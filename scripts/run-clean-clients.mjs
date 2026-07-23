@@ -224,7 +224,9 @@ export function buildClientEnvironment({
   temporaryDirectory,
 }) {
   if (
-    !isPlainObject(baseEnvironment) ||
+    baseEnvironment === null ||
+    typeof baseEnvironment !== "object" ||
+    Array.isArray(baseEnvironment) ||
     !CLIENT_NAMES.includes(clientName)
   ) {
     throw new HarnessConfigurationError();

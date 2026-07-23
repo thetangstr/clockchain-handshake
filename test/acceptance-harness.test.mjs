@@ -436,6 +436,32 @@ test("requires and normalizes an immutable repository commit", () => {
   );
 });
 
+test("accepts the Node process environment for production client isolation", () => {
+  const environment = buildClientEnvironment({
+    baseEnvironment: process.env,
+    clientName: "codex",
+    invitationFile: CODEX_INVITE,
+    repositoryRef: REPOSITORY_REF,
+    temporaryDirectory: "/tmp/handshake-client",
+  });
+
+  assert.equal(environment.PATH, process.env.PATH);
+  assert.equal(environment.HOME, process.env.HOME);
+  for (const invalid of [null, [], "environment"]) {
+    assert.throws(
+      () =>
+        buildClientEnvironment({
+          baseEnvironment: invalid,
+          clientName: "codex",
+          invitationFile: CODEX_INVITE,
+          repositoryRef: REPOSITORY_REF,
+          temporaryDirectory: "/tmp/handshake-client",
+        }),
+      /configuration/i,
+    );
+  }
+});
+
 test("client CLI requires an immutable repository SHA and never exposes executable overrides", async (t) => {
   await t.test("missing repository SHA", async () => {
     const stdout = memoryOutput();
