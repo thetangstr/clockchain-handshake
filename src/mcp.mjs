@@ -1359,14 +1359,28 @@ export function assertResolvedIdentity(identity, expected) {
   return identity;
 }
 
+function hasCanonicalConfirmedAnchor(receipt) {
+  return (
+    isPlainObject(receipt) &&
+    receipt.status === "anchored" &&
+    isPlainObject(receipt.anchor) &&
+    receipt.anchor.confirmed === true &&
+    typeof receipt.anchor.blockHeight === "string" &&
+    /^(0|[1-9]\d*)$/.test(receipt.anchor.blockHeight)
+  );
+}
+
+function isAwaitingConsensusTime(receipt) {
+  return (
+    hasCanonicalConfirmedAnchor(receipt) &&
+    (!Object.hasOwn(receipt.anchor, "consensusTime") ||
+      receipt.anchor.consensusTime === null)
+  );
+}
+
 export function assertAnchoredReceipt(receipt) {
   if (
-    !isPlainObject(receipt) ||
-    receipt.status !== "anchored" ||
-    !isPlainObject(receipt.anchor) ||
-    receipt.anchor.confirmed !== true ||
-    typeof receipt.anchor.blockHeight !== "string" ||
-    !/^(0|[1-9]\d*)$/.test(receipt.anchor.blockHeight) ||
+    !hasCanonicalConfirmedAnchor(receipt) ||
     typeof receipt.anchor.consensusTime !== "string" ||
     receipt.anchor.consensusTime.length === 0 ||
     receipt.anchor.consensusTime.trim() !==
@@ -1470,10 +1484,18 @@ export async function completeReceipt(
       "MCP_INVALID_RECEIPT",
     );
   }
-  if (receipt.status === "anchored") {
+  const awaitingConsensusTime =
+    isAwaitingConsensusTime(receipt);
+  if (
+    receipt.status === "anchored" &&
+    !awaitingConsensusTime
+  ) {
     return assertAnchoredReceipt(receipt);
   }
-  if (!POLLABLE_RECEIPT_STATUSES.has(receipt.status)) {
+  if (
+    !POLLABLE_RECEIPT_STATUSES.has(receipt.status) &&
+    !awaitingConsensusTime
+  ) {
     throw new McpVerificationError(
       "Clockchain receipt status must be pending, degraded, or anchored.",
       "MCP_INVALID_RECEIPT_STATUS",
@@ -1486,6 +1508,9 @@ export async function completeReceipt(
     current = await client.completeAttestation(current);
 
     if (current?.status === "anchored") {
+      if (isAwaitingConsensusTime(current)) {
+        continue;
+      }
       return assertAnchoredReceipt(current);
     }
     if (
@@ -1500,7 +1525,7 @@ export async function completeReceipt(
   }
 
   throw new McpVerificationError(
-    "Clockchain receipt remained unanchored after bounded attempts.",
+    "Clockchain receipt did not reach strict anchored evidence after bounded attempts.",
     "MCP_RECEIPT_PENDING",
   );
 }

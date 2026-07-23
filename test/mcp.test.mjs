@@ -1260,6 +1260,200 @@ test("polls degraded receipts until strict anchored evidence arrives", async () 
   assert.deepEqual(delays, [25, 25]);
 });
 
+test("polls an initially anchored receipt while consensus time enrichment is null", async () => {
+  const awaitingTime = {
+    id: "receipt-awaiting-time",
+    status: "anchored",
+    anchor: {
+      blockHeight: "14",
+      confirmed: true,
+      consensusTime: null,
+      ledgerId: "ledger-1",
+    },
+  };
+  const anchored = {
+    ...awaitingTime,
+    anchor: {
+      ...awaitingTime.anchor,
+      consensusTime: "1753228800.123456789",
+    },
+  };
+  const calls = [];
+  const delays = [];
+  const client = {
+    async completeAttestation(receipt) {
+      calls.push(receipt);
+      return anchored;
+    },
+  };
+
+  assert.equal(
+    await completeReceipt(client, awaitingTime, {
+      attempts: 2,
+      intervalMs: 25,
+      sleeper: async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+    }),
+    anchored,
+  );
+  assert.deepEqual(calls, [awaitingTime]);
+  assert.deepEqual(delays, [25]);
+});
+
+test("continues polling when an intermediate anchored receipt is missing consensus time", async () => {
+  const initial = {
+    id: "receipt-intermediate-time",
+    status: "pending",
+  };
+  const awaitingTime = {
+    ...initial,
+    status: "anchored",
+    anchor: {
+      blockHeight: "15",
+      confirmed: true,
+      ledgerId: "ledger-1",
+    },
+  };
+  const anchored = {
+    ...awaitingTime,
+    anchor: {
+      ...awaitingTime.anchor,
+      consensusTime: "1753228801.123456789",
+    },
+  };
+  const calls = [];
+  const responses = [awaitingTime, anchored];
+  const client = {
+    async completeAttestation(receipt) {
+      calls.push(receipt);
+      return responses.shift();
+    },
+  };
+
+  assert.equal(
+    await completeReceipt(client, initial, {
+      attempts: 2,
+      intervalMs: 0,
+      sleeper: async () => {},
+    }),
+    anchored,
+  );
+  assert.deepEqual(calls, [initial, awaitingTime]);
+});
+
+test("bounds polling while anchored consensus time enrichment remains unavailable", async () => {
+  for (const [label, anchor] of [
+    ["null", {
+      blockHeight: "16",
+      confirmed: true,
+      consensusTime: null,
+    }],
+    ["missing", {
+      blockHeight: "16",
+      confirmed: true,
+    }],
+  ]) {
+    const awaitingTime = {
+      id: `receipt-awaiting-${label}`,
+      status: "anchored",
+      anchor,
+    };
+    let calls = 0;
+    const client = {
+      async completeAttestation(receipt) {
+        calls += 1;
+        return receipt;
+      },
+    };
+
+    await assert.rejects(
+      completeReceipt(client, awaitingTime, {
+        attempts: 2,
+        intervalMs: 0,
+        sleeper: async () => {},
+      }),
+      /consensus time|anchored|attempt/i,
+    );
+    assert.equal(calls, 2, `${label} must exhaust bounded attempts`);
+  }
+});
+
+test("rejects malformed anchored receipts without polling", async (t) => {
+  const valid = {
+    status: "anchored",
+    anchor: {
+      blockHeight: "17",
+      confirmed: true,
+      consensusTime: "1753228802.123456789",
+    },
+  };
+  const malformed = [
+    ["consensus time number", {
+      ...valid,
+      anchor: { ...valid.anchor, consensusTime: 17 },
+    }],
+    ["consensus time undefined", {
+      ...valid,
+      anchor: { ...valid.anchor, consensusTime: undefined },
+    }],
+    ["empty consensus time", {
+      ...valid,
+      anchor: { ...valid.anchor, consensusTime: "" },
+    }],
+    ["whitespace consensus time", {
+      ...valid,
+      anchor: { ...valid.anchor, consensusTime: " \t " },
+    }],
+    ["control consensus time", {
+      ...valid,
+      anchor: { ...valid.anchor, consensusTime: "1753228802.\u0000123456789" },
+    }],
+    ["untrimmed consensus time", {
+      ...valid,
+      anchor: { ...valid.anchor, consensusTime: " 1753228802.123456789 " },
+    }],
+    ["unconfirmed anchor", {
+      ...valid,
+      anchor: { ...valid.anchor, confirmed: false },
+    }],
+    ["malformed block height", {
+      ...valid,
+      anchor: { ...valid.anchor, blockHeight: "017" },
+    }],
+    ["missing anchor", {
+      ...valid,
+      anchor: undefined,
+    }],
+    ["array anchor", {
+      ...valid,
+      anchor: [],
+    }],
+  ];
+
+  for (const [label, receipt] of malformed) {
+    await t.test(label, async () => {
+      let calls = 0;
+      const client = {
+        async completeAttestation() {
+          calls += 1;
+          return valid;
+        },
+      };
+
+      await assert.rejects(
+        completeReceipt(client, receipt, {
+          attempts: 2,
+          intervalMs: 0,
+          sleeper: async () => {},
+        }),
+        /anchored|confirmed|block height|consensus time/i,
+      );
+      assert.equal(calls, 0);
+    });
+  }
+});
+
 test("returns an already anchored receipt and bounds pollable completion attempts", async () => {
   const anchored = {
     status: "anchored",
