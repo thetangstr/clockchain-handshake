@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
 import {
   chmod,
   mkdtemp,
@@ -52,6 +54,65 @@ function assertErrorOmits(error, ...values) {
 
 function alterHex(hex) {
   return `${hex[0] === "0" ? "1" : "0"}${hex.slice(1)}`;
+}
+
+function readInvitationInChild(invitationPath, timeoutMilliseconds = 750) {
+  const invitationModuleUrl = new URL(
+    "../src/invitation.mjs",
+    import.meta.url,
+  ).href;
+  const script = `
+    const { readSecretInvitation } = await import(process.argv[1]);
+    try {
+      await readSecretInvitation(process.argv[2]);
+      process.stdout.write(JSON.stringify({ rejected: false }));
+      process.exitCode = 2;
+    } catch (error) {
+      process.stdout.write(JSON.stringify({
+        rejected: true,
+        message: error.message,
+      }));
+    }
+  `;
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        script,
+        invitationModuleUrl,
+        invitationPath,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMilliseconds);
+
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("close", (code, signal) => {
+      clearTimeout(timeout);
+      resolve({ code, signal, stderr, stdout, timedOut });
+    });
+  });
 }
 
 test("round-trips a validated invitation with a public-only bundle", async () => {
@@ -302,6 +363,40 @@ test("closes the secret file descriptor after parse and validation failures", as
   const movedPath = join(directory, "moved-after-rejection.json");
   await rename(malformedPath, movedPath);
   await rm(movedPath);
+});
+
+test("rejects a POSIX FIFO without blocking before fstat", async (t) => {
+  if (
+    process.platform === "win32" ||
+    typeof fsConstants.O_NONBLOCK !== "number" ||
+    fsConstants.O_NONBLOCK === 0
+  ) {
+    t.skip("POSIX O_NONBLOCK is unavailable");
+    return;
+  }
+
+  const directory = await mkdtemp(join(tmpdir(), "clockchain-fifo-invitation-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const fifoPath = join(directory, "invitation.fifo");
+  const mkfifo = spawnSync("mkfifo", [fifoPath], { stdio: "ignore" });
+
+  if (mkfifo.error?.code === "ENOENT" || mkfifo.status !== 0) {
+    t.skip("mkfifo is unavailable");
+    return;
+  }
+
+  const child = await readInvitationInChild(fifoPath);
+
+  assert.equal(
+    child.timedOut,
+    false,
+    "child timed out because opening the FIFO blocked before fstat",
+  );
+  assert.equal(child.signal, null);
+  assert.equal(child.code, 0, child.stderr);
+  const report = JSON.parse(child.stdout);
+  assert.equal(report.rejected, true);
+  assert.match(report.message, /regular file/i);
 });
 
 test("rejects a mode-0600 secret invitation larger than 16384 bytes before reading", async (t) => {

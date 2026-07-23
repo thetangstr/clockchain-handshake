@@ -18,7 +18,9 @@ const MAX_CODE_BYTES = 1_024;
 const MAX_CIPHERTEXT_BYTES = 4_096;
 const MAX_SECRET_FILE_BYTES = 16_384;
 const SECRET_FILE_OPEN_FLAGS =
-  fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+  fsConstants.O_RDONLY |
+  (fsConstants.O_NOFOLLOW ?? 0) |
+  (fsConstants.O_NONBLOCK ?? 0);
 const KDF = Object.freeze({
   name: "scrypt",
   N: 16_384,
