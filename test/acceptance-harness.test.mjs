@@ -763,6 +763,59 @@ test("fails closed without publishing client evidence that contains an invitatio
   assert.equal(manifest.includes(CODEX_INVITE_CODE), false);
 });
 
+test("rejects a private-key-shaped value in schema-valid evidence", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-evidence-private-key-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const privateKeyShape = `0x${"e".repeat(64)}`;
+  const contaminatedResult = structuredClone(CODEX_RESULT);
+  contaminatedResult.identity.displayName = privateKeyShape;
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    contaminatedResult,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+
+  const result = await runCleanClients(
+    harnessOptions({
+      claudeFixture,
+      codexFixture,
+      directory,
+      executable,
+    }),
+  );
+
+  assert.equal(result.status, "FAIL");
+  assert.equal(result.clients.codex.status, "FAIL");
+  assert.equal(
+    result.clients.codex.errorCode,
+    "CLIENT_EVIDENCE_INVALID",
+  );
+  assert.equal(result.clients.codex.resultPaths, null);
+  assert.equal(result.clients.claude.status, "PASS");
+  await assert.rejects(
+    readFile(
+      join(directory, "artifacts", "codex", "result.json"),
+    ),
+    /ENOENT/,
+  );
+  await assert.rejects(
+    readFile(
+      join(directory, "artifacts", "codex", "RESULT.md"),
+    ),
+    /ENOENT/,
+  );
+  const manifest = await readFile(result.manifestPath, "utf8");
+  assert.equal(manifest.includes(privateKeyShape), false);
+});
+
 test("redacts unlabeled Ethereum private-key-shaped values from client logs", async (t) => {
   const directory = await mkdtemp(
     join(process.env.TMPDIR, "handshake-unlabeled-key-"),

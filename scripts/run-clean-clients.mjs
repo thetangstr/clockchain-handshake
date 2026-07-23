@@ -50,7 +50,13 @@ const MAX_DISCOVERY_ENTRIES = 20_000;
 const MAX_DISCOVERY_DEPTH = 16;
 const MAX_EVIDENCE_BYTES = 2 * 1_024 * 1_024;
 const COMMIT_REF_PATTERN = /^[0-9a-f]{40}$/i;
-const PRIVATE_KEY_SHAPE = /0x[0-9a-f]{64}(?![0-9a-f])/gi;
+const PRIVATE_KEY_SHAPE = /0x[0-9a-f]{64}(?![0-9a-f])/i;
+const PRIVATE_KEY_SHAPE_GLOBAL =
+  /0x[0-9a-f]{64}(?![0-9a-f])/gi;
+const ALLOWED_TRANSACTION_HASH_PATHS = new Set([
+  "identity.registerTx",
+  "identity.metadataTx",
+]);
 const CLIENT_NAMES = Object.freeze(["codex", "claude"]);
 const COMMON_ENVIRONMENT_KEYS = Object.freeze([
   "PATH",
@@ -295,7 +301,10 @@ function sanitizeLog(value, canaries) {
     typeof value === "string" ? value : "",
     canaries,
   );
-  clean = clean.replace(PRIVATE_KEY_SHAPE, "[REDACTED]");
+  clean = clean.replace(
+    PRIVATE_KEY_SHAPE_GLOBAL,
+    "[REDACTED]",
+  );
   clean = clean.replace(
     /("(?:[^"\\]|\\.)*(?:private.?key|secret|token|authorization|invite.?code|ciphertext)(?:[^"\\]|\\.)*"\s*:\s*)("(?:[^"\\]|\\.)*"|[^,\s}\]]+)/gi,
     "$1\"[REDACTED]\"",
@@ -309,6 +318,33 @@ function sanitizeLog(value, canaries) {
     return clean;
   } catch {
     return "[REDACTED UNSAFE CLIENT OUTPUT]\n";
+  }
+}
+
+function assertNoPrivateKeyShapedEvidence(value, path = []) {
+  if (typeof value === "string") {
+    if (
+      PRIVATE_KEY_SHAPE.test(value) &&
+      !ALLOWED_TRANSACTION_HASH_PATHS.has(path.join("."))
+    ) {
+      throw new Error(
+        "Evidence contains private-key-shaped material.",
+      );
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) =>
+      assertNoPrivateKeyShapedEvidence(entry, [
+        ...path,
+        String(index),
+      ]));
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, entry] of Object.entries(value)) {
+      assertNoPrivateKeyShapedEvidence(entry, [...path, key]);
+    }
   }
 }
 
@@ -558,6 +594,7 @@ async function publishEvidence({
     throw new Error("Result JSON is invalid.");
   }
   validatePassResult(result);
+  assertNoPrivateKeyShapedEvidence(result);
   assertSecretFree(result, canaries);
   const canonicalJsonBytes = Buffer.from(
     `${JSON.stringify(result, null, 2)}\n`,
