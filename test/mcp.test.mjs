@@ -705,50 +705,89 @@ test("retries read-only complete_attestation across transient 5xx failures", asy
   );
 });
 
-test("retries attest_action only when an idempotency key preserves the same request", async () => {
-  let unkeyedAttempts = 0;
-  const unkeyedClient = createMcpClient({
-    fetchImpl: async () => {
-      unkeyedAttempts += 1;
-      return new Response(null, { status: 502 });
+test("never automatically retries attest_action across ambiguous failures", async (t) => {
+  const argumentCases = [
+    {
+      name: "without an idempotency key",
+      value: {
+        agent_id: "42",
+        action: "trust_handshake",
+      },
     },
-    token: TOKEN,
-  });
-
-  const unkeyedError = await captureRejection(() =>
-    unkeyedClient.attestAction({
-      agent_id: "42",
-      action: "trust_handshake",
-    }),
-  );
-  assert.ok(unkeyedError instanceof McpNetworkError);
-  assert.equal(unkeyedAttempts, 1);
-
-  let keyedAttempts = 0;
-  const keyedBodies = [];
-  const keyedClient = createMcpClient({
-    fetchImpl: async (_url, init) => {
-      keyedAttempts += 1;
-      keyedBodies.push(init.body);
-      if (keyedAttempts === 1) {
-        return new Response(null, { status: 502 });
-      }
-      return jsonToolResponse(1, { status: "pending" });
+    {
+      name: "with an idempotency key",
+      value: {
+        agent_id: "42",
+        action: "trust_handshake",
+        idempotency_key: "run-1",
+      },
     },
-    sleeper: async () => {},
-    token: TOKEN,
-  });
+  ];
+  const failureCases = [
+    {
+      name: "network failure",
+      respond: async () => {
+        throw new Error(`network echoed ${TOKEN}`);
+      },
+    },
+    {
+      name: "timeout",
+      requestTimeoutMs: 1,
+      respond: async (_url, { signal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => reject(new Error(`timeout echoed ${TOKEN}`)),
+            { once: true },
+          );
+        }),
+    },
+    {
+      name: "429",
+      respond: async () =>
+        new Response(null, {
+          status: 429,
+          headers: { "retry-after": "0" },
+        }),
+    },
+    {
+      name: "5xx",
+      respond: async () => new Response(null, { status: 503 }),
+    },
+  ];
 
-  assert.deepEqual(
-    await keyedClient.attestAction({
-      agent_id: "42",
-      action: "trust_handshake",
-      idempotency_key: "run-1",
-    }),
-    { status: "pending" },
-  );
-  assert.equal(keyedAttempts, 2);
-  assert.equal(new Set(keyedBodies).size, 1);
+  for (const argumentCase of argumentCases) {
+    for (const failureCase of failureCases) {
+      await t.test(
+        `${argumentCase.name} after ${failureCase.name}`,
+        async () => {
+          let attempts = 0;
+          const bodies = [];
+          const client = createMcpClient({
+            fetchImpl: async (...fetchArguments) => {
+              attempts += 1;
+              bodies.push(fetchArguments[1].body);
+              return failureCase.respond(...fetchArguments);
+            },
+            requestTimeoutMs: failureCase.requestTimeoutMs,
+            sleeper: async () => {},
+            token: TOKEN,
+          });
+
+          const error = await captureRejection(() =>
+            client.attestAction(argumentCase.value),
+          );
+          assert.ok(error instanceof McpNetworkError);
+          assert.equal(attempts, 1);
+          assert.equal(bodies.length, 1);
+          assert.deepEqual(
+            JSON.parse(bodies[0]).params.arguments,
+            argumentCase.value,
+          );
+        },
+      );
+    }
+  }
 });
 
 test("bounds MCP response size and request time without exposing the token", async () => {
@@ -951,13 +990,13 @@ test("requires an active resolved identity and matches expected identity fields"
   );
 });
 
-test("requires an anchored and confirmed receipt with a non-null anchor block height", () => {
+test("requires trimmed deployed anchor block height and consensus time strings", async (t) => {
   const receipt = {
     status: "anchored",
     anchor: {
       blockHeight: "12",
       confirmed: true,
-      consensusTime: "2026-07-22T12:00:00Z",
+      consensusTime: "1753228800.123456789",
       ledgerId: "ledger-1",
     },
   };
@@ -971,27 +1010,92 @@ test("requires an anchored and confirmed receipt with a non-null anchor block he
     },
     {
       ...receipt,
-      anchor: { ...receipt.anchor, blockHeight: null },
-    },
-    {
-      ...receipt,
-      anchor: {
-        confirmed: receipt.anchor.confirmed,
-        consensusTime: receipt.anchor.consensusTime,
-        ledgerId: receipt.anchor.ledgerId,
-      },
-    },
-    {
-      ...receipt,
       blockHeight: "12",
       anchor: { ...receipt.anchor, blockHeight: null },
     },
   ]) {
     assert.throws(
       () => assertAnchoredReceipt(malformed),
-      /anchored|confirmed|block height/i,
+      /anchored|confirmed|block height|consensus time/i,
     );
   }
+
+  for (const field of ["blockHeight", "consensusTime"]) {
+    await t.test(`${field} is a required trimmed string`, () => {
+      const missingAnchor = { ...receipt.anchor };
+      delete missingAnchor[field];
+      assert.throws(
+        () =>
+          assertAnchoredReceipt({
+            ...receipt,
+            anchor: missingAnchor,
+          }),
+        /block height|consensus time/i,
+        `${field} must be present`,
+      );
+
+      for (const [label, value] of [
+        ["null", null],
+        ["number", 12],
+        ["empty", ""],
+        ["whitespace", " \t "],
+        ["untrimmed", ` ${receipt.anchor[field]} `],
+      ]) {
+        assert.throws(
+          () =>
+            assertAnchoredReceipt({
+              ...receipt,
+              anchor: {
+                ...receipt.anchor,
+                [field]: value,
+              },
+            }),
+          /block height|consensus time/i,
+          `${field} must reject ${label}`,
+        );
+      }
+    });
+  }
+
+  await t.test("blockHeight uses canonical unsigned-decimal syntax", () => {
+    for (const [label, blockHeight] of [
+      ["nonnumeric", "twelve"],
+      ["leading-zero", "012"],
+    ]) {
+      assert.throws(
+        () =>
+          assertAnchoredReceipt({
+            ...receipt,
+            anchor: {
+              ...receipt.anchor,
+              blockHeight,
+            },
+          }),
+        /block height/i,
+        `blockHeight must reject ${label} values`,
+      );
+    }
+  });
+
+  await t.test("consensusTime rejects control characters", () => {
+    for (const [label, consensusTime] of [
+      ["control-only", "\u0000"],
+      ["interior-control", "1753228800.\u0000123456789"],
+    ]) {
+      assert.throws(
+        () =>
+          assertAnchoredReceipt({
+            ...receipt,
+            anchor: {
+              ...receipt.anchor,
+              consensusTime,
+            },
+          }),
+        /consensus time/i,
+        `consensusTime must reject ${label} values`,
+      );
+    }
+  });
 });
 
 test("requires receipt verification against an on-chain block", () => {
@@ -1113,7 +1217,11 @@ test("polls a pending receipt with an injectable sleeper until it anchors", asyn
 test("returns an already anchored receipt and bounds pending completion attempts", async () => {
   const anchored = {
     status: "anchored",
-    anchor: { blockHeight: 0, confirmed: true },
+    anchor: {
+      blockHeight: "0",
+      confirmed: true,
+      consensusTime: "2026-07-22T12:00:00Z",
+    },
   };
   let calls = 0;
   const client = {

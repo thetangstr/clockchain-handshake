@@ -1143,10 +1143,7 @@ export function createMcpClient(options = {}) {
       );
     }
 
-    const mayRetry =
-      READ_RETRY_TOOLS.has(toolName) ||
-      (toolName === "attest_action" &&
-        typeof toolArguments.idempotency_key === "string");
+    const mayRetry = READ_RETRY_TOOLS.has(toolName);
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       let response;
@@ -1364,11 +1361,18 @@ export function assertAnchoredReceipt(receipt) {
     receipt.status !== "anchored" ||
     !isPlainObject(receipt.anchor) ||
     receipt.anchor.confirmed !== true ||
-    receipt.anchor.blockHeight === null ||
-    receipt.anchor.blockHeight === undefined
+    typeof receipt.anchor.blockHeight !== "string" ||
+    !/^(0|[1-9]\d*)$/.test(receipt.anchor.blockHeight) ||
+    typeof receipt.anchor.consensusTime !== "string" ||
+    receipt.anchor.consensusTime.length === 0 ||
+    receipt.anchor.consensusTime.trim() !==
+      receipt.anchor.consensusTime ||
+    /[\u0000-\u001f\u007f-\u009f]/.test(
+      receipt.anchor.consensusTime,
+    )
   ) {
     throw new McpVerificationError(
-      "Clockchain receipt must be anchored, confirmed, and include a block height.",
+      "Clockchain receipt must be anchored, confirmed, and include a block height and consensus time.",
       "MCP_RECEIPT_NOT_ANCHORED",
     );
   }
