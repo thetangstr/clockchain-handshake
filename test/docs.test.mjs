@@ -41,7 +41,7 @@ const OFFICIAL_REPOSITORY =
 const PUBLISHED_EVIDENCE_PATH =
   "docs/demo-evidence/latest.md";
 const PUBLISHED_EVIDENCE_SHA256 =
-  "7d95b9e759ebd8e5c1092f96740a23612f399427dad3a16e662c9a8f78580014";
+  "dd6459994b527bf7ae45f69f4b9bd3a21881d5b7a45c831f4fcc321356871c10";
 const PUBLISHED_TRANSACTIONS = Object.freeze([
   "0x511c1c379295c0ac1cb9a162a3e45f45c700e4e07eaa41dc3b2e0d1500c6af46",
   "0xb4a5f37e6356c0d3e1291e1038bc85017f558b16b9fda5b09192adab5aa03c5b",
@@ -251,7 +251,10 @@ test("publishes only the approved sanitized live evidence summary", async () => 
   const normalizedEvidence = evidence.replace(/\s+/g, " ");
   for (const requiredText of [
     "# Sanitized Handshake demo evidence — 2026-07-23",
-    "Live execution and independent re-verification occurred on 2026-07-23.",
+    "This summary records a prior private independent verification performed on 2026-07-23. It does not publish the raw result pairs or manifest needed to reproduce that verification.",
+    "The live client runs exercised immutable repository SHA `a603572a5d0a2773a273fc68b5312d9f1100d1f1` with prompt SHA-256 `8aac14d00c5de105422af7c6d8f312cc72025e1bec30bfd298cd49c1f1152711`.",
+    "Subsequent release-hardening commits were verified deterministically and were not exercised by another live client run.",
+    "The repository SHA, prompt SHA, and client/version attributions are provenance records from the original harness, not cryptographic execution attestations.",
     "`a603572a5d0a2773a273fc68b5312d9f1100d1f1`",
     "`8aac14d00c5de105422af7c6d8f312cc72025e1bec30bfd298cd49c1f1152711`",
     "Ethereum Sepolia chain ID `11155111`",
@@ -272,14 +275,18 @@ test("publishes only the approved sanitized live evidence summary", async () => 
     "Both receipts have status `anchored`, commitment verification `true`, cross-party verification `true`, verification against an on-chain block, and `keyless: true`.",
     "The original aggregate harness remains `FAIL`. Codex is the original harness-bound `PASS`. Claude exited 0 and produced a schema-valid `PASS` pair, but that pair was outside the harness collection root; it was recovered from its captured temporary path, remained hash-preserved, and was independently verified. Claude is **not** harness-bound and is not an original aggregate `PASS`.",
     "No invitation rerun, Ethereum transaction, or Clockchain receipt write occurred during recovery verification.",
-    "No raw JSON/Markdown pairs, manifest, logs, invitation material, keys, or tokens are published here.",
-    "This evidence proves anchoring and independent re-verifiability; it does not prove multi-validator consensus, mainnet security, court-grade evidence, or trustless security.",
+    "No raw JSON/Markdown result pairs, manifest, logs, invitation material, keys, or tokens are published here.",
+    "The private verification checked anchoring and cross-party re-verification. The Clockchain testnet used for these receipts has a single validator; within that trust boundary, this summary does not prove multi-validator consensus, mainnet security, court-grade evidence, or trustless security.",
   ]) {
     assert.ok(
       normalizedEvidence.includes(requiredText),
       `missing published evidence text: ${requiredText}`,
     );
   }
+  assert.doesNotMatch(
+    normalizedEvidence,
+    /This evidence proves anchoring and independent re-verifiability/,
+  );
 
   const expectedLinks = PUBLISHED_TRANSACTIONS.map(
     (transaction) =>

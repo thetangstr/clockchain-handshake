@@ -1,12 +1,16 @@
 # Sanitized Handshake demo evidence — 2026-07-23
 
-Live execution and independent re-verification occurred on 2026-07-23.
+This summary records a prior private independent verification performed on
+2026-07-23. It does not publish the raw result pairs or manifest needed to
+reproduce that verification.
 
 ## Reproducibility boundary
 
-The live runs executed immutable repository SHA
+The live client runs exercised immutable repository SHA
 `a603572a5d0a2773a273fc68b5312d9f1100d1f1` with prompt SHA-256
 `8aac14d00c5de105422af7c6d8f312cc72025e1bec30bfd298cd49c1f1152711`.
+Subsequent release-hardening commits were verified deterministically and were
+not exercised by another live client run.
 They used Ethereum Sepolia chain ID `11155111` and the official registry
 `0x8004A818BFB912233c491871b3d84c89A494BD9e`.
 
@@ -34,6 +38,9 @@ cross-party verification `true`, verification against an on-chain block, and
 
 ## Provenance
 
+The repository SHA, prompt SHA, and client/version attributions are provenance
+records from the original harness, not cryptographic execution attestations.
+
 The original aggregate harness remains `FAIL`. Codex is the original
 harness-bound `PASS`. Claude exited 0 and produced a schema-valid `PASS` pair,
 but that pair was outside the harness collection root; it was recovered from
@@ -43,12 +50,12 @@ verified. Claude is **not** harness-bound and is not an original aggregate
 
 No invitation rerun, Ethereum transaction, or Clockchain receipt write occurred during recovery verification.
 
-No raw JSON/Markdown pairs, manifest, logs, invitation material, keys, or tokens
-are published here.
+No raw JSON/Markdown result pairs, manifest, logs, invitation material, keys, or
+tokens are published here.
 
 ## Interpretation
 
-The Clockchain testnet used for these receipts has a single validator. This
-evidence proves anchoring and independent re-verifiability; it does not prove
-multi-validator consensus, mainnet security, court-grade evidence, or trustless
-security.
+The private verification checked anchoring and cross-party re-verification. The
+Clockchain testnet used for these receipts has a single validator; within that
+trust boundary, this summary does not prove multi-validator consensus, mainnet
+security, court-grade evidence, or trustless security.
