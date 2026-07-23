@@ -1,0 +1,25 @@
+{
+  "schema": "clockchain.handshake-invitation/v1",
+  "version": 1,
+  "address": "0x8Ebb593AE8e55B0a93d320e05d2a7BCCA7CE8B99",
+  "displayName": "Iris",
+  "crypto": {
+    "kdf": {
+      "name": "scrypt",
+      "N": 16384,
+      "r": 8,
+      "p": 1,
+      "keyLength": 32
+    },
+    "cipher": {
+      "name": "aes-256-gcm",
+      "ivLength": 12,
+      "tagLength": 16
+    },
+    "encoding": "hex",
+    "salt": "ef870ab808ec8bfa7776e8708e2fcd9c8d074b8d9e8bace979c593d463dc8d54",
+    "iv": "ce43a49cb7b4e747074922ea",
+    "ciphertext": "b98cd05764d3760ce698916cb5df70bfd5342be4e13c9e900289d6e8ef96c048a3304a8c0f9b634e084f869c586fb68d1d06192e536bbab957a79f9c3b2cac30ed93fe150ed605588ac66d84ccd8c9c449a14826742fe4dccb0ca1811a1798b9c7c7429fad2a413aa997703710cf3d5bf6704bc26039cb6d2fffda5eb83dff9afd16bec7c985ecded580054f9978d2b6a92c6aa865d0d24526a67582cdc09d",
+    "tag": "b8b1d989d929bcb0449159b2736d4344"
+  }
+}
