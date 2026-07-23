@@ -18,6 +18,9 @@ const MAX_IDENTIFIER_LENGTH = 256;
 const MAX_ACTION_LENGTH = 128;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
 const JSON_RPC_VERSION = "2.0";
+const CANONICAL_SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const CONTROL_CHARACTER_PATTERN =
+  /[\u0000-\u001f\u007f-\u009f]/;
 const READ_RETRY_TOOLS = new Set([
   "resolve_agent",
   "get_timestamp",
@@ -1378,6 +1381,64 @@ function isAwaitingConsensusTime(receipt) {
   );
 }
 
+function isCompletionText(value) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.trim() === value &&
+    !CONTROL_CHARACTER_PATTERN.test(value)
+  );
+}
+
+function hasCompletionReadyFields(receipt) {
+  return (
+    isPlainObject(receipt) &&
+    Object.hasOwn(receipt, "agentId") &&
+    isCompletionText(receipt.agentId) &&
+    Object.hasOwn(receipt, "action") &&
+    isCompletionText(receipt.action) &&
+    Object.hasOwn(receipt, "eventHash") &&
+    typeof receipt.eventHash === "string" &&
+    CANONICAL_SHA256_PATTERN.test(receipt.eventHash) &&
+    Object.hasOwn(receipt, "network") &&
+    isCompletionText(receipt.network) &&
+    Object.hasOwn(receipt, "payload") &&
+    isPlainObject(receipt.payload) &&
+    Object.hasOwn(receipt.payload, "inputs") &&
+    Object.hasOwn(receipt.payload, "outputs") &&
+    Object.hasOwn(receipt, "anchor") &&
+    isPlainObject(receipt.anchor) &&
+    Object.hasOwn(receipt.anchor, "ledgerId") &&
+    isCompletionText(receipt.anchor.ledgerId)
+  );
+}
+
+function hasCanonicalUnconfirmedAnchor(receipt) {
+  return (
+    isPlainObject(receipt?.anchor) &&
+    receipt.anchor.confirmed === false &&
+    receipt.anchor.blockHeight === null
+  );
+}
+
+function assertCompletionReadyReceipt(receipt) {
+  const hasPollableState =
+    (POLLABLE_RECEIPT_STATUSES.has(receipt?.status) &&
+      hasCanonicalUnconfirmedAnchor(receipt)) ||
+    isAwaitingConsensusTime(receipt);
+
+  if (
+    !hasCompletionReadyFields(receipt) ||
+    !hasPollableState
+  ) {
+    throw new McpVerificationError(
+      "Clockchain receipt is not safe to complete.",
+      "MCP_INVALID_RECEIPT",
+    );
+  }
+  return receipt;
+}
+
 export function assertAnchoredReceipt(receipt) {
   if (
     !hasCanonicalConfirmedAnchor(receipt) ||
@@ -1501,6 +1562,7 @@ export async function completeReceipt(
       "MCP_INVALID_RECEIPT_STATUS",
     );
   }
+  assertCompletionReadyReceipt(receipt);
 
   let current = receipt;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -1509,6 +1571,7 @@ export async function completeReceipt(
 
     if (current?.status === "anchored") {
       if (isAwaitingConsensusTime(current)) {
+        assertCompletionReadyReceipt(current);
         continue;
       }
       return assertAnchoredReceipt(current);
@@ -1522,6 +1585,7 @@ export async function completeReceipt(
         "MCP_RECEIPT_COMPLETION_FAILED",
       );
     }
+    assertCompletionReadyReceipt(current);
   }
 
   throw new McpVerificationError(

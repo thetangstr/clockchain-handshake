@@ -20,6 +20,57 @@ import {
 
 const MCP_BASE_URL = "https://mcp.clockchain.network";
 const TOKEN = `cc_${"A".repeat(88)}.${"b".repeat(89)}`;
+const RECEIPT_EVENT_HASH = "a".repeat(64);
+
+function agentReceipt({
+  anchor = {},
+  payload = {
+    inputs: null,
+    outputs: null,
+  },
+  status = "pending",
+  ...receipt
+} = {}) {
+  const anchored = status === "anchored";
+
+  return {
+    schema: "clockchain.receipt/v1",
+    network: "testnet",
+    status,
+    agentId: "agent:demo",
+    action: "trust_handshake",
+    eventHash: RECEIPT_EVENT_HASH,
+    hashType: "SHA-256",
+    payload,
+    anchor: {
+      ledgerId: "ledger-1",
+      assetReferenceId: "agent:demo:trust_handshake:1",
+      blockHeight: anchored ? "12" : null,
+      recordedAt: "2026-07-23T07:00:00Z",
+      consensusTime: anchored
+        ? "1753228800.123456789"
+        : null,
+      confirmed: anchored,
+      ...anchor,
+    },
+    attestation: {
+      validators: 1,
+      trustPct: null,
+      status: "single-validator-testnet",
+      note: "test fixture",
+    },
+    identity: {
+      resolved: true,
+      status: "active",
+      note: "test fixture",
+    },
+    verify: {
+      how: "test fixture",
+    },
+    disclaimer: "test fixture",
+    ...receipt,
+  };
+}
 
 function loadSseFixture() {
   return readFileSync(
@@ -661,16 +712,9 @@ test("retries only eligible calls for bounded network and 5xx failures", async (
 
 test("retries read-only complete_attestation across transient 5xx failures", async () => {
   const bodies = [];
-  const pending = {
-    schema: "clockchain.receipt/v1",
+  const pending = agentReceipt({
     status: "pending",
-    anchor: {
-      blockHeight: null,
-      confirmed: false,
-      consensusTime: null,
-      ledgerId: "ledger-1",
-    },
-  };
+  });
   const anchored = {
     ...pending,
     status: "anchored",
@@ -1178,7 +1222,16 @@ test("returns full deployed response objects without dropping receipt evidence",
 });
 
 test("polls a pending receipt with an injectable sleeper until it anchors", async () => {
-  const initial = { id: "receipt-1", status: "pending" };
+  const initial = agentReceipt({
+    id: "receipt-1",
+    payload: {
+      inputs: {
+        legitimateJson: [1, null, false, "value"],
+      },
+      outputs: 42,
+    },
+    status: "pending",
+  });
   const pending = { ...initial, stage: 2 };
   const anchored = {
     ...initial,
@@ -1215,16 +1268,10 @@ test("polls a pending receipt with an injectable sleeper until it anchors", asyn
 });
 
 test("polls degraded receipts until strict anchored evidence arrives", async () => {
-  const initial = {
+  const initial = agentReceipt({
     id: "receipt-degraded",
     status: "degraded",
-    anchor: {
-      blockHeight: null,
-      confirmed: false,
-      consensusTime: null,
-      ledgerId: "ledger-1",
-    },
-  };
+  });
   const degraded = { ...initial, stage: 2 };
   const anchored = {
     ...initial,
@@ -1261,16 +1308,14 @@ test("polls degraded receipts until strict anchored evidence arrives", async () 
 });
 
 test("polls an initially anchored receipt while consensus time enrichment is null", async () => {
-  const awaitingTime = {
-    id: "receipt-awaiting-time",
-    status: "anchored",
+  const awaitingTime = agentReceipt({
     anchor: {
       blockHeight: "14",
-      confirmed: true,
       consensusTime: null,
-      ledgerId: "ledger-1",
     },
-  };
+    id: "receipt-awaiting-time",
+    status: "anchored",
+  });
   const anchored = {
     ...awaitingTime,
     anchor: {
@@ -1302,18 +1347,23 @@ test("polls an initially anchored receipt while consensus time enrichment is nul
 });
 
 test("continues polling when an intermediate anchored receipt is missing consensus time", async () => {
-  const initial = {
+  const initial = agentReceipt({
     id: "receipt-intermediate-time",
     status: "pending",
+  });
+  const awaitingAnchor = {
+    ...agentReceipt({
+      anchor: {
+        blockHeight: "15",
+      },
+      status: "anchored",
+    }).anchor,
   };
+  delete awaitingAnchor.consensusTime;
   const awaitingTime = {
     ...initial,
     status: "anchored",
-    anchor: {
-      blockHeight: "15",
-      confirmed: true,
-      ledgerId: "ledger-1",
-    },
+    anchor: awaitingAnchor,
   };
   const anchored = {
     ...awaitingTime,
@@ -1343,22 +1393,18 @@ test("continues polling when an intermediate anchored receipt is missing consens
 });
 
 test("bounds polling while anchored consensus time enrichment remains unavailable", async () => {
-  for (const [label, anchor] of [
-    ["null", {
-      blockHeight: "16",
-      confirmed: true,
-      consensusTime: null,
-    }],
-    ["missing", {
-      blockHeight: "16",
-      confirmed: true,
-    }],
-  ]) {
-    const awaitingTime = {
+  for (const label of ["null", "missing"]) {
+    const awaitingTime = agentReceipt({
+      anchor: {
+        blockHeight: "16",
+        consensusTime: null,
+      },
       id: `receipt-awaiting-${label}`,
       status: "anchored",
-      anchor,
-    };
+    });
+    if (label === "missing") {
+      delete awaitingTime.anchor.consensusTime;
+    }
     let calls = 0;
     const client = {
       async completeAttestation(receipt) {
@@ -1379,15 +1425,188 @@ test("bounds polling while anchored consensus time enrichment remains unavailabl
   }
 });
 
+test("requires a completion-ready receipt before polling every supported state", async (t) => {
+  for (const status of ["pending", "degraded", "anchored"]) {
+    await t.test(status, async () => {
+      const receipt = agentReceipt({
+        anchor: status === "anchored"
+          ? { consensusTime: null }
+          : {},
+        status,
+      });
+      delete receipt.payload;
+      let calls = 0;
+      const client = {
+        async completeAttestation() {
+          calls += 1;
+          return receipt;
+        },
+      };
+
+      const error = await captureRejection(() =>
+        completeReceipt(client, receipt, {
+          attempts: 1,
+          intervalMs: 0,
+          sleeper: async () => {},
+        }),
+      );
+      assert.ok(error instanceof McpVerificationError);
+      assert.equal(error.code, "MCP_INVALID_RECEIPT");
+      assert.equal(calls, 0);
+    });
+  }
+});
+
+test("rejects malformed completion fields without polling", async (t) => {
+  const valid = agentReceipt({ status: "pending" });
+  const omit = (object, key) => {
+    const copy = { ...object };
+    delete copy[key];
+    return copy;
+  };
+  const malformed = [
+    ["missing ledgerId", {
+      ...valid,
+      anchor: omit(valid.anchor, "ledgerId"),
+    }],
+    ["missing payload", omit(valid, "payload")],
+    ["null payload", { ...valid, payload: null }],
+    ["array payload", { ...valid, payload: [] }],
+    ["missing payload inputs", {
+      ...valid,
+      payload: omit(valid.payload, "inputs"),
+    }],
+    ["missing payload outputs", {
+      ...valid,
+      payload: omit(valid.payload, "outputs"),
+    }],
+    ["missing eventHash", omit(valid, "eventHash")],
+    ["short eventHash", {
+      ...valid,
+      eventHash: "a".repeat(63),
+    }],
+    ["uppercase eventHash", {
+      ...valid,
+      eventHash: "A".repeat(64),
+    }],
+    ["prefixed eventHash", {
+      ...valid,
+      eventHash: `0x${RECEIPT_EVENT_HASH}`,
+    }],
+    ["nonhex eventHash", {
+      ...valid,
+      eventHash: "g".repeat(64),
+    }],
+    ["confirmed pending anchor", {
+      ...valid,
+      anchor: { ...valid.anchor, confirmed: true },
+    }],
+    ["block-bearing pending anchor", {
+      ...valid,
+      anchor: { ...valid.anchor, blockHeight: "12" },
+    }],
+  ];
+
+  for (const field of ["agentId", "action", "network"]) {
+    malformed.push([`missing ${field}`, omit(valid, field)]);
+    for (const [label, value] of [
+      ["empty", ""],
+      ["whitespace", " \t "],
+      ["untrimmed", ` ${valid[field]} `],
+      ["control", `${valid[field]}\u0000`],
+    ]) {
+      malformed.push([
+        `${label} ${field}`,
+        { ...valid, [field]: value },
+      ]);
+    }
+  }
+
+  for (const [label, ledgerId] of [
+    ["empty", ""],
+    ["whitespace", " \t "],
+    ["untrimmed", " ledger-1 "],
+    ["control", "ledger-\u00001"],
+  ]) {
+    malformed.push([
+      `${label} ledgerId`,
+      {
+        ...valid,
+        anchor: { ...valid.anchor, ledgerId },
+      },
+    ]);
+  }
+
+  for (const [label, receipt] of malformed) {
+    await t.test(label, async () => {
+      let calls = 0;
+      const client = {
+        async completeAttestation() {
+          calls += 1;
+          return valid;
+        },
+      };
+
+      const error = await captureRejection(() =>
+        completeReceipt(client, receipt, {
+          attempts: 1,
+          intervalMs: 0,
+          sleeper: async () => {},
+        }),
+      );
+      assert.ok(error instanceof McpVerificationError);
+      assert.equal(error.code, "MCP_INVALID_RECEIPT");
+      assert.equal(calls, 0);
+    });
+  }
+});
+
+test("rejects malformed intermediate receipts before another poll", async (t) => {
+  for (const status of ["pending", "degraded", "anchored"]) {
+    await t.test(status, async () => {
+      const malformed = agentReceipt({
+        anchor: status === "anchored"
+          ? { consensusTime: null }
+          : {},
+        status,
+      });
+      delete malformed.network;
+      let calls = 0;
+      const client = {
+        async completeAttestation() {
+          calls += 1;
+          if (calls > 1) {
+            throw new Error("malformed receipt must not be re-polled");
+          }
+          return malformed;
+        },
+      };
+
+      const error = await captureRejection(() =>
+        completeReceipt(
+          client,
+          agentReceipt({ status: "pending" }),
+          {
+            attempts: 2,
+            intervalMs: 0,
+            sleeper: async () => {},
+          },
+        ),
+      );
+      assert.ok(error instanceof McpVerificationError);
+      assert.equal(error.code, "MCP_INVALID_RECEIPT");
+      assert.equal(calls, 1);
+    });
+  }
+});
+
 test("rejects malformed anchored receipts without polling", async (t) => {
-  const valid = {
-    status: "anchored",
+  const valid = agentReceipt({
     anchor: {
       blockHeight: "17",
-      confirmed: true,
-      consensusTime: "1753228802.123456789",
     },
-  };
+    status: "anchored",
+  });
   const malformed = [
     ["consensus time number", {
       ...valid,
@@ -1483,7 +1702,7 @@ test("returns an already anchored receipt and bounds pollable completion attempt
 
   for (const status of ["pending", "degraded"]) {
     let calls = 0;
-    const pollable = { status };
+    const pollable = agentReceipt({ status });
     const pollingClient = {
       async completeAttestation(receipt) {
         calls += 1;
@@ -1520,7 +1739,9 @@ test("rejects invalid options and unknown initial or intermediate statuses", asy
   );
   assert.equal(calls, 0);
   await assert.rejects(
-    completeReceipt(client, { status: "degraded" }, {
+    completeReceipt(client, agentReceipt({
+      status: "degraded",
+    }), {
       attempts: 1,
       intervalMs: 0,
       sleeper: async () => {},
