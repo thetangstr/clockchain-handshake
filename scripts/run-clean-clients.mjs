@@ -50,6 +50,7 @@ const MAX_DISCOVERY_ENTRIES = 20_000;
 const MAX_DISCOVERY_DEPTH = 16;
 const MAX_EVIDENCE_BYTES = 2 * 1_024 * 1_024;
 const COMMIT_REF_PATTERN = /^[0-9a-f]{40}$/i;
+const PRIVATE_KEY_SHAPE = /0x[0-9a-f]{64}(?![0-9a-f])/gi;
 const CLIENT_NAMES = Object.freeze(["codex", "claude"]);
 const COMMON_ENVIRONMENT_KEYS = Object.freeze([
   "PATH",
@@ -200,9 +201,6 @@ function environmentValue(source, key) {
 }
 
 function normalizeRepositoryRef(value) {
-  if (value === undefined) {
-    return undefined;
-  }
   if (
     typeof value !== "string" ||
     !COMMIT_REF_PATTERN.test(value)
@@ -250,9 +248,7 @@ export function buildClientEnvironment({
   environment.HANDSHAKE_INVITE_FILE =
     absolutePath(invitationFile);
   const commitRef = normalizeRepositoryRef(repositoryRef);
-  if (commitRef !== undefined) {
-    environment.HANDSHAKE_REPO_REF = commitRef;
-  }
+  environment.HANDSHAKE_REPO_REF = commitRef;
   return environment;
 }
 
@@ -299,6 +295,7 @@ function sanitizeLog(value, canaries) {
     typeof value === "string" ? value : "",
     canaries,
   );
+  clean = clean.replace(PRIVATE_KEY_SHAPE, "[REDACTED]");
   clean = clean.replace(
     /("(?:[^"\\]|\\.)*(?:private.?key|secret|token|authorization|invite.?code|ciphertext)(?:[^"\\]|\\.)*"\s*:\s*)("(?:[^"\\]|\\.)*"|[^,\s}\]]+)/gi,
     "$1\"[REDACTED]\"",
@@ -547,6 +544,13 @@ async function publishEvidence({
     pair.markdown,
     MAX_EVIDENCE_BYTES,
   );
+  for (const bytes of [jsonBytes, markdownBytes]) {
+    for (const canary of canaries) {
+      if (bytes.includes(Buffer.from(canary, "utf8"))) {
+        throw new Error("Raw evidence contains secret material.");
+      }
+    }
+  }
   let result;
   try {
     result = JSON.parse(jsonBytes.toString("utf8"));
@@ -555,28 +559,53 @@ async function publishEvidence({
   }
   validatePassResult(result);
   assertSecretFree(result, canaries);
-  const expectedMarkdown = renderResultMarkdown(result);
-  const actualMarkdown = markdownBytes.toString("utf8");
-  if (actualMarkdown !== expectedMarkdown) {
+  const canonicalJsonBytes = Buffer.from(
+    `${JSON.stringify(result, null, 2)}\n`,
+    "utf8",
+  );
+  const canonicalMarkdownBytes = Buffer.from(
+    renderResultMarkdown(result),
+    "utf8",
+  );
+  if (!markdownBytes.equals(canonicalMarkdownBytes)) {
     throw new Error("Result Markdown does not match result JSON.");
   }
-  assertSecretFree(actualMarkdown, canaries);
+  assertSecretFree(
+    canonicalMarkdownBytes.toString("utf8"),
+    canaries,
+  );
 
   const jsonPath = join(artifactDirectory, "result.json");
   const markdownPath = join(artifactDirectory, "RESULT.md");
   const jsonTemporary = `${jsonPath}.tmp-${process.pid}`;
   const markdownTemporary = `${markdownPath}.tmp-${process.pid}`;
-  await writeFile(jsonTemporary, jsonBytes, {
+  await writeFile(jsonTemporary, canonicalJsonBytes, {
     flag: "wx",
     mode: 0o600,
   });
-  await writeFile(markdownTemporary, markdownBytes, {
+  await writeFile(markdownTemporary, canonicalMarkdownBytes, {
     flag: "wx",
     mode: 0o600,
   });
   await rename(jsonTemporary, jsonPath);
   await rename(markdownTemporary, markdownPath);
-  return { json: jsonPath, markdown: markdownPath };
+  return {
+    paths: { json: jsonPath, markdown: markdownPath },
+    evidence: {
+      json: {
+        path: jsonPath,
+        sha256: createHash("sha256")
+          .update(canonicalJsonBytes)
+          .digest("hex"),
+      },
+      markdown: {
+        path: markdownPath,
+        sha256: createHash("sha256")
+          .update(canonicalMarkdownBytes)
+          .digest("hex"),
+      },
+    },
+  };
 }
 
 async function writeLog(path, value, canaries) {
@@ -691,6 +720,7 @@ async function runOneClient({
     canaries,
   );
   let resultPaths = null;
+  let evidence = null;
   let status = "FAIL";
   let errorCode = publicFailureCode(processResult);
   if (
@@ -700,11 +730,13 @@ async function runOneClient({
     processResult.exitCode === 0
   ) {
     try {
-      resultPaths = await publishEvidence({
+      const published = await publishEvidence({
         artifactDirectory,
         canaries,
         clientRoot,
       });
+      resultPaths = published.paths;
+      evidence = published.evidence;
       status = "PASS";
       errorCode = null;
     } catch {
@@ -714,6 +746,10 @@ async function runOneClient({
 
   return {
     status,
+    command: {
+      executable: command.executable,
+      args: [...command.args],
+    },
     cliVersion: versionText || null,
     startedAt,
     completedAt: now().toISOString(),
@@ -722,6 +758,7 @@ async function runOneClient({
     timedOut: processResult.timedOut,
     outputLimitExceeded: processResult.outputLimitExceeded,
     errorCode,
+    evidence,
     workDirectory,
     resultPaths,
     stdoutLog,
@@ -779,6 +816,12 @@ export async function runCleanClients({
     throw new HarnessConfigurationError();
   }
   const activeCommands = mergeCommands(commands);
+  if (
+    activeCommands.codex.executable ===
+      activeCommands.claude.executable
+  ) {
+    throw new HarnessConfigurationError();
+  }
   const activeOutputRoot = absolutePath(outputRoot);
   const activePromptFile = absolutePath(promptFile);
   const activeTemporaryDirectory =
@@ -851,23 +894,50 @@ export async function runCleanClients({
   )
     ? "PASS"
     : "FAIL";
+  const manifestClients = Object.fromEntries(
+    CLIENT_NAMES.map((name) => {
+      const client = clients[name];
+      return [
+        name,
+        {
+          status: client.status,
+          command: client.command,
+          cliVersion: client.cliVersion,
+          startedAt: client.startedAt,
+          completedAt: client.completedAt,
+          exitCode: client.exitCode,
+          signal: client.signal,
+          timedOut: client.timedOut,
+          outputLimitExceeded:
+            client.outputLimitExceeded,
+          errorCode: client.errorCode,
+          evidence: client.evidence,
+        },
+      ];
+    }),
+  );
   const manifest = {
     schema: "clockchain.handshake-client-acceptance/v1",
     status,
+    repositorySha: activeRepositoryRef,
     promptSha256,
     startedAt,
     completedAt: now().toISOString(),
-    clients,
+    clients: manifestClients,
   };
   assertSecretFree(manifest, [
     ...derivedCanaries.codex,
     ...derivedCanaries.claude,
   ]);
-  manifest.manifestPath = await writeManifest(
+  const manifestPath = await writeManifest(
     activeOutputRoot,
     manifest,
   );
-  return manifest;
+  return {
+    ...manifest,
+    clients,
+    manifestPath,
+  };
 }
 
 function parseArguments(argv, environment) {
@@ -881,20 +951,12 @@ function parseArguments(argv, environment) {
       DEFAULT_OUTPUT_ROOT,
     repositoryRef:
       environment.HANDSHAKE_REPO_REF,
-    codexExecutable:
-      environment.HANDSHAKE_CODEX_EXECUTABLE ??
-      DEFAULT_CLIENT_COMMANDS.codex.executable,
-    claudeExecutable:
-      environment.HANDSHAKE_CLAUDE_EXECUTABLE ??
-      DEFAULT_CLIENT_COMMANDS.claude.executable,
   };
   const keys = {
     "--codex-invite": "codexInvite",
     "--claude-invite": "claudeInvite",
     "--output": "outputRoot",
     "--repo-ref": "repositoryRef",
-    "--codex-command": "codexExecutable",
-    "--claude-command": "claudeExecutable",
   };
   for (let index = 0; index < argv.length; index += 2) {
     const key = keys[argv[index]];
@@ -904,6 +966,9 @@ function parseArguments(argv, environment) {
     }
     values[key] = value;
   }
+  values.repositoryRef = normalizeRepositoryRef(
+    values.repositoryRef,
+  );
   return values;
 }
 
@@ -918,16 +983,7 @@ export async function main({
     const options = parseArguments(argv, environment);
     const result = await run({
       baseEnvironment: environment,
-      commands: {
-        codex: {
-          ...DEFAULT_CLIENT_COMMANDS.codex,
-          executable: options.codexExecutable,
-        },
-        claude: {
-          ...DEFAULT_CLIENT_COMMANDS.claude,
-          executable: options.claudeExecutable,
-        },
-      },
+      commands: DEFAULT_CLIENT_COMMANDS,
       invitations: {
         codex: resolve(options.codexInvite),
         claude: resolve(options.claudeInvite),

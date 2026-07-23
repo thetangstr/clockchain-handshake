@@ -155,6 +155,10 @@ function memoryOutput() {
   };
 }
 
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 async function writeFixture(directory, result) {
   await mkdir(directory, { recursive: true });
   const jsonPath = join(directory, "result.json");
@@ -187,17 +191,22 @@ async function writePrompt(directory) {
 }
 
 async function writeFakeClient(directory) {
-  const executable = join(directory, "fake-client.mjs");
-  await writeFile(
-    executable,
-    `#!/usr/bin/env node
+  const executables = {};
+  for (const role of ["codex", "claude"]) {
+    const executable = join(directory, `${role}-fake-client.mjs`);
+    const version = role === "codex"
+      ? "codex-cli 0.144.1"
+      : "2.1.218 (Claude Code)";
+    await writeFile(
+      executable,
+      `#!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 if (process.argv.includes("--version")) {
-  process.stdout.write("fake-client 1.2.3\\n");
+  process.stdout.write(${JSON.stringify(`${version}\n`)});
   process.exit(0);
 }
 
@@ -206,10 +215,18 @@ const [
   jsonFixture,
   markdownFixture,
   marker,
-  leakedCode,
-  leakedCiphertext,
 ] =
   process.argv.slice(2);
+const leakedCode = ${JSON.stringify(
+  role === "codex"
+    ? CODEX_INVITE_CODE
+    : CLAUDE_INVITE_CODE,
+)};
+const leakedCiphertext = ${JSON.stringify(
+  role === "codex"
+    ? CODEX_CIPHERTEXT
+    : CLAUDE_CIPHERTEXT,
+)};
 if (mode === "hang") {
   spawn(process.execPath, [
     "-e",
@@ -262,15 +279,17 @@ if (mode === "hang") {
       JSON.stringify({ code: leakedCiphertext }) + "\\n",
   );
   process.stderr.write(
-    "wallet private key: 0x" + "9".repeat(64) + "\\n",
+    "diagnostic 0x" + "9".repeat(64) + "\\n",
   );
   process.exit(mode === "fail" ? 7 : 0);
 }
 `,
-    { mode: 0o700 },
-  );
-  await chmod(executable, 0o700);
-  return executable;
+      { mode: 0o700 },
+    );
+    await chmod(executable, 0o700);
+    executables[role] = executable;
+  }
+  return executables;
 }
 
 function harnessOptions({
@@ -298,26 +317,22 @@ function harnessOptions({
     },
     commands: {
       codex: {
-        executable,
+        executable: executable.codex,
         args: [
           codexMode,
           codexFixture.jsonPath,
           codexFixture.markdownPath,
           marker ?? "",
-          CODEX_INVITE_CODE,
-          CODEX_CIPHERTEXT,
         ],
         versionArgs: ["--version"],
       },
       claude: {
-        executable,
+        executable: executable.claude,
         args: [
           claudeMode,
           claudeFixture.jsonPath,
           claudeFixture.markdownPath,
           marker ?? "",
-          CLAUDE_INVITE_CODE,
-          CLAUDE_CIPHERTEXT,
         ],
         versionArgs: ["--version"],
       },
@@ -383,7 +398,7 @@ test("defines the exact native Codex and Claude clean-client commands", () => {
   });
 });
 
-test("omits repository overrides on main and accepts only a normalized immutable commit", () => {
+test("requires and normalizes an immutable repository commit", () => {
   const base = {
     baseEnvironment: {
       PATH: "/usr/bin",
@@ -394,14 +409,9 @@ test("omits repository overrides on main and accepts only a normalized immutable
     invitationFile: CODEX_INVITE,
     temporaryDirectory: "/tmp/handshake-client",
   };
-  const mainEnvironment = buildClientEnvironment(base);
-  assert.equal(
-    Object.hasOwn(mainEnvironment, "HANDSHAKE_REPO_URL"),
-    false,
-  );
-  assert.equal(
-    Object.hasOwn(mainEnvironment, "HANDSHAKE_REPO_REF"),
-    false,
+  assert.throws(
+    () => buildClientEnvironment(base),
+    /configuration/i,
   );
 
   const commitEnvironment = buildClientEnvironment({
@@ -412,6 +422,10 @@ test("omits repository overrides on main and accepts only a normalized immutable
     commitEnvironment.HANDSHAKE_REPO_REF,
     REPOSITORY_REF.toLowerCase(),
   );
+  assert.equal(
+    Object.hasOwn(commitEnvironment, "HANDSHAKE_REPO_URL"),
+    false,
+  );
   assert.throws(
     () =>
       buildClientEnvironment({
@@ -420,6 +434,104 @@ test("omits repository overrides on main and accepts only a normalized immutable
       }),
     /configuration/i,
   );
+});
+
+test("client CLI requires an immutable repository SHA and never exposes executable overrides", async (t) => {
+  await t.test("missing repository SHA", async () => {
+    const stdout = memoryOutput();
+    const stderr = memoryOutput();
+    let calls = 0;
+    const exitCode = await runClientsMain({
+      argv: [
+        "--codex-invite",
+        CODEX_INVITE,
+        "--claude-invite",
+        CLAUDE_INVITE,
+      ],
+      environment: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+      },
+      async run() {
+        calls += 1;
+        return {
+          status: "PASS",
+          manifestPath: "/tmp/client-acceptance.json",
+        };
+      },
+      stderr: stderr.stream,
+      stdout: stdout.stream,
+    });
+
+    assert.equal(exitCode, 2);
+    assert.equal(calls, 0);
+    assert.equal(stdout.text(), "");
+    assert.match(stderr.text(), /configuration failed/i);
+  });
+
+  await t.test("CLI executable override", async () => {
+    let calls = 0;
+    const exitCode = await runClientsMain({
+      argv: [
+        "--codex-invite",
+        CODEX_INVITE,
+        "--claude-invite",
+        CLAUDE_INVITE,
+        "--repo-ref",
+        REPOSITORY_REF,
+        "--codex-command",
+        "/tmp/attacker-codex",
+      ],
+      environment: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+      },
+      async run() {
+        calls += 1;
+        return {
+          status: "PASS",
+          manifestPath: "/tmp/client-acceptance.json",
+        };
+      },
+      stderr: memoryOutput().stream,
+      stdout: memoryOutput().stream,
+    });
+
+    assert.equal(exitCode, 2);
+    assert.equal(calls, 0);
+  });
+
+  await t.test("environment executable override", async () => {
+    let captured;
+    const exitCode = await runClientsMain({
+      argv: [
+        "--codex-invite",
+        CODEX_INVITE,
+        "--claude-invite",
+        CLAUDE_INVITE,
+        "--repo-ref",
+        REPOSITORY_REF,
+      ],
+      environment: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        HANDSHAKE_CODEX_EXECUTABLE: "/tmp/attacker-codex",
+        HANDSHAKE_CLAUDE_EXECUTABLE: "/tmp/attacker-claude",
+      },
+      async run(options) {
+        captured = options;
+        return {
+          status: "PASS",
+          manifestPath: "/tmp/client-acceptance.json",
+        };
+      },
+      stderr: memoryOutput().stream,
+      stdout: memoryOutput().stream,
+    });
+
+    assert.equal(exitCode, 0);
+    assert.deepEqual(captured.commands, DEFAULT_CLIENT_COMMANDS);
+  });
 });
 
 test("matches the deployed Clockchain canonical event-hash contract", () => {
@@ -447,14 +559,13 @@ test("runs clean clients sequentially with identical prompts and isolated minima
     CLAUDE_RESULT,
   );
 
-  const result = await runCleanClients(
-    harnessOptions({
-      claudeFixture,
-      codexFixture,
-      directory,
-      executable,
-    }),
-  );
+  const options = harnessOptions({
+    claudeFixture,
+    codexFixture,
+    directory,
+    executable,
+  });
+  const result = await runCleanClients(options);
 
   assert.equal(result.status, "PASS");
   assert.equal(
@@ -525,14 +636,51 @@ test("runs clean clients sequentially with identical prompts and isolated minima
       false,
     );
   }
-  assert.equal(result.clients.codex.cliVersion, "fake-client 1.2.3");
-  assert.equal(result.clients.claude.cliVersion, "fake-client 1.2.3");
+  assert.equal(result.clients.codex.cliVersion, "codex-cli 0.144.1");
+  assert.equal(
+    result.clients.claude.cliVersion,
+    "2.1.218 (Claude Code)",
+  );
   assert.match(result.clients.codex.resultPaths.json, /codex\/result\.json$/);
   assert.match(
     result.clients.claude.resultPaths.markdown,
     /claude\/RESULT\.md$/,
   );
   const manifest = await readFile(result.manifestPath, "utf8");
+  const manifestObject = JSON.parse(manifest);
+  assert.equal(
+    manifestObject.repositorySha,
+    REPOSITORY_REF.toLowerCase(),
+  );
+  assert.equal(
+    manifestObject.promptSha256,
+    sha256(PROMPT),
+  );
+  for (const client of ["codex", "claude"]) {
+    assert.deepEqual(
+      manifestObject.clients[client].command,
+      {
+        executable: options.commands[client].executable,
+        args: options.commands[client].args,
+      },
+    );
+    for (const format of ["json", "markdown"]) {
+      const evidence =
+        manifestObject.clients[client].evidence[format];
+      assert.equal(
+        evidence.path,
+        result.clients[client].resultPaths[format],
+      );
+      assert.equal(
+        evidence.sha256,
+        sha256(await readFile(evidence.path)),
+      );
+    }
+  }
+  assert.ok(
+    Date.parse(manifestObject.clients.codex.completedAt) <=
+      Date.parse(manifestObject.clients.claude.startedAt),
+  );
   for (const forbidden of [
     CODEX_INVITE,
     CLAUDE_INVITE,
@@ -615,6 +763,129 @@ test("fails closed without publishing client evidence that contains an invitatio
   assert.equal(manifest.includes(CODEX_INVITE_CODE), false);
 });
 
+test("redacts unlabeled Ethereum private-key-shaped values from client logs", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-unlabeled-key-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+
+  const result = await runCleanClients(
+    harnessOptions({
+      claudeFixture,
+      codexFixture,
+      directory,
+      executable,
+    }),
+  );
+  const privateKeyShape = `0x${"9".repeat(64)}`;
+  for (const client of ["codex", "claude"]) {
+    const stderr = await readFile(
+      result.clients[client].stderrLog,
+      "utf8",
+    );
+    assert.equal(stderr.includes(privateKeyShape), false);
+    assert.match(stderr, /\[REDACTED\]/);
+  }
+});
+
+test("rejects an exact invitation canary hidden in a duplicate raw JSON key", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-duplicate-canary-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const canonical = await readFile(codexFixture.jsonPath, "utf8");
+  const attacked = canonical.replace(
+    '    "displayName": "Billy",',
+    `    "displayName": "${CODEX_INVITE_CODE}",\n` +
+      '    "displayName": "Billy",',
+  );
+  assert.notEqual(attacked, canonical);
+  await writeFile(codexFixture.jsonPath, attacked);
+
+  const result = await runCleanClients(
+    harnessOptions({
+      claudeFixture,
+      codexFixture,
+      directory,
+      executable,
+    }),
+  );
+
+  assert.equal(result.status, "FAIL");
+  assert.equal(
+    result.clients.codex.errorCode,
+    "CLIENT_EVIDENCE_INVALID",
+  );
+  await assert.rejects(
+    readFile(
+      join(directory, "artifacts", "codex", "result.json"),
+    ),
+    /ENOENT/,
+  );
+});
+
+test("publishes parsed evidence only through canonical JSON serialization", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-canonical-evidence-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const canonical = await readFile(codexFixture.jsonPath, "utf8");
+  const duplicate = canonical.replace(
+    '  "status": "PASS",',
+    '  "status": "FAIL",\n  "status": "PASS",',
+  );
+  assert.notEqual(duplicate, canonical);
+  await writeFile(codexFixture.jsonPath, duplicate);
+
+  const result = await runCleanClients(
+    harnessOptions({
+      claudeFixture,
+      codexFixture,
+      directory,
+      executable,
+    }),
+  );
+
+  assert.equal(result.clients.codex.status, "PASS");
+  assert.equal(
+    await readFile(result.clients.codex.resultPaths.json, "utf8"),
+    `${JSON.stringify(CODEX_RESULT, null, 2)}\n`,
+  );
+});
+
 test("rejects a mutable repository ref before reading invitations or launching clients", async (t) => {
   const directory = await mkdtemp(
     join(process.env.TMPDIR, "handshake-mutable-ref-"),
@@ -639,6 +910,43 @@ test("rejects a mutable repository ref before reading invitations or launching c
     executable,
   });
   options.repositoryRef = "feature/turnkey";
+  options.readInvitation = async () => {
+    invitationReads += 1;
+    throw new Error("must not read");
+  };
+
+  await assert.rejects(
+    runCleanClients(options),
+    /configuration/i,
+  );
+  assert.equal(invitationReads, 0);
+});
+
+test("rejects one custom executable reused for both clean-client roles before reading invitations", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-shared-executable-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  let invitationReads = 0;
+  const options = harnessOptions({
+    claudeFixture,
+    codexFixture,
+    directory,
+    executable,
+  });
+  options.commands.claude.executable =
+    options.commands.codex.executable;
   options.readInvitation = async () => {
     invitationReads += 1;
     throw new Error("must not read");
@@ -1000,6 +1308,134 @@ function transactionEvidence(result, index) {
   };
 }
 
+async function writeAcceptanceManifest(
+  directory,
+  {
+    codexDirectory,
+    claudeDirectory,
+    repositorySha = REPOSITORY_REF.toLowerCase(),
+    mutate = (manifest) => manifest,
+  },
+) {
+  const prompt = await readFile(
+    join(process.cwd(), "prompts", "run-turnkey-demo.md"),
+  );
+  const client = async (
+    name,
+    resultDirectory,
+    startedAt,
+    completedAt,
+    cliVersion,
+  ) => {
+    const jsonPath = join(resultDirectory, "result.json");
+    const markdownPath = join(resultDirectory, "RESULT.md");
+    return {
+      status: "PASS",
+      command: {
+        executable: DEFAULT_CLIENT_COMMANDS[name].executable,
+        args: [...DEFAULT_CLIENT_COMMANDS[name].args],
+      },
+      cliVersion,
+      startedAt,
+      completedAt,
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      outputLimitExceeded: false,
+      errorCode: null,
+      evidence: {
+        json: {
+          path: jsonPath,
+          sha256: sha256(await readFile(jsonPath)),
+        },
+        markdown: {
+          path: markdownPath,
+          sha256: sha256(await readFile(markdownPath)),
+        },
+      },
+    };
+  };
+  const manifest = {
+    schema: "clockchain.handshake-client-acceptance/v1",
+    status: "PASS",
+    repositorySha,
+    promptSha256: sha256(prompt),
+    startedAt: "2026-07-23T08:00:00.000Z",
+    completedAt: "2026-07-23T08:00:04.000Z",
+    clients: {
+      codex: await client(
+        "codex",
+        codexDirectory,
+        "2026-07-23T08:00:00.000Z",
+        "2026-07-23T08:00:02.000Z",
+        "codex-cli 0.144.1",
+      ),
+      claude: await client(
+        "claude",
+        claudeDirectory,
+        "2026-07-23T08:00:02.001Z",
+        "2026-07-23T08:00:04.000Z",
+        "2.1.218 (Claude Code)",
+      ),
+    },
+  };
+  const activeManifest = mutate(structuredClone(manifest));
+  const path = join(directory, "client-acceptance.json");
+  await writeFile(
+    path,
+    `${JSON.stringify(activeManifest, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  return path;
+}
+
+async function verificationProvenance(
+  directory,
+  {
+    codexDirectory,
+    claudeDirectory,
+    results = [CODEX_RESULT, CLAUDE_RESULT],
+  },
+) {
+  const manifestFile = await writeAcceptanceManifest(
+    directory,
+    { codexDirectory, claudeDirectory },
+  );
+  const canaryFiles = [
+    join(directory, "codex.secret.json"),
+    join(directory, "claude.secret.json"),
+  ];
+  const invitations = results.map((result, index) => ({
+    code: index === 0
+      ? CODEX_INVITE_CODE
+      : CLAUDE_INVITE_CODE,
+    bundle: {
+      address: result.identity.owner,
+      displayName: result.identity.displayName,
+      crypto: {
+        ciphertext: index === 0
+          ? CODEX_CIPHERTEXT
+          : CLAUDE_CIPHERTEXT,
+      },
+    },
+  }));
+  await Promise.all(
+    canaryFiles.map((path, index) =>
+      writeFile(
+        path,
+        `${JSON.stringify(invitations[index])}\n`,
+        { mode: 0o600 },
+      )),
+  );
+  return {
+    canaryFiles,
+    expectedRepositorySha: REPOSITORY_REF,
+    manifestFile,
+    readInvitation: async (path) =>
+      invitations[canaryFiles.indexOf(path)],
+  };
+}
+
 function fakePublicClient(results) {
   const calls = [];
   const transactions = results.map(transactionEvidence);
@@ -1133,6 +1569,146 @@ function fakeClockchain(
   };
 }
 
+test("rejects an unbound client-acceptance manifest before any live verification", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-unbound-manifest-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  const codexDirectory = join(directory, "codex");
+  const claudeDirectory = join(directory, "claude");
+  await writeFixture(codexDirectory, CODEX_RESULT);
+  await writeFixture(claudeDirectory, CLAUDE_RESULT);
+  const manifestFile = await writeAcceptanceManifest(
+    directory,
+    {
+      codexDirectory,
+      claudeDirectory,
+      mutate(manifest) {
+        manifest.repositorySha = "f".repeat(40);
+        manifest.clients.codex.command.executable =
+          "/tmp/attacker-codex";
+        return manifest;
+      },
+    },
+  );
+  const publicClient = fakePublicClient([
+    CODEX_RESULT,
+    CLAUDE_RESULT,
+  ]);
+  const observations = {
+    completions: [],
+    crossParty: [],
+    factoryTokens: [],
+    tokenSubjects: [],
+  };
+  const clockchain = fakeClockchain(
+    [CODEX_RESULT, CLAUDE_RESULT],
+    observations,
+  );
+
+  await assert.rejects(
+    verifyLiveResults({
+      clientFactory: clockchain.clientFactory,
+      expectedRepositorySha: REPOSITORY_REF,
+      manifestFile,
+      outputFile: join(directory, "verdict.json"),
+      publicClient,
+      resultDirectories: {
+        codex: codexDirectory,
+        claude: claudeDirectory,
+      },
+      tokenIssuer: clockchain.tokenIssuer,
+    }),
+    /configuration|manifest/i,
+  );
+  assert.equal(publicClient.calls.length, 0);
+  assert.equal(observations.tokenSubjects.length, 0);
+});
+
+test("binds each result owner and display name to its ordered operator invitation", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-operator-binding-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  const codexDirectory = join(directory, "codex");
+  const claudeDirectory = join(directory, "claude");
+  await writeFixture(codexDirectory, CODEX_RESULT);
+  await writeFixture(claudeDirectory, CLAUDE_RESULT);
+  const manifestFile = await writeAcceptanceManifest(
+    directory,
+    { codexDirectory, claudeDirectory },
+  );
+  const invitationFiles = [
+    join(directory, "codex.secret.json"),
+    join(directory, "claude.secret.json"),
+  ];
+  const invitations = [
+    {
+      code: CODEX_INVITE_CODE,
+      bundle: {
+        address: OWNER_B,
+        displayName: CODEX_RESULT.identity.displayName,
+        crypto: { ciphertext: CODEX_CIPHERTEXT },
+      },
+    },
+    {
+      code: CLAUDE_INVITE_CODE,
+      bundle: {
+        address: CLAUDE_RESULT.identity.owner,
+        displayName: CLAUDE_RESULT.identity.displayName,
+        crypto: { ciphertext: CLAUDE_CIPHERTEXT },
+      },
+    },
+  ];
+  await Promise.all(
+    invitationFiles.map((path, index) =>
+      writeFile(
+        path,
+        `${JSON.stringify(invitations[index])}\n`,
+        { mode: 0o600 },
+      )),
+  );
+  const publicClient = fakePublicClient([
+    CODEX_RESULT,
+    CLAUDE_RESULT,
+  ]);
+  const observations = {
+    completions: [],
+    crossParty: [],
+    factoryTokens: [],
+    tokenSubjects: [],
+  };
+  const clockchain = fakeClockchain(
+    [CODEX_RESULT, CLAUDE_RESULT],
+    observations,
+  );
+
+  const verdict = await verifyLiveResults({
+    canaryFiles: invitationFiles,
+    clientFactory: clockchain.clientFactory,
+    expectedRepositorySha: REPOSITORY_REF,
+    manifestFile,
+    outputFile: join(directory, "verdict.json"),
+    publicClient,
+    readInvitation: async (path) =>
+      invitations[invitationFiles.indexOf(path)],
+    resultDirectories: {
+      codex: codexDirectory,
+      claude: claudeDirectory,
+    },
+    tokenIssuer: clockchain.tokenIssuer,
+  });
+
+  assert.equal(verdict.status, "FAIL");
+  assert.equal(
+    verdict.clients.codex.errorCode,
+    "OPERATOR_IDENTITY_MISMATCH",
+  );
+  assert.equal(verdict.clients.claude.status, "PASS");
+});
+
 test("independently verifies both identities and recomputed receipt hashes before writing PASS", async (t) => {
   const directory = await mkdtemp(
     join(process.env.TMPDIR, "handshake-verifier-"),
@@ -1163,6 +1739,10 @@ test("independently verifies both identities and recomputed receipt hashes befor
   const outputFile = join(directory, "acceptance-verdict.json");
 
   const verdict = await verifyLiveResults({
+    ...(await verificationProvenance(directory, {
+      codexDirectory,
+      claudeDirectory,
+    })),
     clientFactory: clockchain.clientFactory,
     now: () => new Date("2026-07-23T09:00:00.000Z"),
     outputFile,
@@ -1241,13 +1821,7 @@ test("extracts secret canaries from operator files and fails closed without echo
   const claudeDirectory = join(directory, "claude");
   await writeFixture(codexDirectory, CODEX_RESULT);
   await writeFixture(claudeDirectory, CLAUDE_RESULT);
-  const secretCanary = "invitation-code-canary-never-persist";
-  const canaryFile = join(directory, "operator.secret.json");
-  await writeFile(
-    canaryFile,
-    JSON.stringify({ code: secretCanary }),
-    { mode: 0o600 },
-  );
+  const secretCanary = CODEX_INVITE_CODE;
   await writeFile(
     join(codexDirectory, "stdout.log"),
     `accidental ${secretCanary}\n`,
@@ -1269,7 +1843,10 @@ test("extracts secret canaries from operator files and fails closed without echo
   const outputFile = join(directory, "acceptance-verdict.json");
 
   const verdict = await verifyLiveResults({
-    canaryFiles: [canaryFile],
+    ...(await verificationProvenance(directory, {
+      codexDirectory,
+      claudeDirectory,
+    })),
     clientFactory: clockchain.clientFactory,
     outputFile,
     publicClient,
@@ -1324,6 +1901,10 @@ test("fails a client whose live ERC-8004 owner differs from its evidence", async
   );
 
   const verdict = await verifyLiveResults({
+    ...(await verificationProvenance(directory, {
+      codexDirectory,
+      claudeDirectory,
+    })),
     clientFactory: clockchain.clientFactory,
     outputFile: join(directory, "verdict.json"),
     publicClient,
@@ -1375,6 +1956,11 @@ test("rejects two otherwise verified runs that reuse one ERC-8004 identity", asy
   );
 
   const verdict = await verifyLiveResults({
+    ...(await verificationProvenance(directory, {
+      codexDirectory,
+      claudeDirectory,
+      results: [CODEX_RESULT, duplicateIdentity],
+    })),
     clientFactory: clockchain.clientFactory,
     outputFile: join(directory, "verdict.json"),
     publicClient,
@@ -1473,6 +2059,10 @@ test("rejects forged ERC-8004 transaction proof even when final owner and URI re
       );
 
       const verdict = await verifyLiveResults({
+        ...(await verificationProvenance(directory, {
+          codexDirectory,
+          claudeDirectory,
+        })),
         clientFactory: clockchain.clientFactory,
         outputFile: join(directory, "verdict.json"),
         publicClient,
@@ -1538,6 +2128,10 @@ test("rejects forged consensus time and pool-health result fields against a read
       );
 
       const verdict = await verifyLiveResults({
+        ...(await verificationProvenance(directory, {
+          codexDirectory,
+          claudeDirectory,
+        })),
         clientFactory: clockchain.clientFactory,
         outputFile: join(directory, "verdict.json"),
         publicClient,
@@ -1567,6 +2161,10 @@ test("verifier CLI accepts two documented result paths and activates conventiona
     argv: [
       "artifacts/codex/result.json",
       "artifacts/claude/result.json",
+      "--manifest",
+      "artifacts/client-acceptance.json",
+      "--repo-sha",
+      REPOSITORY_REF,
       "--output",
       customOutput,
     ],
@@ -1593,6 +2191,14 @@ test("verifier CLI accepts two documented result paths and activates conventiona
       ".context/invitations/claude.secret.json",
     ),
   ]);
+  assert.equal(
+    captured.manifestFile,
+    join(process.cwd(), "artifacts/client-acceptance.json"),
+  );
+  assert.equal(
+    captured.expectedRepositorySha,
+    REPOSITORY_REF.toLowerCase(),
+  );
   assert.equal(
     captured.outputFile,
     join(process.cwd(), customOutput),

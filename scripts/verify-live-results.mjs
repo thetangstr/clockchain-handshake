@@ -10,7 +10,6 @@ import {
   lstat,
   mkdir,
   open,
-  readFile,
   readdir,
   realpath,
   rename,
@@ -45,6 +44,7 @@ import {
   renderResultMarkdown,
   validatePassResult,
 } from "../src/evidence.mjs";
+import { readSecretInvitation } from "../src/invitation.mjs";
 import {
   assertCrossPartyVerification,
   createMcpClient,
@@ -57,7 +57,6 @@ import {
   registrationDataUri,
 } from "../src/registration.mjs";
 import {
-  SENSITIVE_KEY,
   assertSecretFree,
 } from "../src/redact.mjs";
 
@@ -72,12 +71,51 @@ const DEFAULT_OUTPUT_FILE = join(
   "artifacts",
   "acceptance-verdict.json",
 );
+const DEFAULT_PROMPT_FILE = join(
+  REPOSITORY_DIRECTORY,
+  "prompts",
+  "run-turnkey-demo.md",
+);
 const CLIENT_NAMES = Object.freeze(["codex", "claude"]);
 const MAX_ARTIFACT_FILE_BYTES = 2 * 1_024 * 1_024;
 const MAX_ARTIFACT_TOTAL_BYTES = 8 * 1_024 * 1_024;
 const MAX_ARTIFACT_FILES = 256;
 const MAX_ARTIFACT_DEPTH = 8;
 const MAX_CANARY_FILE_BYTES = 128 * 1_024;
+const MAX_MANIFEST_BYTES = 256 * 1_024;
+const MAX_PROMPT_BYTES = 256 * 1_024;
+const REPOSITORY_SHA_PATTERN = /^[0-9a-f]{40}$/i;
+const CODEX_VERSION_PATTERN =
+  /^codex-cli \d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+const CLAUDE_VERSION_PATTERN =
+  /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)? \(Claude Code\)$/;
+const RFC3339_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const DEFAULT_CLIENT_COMMANDS = Object.freeze({
+  codex: Object.freeze({
+    executable: "codex",
+    args: Object.freeze([
+      "exec",
+      "--ephemeral",
+      "--skip-git-repo-check",
+      "--ignore-user-config",
+      "--ignore-rules",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "-",
+    ]),
+  }),
+  claude: Object.freeze({
+    executable: "claude",
+    args: Object.freeze([
+      "-p",
+      "--no-session-persistence",
+      "--permission-mode",
+      "bypassPermissions",
+      "--dangerously-skip-permissions",
+      "--safe-mode",
+    ]),
+  }),
+});
 const SECRET_ASSIGNMENT_PATTERN =
   /(?:private.?key|secret|token|invite(?:ation)?.?code|ciphertext)\s*["']?\s*[:=]\s*(?!"?\[REDACTED\]"?)[^\s,;}]+/i;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
@@ -183,73 +221,63 @@ export function expectedReceiptHash(result) {
     .digest("hex");
 }
 
-function collectSensitiveCanaries(value, underSensitiveKey = false) {
-  const canaries = [];
-  if (typeof value === "string") {
-    if (underSensitiveKey && value.length > 0) {
-      canaries.push(value);
-    }
-    return canaries;
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      canaries.push(
-        ...collectSensitiveCanaries(entry, underSensitiveKey),
-      );
-    }
-    return canaries;
-  }
-  if (!isPlainObject(value)) {
-    return canaries;
-  }
-  for (const [key, entry] of Object.entries(value)) {
-    const sensitiveKey =
-      underSensitiveKey ||
-      key.toLowerCase() === "code" ||
-      SENSITIVE_KEY.test(key);
-    canaries.push(
-      ...collectSensitiveCanaries(
-        entry,
-        sensitiveKey,
-      ),
-    );
-  }
-  return canaries;
-}
-
-async function loadCanaryFiles(canaryFiles) {
+function normalizeRepositorySha(value) {
   if (
-    !Array.isArray(canaryFiles) ||
-    canaryFiles.some((path) => typeof path !== "string")
+    typeof value !== "string" ||
+    !REPOSITORY_SHA_PATTERN.test(value)
   ) {
     throw new LiveVerificationConfigurationError();
   }
+  return value.toLowerCase();
+}
+
+async function loadOperatorInvitations(
+  canaryFiles,
+  readInvitation,
+) {
+  if (
+    !Array.isArray(canaryFiles) ||
+    canaryFiles.length !== CLIENT_NAMES.length ||
+    canaryFiles.some((path) => typeof path !== "string") ||
+    typeof readInvitation !== "function"
+  ) {
+    throw new LiveVerificationConfigurationError();
+  }
+  const paths = canaryFiles.map(absolutePath);
+  if (new Set(paths).size !== paths.length) {
+    throw new LiveVerificationConfigurationError();
+  }
+  const invitations = {};
   const canaries = [];
-  for (const candidate of canaryFiles) {
-    const path = absolutePath(candidate);
-    const stat = await lstat(path);
+  for (let index = 0; index < CLIENT_NAMES.length; index += 1) {
+    const invitation = await readInvitation(paths[index]);
+    const code = invitation?.code;
+    const bundle = invitation?.bundle;
+    const ciphertext = bundle?.crypto?.ciphertext;
     if (
-      !stat.isFile() ||
-      stat.isSymbolicLink() ||
-      stat.size < 1 ||
-      stat.size > MAX_CANARY_FILE_BYTES
+      typeof code !== "string" ||
+      code.length === 0 ||
+      code.length > MAX_CANARY_FILE_BYTES ||
+      typeof ciphertext !== "string" ||
+      ciphertext.length === 0 ||
+      ciphertext.length > MAX_CANARY_FILE_BYTES ||
+      !addressesEqual(bundle?.address, bundle?.address) ||
+      typeof bundle?.displayName !== "string" ||
+      bundle.displayName.length === 0 ||
+      bundle.displayName.length > 128
     ) {
       throw new LiveVerificationConfigurationError();
     }
-    const text = await readFile(path, "utf8");
-    try {
-      const parsed = JSON.parse(text);
-      canaries.push(...collectSensitiveCanaries(parsed));
-    } catch {
-      canaries.push(
-        ...text
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter(Boolean),
-      );
-    }
+    invitations[CLIENT_NAMES[index]] = {
+      address: bundle.address,
+      displayName: bundle.displayName,
+    };
+    canaries.push(code, ciphertext);
   }
-  return normalizedCanaries(canaries);
+  return {
+    canaries: normalizedCanaries(canaries),
+    invitations,
+  };
 }
 
 function isWithin(root, candidate) {
@@ -295,6 +323,7 @@ async function readArtifactFile(path) {
       );
     }
     return {
+      bytes,
       size: bytes.length,
       text: bytes.toString("utf8"),
     };
@@ -305,6 +334,37 @@ async function readArtifactFile(path) {
     throw new LiveVerificationError(
       "ARTIFACT_FILE_INVALID",
     );
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function readTrustedFile(path, maximum) {
+  let handle;
+  try {
+    handle = await open(
+      absolutePath(path),
+      fileSystemConstants.O_RDONLY |
+        fileSystemConstants.O_NOFOLLOW,
+    );
+    const stat = await handle.stat();
+    if (
+      !stat.isFile() ||
+      stat.size < 1 ||
+      stat.size > maximum
+    ) {
+      throw new LiveVerificationConfigurationError();
+    }
+    const bytes = await handle.readFile();
+    if (bytes.length < 1 || bytes.length > maximum) {
+      throw new LiveVerificationConfigurationError();
+    }
+    return bytes;
+  } catch (error) {
+    if (error instanceof LiveVerificationConfigurationError) {
+      throw error;
+    }
+    throw new LiveVerificationConfigurationError();
   } finally {
     await handle?.close();
   }
@@ -425,6 +485,192 @@ async function loadLocalResult(directory, canaries) {
   };
 }
 
+function hasExactKeys(value, keys) {
+  return (
+    isPlainObject(value) &&
+    Reflect.ownKeys(value).length === keys.length &&
+    keys.every((key) => Object.hasOwn(value, key))
+  );
+}
+
+function timestampMilliseconds(value) {
+  if (
+    typeof value !== "string" ||
+    !RFC3339_PATTERN.test(value) ||
+    !Number.isFinite(Date.parse(value)) ||
+    new Date(value).toISOString() !== value
+  ) {
+    throw new LiveVerificationConfigurationError();
+  }
+  return Date.parse(value);
+}
+
+function commandMatches(clientName, command) {
+  const expected = DEFAULT_CLIENT_COMMANDS[clientName];
+  return (
+    hasExactKeys(command, ["executable", "args"]) &&
+    command.executable === expected.executable &&
+    isDeepStrictEqual(command.args, expected.args)
+  );
+}
+
+function versionMatches(clientName, value) {
+  return (
+    typeof value === "string" &&
+    (
+      clientName === "codex"
+        ? CODEX_VERSION_PATTERN.test(value)
+        : CLAUDE_VERSION_PATTERN.test(value)
+    )
+  );
+}
+
+async function validateManifestEvidence(
+  evidence,
+  expectedPath,
+) {
+  if (
+    !hasExactKeys(evidence, ["path", "sha256"]) ||
+    absolutePath(evidence.path) !== expectedPath ||
+    typeof evidence.sha256 !== "string" ||
+    !HASH_PATTERN.test(evidence.sha256)
+  ) {
+    throw new LiveVerificationConfigurationError();
+  }
+  const file = await readArtifactFile(expectedPath);
+  const digest = createHash("sha256")
+    .update(file.bytes)
+    .digest("hex");
+  if (digest !== evidence.sha256) {
+    throw new LiveVerificationConfigurationError();
+  }
+}
+
+async function validateAcceptanceManifest({
+  directories,
+  expectedRepositorySha,
+  manifestFile,
+}) {
+  const activeManifestFile = absolutePath(manifestFile);
+  const commonDirectory = dirname(directories.codex);
+  if (
+    basename(activeManifestFile) !==
+      "client-acceptance.json" ||
+    dirname(activeManifestFile) !== commonDirectory ||
+    dirname(directories.claude) !== commonDirectory ||
+    basename(directories.codex) !== "codex" ||
+    basename(directories.claude) !== "claude"
+  ) {
+    throw new LiveVerificationConfigurationError();
+  }
+  const bytes = await readTrustedFile(
+    activeManifestFile,
+    MAX_MANIFEST_BYTES,
+  );
+  let manifest;
+  try {
+    manifest = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new LiveVerificationConfigurationError();
+  }
+  if (
+    !hasExactKeys(manifest, [
+      "schema",
+      "status",
+      "repositorySha",
+      "promptSha256",
+      "startedAt",
+      "completedAt",
+      "clients",
+    ]) ||
+    manifest.schema !==
+      "clockchain.handshake-client-acceptance/v1" ||
+    manifest.status !== "PASS" ||
+    manifest.repositorySha !== expectedRepositorySha ||
+    typeof manifest.promptSha256 !== "string" ||
+    !HASH_PATTERN.test(manifest.promptSha256) ||
+    !hasExactKeys(manifest.clients, CLIENT_NAMES) ||
+    !bytes.equals(
+      Buffer.from(
+        `${JSON.stringify(manifest, null, 2)}\n`,
+        "utf8",
+      ),
+    )
+  ) {
+    throw new LiveVerificationConfigurationError();
+  }
+  const promptSha256 = createHash("sha256")
+    .update(
+      await readTrustedFile(
+        DEFAULT_PROMPT_FILE,
+        MAX_PROMPT_BYTES,
+      ),
+    )
+    .digest("hex");
+  if (manifest.promptSha256 !== promptSha256) {
+    throw new LiveVerificationConfigurationError();
+  }
+
+  const overallStarted =
+    timestampMilliseconds(manifest.startedAt);
+  const overallCompleted =
+    timestampMilliseconds(manifest.completedAt);
+  const times = {};
+  for (const name of CLIENT_NAMES) {
+    const client = manifest.clients[name];
+    if (
+      !hasExactKeys(client, [
+        "status",
+        "command",
+        "cliVersion",
+        "startedAt",
+        "completedAt",
+        "exitCode",
+        "signal",
+        "timedOut",
+        "outputLimitExceeded",
+        "errorCode",
+        "evidence",
+      ]) ||
+      client.status !== "PASS" ||
+      !commandMatches(name, client.command) ||
+      !versionMatches(name, client.cliVersion) ||
+      client.exitCode !== 0 ||
+      client.signal !== null ||
+      client.timedOut !== false ||
+      client.outputLimitExceeded !== false ||
+      client.errorCode !== null ||
+      !hasExactKeys(client.evidence, ["json", "markdown"])
+    ) {
+      throw new LiveVerificationConfigurationError();
+    }
+    times[name] = {
+      started: timestampMilliseconds(client.startedAt),
+      completed: timestampMilliseconds(client.completedAt),
+    };
+    if (times[name].started > times[name].completed) {
+      throw new LiveVerificationConfigurationError();
+    }
+    await validateManifestEvidence(
+      client.evidence.json,
+      join(directories[name], "result.json"),
+    );
+    await validateManifestEvidence(
+      client.evidence.markdown,
+      join(directories[name], "RESULT.md"),
+    );
+  }
+  if (
+    overallStarted > times.codex.started ||
+    times.codex.completed > times.claude.started ||
+    times.claude.completed > overallCompleted ||
+    overallStarted > overallCompleted
+  ) {
+    throw new LiveVerificationConfigurationError();
+  }
+  return manifest;
+}
+
 function addressesEqual(left, right) {
   return (
     typeof left === "string" &&
@@ -433,6 +679,17 @@ function addressesEqual(left, right) {
     /^0x[0-9a-f]{40}$/i.test(right) &&
     left.toLowerCase() === right.toLowerCase()
   );
+}
+
+function assertOperatorIdentity(result, operator) {
+  if (
+    !addressesEqual(result.identity.owner, operator.address) ||
+    result.identity.displayName !== operator.displayName
+  ) {
+    throw new LiveVerificationError(
+      "OPERATOR_IDENTITY_MISMATCH",
+    );
+  }
 }
 
 async function verifyIdentity(publicClient, result) {
@@ -858,6 +1115,8 @@ export async function verifyLiveResults({
   canaries = [],
   canaryFiles = [],
   clientFactory = createMcpClient,
+  expectedRepositorySha,
+  manifestFile,
   now = () => new Date(),
   outputFile = DEFAULT_OUTPUT_FILE,
   publicClient = createPublicClient({
@@ -865,6 +1124,7 @@ export async function verifyLiveResults({
     transport: http(RPC_URL),
   }),
   randomUUID = defaultRandomUUID,
+  readInvitation = readSecretInvitation,
   resultDirectories = DEFAULT_RESULT_DIRECTORIES,
   tokenIssuer = mintDemoToken,
 } = {}) {
@@ -873,6 +1133,7 @@ export async function verifyLiveResults({
     typeof clientFactory !== "function" ||
     typeof now !== "function" ||
     typeof randomUUID !== "function" ||
+    typeof readInvitation !== "function" ||
     typeof tokenIssuer !== "function" ||
     !publicClient ||
     typeof publicClient.getChainId !== "function" ||
@@ -900,19 +1161,36 @@ export async function verifyLiveResults({
     throw new LiveVerificationConfigurationError();
   }
   const activeOutputFile = absolutePath(outputFile);
+  const activeRepositorySha = normalizeRepositorySha(
+    expectedRepositorySha,
+  );
+  const operatorData = await loadOperatorInvitations(
+    canaryFiles,
+    readInvitation,
+  );
   const activeCanaries = normalizedCanaries([
     ...normalizedCanaries(canaries),
-    ...(await loadCanaryFiles(canaryFiles)),
+    ...operatorData.canaries,
   ]);
+  await validateAcceptanceManifest({
+    directories,
+    expectedRepositorySha: activeRepositorySha,
+    manifestFile,
+  });
   const localResults = {};
   const clients = {};
 
   for (const name of CLIENT_NAMES) {
     try {
-      localResults[name] = await loadLocalResult(
+      const localResult = await loadLocalResult(
         directories[name],
         activeCanaries,
       );
+      assertOperatorIdentity(
+        localResult.result,
+        operatorData.invitations[name],
+      );
+      localResults[name] = localResult;
     } catch (error) {
       clients[name] = {
         status: "FAIL",
@@ -1029,6 +1307,8 @@ function parseArguments(argv) {
     resultFiles: [],
     outputFile: DEFAULT_OUTPUT_FILE,
     canaryFiles: [],
+    expectedRepositorySha: undefined,
+    manifestFile: undefined,
   };
   for (let index = 0; index < argv.length;) {
     const option = argv[index];
@@ -1046,6 +1326,21 @@ function parseArguments(argv) {
       }
       values.canaryFiles.push(resolve(value));
       index += 2;
+    } else if (option === "--manifest") {
+      const value = argv[index + 1];
+      if (value === undefined) {
+        throw new LiveVerificationConfigurationError();
+      }
+      values.manifestFile = resolve(value);
+      index += 2;
+    } else if (option === "--repo-sha") {
+      const value = argv[index + 1];
+      if (value === undefined) {
+        throw new LiveVerificationConfigurationError();
+      }
+      values.expectedRepositorySha =
+        normalizeRepositorySha(value);
+      index += 2;
     } else if (
       typeof option === "string" &&
       !option.startsWith("--")
@@ -1061,6 +1356,8 @@ function parseArguments(argv) {
     values.resultFiles.some(
       (path) => basename(path) !== "result.json",
     ) ||
+    values.manifestFile === undefined ||
+    values.expectedRepositorySha === undefined ||
     ![0, 2].includes(values.canaryFiles.length)
   ) {
     throw new LiveVerificationConfigurationError();
