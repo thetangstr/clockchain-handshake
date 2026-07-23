@@ -3,7 +3,9 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
+  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -248,5 +250,93 @@ test("fails closed when redaction changes a canary and leaves no artifact", asyn
       return true;
     },
   );
+  assert.deepEqual(await readdir(directory), []);
+});
+
+test("restores the exact prior pair when the second publication rename fails", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const jsonPath = join(directory, "result.json");
+  const markdownPath = join(directory, "RESULT.md");
+  const priorJson = "{\"prior\":\"json\"}\n";
+  const priorMarkdown = "# Prior PASS\n";
+  await writeFile(jsonPath, priorJson, "utf8");
+  await writeFile(markdownPath, priorMarkdown, "utf8");
+  let rejectedSecondRename = false;
+
+  await assert.rejects(
+    () =>
+      writeEvidence({
+        directory,
+        result: validResult(),
+        canaries: [],
+        fileSystem: {
+          async rename(source, destination) {
+            if (
+              !rejectedSecondRename &&
+              destination === markdownPath &&
+              source.includes(".result.")
+            ) {
+              rejectedSecondRename = true;
+              throw new Error("injected second rename failure");
+            }
+            return rename(source, destination);
+          },
+        },
+      }),
+    /evidence/i,
+  );
+
+  assert.equal(rejectedSecondRename, true);
+  assert.equal(await readFile(jsonPath, "utf8"), priorJson);
+  assert.equal(
+    await readFile(markdownPath, "utf8"),
+    priorMarkdown,
+  );
+  assert.deepEqual(
+    (await readdir(directory)).sort(),
+    ["RESULT.md", "result.json"],
+  );
+});
+
+test("removes newly published finals when final read-back fails without a prior pair", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const jsonPath = join(directory, "result.json");
+  let publicationRenames = 0;
+  let rejectedFinalRead = false;
+
+  await assert.rejects(
+    () =>
+      writeEvidence({
+        directory,
+        result: validResult(),
+        canaries: [],
+        fileSystem: {
+          async readFile(path, options) {
+            if (
+              publicationRenames === 2 &&
+              path === jsonPath &&
+              !rejectedFinalRead
+            ) {
+              rejectedFinalRead = true;
+              throw new Error("injected final read failure");
+            }
+            return readFile(path, options);
+          },
+          async rename(source, destination) {
+            const value = await rename(source, destination);
+            if (
+              destination === jsonPath ||
+              destination === join(directory, "RESULT.md")
+            ) {
+              publicationRenames += 1;
+            }
+            return value;
+          },
+        },
+      }),
+    /evidence/i,
+  );
+
+  assert.equal(rejectedFinalRead, true);
   assert.deepEqual(await readdir(directory), []);
 });

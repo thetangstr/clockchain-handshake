@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  lstat,
   mkdir,
   readFile,
   rename,
@@ -71,6 +72,24 @@ const TRANSACTION_PATTERN = /^0x[0-9a-f]{64}$/i;
 const RFC3339_PATTERN =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const MAX_TEXT_LENGTH = 512;
+const EVIDENCE_HISTORY_DIRECTORY =
+  ".handshake-evidence-history";
+const FILE_SYSTEM_KEYS = new Set([
+  "lstat",
+  "mkdir",
+  "readFile",
+  "rename",
+  "rm",
+  "writeFile",
+]);
+const DEFAULT_FILE_SYSTEM = Object.freeze({
+  lstat,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+});
 
 export class EvidenceError extends Error {
   constructor(message, {
@@ -130,6 +149,31 @@ function hasExactKeys(value, expectedKeys) {
     keys.length === expectedKeys.length &&
     expectedKeys.every((key) => keys.includes(key))
   );
+}
+
+function mergeFileSystem(fileSystem = {}) {
+  if (!isPlainObject(fileSystem)) {
+    throw new EvidenceConfigurationError();
+  }
+
+  const active = { ...DEFAULT_FILE_SYSTEM };
+  for (const key of Reflect.ownKeys(fileSystem)) {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      fileSystem,
+      key,
+    );
+    if (
+      typeof key !== "string" ||
+      !FILE_SYSTEM_KEYS.has(key) ||
+      !descriptor ||
+      !Object.hasOwn(descriptor, "value") ||
+      typeof descriptor.value !== "function"
+    ) {
+      throw new EvidenceConfigurationError();
+    }
+    active[key] = descriptor.value;
+  }
+  return active;
 }
 
 function isBoundedString(
@@ -340,11 +384,171 @@ export function renderResultMarkdown(result) {
   ].join("\n");
 }
 
-function validateWriteOptions({ directory, canaries }) {
+function validateDirectory(directory) {
+  return (
+    typeof directory === "string" &&
+    directory.length > 0 &&
+    !directory.includes("\0")
+  );
+}
+
+async function regularFileExists(fileSystem, path) {
+  try {
+    const metadata = await fileSystem.lstat(path);
+    if (!metadata.isFile()) {
+      throw new EvidenceConfigurationError();
+    }
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return false;
+    }
+    if (error instanceof EvidenceError) {
+      throw error;
+    }
+    throw new EvidenceConfigurationError();
+  }
+}
+
+async function ensureRealDirectory(fileSystem, path) {
+  try {
+    const metadata = await fileSystem.lstat(path);
+    if (!metadata.isDirectory()) {
+      throw new EvidenceConfigurationError();
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      if (error instanceof EvidenceError) {
+        throw error;
+      }
+      throw new EvidenceConfigurationError();
+    }
+    try {
+      await fileSystem.mkdir(path, { recursive: true });
+      const metadata = await fileSystem.lstat(path);
+      if (!metadata.isDirectory()) {
+        throw new EvidenceConfigurationError();
+      }
+    } catch (creationError) {
+      if (creationError instanceof EvidenceError) {
+        throw creationError;
+      }
+      throw new EvidenceConfigurationError();
+    }
+  }
+}
+
+export async function beginEvidenceAttempt({
+  directory,
+  runId,
+  fileSystem = {},
+}) {
+  if (!validateDirectory(directory) || !UUID_PATTERN.test(runId)) {
+    throw new EvidenceConfigurationError();
+  }
+  const activeFileSystem = mergeFileSystem(fileSystem);
+  const jsonPath = join(directory, "result.json");
+  const markdownPath = join(directory, "RESULT.md");
+  const finals = [
+    {
+      source: markdownPath,
+      destinationName: "RESULT.md",
+    },
+    {
+      source: jsonPath,
+      destinationName: "result.json",
+    },
+  ];
+  const present = [];
+  for (const entry of finals) {
+    if (
+      await regularFileExists(activeFileSystem, entry.source)
+    ) {
+      present.push(entry);
+    }
+  }
+  if (present.length === 0) {
+    return {
+      archived: false,
+      archiveDirectory: null,
+    };
+  }
+
+  const historyDirectory = join(
+    directory,
+    EVIDENCE_HISTORY_DIRECTORY,
+  );
+  const archiveDirectory = join(historyDirectory, runId);
+  await ensureRealDirectory(
+    activeFileSystem,
+    historyDirectory,
+  );
+  try {
+    await activeFileSystem.mkdir(archiveDirectory, {
+      recursive: false,
+    });
+  } catch {
+    throw new EvidenceConfigurationError();
+  }
+
+  const moved = [];
+  try {
+    for (const entry of present) {
+      const destination = join(
+        archiveDirectory,
+        entry.destinationName,
+      );
+      if (
+        await regularFileExists(
+          activeFileSystem,
+          destination,
+        )
+      ) {
+        throw new EvidenceConfigurationError();
+      }
+      await activeFileSystem.rename(entry.source, destination);
+      moved.push({ ...entry, destination });
+    }
+  } catch (error) {
+    let rollbackFailed = false;
+    for (const entry of [...moved].reverse()) {
+      try {
+        await activeFileSystem.rename(
+          entry.destination,
+          entry.source,
+        );
+      } catch {
+        rollbackFailed = true;
+      }
+    }
+    if (rollbackFailed) {
+      throw new EvidenceError(
+        "Handshake evidence attempt rollback failed.",
+        {
+          category: "configuration",
+          code: "HANDSHAKE_EVIDENCE_ARCHIVE_ROLLBACK",
+        },
+      );
+    }
+    if (error instanceof EvidenceError) {
+      throw error;
+    }
+    throw new EvidenceConfigurationError();
+  }
+
+  return {
+    archived: true,
+    archiveDirectory,
+  };
+}
+
+function validateWriteOptions({
+  directory,
+  canaries,
+  fileSystem,
+}) {
   if (
-    typeof directory !== "string" ||
-    directory.length === 0 ||
-    directory.includes("\0") ||
+    !validateDirectory(directory) ||
     !Array.isArray(canaries) ||
     canaries.some(
       (canary) =>
@@ -353,20 +557,116 @@ function validateWriteOptions({ directory, canaries }) {
   ) {
     throw new EvidenceConfigurationError();
   }
+  return mergeFileSystem(fileSystem);
 }
 
-async function removeTemporaryFiles(paths) {
+async function removeTemporaryFiles(paths, fileSystem) {
   await Promise.all(
-    paths.map((path) => rm(path, { force: true }).catch(() => {})),
+    paths.map((path) =>
+      fileSystem.rm(path, { force: true }).catch(() => {}),
+    ),
   );
+}
+
+async function readOptionalFile(fileSystem, path) {
+  try {
+    return await fileSystem.readFile(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function restoreFinalState({
+  fileSystem,
+  jsonPath,
+  markdownPath,
+  priorJson,
+  priorMarkdown,
+  restorePaths,
+}) {
+  const restores = [
+    {
+      bytes: priorJson,
+      finalPath: jsonPath,
+      temporaryPath: restorePaths[0],
+    },
+    {
+      bytes: priorMarkdown,
+      finalPath: markdownPath,
+      temporaryPath: restorePaths[1],
+    },
+  ];
+  try {
+    await Promise.all([
+      fileSystem.rm(jsonPath, { force: true }),
+      fileSystem.rm(markdownPath, { force: true }),
+    ]);
+    for (const restore of restores) {
+      if (restore.bytes === null) {
+        continue;
+      }
+      await fileSystem.writeFile(
+        restore.temporaryPath,
+        restore.bytes,
+        {
+          flag: "wx",
+          mode: 0o600,
+        },
+      );
+    }
+    for (const restore of restores) {
+      if (restore.bytes === null) {
+        continue;
+      }
+      await fileSystem.rename(
+        restore.temporaryPath,
+        restore.finalPath,
+      );
+    }
+    for (const restore of restores) {
+      if (restore.bytes === null) {
+        continue;
+      }
+      const restored = await fileSystem.readFile(
+        restore.finalPath,
+      );
+      if (!isDeepStrictEqual(restored, restore.bytes)) {
+        throw new Error("Restored evidence does not match.");
+      }
+    }
+  } catch {
+    await Promise.all([
+      fileSystem.rm(jsonPath, { force: true }).catch(() => {}),
+      fileSystem
+        .rm(markdownPath, { force: true })
+        .catch(() => {}),
+    ]);
+    throw new EvidenceError(
+      "Handshake evidence publication rollback failed.",
+      {
+        category: "configuration",
+        code: "HANDSHAKE_EVIDENCE_ROLLBACK",
+      },
+    );
+  } finally {
+    await removeTemporaryFiles(restorePaths, fileSystem);
+  }
 }
 
 export async function writeEvidence({
   directory,
   result,
   canaries,
+  fileSystem = {},
 }) {
-  validateWriteOptions({ directory, canaries });
+  const activeFileSystem = validateWriteOptions({
+    directory,
+    canaries,
+    fileSystem,
+  });
 
   let sanitized;
   try {
@@ -398,25 +698,44 @@ export async function writeEvidence({
     temporaryJsonPath,
     temporaryMarkdownPath,
   ];
+  const restorePaths = [
+    join(directory, `.result.${suffix}.json.restore.tmp`),
+    join(directory, `.result.${suffix}.md.restore.tmp`),
+  ];
+  let priorJson = null;
+  let priorMarkdown = null;
+  let publicationStarted = false;
 
   try {
-    await mkdir(directory, { recursive: true });
-    await writeFile(temporaryJsonPath, json, {
+    await activeFileSystem.mkdir(directory, { recursive: true });
+    priorJson = await readOptionalFile(
+      activeFileSystem,
+      jsonPath,
+    );
+    priorMarkdown = await readOptionalFile(
+      activeFileSystem,
+      markdownPath,
+    );
+    await activeFileSystem.writeFile(temporaryJsonPath, json, {
       encoding: "utf8",
       flag: "wx",
       mode: 0o600,
     });
-    await writeFile(temporaryMarkdownPath, markdown, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
+    await activeFileSystem.writeFile(
+      temporaryMarkdownPath,
+      markdown,
+      {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      },
+    );
 
-    const temporaryJson = await readFile(
+    const temporaryJson = await activeFileSystem.readFile(
       temporaryJsonPath,
       "utf8",
     );
-    const temporaryMarkdown = await readFile(
+    const temporaryMarkdown = await activeFileSystem.readFile(
       temporaryMarkdownPath,
       "utf8",
     );
@@ -433,11 +752,21 @@ export async function writeEvidence({
       );
     }
 
-    await rename(temporaryJsonPath, jsonPath);
-    await rename(temporaryMarkdownPath, markdownPath);
+    await activeFileSystem.rename(
+      temporaryJsonPath,
+      jsonPath,
+    );
+    publicationStarted = true;
+    await activeFileSystem.rename(
+      temporaryMarkdownPath,
+      markdownPath,
+    );
 
-    const finalJson = await readFile(jsonPath, "utf8");
-    const finalMarkdown = await readFile(
+    const finalJson = await activeFileSystem.readFile(
+      jsonPath,
+      "utf8",
+    );
+    const finalMarkdown = await activeFileSystem.readFile(
       markdownPath,
       "utf8",
     );
@@ -456,6 +785,16 @@ export async function writeEvidence({
 
     return { jsonPath, markdownPath };
   } catch (error) {
+    if (publicationStarted) {
+      await restoreFinalState({
+        fileSystem: activeFileSystem,
+        jsonPath,
+        markdownPath,
+        priorJson,
+        priorMarkdown,
+        restorePaths,
+      });
+    }
     if (error instanceof EvidenceError) {
       throw error;
     }
@@ -467,6 +806,9 @@ export async function writeEvidence({
       },
     );
   } finally {
-    await removeTemporaryFiles(temporaryPaths);
+    await removeTemporaryFiles(
+      [...temporaryPaths, ...restorePaths],
+      activeFileSystem,
+    );
   }
 }

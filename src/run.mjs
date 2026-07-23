@@ -17,6 +17,7 @@ import {
   SINGLE_VALIDATOR_DISCLAIMER,
 } from "./constants.mjs";
 import {
+  beginEvidenceAttempt,
   EvidenceError,
   validatePassResult,
   writeEvidence,
@@ -110,6 +111,8 @@ const ADAPTER_KEYS = new Set([
   "assertCrossPartyVerification",
   "completeReceipt",
   "writeEvidence",
+  "beginEvidenceAttempt",
+  "openRecoveryFile",
   "reportProgress",
 ]);
 const CATEGORY_VALUES = new Set([
@@ -204,6 +207,8 @@ const DEFAULT_ADAPTERS = Object.freeze({
   assertCrossPartyVerification,
   completeReceipt,
   writeEvidence,
+  beginEvidenceAttempt,
+  openRecoveryFile: open,
   reportProgress: async () => {},
 });
 
@@ -457,12 +462,18 @@ async function readRecoveryCheckpoint({
   outputDirectory,
   expectedAddress,
   expectedDisplayName,
+  openFile,
 }) {
   const path = join(outputDirectory, RECOVERY_FILE_NAME);
   let fileHandle;
+  let failure;
+  let result = null;
 
   try {
-    fileHandle = await open(path, RECOVERY_FILE_OPEN_FLAGS);
+    fileHandle = await openFile(
+      path,
+      RECOVERY_FILE_OPEN_FLAGS,
+    );
     const metadata = await fileHandle.stat();
     if (!metadata.isFile() || metadata.size > MAX_RECOVERY_BYTES) {
       throw new CheckpointError("configuration");
@@ -483,28 +494,32 @@ async function readRecoveryCheckpoint({
     } catch {
       throw new CheckpointError("configuration");
     }
-    return validateRecoveryValue(recovery, {
+    result = validateRecoveryValue(recovery, {
       expectedAddress,
       expectedDisplayName,
       category: "configuration",
     });
   } catch (error) {
-    if (error?.code === "ENOENT") {
-      return null;
+    if (error?.code !== "ENOENT") {
+      failure =
+        error instanceof CheckpointError
+          ? error
+          : new CheckpointError("configuration");
     }
-    if (error instanceof CheckpointError) {
-      throw error;
-    }
-    throw new CheckpointError("configuration");
   } finally {
     if (fileHandle) {
       try {
         await fileHandle.close();
       } catch {
-        // The read result is never returned after an unsafe close failure.
+        failure ??= new CheckpointError("configuration");
       }
     }
   }
+
+  if (failure) {
+    throw failure;
+  }
+  return result;
 }
 
 async function persistRecoveryCheckpoint({
@@ -866,6 +881,15 @@ export async function runHandshake({
   const started = readClock(now);
   const runId = createRunId(randomUUID);
 
+  await invokeStage("evidence", () =>
+    prepareOutputDirectory(outputDirectory),
+  );
+  await invokeStage("evidence", () =>
+    activeAdapters.beginEvidenceAttempt({
+      directory: outputDirectory,
+      runId,
+    }),
+  );
   await report(activeAdapters, "invitation-read");
   const invitation = await invokeStage(
     "invitation-read",
@@ -894,9 +918,6 @@ export async function runHandshake({
     throw stageError("invitation-decryption");
   }
 
-  await invokeStage("registration-recovery", () =>
-    prepareOutputDirectory(outputDirectory),
-  );
   const checkpoint = await invokeStage(
     "registration-recovery",
     () =>
@@ -904,6 +925,7 @@ export async function runHandshake({
         outputDirectory,
         expectedAddress: decrypted.address,
         expectedDisplayName: decrypted.displayName,
+        openFile: activeAdapters.openRecoveryFile,
       }),
   );
 
@@ -991,6 +1013,10 @@ export async function runHandshake({
   const submitted = await invokeStage(
     "attestation",
     async () => {
+      // Deliberate residual risk: an ambiguous transport failure can
+      // leave an accepted attestation without a local result. There is
+      // no safe read-by-idempotency operation, so this write is invoked
+      // exactly once and an ambiguous failure never produces PASS.
       const receipt = await client.attestAction({
         agent_id: registration.agentId,
         action: "trust_handshake",

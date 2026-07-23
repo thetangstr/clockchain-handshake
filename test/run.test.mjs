@@ -3,6 +3,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   rm,
   stat,
@@ -21,6 +22,7 @@ import { writeEvidence } from "../src/evidence.mjs";
 import {
   McpNetworkError,
   McpVerificationError,
+  completeReceipt,
 } from "../src/mcp.mjs";
 import {
   PartialRegistrationError,
@@ -34,6 +36,8 @@ import {
 } from "../src/run.mjs";
 
 const RUN_ID = "123e4567-e89b-42d3-a456-426614174000";
+const PRIOR_RUN_ID =
+  "323e4567-e89b-42d3-a456-426614174002";
 const LEDGER_ID = "223e4567-e89b-42d3-a456-426614174001";
 const REGISTRY =
   "0x8004A818BFB912233c491871b3d84c89A494BD9e";
@@ -46,6 +50,8 @@ const INVITATION_CODE = "fresh-invitation-code-canary";
 const MCP_TOKEN = `cc_${"t".repeat(48)}`;
 const DISPLAY_NAME = "Billy";
 const RECOVERY_FILE = ".handshake-registration-recovery.json";
+const EVIDENCE_HISTORY_DIRECTORY =
+  ".handshake-evidence-history";
 
 function registrationRecovery({ metadata = true } = {}) {
   return {
@@ -112,10 +118,13 @@ function receiptOutputs() {
 
 function submittedReceipt() {
   return {
+    schema: "clockchain.receipt/v1",
+    network: "testnet",
     status: "degraded",
     agentId: "42",
     action: "trust_handshake",
     eventHash: EVENT_HASH,
+    hashType: "SHA-256",
     payload: {
       inputs: receiptInputs(),
       outputs: receiptOutputs(),
@@ -127,10 +136,27 @@ function submittedReceipt() {
     },
     anchor: {
       ledgerId: LEDGER_ID,
+      assetReferenceId: "agent:42:trust_handshake:1",
       blockHeight: null,
+      recordedAt: "2026-07-23T07:00:00.000Z",
       consensusTime: null,
       confirmed: false,
     },
+    attestation: {
+      validators: 1,
+      trustPct: null,
+      status: "single-validator-testnet",
+      note: "Test fixture.",
+    },
+    identity: {
+      resolved: true,
+      status: "active",
+      note: "Resolved via ERC-8004.",
+    },
+    verify: {
+      how: "Recompute the canonical SHA-256 event hash.",
+    },
+    disclaimer: "Testnet receipt fixture.",
   };
 }
 
@@ -144,7 +170,7 @@ function anchoredReceipt() {
       degraded: false,
     },
     anchor: {
-      ledgerId: LEDGER_ID,
+      ...submittedReceipt().anchor,
       blockHeight: "321",
       consensusTime: "23-07-2026_07:00:01:234",
       confirmed: true,
@@ -461,6 +487,67 @@ test("runs the first-time flow in order and writes only strict sanitized PASS ev
   );
 });
 
+test("integrates the production completion gate across degraded and time-enrichment states", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const calls = [];
+  const captured = {};
+  const adapters = createAdapters({
+    calls,
+    captured,
+    resumed: false,
+  });
+  const awaitingTime = {
+    ...anchoredReceipt(),
+    anchor: {
+      ...anchoredReceipt().anchor,
+      consensusTime: null,
+    },
+  };
+  const responses = [awaitingTime, anchoredReceipt()];
+  adapters.completeReceipt = (client, receipt) =>
+    completeReceipt(
+      {
+        ...client,
+        async completeAttestation(current) {
+          calls.push("complete attestation");
+          assert.ok(
+            current.status === "degraded" ||
+              current.status === "anchored",
+          );
+          return responses.shift();
+        },
+      },
+      receipt,
+      {
+        attempts: 2,
+        intervalMs: 0,
+        sleeper: async (milliseconds) => {
+          assert.equal(milliseconds, 0);
+        },
+      },
+    );
+
+  const result = await runHandshake({
+    invitationFile: "/operator/invite.secret.json",
+    outputDirectory,
+    adapters,
+    now: clock(),
+    randomUUID: () => RUN_ID,
+  });
+
+  assert.equal(result.status, "PASS");
+  assert.equal(responses.length, 0);
+  assert.equal(
+    calls.filter((call) => call === "complete attestation")
+      .length,
+    2,
+  );
+  assert.equal(
+    result.clockchain.consensusTime,
+    anchoredReceipt().anchor.consensusTime,
+  );
+});
+
 test("resumes from the retained public checkpoint without repeating registration", async (t) => {
   const outputDirectory = await temporaryDirectory(t);
   await writeFile(
@@ -506,6 +593,54 @@ test("resumes from the retained public checkpoint without repeating registration
     Object.hasOwn(captured.finalizeOptions, "registerIdentity"),
     false,
   );
+});
+
+test("fails the resumed run when the public recovery file cannot be closed safely", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  await writeFile(
+    join(outputDirectory, RECOVERY_FILE),
+    `${JSON.stringify(registrationRecovery(), null, 2)}\n`,
+    { encoding: "utf8", mode: 0o644 },
+  );
+  const calls = [];
+  let openCalls = 0;
+  const adapters = createAdapters({
+    calls,
+    captured: {},
+    resumed: true,
+  });
+  adapters.openRecoveryFile = async (path, flags) => {
+    openCalls += 1;
+    const handle = await open(path, flags);
+    return {
+      stat: (...args) => handle.stat(...args),
+      readFile: (...args) => handle.readFile(...args),
+      async close() {
+        await handle.close();
+        throw new Error(`close echoed ${PRIVATE_KEY}`);
+      },
+    };
+  };
+
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters,
+        now: clock(),
+        randomUUID: () => RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "registration-recovery");
+      assert.equal(error.category, "configuration");
+      assert.equal(error.message.includes(PRIVATE_KEY), false);
+      return true;
+    },
+  );
+  assert.equal(openCalls, 1);
+  assert.equal(calls.includes("finalize registration"), false);
 });
 
 test("persists PartialRegistrationError recovery again and returns only a typed safe error", async (t) => {
@@ -567,6 +702,88 @@ test("persists PartialRegistrationError recovery again and returns only a typed 
   );
 });
 
+test("archives a seeded PASS pair before an early failed rerun", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const priorResult = {
+    ...expectedPassResult(),
+    runId: PRIOR_RUN_ID,
+  };
+  await writeEvidence({
+    directory: outputDirectory,
+    result: priorResult,
+    canaries: [],
+  });
+  const recovery = registrationRecovery();
+  await writeFile(
+    join(outputDirectory, RECOVERY_FILE),
+    `${JSON.stringify(recovery, null, 2)}\n`,
+    { encoding: "utf8", mode: 0o644 },
+  );
+  const priorJson = await readFile(
+    join(outputDirectory, "result.json"),
+    "utf8",
+  );
+  const priorMarkdown = await readFile(
+    join(outputDirectory, "RESULT.md"),
+    "utf8",
+  );
+  const calls = [];
+  const adapters = createAdapters({
+    calls,
+    captured: {},
+    failAt: "read invitation",
+    resumed: false,
+  });
+
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters,
+        now: clock(),
+        randomUUID: () => RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "invitation-read");
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    () => stat(join(outputDirectory, "result.json")),
+    { code: "ENOENT" },
+  );
+  await assert.rejects(
+    () => stat(join(outputDirectory, "RESULT.md")),
+    { code: "ENOENT" },
+  );
+  const archive = join(
+    outputDirectory,
+    EVIDENCE_HISTORY_DIRECTORY,
+    RUN_ID,
+  );
+  assert.equal(
+    await readFile(join(archive, "result.json"), "utf8"),
+    priorJson,
+  );
+  assert.equal(
+    await readFile(join(archive, "RESULT.md"), "utf8"),
+    priorMarkdown,
+  );
+  assert.deepEqual(
+    JSON.parse(
+      await readFile(
+        join(outputDirectory, RECOVERY_FILE),
+        "utf8",
+      ),
+    ),
+    recovery,
+  );
+  assert.deepEqual(calls, ["read invitation"]);
+});
+
 test("withholds PASS artifacts after a typed MCP verification failure", async (t) => {
   const outputDirectory = await temporaryDirectory(t);
   let evidenceWrites = 0;
@@ -597,6 +814,51 @@ test("withholds PASS artifacts after a typed MCP verification failure", async (t
       assert.equal(error.message.includes(MCP_TOKEN), false);
       return true;
     },
+  );
+  assert.equal(evidenceWrites, 0);
+  await assert.rejects(
+    () => stat(join(outputDirectory, "result.json")),
+    { code: "ENOENT" },
+  );
+  await assert.rejects(
+    () => stat(join(outputDirectory, "RESULT.md")),
+    { code: "ENOENT" },
+  );
+});
+
+test("never retries an ambiguous attestation write or emits PASS evidence", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  let evidenceWrites = 0;
+  const calls = [];
+  const adapters = createAdapters({
+    calls,
+    captured: {},
+    failAt: "attest",
+    resumed: false,
+    onEvidence: async () => {
+      evidenceWrites += 1;
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters,
+        now: clock(),
+        randomUUID: () => RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "attestation");
+      assert.equal(error.category, "protocol");
+      return true;
+    },
+  );
+  assert.equal(
+    calls.filter((call) => call === "attest").length,
+    1,
   );
   assert.equal(evidenceWrites, 0);
   await assert.rejects(
