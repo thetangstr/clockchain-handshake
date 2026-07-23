@@ -39,6 +39,7 @@ const BASE_RECOVERY_KEYS = [
 const METADATA_RECOVERY_KEYS = [
   ...BASE_RECOVERY_KEYS,
   "metadataTx",
+  "metadataNonce",
 ];
 
 export function normalizeAgentId(
@@ -304,12 +305,17 @@ export function validateRecovery(
   const hasMetadataTransaction =
     isPlainObject(recovery) &&
     Object.hasOwn(recovery, "metadataTx");
-  const expectedKeys = hasMetadataTransaction
-    ? METADATA_RECOVERY_KEYS
-    : BASE_RECOVERY_KEYS;
+  const hasMetadataNonce =
+    isPlainObject(recovery) &&
+    Object.hasOwn(recovery, "metadataNonce");
+  const expectedKeys =
+    hasMetadataTransaction && hasMetadataNonce
+      ? METADATA_RECOVERY_KEYS
+      : BASE_RECOVERY_KEYS;
 
   try {
     if (
+      hasMetadataTransaction !== hasMetadataNonce ||
       !hasExactKeys(recovery, expectedKeys) ||
       recovery.schema !== RECOVERY_SCHEMA ||
       recovery.chainId !== CHAIN_ID ||
@@ -334,7 +340,10 @@ export function validateRecovery(
 
     if (
       hasMetadataTransaction &&
-      !isTransactionHash(recovery.metadataTx)
+      (!isTransactionHash(recovery.metadataTx) ||
+        typeof recovery.metadataNonce !== "number" ||
+        !Number.isSafeInteger(recovery.metadataNonce) ||
+        recovery.metadataNonce < 0)
     ) {
       throw new Error();
     }
@@ -380,26 +389,35 @@ export function createRecovery({
   });
 }
 
-export function withMetadataTransaction(recovery, metadataTx) {
+export function withMetadataTransaction(
+  recovery,
+  metadataTx,
+  metadataNonce,
+) {
   return validateRecovery({
     ...recovery,
     metadataTx,
+    metadataNonce,
   });
 }
 
 export function withoutMetadataTransaction(recovery) {
   const {
     metadataTx: _metadataTx,
+    metadataNonce: _metadataNonce,
     ...registrationRecovery
   } = recovery;
   return validateRecovery(registrationRecovery);
 }
 
-export async function invokeCheckpoint(onCheckpoint, recovery) {
+export function validateCheckpointCallback(onCheckpoint) {
   if (typeof onCheckpoint !== "function") {
     throw new Error("Registration checkpoint callback is invalid.");
   }
+}
 
+export async function invokeCheckpoint(onCheckpoint, recovery) {
+  validateCheckpointCallback(onCheckpoint);
   await onCheckpoint(copyRecovery(recovery));
 }
 

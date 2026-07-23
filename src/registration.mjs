@@ -1,4 +1,8 @@
-import { parseEventLogs } from "viem";
+import {
+  decodeFunctionData,
+  encodeFunctionData,
+  parseEventLogs,
+} from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import {
@@ -23,6 +27,7 @@ import {
   normalizePendingNonce,
   registryNamespaceValue,
   runStage,
+  validateCheckpointCallback,
   validateDisplayName,
   validateReceipt,
   validateReceiptEvidence,
@@ -105,6 +110,26 @@ export const ERC8004_ABI = [
         indexed: true,
       },
     ],
+  },
+];
+
+const RECOVERY_TRANSACTION_ABI = [
+  {
+    type: "function",
+    name: "register",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "agentURI", type: "string" }],
+    outputs: [{ name: "agentId", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "setAgentURI",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "agentId", type: "uint256" },
+      { name: "newURI", type: "string" },
+    ],
+    outputs: [],
   },
 ];
 
@@ -243,6 +268,153 @@ export function parseRegisteredAgentId(
   return normalizeAgentId(agentId);
 }
 
+function validateTransactionEnvelope(
+  transaction,
+  {
+    expectedBlockNumber,
+    expectedFrom,
+    expectedHash,
+    expectedNonce,
+    stage,
+  },
+) {
+  try {
+    validateTransactionHash(transaction?.hash, stage);
+    if (
+      transaction.hash.toLowerCase() !== expectedHash.toLowerCase() ||
+      transaction.chainId !== CHAIN_ID ||
+      !addressesEqual(transaction.from, expectedFrom) ||
+      !addressesEqual(transaction.to, REGISTRY_ADDRESS) ||
+      transaction.nonce !== expectedNonce ||
+      transaction.value !== 0n ||
+      typeof transaction.input !== "string" ||
+      !/^0x(?:[0-9a-fA-F]{2})+$/.test(transaction.input) ||
+      (expectedBlockNumber !== undefined &&
+        (typeof transaction.blockNumber !== "bigint" ||
+          transaction.blockNumber !== expectedBlockNumber))
+    ) {
+      throw new Error();
+    }
+  } catch {
+    throw new Error(`${stage} transaction evidence is invalid.`);
+  }
+
+  return transaction.input;
+}
+
+function validateExactTransactionCall({
+  args,
+  functionName,
+  input,
+  stage,
+}) {
+  try {
+    const decoded = decodeFunctionData({
+      abi: RECOVERY_TRANSACTION_ABI,
+      data: input,
+    });
+    const canonicalInput = encodeFunctionData({
+      abi: RECOVERY_TRANSACTION_ABI,
+      functionName,
+      args,
+    });
+
+    if (
+      decoded.functionName !== functionName ||
+      decoded.args.length !== args.length ||
+      decoded.args.some((argument, index) => argument !== args[index]) ||
+      input.toLowerCase() !== canonicalInput.toLowerCase()
+    ) {
+      throw new Error();
+    }
+  } catch {
+    throw new Error(`${stage} transaction calldata is invalid.`);
+  }
+}
+
+async function verifyRegistrationRecoveryEvidence({
+  account,
+  agentId,
+  initialURI,
+  publicClient,
+  recovery,
+}) {
+  const transaction = await runStage(
+    () => publicClient.getTransaction({ hash: recovery.registerTx }),
+    "Registration transaction lookup failed.",
+  );
+  const expectedBlockNumber = BigInt(recovery.registerBlock);
+  const input = validateTransactionEnvelope(transaction, {
+    expectedBlockNumber,
+    expectedFrom: account.address,
+    expectedHash: recovery.registerTx,
+    expectedNonce: 0,
+    stage: "Registration",
+  });
+  validateExactTransactionCall({
+    args: [initialURI],
+    functionName: "register",
+    input,
+    stage: "Registration",
+  });
+
+  const receipt = await runStage(
+    () =>
+      publicClient.waitForTransactionReceipt({
+        hash: recovery.registerTx,
+        confirmations: RECEIPT_CONFIRMATIONS,
+        timeout: RECEIPT_TIMEOUT_MILLISECONDS,
+      }),
+    "Registration receipt wait failed.",
+  );
+  const receiptBlock = validateReceipt(
+    receipt,
+    recovery.registerTx,
+    "Registration",
+  );
+  if (receiptBlock !== expectedBlockNumber) {
+    throw new Error("Registration receipt block is invalid.");
+  }
+
+  let receiptAgentId;
+  try {
+    receiptAgentId = parseRegisteredAgentId(receipt, {
+      expectedOwner: account.address,
+      expectedAgentURI: initialURI,
+    });
+  } catch {
+    throw new Error("Registration event evidence is invalid.");
+  }
+  if (receiptAgentId !== agentId) {
+    throw new Error("Registration agent identity is invalid.");
+  }
+}
+
+async function verifyMetadataTransactionEvidence({
+  account,
+  agentId,
+  finalURI,
+  publicClient,
+  recovery,
+}) {
+  const transaction = await runStage(
+    () => publicClient.getTransaction({ hash: recovery.metadataTx }),
+    "Metadata transaction lookup failed.",
+  );
+  const input = validateTransactionEnvelope(transaction, {
+    expectedFrom: account.address,
+    expectedHash: recovery.metadataTx,
+    expectedNonce: recovery.metadataNonce,
+    stage: "Metadata",
+  });
+  validateExactTransactionCall({
+    args: [agentId, finalURI],
+    functionName: "setAgentURI",
+    input,
+    stage: "Metadata",
+  });
+}
+
 export class PartialRegistrationError extends Error {
   constructor(recovery) {
     super("ERC-8004 identity registration is incomplete.");
@@ -351,6 +523,7 @@ export async function finalizeIdentityRegistration({
   walletClient,
   onCheckpoint = async () => {},
 }) {
+  validateCheckpointCallback(onCheckpoint);
   const account = createVerifiedAccount(privateKey, expectedAddress);
   let checkpoint = validateRecovery(recovery, {
     expectedAddress: account.address,
@@ -370,12 +543,32 @@ export async function finalizeIdentityRegistration({
     await verifyOfficialRegistry(activePublicClient);
 
     const agentId = normalizeAgentId(BigInt(checkpoint.agentId));
+    const initialDocument = buildRegistrationDocument({
+      displayName,
+      agentId: null,
+    });
+    const initialURI = registrationDataUri(initialDocument);
+    await verifyRegistrationRecoveryEvidence({
+      account,
+      agentId,
+      initialURI,
+      publicClient: activePublicClient,
+      recovery: checkpoint,
+    });
+
     const document = buildRegistrationDocument({ displayName, agentId });
     const finalURI = registrationDataUri(document);
     let recoveredFromRevert = false;
     let submissionRecovery = checkpoint;
 
     if (checkpoint.metadataTx) {
+      await verifyMetadataTransactionEvidence({
+        account,
+        agentId,
+        finalURI,
+        publicClient: activePublicClient,
+        recovery: checkpoint,
+      });
       const existingMetadataReceipt = await runStage(
         () =>
           activePublicClient.waitForTransactionReceipt({
@@ -425,7 +618,8 @@ export async function finalizeIdentityRegistration({
     const pendingNonce = normalizePendingNonce(pendingNonceValue);
     if (
       (!recoveredFromRevert && pendingNonce !== 1) ||
-      (recoveredFromRevert && pendingNonce < 2)
+      (recoveredFromRevert &&
+        pendingNonce <= checkpoint.metadataNonce)
     ) {
       throw new Error("Metadata wallet nonce is unsafe.");
     }
@@ -491,8 +685,16 @@ export async function finalizeIdentityRegistration({
     checkpoint = withMetadataTransaction(
       submissionRecovery,
       metadataTx,
+      pendingNonce,
     );
     await invokeCheckpoint(onCheckpoint, checkpoint);
+    await verifyMetadataTransactionEvidence({
+      account,
+      agentId,
+      finalURI,
+      publicClient: activePublicClient,
+      recovery: checkpoint,
+    });
 
     const metadataReceipt = await runStage(
       () =>
@@ -539,6 +741,7 @@ export async function registerIdentity({
   walletClient,
   onCheckpoint = async () => {},
 }) {
+  validateCheckpointCallback(onCheckpoint);
   const account = createVerifiedAccount(privateKey, expectedAddress);
   let activePublicClient;
   let activeWalletClient;

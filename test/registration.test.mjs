@@ -8,6 +8,7 @@ import {
   decodeFunctionData,
   encodeAbiParameters,
   encodeEventTopics,
+  encodeFunctionData,
   keccak256,
   parseTransaction,
 } from "viem";
@@ -39,6 +40,7 @@ const DERIVED_ADDRESS = "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A";
 const REGISTER_HASH = `0x${"33".repeat(32)}`;
 const METADATA_HASH = `0x${"44".repeat(32)}`;
 const RETRY_METADATA_HASH = `0x${"55".repeat(32)}`;
+const UNRELATED_HASH = `0x${"66".repeat(32)}`;
 const DESCRIPTION =
   "Ephemeral Clockchain Handshake testnet identity; registration does not establish capability or trust.";
 
@@ -57,6 +59,18 @@ function registeredLog(receipt) {
 
 function option(options, name, fallback) {
   return Object.hasOwn(options, name) ? options[name] : fallback;
+}
+
+function initialRegistrationURI(displayName = "Billy") {
+  return registrationDataUri(
+    buildRegistrationDocument({ displayName, agentId: null }),
+  );
+}
+
+function finalRegistrationURI(agentId = 42n, displayName = "Billy") {
+  return registrationDataUri(
+    buildRegistrationDocument({ displayName, agentId }),
+  );
 }
 
 function createRegisteredLog({
@@ -88,10 +102,19 @@ function createFakeClients(options = {}) {
     initialURI: null,
     nonceReads: 0,
     metadataReceipts: 0,
-    waits: 0,
   };
   const registerHash = option(options, "registerHash", REGISTER_HASH);
+  const recoveryRegisterHash = option(
+    options,
+    "recoveryRegisterHash",
+    REGISTER_HASH,
+  );
   const metadataHash = option(options, "metadataHash", METADATA_HASH);
+  state.registrationHashes = new Set(
+    [registerHash, recoveryRegisterHash].filter(
+      (hash) => typeof hash === "string",
+    ),
+  );
 
   function record(name, parameters) {
     state.calls.push({ name, parameters });
@@ -99,13 +122,18 @@ function createFakeClients(options = {}) {
 
   function createRegisterReceipt(hash) {
     const eventMode = option(options, "eventMode", "valid");
+    const initialURI = state.initialURI ?? initialRegistrationURI();
     const event = createRegisteredLog({
       address:
         eventMode === "foreign" ? FOREIGN_ADDRESS : REGISTRY_ADDRESS,
-      agentURI:
+      agentId: option(options, "registerEventAgentId", 42n),
+      agentURI: option(
+        options,
+        "registerEventURI",
         eventMode === "wrongURI"
-          ? `${state.initialURI}-wrong`
-          : state.initialURI,
+          ? `${initialURI}-wrong`
+          : initialURI,
+      ),
       owner:
         eventMode === "wrongOwner"
           ? FOREIGN_ADDRESS
@@ -121,7 +149,7 @@ function createFakeClients(options = {}) {
       logs.push(structuredClone(event));
     }
 
-    return {
+    const receipt = {
       status: option(options, "registerStatus", "success"),
       transactionHash: option(
         options,
@@ -135,6 +163,8 @@ function createFakeClients(options = {}) {
       ),
       logs,
     };
+
+    return option(options, "registerReceipt", receipt);
   }
 
   function createMetadataReceipt(hash) {
@@ -196,6 +226,63 @@ function createFakeClients(options = {}) {
         default:
           throw new Error("Unexpected readContract call.");
       }
+    },
+
+    async getTransaction(parameters) {
+      const isRegistration = state.registrationHashes.has(
+        parameters.hash,
+      );
+      const stage = isRegistration ? "register" : "metadata";
+      record(`getTransaction:${stage}`, parameters);
+
+      if (
+        (isRegistration && options.registerTransactionError) ||
+        (!isRegistration && options.metadataTransactionError)
+      ) {
+        throw new Error(`Sensitive transaction failure ${PRIVATE_KEY}`);
+      }
+
+      if (isRegistration) {
+        const transaction = {
+          hash: parameters.hash,
+          chainId: 11_155_111,
+          from: DERIVED_ADDRESS,
+          to: REGISTRY_ADDRESS,
+          nonce: 0,
+          value: 0n,
+          blockNumber: 123_456n,
+          input: encodeFunctionData({
+            abi: ERC8004_ABI,
+            functionName: "register",
+            args: [state.initialURI ?? initialRegistrationURI()],
+          }),
+          ...option(options, "registerTransactionOverrides", {}),
+        };
+        return option(options, "registerTransaction", transaction);
+      }
+
+      const defaultNonce =
+        parameters.hash === RETRY_METADATA_HASH ? 2 : 1;
+      const transactionOverrides =
+        typeof options.metadataTransactionOverrides === "function"
+          ? options.metadataTransactionOverrides(parameters.hash)
+          : option(options, "metadataTransactionOverrides", {});
+      const transaction = {
+        hash: parameters.hash,
+        chainId: 11_155_111,
+        from: DERIVED_ADDRESS,
+        to: REGISTRY_ADDRESS,
+        nonce: defaultNonce,
+        value: 0n,
+        blockNumber: 123_457n,
+        input: encodeFunctionData({
+          abi: ERC8004_ABI,
+          functionName: "setAgentURI",
+          args: [42n, state.finalURI ?? finalRegistrationURI()],
+        }),
+        ...transactionOverrides,
+      };
+      return option(options, "metadataTransaction", transaction);
     },
 
     async getTransactionCount(parameters) {
@@ -269,12 +356,10 @@ function createFakeClients(options = {}) {
     },
 
     async waitForTransactionReceipt(parameters) {
-      const firstWaitStage = option(options, "firstWaitStage", "register");
       const stage =
-        state.waits === 0
-          ? firstWaitStage
+        state.registrationHashes.has(parameters.hash)
+          ? "register"
           : "metadata";
-      state.waits += 1;
       record(`wait:${stage}`, parameters);
       if (
         (stage === "register" && options.registerWaitError) ||
@@ -347,7 +432,7 @@ function decodeRegistrationDataURI(uri) {
 }
 
 function expectedRecovery(overrides = {}) {
-  return {
+  const recovery = {
     schema: "clockchain.handshake-registration-recovery/v1",
     chainId: 11_155_111,
     registryAddress: REGISTRY_ADDRESS,
@@ -360,6 +445,16 @@ function expectedRecovery(overrides = {}) {
     registerBlock: "123456",
     ...overrides,
   };
+
+  if (
+    Object.hasOwn(recovery, "metadataTx") &&
+    !Object.hasOwn(recovery, "metadataNonce")
+  ) {
+    recovery.metadataNonce =
+      recovery.metadataTx === RETRY_METADATA_HASH ? 2 : 1;
+  }
+
+  return recovery;
 }
 
 function assertPublicPartialError(error, expected) {
@@ -372,11 +467,49 @@ function assertPublicPartialError(error, expected) {
   assert.equal(Object.hasOwn(error, "cause"), false);
 }
 
+function assertNoMetadataActivity(fake) {
+  const forbiddenCalls = new Set([
+    "getTransaction:metadata",
+    "getTransactionCount",
+    "getBalance",
+    "estimateFeesPerGas",
+    "estimate:setAgentURI",
+    "write:setAgentURI",
+    "wait:metadata",
+    "read:ownerOf",
+    "read:getAgentWallet",
+    "read:tokenURI",
+  ]);
+
+  assert.deepEqual(
+    fake.state.calls
+      .map(({ name }) => name)
+      .filter((name) => forbiddenCalls.has(name)),
+    [],
+  );
+}
+
 async function runWithFakeClients(fake, overrides = {}) {
   return registerIdentity({
     privateKey: PRIVATE_KEY,
     expectedAddress: DERIVED_ADDRESS,
     displayName: "Billy",
+    publicClient: fake.publicClient,
+    walletClient: fake.walletClient,
+    ...overrides,
+  });
+}
+
+async function finalizeWithFakeClients(
+  fake,
+  recovery,
+  overrides = {},
+) {
+  return finalizeIdentityRegistration({
+    privateKey: PRIVATE_KEY,
+    expectedAddress: DERIVED_ADDRESS,
+    displayName: "Billy",
+    recovery,
     publicClient: fake.publicClient,
     walletClient: fake.walletClient,
     ...overrides,
@@ -395,6 +528,7 @@ function createRealSigningWallet(fake) {
         }
 
         const rawTransaction = params[0];
+        const transactionHash = keccak256(rawTransaction);
         const transaction = parseTransaction(rawTransaction);
         const decoded = decodeFunctionData({
           abi: ERC8004_ABI,
@@ -404,11 +538,12 @@ function createRealSigningWallet(fake) {
 
         if (decoded.functionName === "register") {
           fake.state.initialURI = decoded.args[0];
+          fake.state.registrationHashes.add(transactionHash);
         } else if (decoded.functionName === "setAgentURI") {
           fake.state.finalURI = decoded.args[1];
         }
 
-        return keccak256(rawTransaction);
+        return transactionHash;
       },
     }),
   });
@@ -629,11 +764,14 @@ test("registers then finalizes metadata in strict order and returns public JSON 
       "getChainId",
       "getCode",
       "read:getVersion",
+      "getTransaction:register",
+      "wait:register",
       "getTransactionCount",
       "getBalance",
       "estimateFeesPerGas",
       "estimate:setAgentURI",
       "write:setAgentURI",
+      "getTransaction:metadata",
       "wait:metadata",
       "read:ownerOf",
       "read:getAgentWallet",
@@ -687,6 +825,11 @@ test("registers then finalizes metadata in strict order and returns public JSON 
   assert.deepEqual(
     waits.map(({ parameters }) => parameters),
     [
+      {
+        hash: REGISTER_HASH,
+        confirmations: 2,
+        timeout: 120_000,
+      },
       {
         hash: REGISTER_HASH,
         confirmations: 2,
@@ -978,6 +1121,11 @@ test("returns a secret-free public partial checkpoint for every post-registratio
       expected: expectedRecovery({ metadataTx: METADATA_HASH }),
     },
     {
+      name: "metadata transaction lookup",
+      options: { metadataTransactionError: true },
+      expected: expectedRecovery({ metadataTx: METADATA_HASH }),
+    },
+    {
       name: "metadata wait",
       options: { metadataWaitError: true },
       expected: expectedRecovery({ metadataTx: METADATA_HASH }),
@@ -1036,6 +1184,338 @@ test("checkpoints immediately after registration and after metadata submission",
   );
 });
 
+test("rejects a mutated agent identity that the registration event does not prove", async () => {
+  const recovery = expectedRecovery({
+    agentId: "43",
+    identityReference: `${REGISTRY_NAMESPACE}:43`,
+  });
+  const fake = createFakeClients({ nonces: [1] });
+  const error = await captureRejection(() =>
+    finalizeWithFakeClients(fake, recovery),
+  );
+
+  assertPublicPartialError(error, recovery);
+  assert.deepEqual(
+    fake.state.calls.map(({ name }) => name),
+    [
+      "getChainId",
+      "getCode",
+      "read:getVersion",
+      "getTransaction:register",
+      "wait:register",
+    ],
+  );
+  assertNoMetadataActivity(fake);
+});
+
+test("rejects registration checkpoints whose transaction fields do not bind to the recovery", async (t) => {
+  const wrongInitialURI = `${initialRegistrationURI()}-wrong`;
+  const scenarios = [
+    {
+      name: "mutated recovery block",
+      recovery: expectedRecovery({ registerBlock: "123457" }),
+    },
+    {
+      name: "transaction hash",
+      options: {
+        registerTransactionOverrides: { hash: UNRELATED_HASH },
+      },
+    },
+    {
+      name: "transaction chain",
+      options: {
+        registerTransactionOverrides: { chainId: 1 },
+      },
+    },
+    {
+      name: "transaction sender",
+      options: {
+        registerTransactionOverrides: { from: FOREIGN_ADDRESS },
+      },
+    },
+    {
+      name: "transaction destination",
+      options: {
+        registerTransactionOverrides: { to: FOREIGN_ADDRESS },
+      },
+    },
+    {
+      name: "transaction nonce",
+      options: {
+        registerTransactionOverrides: { nonce: 1 },
+      },
+    },
+    {
+      name: "transaction value",
+      options: {
+        registerTransactionOverrides: { value: 1n },
+      },
+    },
+    {
+      name: "transaction block",
+      options: {
+        registerTransactionOverrides: { blockNumber: 123_457n },
+      },
+    },
+    {
+      name: "unrelated calldata",
+      options: {
+        registerTransactionOverrides: {
+          input: encodeFunctionData({
+            abi: ERC8004_ABI,
+            functionName: "setAgentURI",
+            args: [42n, finalRegistrationURI()],
+          }),
+        },
+      },
+    },
+    {
+      name: "mutated hash pointing to unrelated calldata",
+      recovery: expectedRecovery({ registerTx: UNRELATED_HASH }),
+      options: {
+        recoveryRegisterHash: UNRELATED_HASH,
+        registerTransactionOverrides: {
+          input: encodeFunctionData({
+            abi: ERC8004_ABI,
+            functionName: "setAgentURI",
+            args: [42n, finalRegistrationURI()],
+          }),
+        },
+      },
+    },
+    {
+      name: "wrong initial URI",
+      options: {
+        registerTransactionOverrides: {
+          input: encodeFunctionData({
+            abi: ERC8004_ABI,
+            functionName: "register",
+            args: [wrongInitialURI],
+          }),
+        },
+      },
+    },
+    {
+      name: "missing transaction",
+      options: { registerTransactionError: true },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const recovery = scenario.recovery ?? expectedRecovery();
+      const fake = createFakeClients({
+        nonces: [1],
+        ...scenario.options,
+      });
+      const error = await captureRejection(() =>
+        finalizeWithFakeClients(fake, recovery),
+      );
+
+      assertPublicPartialError(error, recovery);
+      assertNoMetadataActivity(fake);
+    });
+  }
+});
+
+test("rejects missing, reverted, or mismatched registration receipts before metadata work", async (t) => {
+  const scenarios = [
+    {
+      name: "missing receipt",
+      options: { registerReceipt: undefined },
+    },
+    {
+      name: "receipt wait failure",
+      options: { registerWaitError: true },
+    },
+    {
+      name: "reverted receipt",
+      options: { registerStatus: "reverted" },
+    },
+    {
+      name: "receipt hash",
+      options: { registerReceiptHash: UNRELATED_HASH },
+    },
+    {
+      name: "receipt block",
+      options: { registerBlockNumber: 123_457n },
+    },
+    {
+      name: "event agent ID",
+      options: { registerEventAgentId: 43n },
+    },
+    {
+      name: "event URI",
+      options: { registerEventURI: `${initialRegistrationURI()}-wrong` },
+    },
+    {
+      name: "event owner",
+      options: { eventMode: "wrongOwner" },
+    },
+    {
+      name: "ambiguous event",
+      options: { eventMode: "duplicate" },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const recovery = expectedRecovery();
+      const fake = createFakeClients({
+        nonces: [1],
+        ...scenario.options,
+      });
+      const error = await captureRejection(() =>
+        finalizeWithFakeClients(fake, recovery),
+      );
+
+      assertPublicPartialError(error, recovery);
+      assertNoMetadataActivity(fake);
+    });
+  }
+});
+
+test("rejects checkpointed metadata transactions that do not encode the proven finalization", async (t) => {
+  const wrongURI = `${finalRegistrationURI()}-wrong`;
+  const scenarios = [
+    {
+      name: "transaction hash",
+      overrides: { hash: UNRELATED_HASH },
+    },
+    {
+      name: "transaction chain",
+      overrides: { chainId: 1 },
+    },
+    {
+      name: "transaction sender",
+      overrides: { from: FOREIGN_ADDRESS },
+    },
+    {
+      name: "transaction destination",
+      overrides: { to: FOREIGN_ADDRESS },
+    },
+    {
+      name: "transaction value",
+      overrides: { value: 1n },
+    },
+    {
+      name: "transaction nonce",
+      overrides: { nonce: 2 },
+    },
+    {
+      name: "unrelated calldata",
+      overrides: {
+        input: encodeFunctionData({
+          abi: ERC8004_ABI,
+          functionName: "register",
+          args: [initialRegistrationURI()],
+        }),
+      },
+    },
+    {
+      name: "wrong agent ID",
+      overrides: {
+        input: encodeFunctionData({
+          abi: ERC8004_ABI,
+          functionName: "setAgentURI",
+          args: [43n, finalRegistrationURI(43n)],
+        }),
+      },
+    },
+    {
+      name: "wrong final URI",
+      overrides: {
+        input: encodeFunctionData({
+          abi: ERC8004_ABI,
+          functionName: "setAgentURI",
+          args: [42n, wrongURI],
+        }),
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const recovery = expectedRecovery({
+        metadataTx: METADATA_HASH,
+        metadataNonce: 1,
+      });
+      const fake = createFakeClients({
+        finalTokenURI: finalRegistrationURI(),
+        metadataTransactionOverrides: scenario.overrides,
+      });
+      const error = await captureRejection(() =>
+        finalizeWithFakeClients(fake, recovery),
+      );
+
+      assertPublicPartialError(error, recovery);
+      assert.equal(
+        fake.state.calls.some(({ name }) => name === "wait:metadata"),
+        false,
+      );
+      assert.equal(
+        fake.state.calls.some(({ name }) => name.startsWith("read:owner")),
+        false,
+      );
+      assert.equal(
+        fake.state.calls.some(({ name }) => name.startsWith("write:")),
+        false,
+      );
+    });
+  }
+});
+
+test("binds a valid resumed recovery to exact registration and metadata evidence", async () => {
+  const recovery = expectedRecovery({
+    metadataTx: METADATA_HASH,
+    metadataNonce: 1,
+  });
+  const fake = createFakeClients({
+    finalTokenURI: finalRegistrationURI(),
+  });
+  const evidence = await finalizeWithFakeClients(fake, recovery);
+
+  assert.equal(evidence.metadataTx, METADATA_HASH);
+  assert.deepEqual(
+    fake.state.calls.map(({ name }) => name),
+    [
+      "getChainId",
+      "getCode",
+      "read:getVersion",
+      "getTransaction:register",
+      "wait:register",
+      "getTransaction:metadata",
+      "wait:metadata",
+      "read:ownerOf",
+      "read:getAgentWallet",
+      "read:tokenURI",
+    ],
+  );
+  assert.deepEqual(
+    fake.state.calls
+      .filter(({ name }) => name.startsWith("getTransaction:"))
+      .map(({ parameters }) => parameters),
+    [{ hash: REGISTER_HASH }, { hash: METADATA_HASH }],
+  );
+  assert.deepEqual(
+    fake.state.calls
+      .filter(({ name }) => name.startsWith("wait:"))
+      .map(({ parameters }) => parameters),
+    [
+      {
+        hash: REGISTER_HASH,
+        confirmations: 2,
+        timeout: 120_000,
+      },
+      {
+        hash: METADATA_HASH,
+        confirmations: 2,
+        timeout: 120_000,
+      },
+    ],
+  );
+});
+
 test("resumes a clean public checkpoint without registering again", async () => {
   const firstFake = createFakeClients({
     balances: [1_000_000_000_000_000n, 0n],
@@ -1046,7 +1526,6 @@ test("resumes a clean public checkpoint without registering again", async () => 
   assertPublicPartialError(partial, expectedRecovery());
 
   const resumedFake = createFakeClients({
-    firstWaitStage: "metadata",
     nonces: [1],
   });
   const evidence = await finalizeIdentityRegistration({
@@ -1093,7 +1572,6 @@ test("waits and verifies an existing metadata transaction before any resubmissio
   );
   const fake = createFakeClients({
     finalTokenURI: finalURI,
-    firstWaitStage: "metadata",
   });
   const evidence = await finalizeIdentityRegistration({
     privateKey: PRIVATE_KEY,
@@ -1119,9 +1597,47 @@ test("waits and verifies an existing metadata transaction before any resubmissio
   );
 });
 
+test("never resubmits checkpointed metadata on lookup, wait, or unknown-status failures", async (t) => {
+  const scenarios = [
+    {
+      name: "transaction lookup failure",
+      options: { metadataTransactionError: true },
+    },
+    {
+      name: "receipt wait failure",
+      options: { metadataWaitError: true },
+    },
+    {
+      name: "unknown receipt status",
+      options: { metadataStatus: "pending" },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const recovery = expectedRecovery({
+        metadataTx: METADATA_HASH,
+        metadataNonce: 1,
+      });
+      const fake = createFakeClients({
+        finalTokenURI: finalRegistrationURI(),
+        ...scenario.options,
+      });
+      const error = await captureRejection(() =>
+        finalizeWithFakeClients(fake, recovery),
+      );
+
+      assertPublicPartialError(error, recovery);
+      assert.equal(
+        fake.state.calls.some(({ name }) => name.startsWith("write:")),
+        false,
+      );
+    });
+  }
+});
+
 test("resubmits metadata only after the checkpoint transaction is confirmed reverted", async () => {
   const fake = createFakeClients({
-    firstWaitStage: "metadata",
     metadataHash: RETRY_METADATA_HASH,
     metadataStatuses: ["reverted", "success"],
     nonces: [2],
@@ -1153,12 +1669,40 @@ test("resubmits metadata only after the checkpoint transaction is confirmed reve
   assert.deepEqual(checkpoints, [
     expectedRecovery({ metadataTx: RETRY_METADATA_HASH }),
   ]);
+  assert.deepEqual(
+    fake.state.calls
+      .filter(({ name }) => name.startsWith("getTransaction:"))
+      .map(({ parameters }) => parameters.hash),
+    [REGISTER_HASH, METADATA_HASH, RETRY_METADATA_HASH],
+  );
   assert.equal(evidence.metadataTx, RETRY_METADATA_HASH);
+});
+
+test("does not reuse the nonce of a confirmed reverted metadata transaction", async () => {
+  const recovery = expectedRecovery({
+    metadataTx: METADATA_HASH,
+    metadataNonce: 2,
+  });
+  const fake = createFakeClients({
+    metadataHash: RETRY_METADATA_HASH,
+    metadataStatuses: ["reverted", "success"],
+    metadataTransactionOverrides: (hash) =>
+      hash === METADATA_HASH ? { nonce: 2 } : {},
+    nonces: [2],
+  });
+  const error = await captureRejection(() =>
+    finalizeWithFakeClients(fake, recovery),
+  );
+
+  assertPublicPartialError(error, recovery);
+  assert.equal(
+    fake.state.calls.some(({ name }) => name === "write:setAgentURI"),
+    false,
+  );
 });
 
 test("retains a confirmed reverted hash until a replacement hash exists", async () => {
   const fake = createFakeClients({
-    firstWaitStage: "metadata",
     metadataStatuses: ["reverted"],
     metadataWriteError: true,
     nonces: [2],
@@ -1195,7 +1739,6 @@ test("retains a confirmed reverted hash until a replacement hash exists", async 
 
 test("does not guess when a clean checkpoint has an unknown pending nonce", async () => {
   const fake = createFakeClients({
-    firstWaitStage: "metadata",
     nonces: [2],
   });
   const error = await captureRejection(() =>
@@ -1229,10 +1772,20 @@ test("strictly validates recovery schema and caller identity before RPC calls", 
     { ...expectedRecovery(), registerTx: "0x1234" },
     { ...expectedRecovery(), registerBlock: "0x123456" },
     { ...expectedRecovery(), metadataTx: "0x1234" },
+    { ...expectedRecovery(), metadataTx: METADATA_HASH },
+    { ...expectedRecovery(), metadataNonce: 1 },
+    expectedRecovery({
+      metadataTx: METADATA_HASH,
+      metadataNonce: -1,
+    }),
+    expectedRecovery({
+      metadataTx: METADATA_HASH,
+      metadataNonce: 1n,
+    }),
   ];
 
   for (const recovery of invalidRecoveries) {
-    const fake = createFakeClients({ firstWaitStage: "metadata" });
+    const fake = createFakeClients();
     const error = await captureRejection(() =>
       finalizeIdentityRegistration({
         privateKey: PRIVATE_KEY,
@@ -1248,6 +1801,30 @@ test("strictly validates recovery schema and caller identity before RPC calls", 
     assert.match(error.message, /recovery/i);
     assert.deepEqual(fake.state.calls, []);
   }
+});
+
+test("rejects an invalid checkpoint callback before the registration write", async () => {
+  const fake = createFakeClients();
+  const error = await captureRejection(() =>
+    runWithFakeClients(fake, { onCheckpoint: null }),
+  );
+
+  assert.equal(error instanceof PartialRegistrationError, false);
+  assert.match(error.message, /checkpoint callback/i);
+  assert.deepEqual(fake.state.calls, []);
+});
+
+test("rejects an invalid checkpoint callback before a resumed metadata write", async () => {
+  const fake = createFakeClients({ nonces: [1] });
+  const error = await captureRejection(() =>
+    finalizeWithFakeClients(fake, expectedRecovery(), {
+      onCheckpoint: null,
+    }),
+  );
+
+  assert.equal(error instanceof PartialRegistrationError, false);
+  assert.match(error.message, /checkpoint callback/i);
+  assert.deepEqual(fake.state.calls, []);
 });
 
 test("rejects malformed keys and derived-address mismatches without key leakage", async () => {
@@ -1371,10 +1948,11 @@ test("rejects reverted first and second transaction receipts", async () => {
     expectedRecovery({ metadataTx: METADATA_HASH }),
   );
   assert.deepEqual(
-    secondFake.state.calls.slice(-3).map(({ name }) => name),
+    secondFake.state.calls.slice(-4).map(({ name }) => name),
     [
       "estimate:setAgentURI",
       "write:setAgentURI",
+      "getTransaction:metadata",
       "wait:metadata",
     ],
   );
