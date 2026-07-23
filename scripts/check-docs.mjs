@@ -43,7 +43,13 @@ const FORBIDDEN_PRESENT_CAPABILITIES = Object.freeze([
   "consensus-secure",
 ]);
 const NEGATION_PATTERN =
-  /\b(?:not|no|never|without|neither|nor|cannot|can't|doesn't|does not|isn't|is not|aren't|are not|must not)\b/i;
+  /\b(?:no|never|without|neither|nor|cannot|can't|doesn't|isn't|aren't|(?:does|do|is|are|was|were|will|can|must)\s+not(?!\s+only)|not(?!\s+only))\b/i;
+const CLAUSE_BOUNDARY_PATTERN =
+  /(?<=[.!?])\s+|[;:]|,\s*(?=which\b)|\b(?:but|yet|however|although|though|while|whereas|and|because|since|if|unless)\b|\bor(?=\s+(?:does|do|is|are|was|were|will|can|must|has|have|it|this|that|the|Clockchain)\b)/gi;
+const TOKEN_BOUNDARY_PATTERN =
+  /[\s`"'()[\]{}<>,;!?/]/;
+const TOKEN_EXTENSION_PATTERN =
+  /[a-z0-9_.:/-]/i;
 const EXTERNAL_LINK_PATTERN =
   /^(?:[a-z][a-z+.-]*:|\/\/)/i;
 const MARKDOWN_LINK_PATTERN =
@@ -77,17 +83,22 @@ const REQUIRED_DOCUMENT_PATTERNS = Object.freeze([
   }),
   Object.freeze({
     label: "npm run demo",
-    pattern: /npm run demo/,
+    token: "npm run demo",
   }),
   Object.freeze({
     label: "RESULT.md",
-    pattern: /RESULT\.md/,
+    token: "RESULT.md",
   }),
   Object.freeze({
     label: "result.json",
-    pattern: /result\.json/,
+    token: "result.json",
   }),
 ]);
+const CANONICAL_DOCUMENT_TOKENS = Object.freeze(
+  REQUIRED_DOCUMENT_PATTERNS.filter(
+    (requirement) => requirement.token !== undefined,
+  ),
+);
 
 function isPlainRoot(rootDirectory) {
   return (
@@ -106,10 +117,10 @@ async function regularFile(path) {
   }
 }
 
-function sentenceSegments(contents) {
+function clauseSegments(contents) {
   return contents
     .replace(/\r?\n/g, " ")
-    .split(/(?<=[.!?])\s+/)
+    .split(CLAUSE_BOUNDARY_PATTERN)
     .map((segment) => segment.trim())
     .filter(Boolean);
 }
@@ -119,7 +130,7 @@ function forbiddenCapabilityFailures(
   contents,
 ) {
   const failures = [];
-  const segments = sentenceSegments(contents);
+  const segments = clauseSegments(contents);
   for (const capability of FORBIDDEN_PRESENT_CAPABILITIES) {
     const pattern = new RegExp(
       `\\b${capability.replace("-", "\\-")}\\b`,
@@ -133,6 +144,101 @@ function forbiddenCapabilityFailures(
     if (unsafe) {
       failures.push(
         `${relativePath}: presents forbidden capability "${capability}" without an explicit negation.`,
+      );
+    }
+  }
+  return failures;
+}
+
+function tokenBoundaryBefore(contents, index) {
+  return (
+    index === 0 ||
+    TOKEN_BOUNDARY_PATTERN.test(contents[index - 1])
+  );
+}
+
+function tokenBoundaryAfter(contents, index) {
+  if (index === contents.length) {
+    return true;
+  }
+  const next = contents[index];
+  if (TOKEN_BOUNDARY_PATTERN.test(next)) {
+    return true;
+  }
+  if (next !== "." && next !== ":") {
+    return false;
+  }
+  const afterPunctuation = contents[index + 1];
+  return (
+    afterPunctuation === undefined ||
+    TOKEN_BOUNDARY_PATTERN.test(afterPunctuation)
+  );
+}
+
+function tokenOccurrences(contents, token) {
+  const occurrences = [];
+  let fromIndex = 0;
+  while (fromIndex <= contents.length - token.length) {
+    const index = contents.indexOf(token, fromIndex);
+    if (index === -1) {
+      break;
+    }
+    occurrences.push(index);
+    fromIndex = index + token.length;
+  }
+  return occurrences;
+}
+
+function hasCanonicalToken(contents, token) {
+  return tokenOccurrences(contents, token).some(
+    (index) =>
+      tokenBoundaryBefore(contents, index) &&
+      tokenBoundaryAfter(contents, index + token.length),
+  );
+}
+
+function extendedToken(contents, index, token) {
+  let start = index;
+  while (
+    start > 0 &&
+    TOKEN_EXTENSION_PATTERN.test(contents[start - 1])
+  ) {
+    start -= 1;
+  }
+
+  let end = index + token.length;
+  while (
+    end < contents.length &&
+    TOKEN_EXTENSION_PATTERN.test(contents[end])
+  ) {
+    end += 1;
+  }
+  return contents.slice(start, end);
+}
+
+function noncanonicalTokenFailures(
+  relativePath,
+  contents,
+) {
+  const failures = [];
+  for (const { token } of CANONICAL_DOCUMENT_TOKENS) {
+    for (const index of tokenOccurrences(contents, token)) {
+      if (
+        tokenBoundaryBefore(contents, index) &&
+        tokenBoundaryAfter(
+          contents,
+          index + token.length,
+        )
+      ) {
+        continue;
+      }
+      const extension = extendedToken(
+        contents,
+        index,
+        token,
+      );
+      failures.push(
+        `${relativePath}: contains noncanonical extension "${extension}" of required token "${token}".`,
       );
     }
   }
@@ -259,7 +365,14 @@ export async function checkDocumentation({
 
   for (const [relativePath, contents] of documents) {
     for (const requirement of REQUIRED_DOCUMENT_PATTERNS) {
-      if (!requirement.pattern.test(contents)) {
+      const present =
+        requirement.token === undefined
+          ? requirement.pattern.test(contents)
+          : hasCanonicalToken(
+              contents,
+              requirement.token,
+            );
+      if (!present) {
         failures.push(
           `${relativePath}: missing required phrase "${requirement.label}".`,
         );
@@ -267,6 +380,7 @@ export async function checkDocumentation({
     }
     failures.push(
       ...forbiddenCapabilityFailures(relativePath, contents),
+      ...noncanonicalTokenFailures(relativePath, contents),
       ...(await linkFailures({
         rootDirectory,
         relativePath,

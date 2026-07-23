@@ -118,6 +118,191 @@ test("reports a present-capability claim with an exact diagnostic", async (t) =>
   );
 });
 
+test("does not borrow negation from another compound clause", async (t) => {
+  const cases = [
+    {
+      capability: "trustless",
+      sentence:
+        "Clockchain is trustless but does not use AgentDash.",
+    },
+    {
+      capability: "mainnet",
+      sentence:
+        "Clockchain is mainnet and no money moves.",
+    },
+    {
+      capability: "court-grade",
+      sentence:
+        "Clockchain is court-grade, yet it is not a payment rail.",
+    },
+    {
+      capability: "consensus-secure",
+      sentence:
+        "Clockchain is consensus-secure although it does not move money.",
+    },
+    {
+      capability: "trustless",
+      sentence:
+        "Clockchain is trustless because it does not use AgentDash.",
+    },
+    {
+      capability: "mainnet",
+      sentence:
+        "Clockchain is mainnet or does not move money.",
+    },
+    {
+      capability: "court-grade",
+      sentence:
+        "Clockchain is not only court-grade but also trustless.",
+    },
+    {
+      capability: "consensus-secure",
+      sentence:
+        "Clockchain is consensus-secure, which does not imply payment.",
+    },
+  ];
+
+  for (const { capability, sentence } of cases) {
+    await t.test(capability, async (subtest) => {
+      const directory =
+        await temporaryDocumentationFixture(subtest);
+      const demoPath = join(directory, "DEMO.md");
+      await writeFile(
+        demoPath,
+        `${await readFile(demoPath, "utf8")}\n${sentence}\n`,
+      );
+
+      assert.deepEqual(
+        (
+          await checkDocumentation({
+            rootDirectory: directory,
+          })
+        ).filter((failure) =>
+          failure.includes(`"${capability}"`),
+        ),
+        [
+          `DEMO.md: presents forbidden capability "${capability}" without an explicit negation.`,
+        ],
+      );
+    });
+  }
+});
+
+test("rejects noncanonical extensions even when exact tokens also exist", async (t) => {
+  const extensions = [
+    {
+      canonical: "npm run demo",
+      extended: "npm run demo:unsafe",
+    },
+    {
+      canonical: "RESULT.md",
+      extended: "RESULT.md.bak",
+    },
+    {
+      canonical: "result.json",
+      extended: "result.json.bak",
+    },
+  ];
+
+  for (const { canonical, extended } of extensions) {
+    await t.test(extended, async (subtest) => {
+      const directory =
+        await temporaryDocumentationFixture(subtest);
+      const demoPath = join(directory, "DEMO.md");
+      await writeFile(
+        demoPath,
+        `${await readFile(demoPath, "utf8")}\nDo not run or publish \`${extended}\`.\n`,
+      );
+
+      assert.deepEqual(
+        (
+          await checkDocumentation({
+            rootDirectory: directory,
+          })
+        ).filter((failure) =>
+          failure.includes("noncanonical extension"),
+        ),
+        [
+          `DEMO.md: contains noncanonical extension "${extended}" of required token "${canonical}".`,
+        ],
+      );
+    });
+  }
+});
+
+test("does not count command or result supersets as canonical tokens", async (t) => {
+  const extensions = [
+    {
+      canonical: "npm run demo",
+      extended: "npm run demo:unsafe",
+    },
+    {
+      canonical: "RESULT.md",
+      extended: "RESULT.md.bak",
+    },
+    {
+      canonical: "result.json",
+      extended: "result.json.bak",
+    },
+  ];
+
+  for (const { canonical, extended } of extensions) {
+    await t.test(extended, async (subtest) => {
+      const directory =
+        await temporaryDocumentationFixture(subtest);
+      const demoPath = join(directory, "DEMO.md");
+      const demo = await readFile(demoPath, "utf8");
+      await writeFile(
+        demoPath,
+        demo.replaceAll(canonical, extended),
+      );
+
+      assert.equal(
+        (
+          await checkDocumentation({
+            rootDirectory: directory,
+          })
+        ).includes(
+          `DEMO.md: missing required phrase "${canonical}".`,
+        ),
+        true,
+      );
+    });
+  }
+});
+
+test("accepts exact command and result tokens beside Markdown punctuation", async (t) => {
+  const directory = await temporaryDocumentationFixture(t);
+  const demoPath = join(directory, "DEMO.md");
+  const demo = await readFile(demoPath, "utf8");
+  await writeFile(
+    demoPath,
+    `${demo
+      .replaceAll("npm run demo", "the demo command")
+      .replaceAll("RESULT.md", "the Markdown result")
+      .replaceAll("result.json", "the JSON result")}
+
+Use \`npm run demo\`; the exact command is npm run demo.
+Read (\`RESULT.md\`), then RESULT.md; compare \`result.json\` with result.json.
+`,
+  );
+
+  assert.deepEqual(
+    (
+      await checkDocumentation({
+        rootDirectory: directory,
+      })
+    ).filter(
+      (failure) =>
+        failure.includes("npm run demo") ||
+        failure.includes("RESULT.md") ||
+        failure.includes("result.json") ||
+        failure.includes("noncanonical extension"),
+    ),
+    [],
+  );
+});
+
 test("rejects README prompt drift with an exact diagnostic", async (t) => {
   const directory = await temporaryDocumentationFixture(t);
   const readmePath = join(directory, "README.md");
