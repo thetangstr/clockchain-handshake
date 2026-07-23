@@ -220,7 +220,7 @@ Not-tested: Runtime demo behavior is implemented in later tasks."
 - Create: `test/invitation.test.mjs`
 - Create: `test/redact.test.mjs`
 
-- [ ] **Step 1: Write failing invitation tests**
+- [x] **Step 1: Write failing invitation tests**
 
 ```js
 import test from "node:test";
@@ -248,13 +248,13 @@ test("rejects a modified ciphertext", async () => {
 });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `node --test test/invitation.test.mjs`
 
 Expected: FAIL with `ERR_MODULE_NOT_FOUND`.
 
-- [ ] **Step 3: Implement constants and invitation crypto**
+- [x] **Step 3: Implement constants and invitation crypto**
 
 `src/constants.mjs` exports exact immutable values:
 
@@ -291,8 +291,13 @@ export async function readSecretInvitation(path) {}
 
 `readSecretInvitation` accepts JSON containing only `bundle` and `code`, rejects
 group/world-readable files on POSIX, and never includes `code` in thrown errors.
+The verified implementation additionally bounds invitation codes to 1,024
+UTF-8 bytes, ciphertext to 4,096 decoded bytes, and secret files to 16,384
+bytes. It opens one `O_NONBLOCK | O_NOFOLLOW | O_RDONLY` descriptor and performs
+both metadata checks plus the read through that handle, so symlinks, path swaps,
+and blocking FIFOs fail before secret processing.
 
-- [ ] **Step 4: Write failing redaction tests**
+- [x] **Step 4: Write failing redaction tests**
 
 ```js
 import test from "node:test";
@@ -311,7 +316,7 @@ test("rejects a secret embedded inside a longer string", () => {
 });
 ```
 
-- [ ] **Step 5: Implement recursive redaction**
+- [x] **Step 5: Implement recursive redaction**
 
 `src/redact.mjs` exports:
 
@@ -322,15 +327,18 @@ export function assertSecretFree(value, canaries = []) {}
 ```
 
 Arrays, plain objects, errors, and strings must be traversed. Sensitive values
-become `[REDACTED]`; keys remain so diagnostics preserve structure.
+become `[REDACTED]`; keys remain so diagnostics preserve structure. Exact
+canaries, labeled private keys, bearer tokens, and standalone long `cc_` tokens
+are redacted while ordinary 32-byte transaction hashes remain public.
 
-- [ ] **Step 6: Run the focused tests**
+- [x] **Step 6: Run the focused tests**
 
 Run: `node --test test/invitation.test.mjs test/redact.test.mjs`
 
-Expected: 4 tests pass.
+Expected and verified: 17 tests pass, including real symlink/FIFO and hostile
+input regressions.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/constants.mjs src/invitation.mjs src/redact.mjs test/invitation.test.mjs test/redact.test.mjs
@@ -347,7 +355,12 @@ Tested: Invitation round-trip, tamper rejection, nested redaction, and secret-ca
 **Files:**
 - Create: `src/registration.mjs`
 - Create: `test/registration.test.mjs`
-- Create: `test/fixtures/registered-log.json`
+- Create: `test/fixtures/registered-receipt.json`
+
+The ABI and invariants below were verified read-only against official
+`erc-8004-contracts` commit
+`68fc6765761a10fb26f0692df21c8a6f9d12b1be` and the live Ethereum Sepolia
+deployment reporting version `2.0.0`.
 
 - [ ] **Step 1: Write failing metadata and event tests**
 
@@ -363,7 +376,7 @@ import {
 test("builds a final registration document bound to the official registry", () => {
   const ref = identityReference(42n);
   assert.equal(ref, "eip155:11155111:0x8004A818BFB912233c491871b3d84c89A494BD9e:42");
-  const doc = buildRegistrationDocument({ displayName: "Billy", address: "0x1111111111111111111111111111111111111111", agentId: 42n });
+  const doc = buildRegistrationDocument({ displayName: "Billy", agentId: 42n });
   assert.deepEqual(doc.registrations, [{
     agentRegistry: "eip155:11155111:0x8004A818BFB912233c491871b3d84c89A494BD9e",
     agentId: 42,
@@ -371,8 +384,11 @@ test("builds a final registration document bound to the official registry", () =
 });
 
 test("extracts agentId only from the official Registered event", () => {
-  const fixture = JSON.parse(readFileSync(new URL("./fixtures/registered-log.json", import.meta.url)));
-  assert.equal(parseRegisteredAgentId(fixture), 42n);
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/registered-receipt.json", import.meta.url)));
+  assert.equal(parseRegisteredAgentId(fixture, {
+    expectedOwner: "0x1111111111111111111111111111111111111111",
+    expectedAgentURI: "data:application/json;base64,e30=",
+  }), 42n);
 });
 ```
 
@@ -384,16 +400,18 @@ Expected: FAIL with `ERR_MODULE_NOT_FOUND`.
 
 - [ ] **Step 3: Implement pinned ABI and pure helpers**
 
-The ABI includes only:
+Use a deliberately minimal ABI even though the official v2 contract has three
+`register` overloads. The demo calls only `register(string)`. The event must
+preserve its real indexed layout:
 
 ```text
-getVersion()
-register(string)
-setAgentURI(uint256,string)
-ownerOf(uint256)
-tokenURI(uint256)
-getAgentWallet(uint256)
-Registered(uint256,string,address)
+string getVersion()
+uint256 register(string agentURI)
+setAgentURI(uint256 agentId,string newURI)
+address ownerOf(uint256 tokenId)
+string tokenURI(uint256 tokenId)
+address getAgentWallet(uint256 agentId)
+Registered(uint256 indexed agentId,string agentURI,address indexed owner)
 ```
 
 Export:
@@ -402,15 +420,25 @@ Export:
 export const ERC8004_ABI = [];
 export function registryNamespace() {}
 export function identityReference(agentId) {}
-export function buildRegistrationDocument({ displayName, address, agentId = null }) {}
+export function buildRegistrationDocument({ displayName, agentId = null }) {}
 export function registrationDataUri(document) {}
-export function parseRegisteredAgentId(receipt) {}
+export function parseRegisteredAgentId(receipt, { expectedOwner, expectedAgentURI }) {}
 ```
 
 The document type is
 `https://eips.ethereum.org/EIPS/eip-8004#registration-v1`, advertises no live
 MCP/A2A endpoint for the ephemeral demo agent, sets `x402Support: false`, and
-sets `active: true`.
+sets `active: true`. It has no nonstandard top-level wallet/address property.
+`registrationDataUri` emits
+`data:application/json;base64,<base64 UTF-8 JSON>`. The canonical ERC-8004
+identity remains the pair of `agentRegistry` plus separate numeric `agentId`;
+`identityReference()` is an explicitly project-local display convenience.
+
+The receipt fixture is shaped like a real four-log registration receipt. Event
+tests must filter by the official registry address, decode strict ABI logs,
+require exactly one `Registered` event, and match both indexed `owner` and
+nonindexed `agentURI`. Add negative cases for a foreign registry log and
+duplicate official `Registered` logs.
 
 - [ ] **Step 4: Write failing RPC invariant tests with a mock viem client**
 
@@ -421,6 +449,10 @@ wrong chain id -> reject
 empty registry bytecode -> reject
 version other than 2.0.0 -> reject
 nonzero sender nonce before registration -> reject
+derived address mismatch -> reject
+zero balance -> reject
+reverted transaction receipt -> reject
+wrong/multiple/foreign Registered event -> reject
 owner mismatch -> reject
 agentWallet mismatch -> reject
 tokenURI mismatch -> reject
@@ -447,12 +479,15 @@ The ordered implementation:
 2. Assert the derived address matches the encrypted bundle.
 3. Assert chain ID, registry bytecode, `getVersion()`, nonce, and balance.
 4. Estimate and send `register(initialDataUri)`.
-5. Wait for a successful receipt and decode exactly one `Registered` event.
+5. Wait for a successful receipt; filter logs by the official registry; decode
+   exactly one strict `Registered` event; match its `owner` and initial
+   `agentURI`.
 6. Build final metadata containing the resulting `agentId`.
 7. Estimate and send `setAgentURI(agentId, finalDataUri)`.
 8. Wait for success.
 9. Read `ownerOf`, `getAgentWallet`, and `tokenURI`.
-10. Return only public evidence: address, full identity reference, agentId,
+10. Return only public evidence: address, project-local full identity reference,
+    canonical registry namespace plus separate agentId,
     transaction hashes, block numbers, and final registration document.
 
 - [ ] **Step 6: Run focused tests**
@@ -464,7 +499,7 @@ Expected: all registration tests pass with no network calls.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/registration.mjs test/registration.test.mjs test/fixtures/registered-log.json
+git add src/registration.mjs test/registration.test.mjs test/fixtures/registered-receipt.json
 git commit -m "Bind demo agents to the official ERC-8004 registry" \
   -m "Constraint: The stakeholder wallet must remain the on-chain owner and agent wallet.
 Rejected: Clockchain DID minting | The product consumes ERC-8004 identity instead of competing with it.
