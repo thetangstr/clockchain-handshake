@@ -1,0 +1,8 @@
+: keepalive
+
+event: message
+data: {"jsonrpc":"2.0","id":99,"result":{"structuredContent":{"status":"ignored"}}}
+
+event: message
+data: {"jsonrpc":"2.0",
+data: "id":7,"result":{"content":[{"type":"text","text":"{\"status\":\"active\"}"}]}}
