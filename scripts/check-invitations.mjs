@@ -57,6 +57,15 @@ const CIPHER_KEYS = Object.freeze([
   "tagLength",
 ]);
 
+function isUnsafeAdjacentArtifact(name) {
+  return (
+    name.endsWith(".secret.json") ||
+    name.endsWith(".tmp") ||
+    name.endsWith(".bak") ||
+    name.endsWith(".lock")
+  );
+}
+
 class InvitationCheckError extends Error {
   constructor() {
     super("Invitation readiness check failed safely.");
@@ -259,6 +268,9 @@ async function loadInvitations(inputDirectory) {
   try {
     entries = await readdir(inputDirectory, { withFileTypes: true });
   } catch {
+    fail();
+  }
+  if (entries.some(({ name }) => isUnsafeAdjacentArtifact(name))) {
     fail();
   }
 

@@ -5,8 +5,10 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open as openFile,
   readFile,
   readdir,
+  realpath,
   rename,
   stat,
   symlink,
@@ -47,6 +49,7 @@ const CHECK_SCRIPT = join(
 );
 const PILOT_MINIMUM_WEI = parseEther("0.005");
 const PILOT_MAXIMUM_WEI = parseEther("0.02");
+const TRANSACTION_LOCK_FILENAME = ".handshake-invitations.lock";
 const PRIVATE_KEYS = [
   `0x${"0".repeat(63)}1`,
   `0x${"0".repeat(63)}2`,
@@ -259,6 +262,9 @@ test("creates distinct encrypted invitations without printing their secrets", as
     const secret = secrets[index];
     const id = ["codex", "claude"][index];
     const serializedPublic = JSON.stringify(bundle);
+    const publicMetadata = await stat(
+      join(publicDirectory, `${id}.enc.json`),
+    );
     const secretMetadata = await stat(
       join(secretDirectory, `${id}.secret.json`),
     );
@@ -267,6 +273,7 @@ test("creates distinct encrypted invitations without printing their secrets", as
     assert.deepEqual(secret.bundle, bundle);
     assert.equal(decrypted.address, bundle.address);
     assert.equal(decrypted.displayName, ["Billy", "Iris"][index]);
+    assert.equal(publicMetadata.mode & 0o777, 0o644);
     assert.equal(secretMetadata.mode & 0o777, 0o600);
     assert.doesNotMatch(serializedPublic, /privateKey|"code"/i);
     assert.equal(report.created[index].address, bundle.address);
@@ -303,6 +310,123 @@ test("rejects invalid ID and name lists before creating output paths", async (t)
     assert.match(result.stderr, /^Invitation creation failed safely\.\n$/);
     await assert.rejects(lstat(publicDirectory), { code: "ENOENT" });
     await assert.rejects(lstat(secretDirectory), { code: "ENOENT" });
+  }
+});
+
+test("rejects equal, nested, and canonical-aliased public and secret directories", async (t) => {
+  const directory = await makeTemporaryDirectory(t);
+  const directDirectory = join(directory, "direct");
+  const publicParent = join(directory, "public-parent");
+  const secretParent = join(directory, "secret-parent");
+  const canonicalDirectory = join(directory, "canonical");
+  const aliasRoot = join(directory, "alias-root");
+  await mkdir(canonicalDirectory);
+  await symlink(directory, aliasRoot, "dir");
+
+  const cases = [
+    {
+      publicDirectory: directDirectory,
+      secretDirectory: directDirectory,
+    },
+    {
+      publicDirectory: publicParent,
+      secretDirectory: join(publicParent, "secret"),
+    },
+    {
+      publicDirectory: join(secretParent, "public"),
+      secretDirectory: secretParent,
+    },
+    {
+      publicDirectory: canonicalDirectory,
+      secretDirectory: join(aliasRoot, "canonical"),
+    },
+  ];
+
+  for (const { publicDirectory, secretDirectory } of cases) {
+    const result = await runNode(
+      CREATE_SCRIPT,
+      createArguments({
+        publicDirectory,
+        secretDirectory,
+        ids: "codex",
+        names: "Billy",
+      }),
+    );
+
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    assert.match(
+      result.stderr,
+      /^Invitation creation failed safely\.\n$/,
+    );
+    await assert.rejects(
+      lstat(join(publicDirectory, "codex.enc.json")),
+      { code: "ENOENT" },
+    );
+    await assert.rejects(
+      lstat(join(secretDirectory, "codex.secret.json")),
+      { code: "ENOENT" },
+    );
+  }
+});
+
+test("fails closed on stale transaction artifacts in either output directory", async (t) => {
+  const directory = await makeTemporaryDirectory(t);
+  const cases = [
+    { location: "public", name: ".orphan.tmp" },
+    { location: "secret", name: ".orphan.bak" },
+    {
+      location: "public",
+      name: TRANSACTION_LOCK_FILENAME,
+    },
+  ];
+
+  for (let index = 0; index < cases.length; index += 1) {
+    const publicDirectory = join(directory, `public-${index}`);
+    const secretDirectory = join(directory, `secret-${index}`);
+    await mkdir(publicDirectory);
+    await mkdir(secretDirectory);
+    const artifactDirectory =
+      cases[index].location === "public"
+        ? publicDirectory
+        : secretDirectory;
+    await writeFile(
+      join(artifactDirectory, cases[index].name),
+      "stale\n",
+      "utf8",
+    );
+
+    const result = await runNode(
+      CREATE_SCRIPT,
+      createArguments({
+        publicDirectory,
+        secretDirectory,
+        ids: "codex",
+        names: "Billy",
+      }),
+    );
+
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    assert.match(
+      result.stderr,
+      /^Invitation creation failed safely\.\n$/,
+    );
+    assert.equal(
+      await readFile(
+        join(artifactDirectory, cases[index].name),
+        "utf8",
+      ),
+      "stale\n",
+    );
+    await assert.rejects(
+      lstat(join(publicDirectory, "codex.enc.json")),
+      { code: "ENOENT" },
+    );
+    await assert.rejects(
+      lstat(join(secretDirectory, "codex.secret.json")),
+      { code: "ENOENT" },
+    );
   }
 });
 
@@ -390,9 +514,11 @@ test("rolls back a fresh invitation pair when its second publication fails", asy
   );
 
   assert.equal(publicationCount, 2);
+  const canonicalSecretDirectory = await realpath(secretDirectory);
+  const canonicalPublicDirectory = await realpath(publicDirectory);
   assert.deepEqual(publicationTargets, [
-    join(secretDirectory, "codex.secret.json"),
-    join(publicDirectory, "codex.enc.json"),
+    join(canonicalSecretDirectory, "codex.secret.json"),
+    join(canonicalPublicDirectory, "codex.enc.json"),
   ]);
   assert.deepEqual(await readdir(publicDirectory), []);
   assert.deepEqual(await readdir(secretDirectory), []);
@@ -467,6 +593,103 @@ test("restores every old invitation pair when a forced batch publication fails",
     assert.equal(await readFile(path, "utf8"), original.contents);
     assert.equal((await stat(path)).mode & 0o777, original.mode);
   }
+});
+
+test("serializes concurrent forced batches and leaves one exactly matching pair", { timeout: 10_000 }, async (t) => {
+  const directory = await makeTemporaryDirectory(t);
+  const publicDirectory = join(directory, "public");
+  const secretDirectory = join(directory, "secret");
+  const arguments_ = createArguments({
+    publicDirectory,
+    secretDirectory,
+    ids: "codex",
+    names: "Billy",
+  });
+  await createInvitations(arguments_);
+
+  let releaseStaging;
+  const stagingRelease = new Promise((resolveRelease) => {
+    releaseStaging = resolveRelease;
+  });
+  let reportStaging;
+  const stagingReached = new Promise((resolveReached) => {
+    reportStaging = resolveReached;
+  });
+  let paused = false;
+  const first = createInvitations([...arguments_, "--force"], {
+    fileSystem: {
+      async open(path, ...rest) {
+        const handle = await openFile(path, ...rest);
+        if (!paused && path.endsWith(".tmp")) {
+          paused = true;
+          reportStaging();
+          await stagingRelease;
+        }
+        return handle;
+      },
+    },
+  });
+
+  await Promise.race([
+    stagingReached,
+    first.then(
+      () => {
+        throw new Error("first invocation never paused");
+      },
+      (error) => {
+        throw error;
+      },
+    ),
+  ]);
+  assert.equal(
+    (
+      await stat(
+        join(publicDirectory, TRANSACTION_LOCK_FILENAME),
+      )
+    ).mode & 0o777,
+    0o600,
+  );
+  assert.equal(
+    (
+      await stat(
+        join(secretDirectory, TRANSACTION_LOCK_FILENAME),
+      )
+    ).mode & 0o777,
+    0o600,
+  );
+  const [secondOutcome] = await Promise.allSettled([
+    createInvitations([...arguments_, "--force"]),
+  ]);
+  releaseStaging();
+  const [firstOutcome] = await Promise.allSettled([first]);
+
+  assert.equal(firstOutcome.status, "fulfilled");
+  assert.equal(secondOutcome.status, "rejected");
+  assert.equal(secondOutcome.reason?.name, "InvitationCreationError");
+  assert.equal(
+    secondOutcome.reason?.message,
+    "Invitation creation failed safely.",
+  );
+
+  const publicBundle = await readJson(
+    join(publicDirectory, "codex.enc.json"),
+  );
+  const secret = await readJson(
+    join(secretDirectory, "codex.secret.json"),
+  );
+  assert.deepEqual(secret.bundle, publicBundle);
+  assert.equal(
+    firstOutcome.value.created[0].address,
+    publicBundle.address,
+  );
+  assert.deepEqual(
+    (await readdir(publicDirectory)).sort(),
+    ["codex.enc.json"],
+  );
+  assert.deepEqual(
+    (await readdir(secretDirectory)).sort(),
+    ["codex.secret.json"],
+  );
 });
 
 test("never follows special output paths, including with force", async (t) => {
@@ -741,6 +964,48 @@ test("does not expose RPC URLs or upstream errors on readiness failure", async (
   assert.doesNotMatch(result.stderr, new RegExp(upstreamSecret, "u"));
   assert.doesNotMatch(result.stderr, new RegExp(querySecret, "u"));
   assert.doesNotMatch(result.stderr, /127\.0\.0\.1/u);
+});
+
+test("rejects adjacent secrets and stale transaction artifacts before network access", async (t) => {
+  const directory = await makeTemporaryDirectory(t);
+  const fixture = await startRpcFixture(t);
+  const artifacts = [
+    "codex.secret.json",
+    ".orphan.tmp",
+    ".orphan.bak",
+    TRANSACTION_LOCK_FILENAME,
+  ];
+
+  for (let index = 0; index < artifacts.length; index += 1) {
+    const publicDirectory = join(directory, `public-${index}`);
+    await writePublicBundle({
+      directory: publicDirectory,
+      id: "codex",
+      displayName: "Billy",
+      privateKey: PRIVATE_KEYS[0],
+    });
+    await writeFile(
+      join(publicDirectory, artifacts[index]),
+      "unsafe-adjacent-artifact\n",
+      "utf8",
+    );
+
+    const result = await runNode(CHECK_SCRIPT, [
+      "--input-public",
+      publicDirectory,
+      "--rpc-url",
+      fixture.url,
+    ]);
+
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    assert.match(
+      result.stderr,
+      /^Invitation readiness check failed safely\.\n$/,
+    );
+  }
+
+  assert.equal(fixture.requests.length, 0);
 });
 
 test("rejects symlink and secret-bearing public bundles before network access", async (t) => {

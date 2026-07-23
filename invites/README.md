@@ -19,7 +19,14 @@ The command writes public `<id>.enc.json` files and mode-`0600` operator-only
 `<id>.secret.json` files. It refuses existing targets by default. `--force`
 replaces existing regular files only; it never follows symlinks or replaces
 directories and other special files. The command prints only each ID and public
-address.
+address. Public and secret output directories must be canonically distinct and
+must not contain one another, including through a symlinked parent.
+
+Creation takes owner-only exclusive locks in both canonical output directories,
+using the same deterministic order for every process. It holds those locks
+through preflight, generation, staged publication, exact public/secret pair
+verification, artifact cleanup, and directory synchronization. A concurrent
+creator fails closed instead of waiting or interleaving with the active batch.
 
 After funding, check the public bundles without reading their secret files:
 
@@ -32,7 +39,22 @@ official ERC-8004 Identity Registry, and reads each wallet balance and nonce.
 An invitation is ready only when its nonce is zero and its balance is between
 `0.005` and `0.02` Sepolia ETH, inclusive. These intentionally narrow pilot
 bounds provide testnet transaction headroom while catching an unfunded, consumed,
-or accidentally overfunded wallet.
+or accidentally overfunded wallet. It refuses to contact RPC when the public
+directory contains an adjacent `*.secret.json` file or a `.tmp`, `.bak`, or
+`.lock` transaction artifact.
+
+An abrupt process termination or power loss can leave a lock, staged `.tmp`
+file, or forced-replacement `.bak` recovery copy. There is deliberately no
+automatic stale-lock timeout: every later create or readiness check fails closed
+until an operator resolves the interrupted batch.
+
+Before recovery, confirm that no invitation creator is running and copy both
+output directories to a separate operator-only recovery location. For every ID,
+either restore both old files from their corresponding hidden `.bak` copies or
+retain a current pair only after confirming that the secret file's `bundle`
+exactly equals the public JSON bundle. Never restore or delete just one side of
+a pair. Remove residual `.tmp`, `.bak`, and lock files only after all requested
+pairs match, then rerun creation or the readiness check.
 
 These wallets are disposable testnet identities. They hold no mainnet assets,
 move no scenario money, and must not be reused outside this exercise.

@@ -5,10 +5,20 @@ import {
   lstat,
   mkdir,
   open,
+  readdir,
+  realpath,
   rename,
   unlink,
 } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
@@ -24,11 +34,22 @@ const WRITE_FLAGS =
   fsConstants.O_CREAT |
   fsConstants.O_EXCL |
   (fsConstants.O_NOFOLLOW ?? 0);
+const READ_FLAGS =
+  fsConstants.O_RDONLY |
+  (fsConstants.O_NOFOLLOW ?? 0) |
+  (fsConstants.O_NONBLOCK ?? 0);
+const DIRECTORY_READ_FLAGS =
+  fsConstants.O_RDONLY |
+  (fsConstants.O_DIRECTORY ?? 0) |
+  (fsConstants.O_NOFOLLOW ?? 0);
+const LOCK_FILENAME = ".handshake-invitations.lock";
 const DEFAULT_FILE_SYSTEM = Object.freeze({
   link,
   lstat,
   mkdir,
   open,
+  readdir,
+  realpath,
   rename,
   unlink,
 });
@@ -187,6 +208,65 @@ async function createDirectory(path, mode, fileSystem) {
   }
 }
 
+function isSameOrNestedDirectory(parent, candidate) {
+  const pathFromParent = relative(parent, candidate);
+  return (
+    pathFromParent === "" ||
+    (pathFromParent !== ".." &&
+      !pathFromParent.startsWith(`..${sep}`) &&
+      !isAbsolute(pathFromParent))
+  );
+}
+
+function assertSeparatedDirectories(
+  publicDirectory,
+  secretDirectory,
+) {
+  if (
+    isSameOrNestedDirectory(publicDirectory, secretDirectory) ||
+    isSameOrNestedDirectory(secretDirectory, publicDirectory)
+  ) {
+    fail();
+  }
+}
+
+async function canonicalOutputDirectories(
+  publicDirectory,
+  secretDirectory,
+  fileSystem,
+) {
+  try {
+    const [canonicalPublic, canonicalSecret] = await Promise.all([
+      fileSystem.realpath(publicDirectory),
+      fileSystem.realpath(secretDirectory),
+    ]);
+    const [publicMetadata, secretMetadata] = await Promise.all([
+      fileSystem.lstat(canonicalPublic),
+      fileSystem.lstat(canonicalSecret),
+    ]);
+    if (
+      !publicMetadata.isDirectory() ||
+      publicMetadata.isSymbolicLink() ||
+      !secretMetadata.isDirectory() ||
+      secretMetadata.isSymbolicLink() ||
+      (publicMetadata.dev === secretMetadata.dev &&
+        publicMetadata.ino === secretMetadata.ino)
+    ) {
+      fail();
+    }
+    assertSeparatedDirectories(canonicalPublic, canonicalSecret);
+    return {
+      publicDirectory: canonicalPublic,
+      secretDirectory: canonicalSecret,
+    };
+  } catch (error) {
+    if (error instanceof InvitationCreationError) {
+      throw error;
+    }
+    fail();
+  }
+}
+
 async function inspectTarget(path, force, fileSystem) {
   try {
     const metadata = await fileSystem.lstat(path);
@@ -226,6 +306,172 @@ function temporaryPath(path, purpose) {
   );
 }
 
+function isTransactionArtifact(name) {
+  return (
+    name.endsWith(".tmp") ||
+    name.endsWith(".bak") ||
+    name.endsWith(".lock")
+  );
+}
+
+async function assertCleanOutputDirectory(
+  path,
+  role,
+  fileSystem,
+) {
+  let entries;
+  try {
+    entries = await fileSystem.readdir(path, {
+      withFileTypes: true,
+    });
+  } catch {
+    fail();
+  }
+
+  for (const entry of entries) {
+    if (entry.name === LOCK_FILENAME) {
+      if (!entry.isFile() || entry.isSymbolicLink()) {
+        fail();
+      }
+      continue;
+    }
+    if (
+      isTransactionArtifact(entry.name) ||
+      (role === "public" &&
+        entry.name.endsWith(".secret.json")) ||
+      (role === "secret" &&
+        entry.name.endsWith(".enc.json"))
+    ) {
+      fail();
+    }
+  }
+}
+
+async function assertCleanOutputDirectories(
+  publicDirectory,
+  secretDirectory,
+  fileSystem,
+) {
+  await assertCleanOutputDirectory(
+    publicDirectory,
+    "public",
+    fileSystem,
+  );
+  await assertCleanOutputDirectory(
+    secretDirectory,
+    "secret",
+    fileSystem,
+  );
+}
+
+async function syncDirectories(directories, fileSystem) {
+  for (const directory of [...new Set(directories)].sort()) {
+    let fileHandle;
+    try {
+      fileHandle = await fileSystem.open(
+        directory,
+        DIRECTORY_READ_FLAGS,
+      );
+      await fileHandle.sync();
+      await fileHandle.close();
+      fileHandle = undefined;
+    } catch (error) {
+      if (fileHandle !== undefined) {
+        try {
+          await fileHandle.close();
+        } catch {
+          // The public CLI still emits only its fixed safe failure.
+        }
+      }
+      if (error instanceof InvitationCreationError) {
+        throw error;
+      }
+      fail();
+    }
+  }
+}
+
+async function releaseBatchLocks(locks, fileSystem) {
+  let firstError;
+  for (const lock of [...locks].reverse()) {
+    try {
+      await lock.fileHandle.close();
+    } catch (error) {
+      firstError ??= error;
+    }
+    try {
+      await fileSystem.unlink(lock.path);
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+
+  try {
+    await syncDirectories(
+      locks.map(({ directory }) => directory),
+      fileSystem,
+    );
+  } catch (error) {
+    firstError ??= error;
+  }
+  return firstError;
+}
+
+async function acquireBatchLocks(directories, fileSystem) {
+  const locks = [];
+  const orderedDirectories = [...new Set(directories)].sort();
+
+  try {
+    for (const directory of orderedDirectories) {
+      const path = join(directory, LOCK_FILENAME);
+      const fileHandle = await fileSystem.open(
+        path,
+        WRITE_FLAGS,
+        0o600,
+      );
+      const lock = { directory, fileHandle, path };
+      locks.push(lock);
+      await fileHandle.chmod(0o600);
+      await fileHandle.writeFile(
+        `${JSON.stringify({
+          schema: "clockchain.handshake-invitation-lock/v1",
+          pid: process.pid,
+        })}\n`,
+        "utf8",
+      );
+      await fileHandle.sync();
+    }
+    await syncDirectories(orderedDirectories, fileSystem);
+    return locks;
+  } catch {
+    await releaseBatchLocks(locks, fileSystem);
+    fail();
+  }
+}
+
+async function withBatchLocks(directories, fileSystem, operation) {
+  const locks = await acquireBatchLocks(directories, fileSystem);
+  let result;
+  let operationError;
+  try {
+    result = await operation();
+  } catch (error) {
+    operationError = error;
+  }
+
+  const releaseError = await releaseBatchLocks(locks, fileSystem);
+  if (
+    operationError instanceof InvitationCreationError &&
+    releaseError === undefined
+  ) {
+    throw operationError;
+  }
+  if (operationError !== undefined || releaseError !== undefined) {
+    fail();
+  }
+  return result;
+}
+
 async function stageTarget(target, fileSystem) {
   const temporary = temporaryPath(target.path, "tmp");
   let fileHandle;
@@ -237,6 +483,7 @@ async function stageTarget(target, fileSystem) {
       target.mode,
     );
     await fileHandle.writeFile(target.contents, "utf8");
+    await fileHandle.chmod(target.mode);
     await fileHandle.sync();
     await fileHandle.close();
     fileHandle = undefined;
@@ -280,6 +527,75 @@ async function removePaths(paths, fileSystem) {
   return firstError;
 }
 
+function sameFileMetadata(left, right) {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.mode === right.mode
+  );
+}
+
+async function readPublishedTarget(target, fileSystem) {
+  let fileHandle;
+  try {
+    fileHandle = await fileSystem.open(target.path, READ_FLAGS);
+    const metadata = await fileHandle.stat();
+    if (
+      !metadata.isFile() ||
+      (metadata.mode & 0o777) !== target.mode ||
+      metadata.size !== Buffer.byteLength(target.contents, "utf8")
+    ) {
+      fail();
+    }
+    const contents = await fileHandle.readFile("utf8");
+    const finalMetadata = await fileHandle.stat();
+    if (
+      contents !== target.contents ||
+      !sameFileMetadata(metadata, finalMetadata)
+    ) {
+      fail();
+    }
+    return JSON.parse(contents);
+  } catch (error) {
+    if (error instanceof InvitationCreationError) {
+      throw error;
+    }
+    fail();
+  } finally {
+    if (fileHandle !== undefined) {
+      try {
+        await fileHandle.close();
+      } catch {
+        fail();
+      }
+    }
+  }
+}
+
+async function verifyPublishedTargets(targets, fileSystem) {
+  const documents = new Map();
+  for (const target of targets) {
+    documents.set(
+      `${target.id}:${target.kind}`,
+      await readPublishedTarget(target, fileSystem),
+    );
+  }
+
+  for (const id of new Set(targets.map((target) => target.id))) {
+    const secret = documents.get(`${id}:secret`);
+    const publicBundle = documents.get(`${id}:public`);
+    if (
+      secret === undefined ||
+      publicBundle === undefined ||
+      JSON.stringify(secret.bundle) !== JSON.stringify(publicBundle)
+    ) {
+      fail();
+    }
+  }
+}
+
 async function prepareBackups(targets, fileSystem) {
   for (const target of targets) {
     if (!target.existed) {
@@ -314,11 +630,13 @@ async function assertTargetState(target, fileSystem) {
 
 async function publishTargets(targets, force, fileSystem) {
   const published = [];
+  const directories = targets.map(({ path }) => dirname(path));
 
   try {
     if (force) {
       await prepareBackups(targets, fileSystem);
     }
+    await syncDirectories(directories, fileSystem);
 
     for (const target of targets) {
       if (force) {
@@ -330,6 +648,8 @@ async function publishTargets(targets, force, fileSystem) {
       target.published = true;
       published.push(target);
     }
+    await syncDirectories(directories, fileSystem);
+    await verifyPublishedTargets(targets, fileSystem);
   } catch (publicationError) {
     let rollbackError;
     for (const target of published.reverse()) {
@@ -360,11 +680,18 @@ async function publishTargets(targets, force, fileSystem) {
       ],
       fileSystem,
     );
+    let syncError;
+    try {
+      await syncDirectories(directories, fileSystem);
+    } catch (error) {
+      syncError = error;
+    }
 
     if (
       publicationError instanceof InvitationCreationError &&
       rollbackError === undefined &&
-      cleanupError === undefined
+      cleanupError === undefined &&
+      syncError === undefined
     ) {
       throw publicationError;
     }
@@ -381,6 +708,7 @@ async function publishTargets(targets, force, fileSystem) {
   if (cleanupError !== undefined) {
     fail();
   }
+  await syncDirectories(directories, fileSystem);
 }
 
 async function writeInvitationBatch(targets, force, fileSystem) {
@@ -395,7 +723,7 @@ async function writeInvitationBatch(targets, force, fileSystem) {
         .filter((target) => target.published)
         .map((target) => target.backup),
     );
-    await removePaths(
+    const cleanupError = await removePaths(
       [
         ...targets.map((target) => target.temporary),
         ...targets
@@ -404,7 +732,20 @@ async function writeInvitationBatch(targets, force, fileSystem) {
       ],
       fileSystem,
     );
-    if (error instanceof InvitationCreationError) {
+    let syncError;
+    try {
+      await syncDirectories(
+        targets.map(({ path }) => dirname(path)),
+        fileSystem,
+      );
+    } catch (caught) {
+      syncError = caught;
+    }
+    if (
+      error instanceof InvitationCreationError &&
+      cleanupError === undefined &&
+      syncError === undefined
+    ) {
       throw error;
     }
     fail();
@@ -445,62 +786,101 @@ async function createInvitations(configuration, fileSystem) {
     force,
     ids,
     names,
-    publicDirectory,
-    secretDirectory,
+    publicDirectory: requestedPublicDirectory,
+    secretDirectory: requestedSecretDirectory,
   } = configuration;
 
+  assertSeparatedDirectories(
+    requestedPublicDirectory,
+    requestedSecretDirectory,
+  );
   await prepareDirectories(
-    publicDirectory,
-    secretDirectory,
+    requestedPublicDirectory,
+    requestedSecretDirectory,
     fileSystem,
   );
+  const { publicDirectory, secretDirectory } =
+    await canonicalOutputDirectories(
+      requestedPublicDirectory,
+      requestedSecretDirectory,
+      fileSystem,
+    );
 
-  const usedAddresses = new Set();
-  const usedCodes = new Set();
-  const invitations = [];
-  for (let index = 0; index < ids.length; index += 1) {
-    invitations.push({
-      id: ids[index],
-      ...(await createDistinctInvitation({
-        displayName: names[index],
-        usedAddresses,
-        usedCodes,
-      })),
-    });
-  }
-
-  const targets = invitations.flatMap((invitation) => [
-    {
-      contents: `${JSON.stringify(
-        {
-          bundle: invitation.bundle,
-          code: invitation.code,
-        },
-        null,
-        2,
-      )}\n`,
-      mode: 0o600,
-      path: join(
-        secretDirectory,
-        `${invitation.id}.secret.json`,
-      ),
-    },
-    {
-      contents: `${JSON.stringify(invitation.bundle, null, 2)}\n`,
-      mode: 0o644,
-      path: join(
+  return withBatchLocks(
+    [publicDirectory, secretDirectory],
+    fileSystem,
+    async () => {
+      await assertCleanOutputDirectories(
         publicDirectory,
-        `${invitation.id}.enc.json`,
-      ),
+        secretDirectory,
+        fileSystem,
+      );
+      const targets = ids.flatMap((id) => [
+        {
+          id,
+          kind: "secret",
+          mode: 0o600,
+          path: join(secretDirectory, `${id}.secret.json`),
+        },
+        {
+          id,
+          kind: "public",
+          mode: 0o644,
+          path: join(publicDirectory, `${id}.enc.json`),
+        },
+      ]);
+      await preflightTargets(targets, force, fileSystem);
+
+      const usedAddresses = new Set();
+      const usedCodes = new Set();
+      const invitations = [];
+      for (let index = 0; index < ids.length; index += 1) {
+        invitations.push({
+          id: ids[index],
+          ...(await createDistinctInvitation({
+            displayName: names[index],
+            usedAddresses,
+            usedCodes,
+          })),
+        });
+      }
+
+      for (
+        let index = 0;
+        index < invitations.length;
+        index += 1
+      ) {
+        const invitation = invitations[index];
+        targets[index * 2].contents = `${JSON.stringify(
+          {
+            bundle: invitation.bundle,
+            code: invitation.code,
+          },
+          null,
+          2,
+        )}\n`;
+        targets[index * 2 + 1].contents = `${JSON.stringify(
+          invitation.bundle,
+          null,
+          2,
+        )}\n`;
+      }
+
+      await writeInvitationBatch(targets, force, fileSystem);
+      await assertCleanOutputDirectories(
+        publicDirectory,
+        secretDirectory,
+        fileSystem,
+      );
+
+      return {
+        created: invitations.map(({ id, address }) => ({
+          id,
+          address,
+        })),
+      };
     },
-  ]);
-
-  await preflightTargets(targets, force, fileSystem);
-  await writeInvitationBatch(targets, force, fileSystem);
-
-  return {
-    created: invitations.map(({ id, address }) => ({ id, address })),
-  };
+  );
 }
 
 export async function main(
