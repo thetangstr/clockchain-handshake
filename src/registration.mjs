@@ -1,29 +1,42 @@
-import {
-  createPublicClient,
-  createWalletClient,
-  http,
-  isAddressEqual,
-  parseEventLogs,
-} from "viem";
+import { parseEventLogs } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { sepolia } from "viem/chains";
 
 import {
   CHAIN_ID,
   REGISTRY_ADDRESS,
   RPC_URL,
 } from "./constants.mjs";
+import {
+  CONSERVATIVE_METADATA_GAS_RESERVE,
+  RECEIPT_CONFIRMATIONS,
+  RECEIPT_TIMEOUT_MILLISECONDS,
+  addGasHeadroom,
+  addressesEqual,
+  createRecovery,
+  createRegistrationClients,
+  estimateFeeQuote,
+  identityReferenceValue,
+  invokeCheckpoint,
+  isRevertedReceipt,
+  isSuccessfulReceipt,
+  normalizeAgentId,
+  normalizePendingNonce,
+  registryNamespaceValue,
+  runStage,
+  validateDisplayName,
+  validateReceipt,
+  validateReceiptEvidence,
+  validateRecovery,
+  validateTransactionHash,
+  withMetadataTransaction,
+  withoutMetadataTransaction,
+} from "./registration-internal.mjs";
 
 const REGISTRATION_TYPE =
   "https://eips.ethereum.org/EIPS/eip-8004#registration-v1";
 const REGISTRATION_DESCRIPTION =
   "Ephemeral Clockchain Handshake testnet identity; registration does not establish capability or trust.";
-const MAX_DISPLAY_NAME_LENGTH = 128;
-const MAX_UINT256 = (1n << 256n) - 1n;
 const REGISTRY_VERSION = "2.0.0";
-const RECEIPT_TIMEOUT_MILLISECONDS = 120_000;
-const RPC_TIMEOUT_MILLISECONDS = 10_000;
-const RPC_RETRY_COUNT = 1;
 
 export const ERC8004_ABI = [
   {
@@ -95,144 +108,52 @@ export const ERC8004_ABI = [
   },
 ];
 
-function normalizeAgentId(agentId, { jsonSafe = false } = {}) {
-  let normalized;
-
-  if (typeof agentId === "bigint") {
-    normalized = agentId;
-  } else if (typeof agentId === "number" && Number.isSafeInteger(agentId)) {
-    normalized = BigInt(agentId);
-  } else {
-    throw new TypeError("Agent ID must be a nonnegative integer.");
-  }
-
-  if (normalized < 0n || normalized > MAX_UINT256) {
-    throw new RangeError("Agent ID is outside the uint256 range.");
-  }
-
-  if (jsonSafe && normalized > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new RangeError("Agent ID is too large for exact JSON numeric encoding.");
-  }
-
-  return normalized;
-}
-
-function validateDisplayName(displayName) {
-  if (
-    typeof displayName !== "string" ||
-    displayName.trim().length === 0 ||
-    displayName.length > MAX_DISPLAY_NAME_LENGTH
-  ) {
-    throw new TypeError(
-      `Display name must contain 1-${MAX_DISPLAY_NAME_LENGTH} characters.`,
-    );
-  }
-}
-
-function isSuccessfulReceipt(receipt) {
-  return (
-    receipt?.status === "success" ||
-    receipt?.status === 1 ||
-    receipt?.status === 1n ||
-    receipt?.status === "0x1"
-  );
-}
-
 function isOfficialRegistryLog(log) {
-  try {
-    return isAddressEqual(log.address, REGISTRY_ADDRESS);
-  } catch {
-    return false;
-  }
+  return addressesEqual(log?.address, REGISTRY_ADDRESS);
 }
 
-function addressesEqual(left, right) {
-  try {
-    return isAddressEqual(left, right);
-  } catch {
-    return false;
-  }
-}
-
-function isTransactionHash(value) {
-  return typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value);
-}
-
-function parseBlockNumber(value) {
-  try {
-    if (
-      typeof value === "bigint" &&
-      value >= 0n
-    ) {
-      return value;
-    }
-
-    if (
-      typeof value === "number" &&
-      Number.isSafeInteger(value) &&
-      value >= 0
-    ) {
-      return BigInt(value);
-    }
-
-    if (
-      typeof value === "string" &&
-      (/^[0-9]+$/.test(value) || /^0x[0-9a-fA-F]+$/.test(value))
-    ) {
-      const blockNumber = BigInt(value);
-      if (blockNumber >= 0n) {
-        return blockNumber;
-      }
-    }
-  } catch {
-    // Fall through to the generic receipt error.
+async function verifyOfficialRegistry(publicClient) {
+  const chainId = await runStage(
+    () => publicClient.getChainId(),
+    "Ethereum Sepolia chain verification failed.",
+  );
+  if (chainId !== CHAIN_ID) {
+    throw new Error("Ethereum Sepolia chain verification failed.");
   }
 
-  return null;
-}
-
-function validateTransactionHash(hash, stage) {
-  if (!isTransactionHash(hash)) {
-    throw new Error(`${stage} transaction hash is invalid.`);
-  }
-}
-
-function validateReceipt(receipt, expectedHash, stage) {
-  if (!isSuccessfulReceipt(receipt)) {
-    throw new Error(`${stage} receipt was not successful.`);
-  }
-
+  const bytecode = await runStage(
+    () => publicClient.getCode({ address: REGISTRY_ADDRESS }),
+    "Official registry contract verification failed.",
+  );
   if (
-    !isTransactionHash(receipt?.transactionHash) ||
-    receipt.transactionHash.toLowerCase() !== expectedHash.toLowerCase()
+    typeof bytecode !== "string" ||
+    !/^0x(?:[0-9a-fA-F]{2})+$/.test(bytecode)
   ) {
-    throw new Error(
-      `${stage} receipt transaction hash is missing or mismatched.`,
-    );
+    throw new Error("Official registry contract is not deployed.");
   }
 
-  const blockNumber = parseBlockNumber(receipt.blockNumber);
-  if (blockNumber === null) {
-    throw new Error(`${stage} receipt block number is missing or invalid.`);
+  const version = await runStage(
+    () =>
+      publicClient.readContract({
+        address: REGISTRY_ADDRESS,
+        abi: ERC8004_ABI,
+        functionName: "getVersion",
+      }),
+    "Official registry version verification failed.",
+  );
+  if (version !== REGISTRY_VERSION) {
+    throw new Error("Official registry version is unsupported.");
   }
 
-  return blockNumber;
-}
-
-async function runStage(operation, errorMessage) {
-  try {
-    return await operation();
-  } catch {
-    throw new Error(errorMessage);
-  }
+  return chainId;
 }
 
 export function registryNamespace() {
-  return `eip155:${CHAIN_ID}:${REGISTRY_ADDRESS}`;
+  return registryNamespaceValue();
 }
 
 export function identityReference(agentId) {
-  return `${registryNamespace()}:${normalizeAgentId(agentId)}`;
+  return identityReferenceValue(agentId);
 }
 
 export function buildRegistrationDocument({
@@ -302,7 +223,7 @@ export function parseRegisteredAgentId(
   let ownerMatches = false;
 
   try {
-    ownerMatches = isAddressEqual(owner, expectedOwner);
+    ownerMatches = addressesEqual(owner, expectedOwner);
   } catch {
     ownerMatches = false;
   }
@@ -322,14 +243,16 @@ export function parseRegisteredAgentId(
   return normalizeAgentId(agentId);
 }
 
-export async function registerIdentity({
-  privateKey,
-  expectedAddress,
-  displayName,
-  rpcUrl = RPC_URL,
-  publicClient,
-  walletClient,
-}) {
+export class PartialRegistrationError extends Error {
+  constructor(recovery) {
+    super("ERC-8004 identity registration is incomplete.");
+    this.name = "PartialRegistrationError";
+    this.code = "ERC8004_PARTIAL_REGISTRATION";
+    this.recovery = Object.freeze(validateRecovery(recovery));
+  }
+}
+
+function createVerifiedAccount(privateKey, expectedAddress) {
   let account;
 
   try {
@@ -344,60 +267,297 @@ export async function registerIdentity({
     );
   }
 
-  let activePublicClient = publicClient;
-  let activeWalletClient = walletClient;
+  return account;
+}
+
+async function verifyFinalReadback({
+  account,
+  agentId,
+  finalURI,
+  publicClient,
+}) {
+  const owner = await runStage(
+    () =>
+      publicClient.readContract({
+        address: REGISTRY_ADDRESS,
+        abi: ERC8004_ABI,
+        functionName: "ownerOf",
+        args: [agentId],
+      }),
+    "Final owner read failed.",
+  );
+  if (!addressesEqual(owner, account.address)) {
+    throw new Error("Final owner verification failed.");
+  }
+
+  const agentWallet = await runStage(
+    () =>
+      publicClient.readContract({
+        address: REGISTRY_ADDRESS,
+        abi: ERC8004_ABI,
+        functionName: "getAgentWallet",
+        args: [agentId],
+      }),
+    "Final agent wallet read failed.",
+  );
+  if (!addressesEqual(agentWallet, account.address)) {
+    throw new Error("Final agent wallet verification failed.");
+  }
+
+  const tokenURI = await runStage(
+    () =>
+      publicClient.readContract({
+        address: REGISTRY_ADDRESS,
+        abi: ERC8004_ABI,
+        functionName: "tokenURI",
+        args: [agentId],
+      }),
+    "Final token URI read failed.",
+  );
+  if (tokenURI !== finalURI) {
+    throw new Error("Final token URI verification failed.");
+  }
+}
+
+function createCompletedEvidence({
+  document,
+  metadataBlock,
+  metadataTx,
+  recovery,
+}) {
+  return {
+    chainId: recovery.chainId,
+    registryAddress: recovery.registryAddress,
+    registryNamespace: recovery.registryNamespace,
+    identityReference: recovery.identityReference,
+    agentId: recovery.agentId,
+    address: recovery.address,
+    displayName: recovery.displayName,
+    registerTx: recovery.registerTx,
+    registerBlock: recovery.registerBlock,
+    metadataTx,
+    metadataBlock: metadataBlock.toString(10),
+    document,
+  };
+}
+
+export async function finalizeIdentityRegistration({
+  privateKey,
+  expectedAddress,
+  displayName,
+  recovery,
+  rpcUrl = RPC_URL,
+  publicClient,
+  walletClient,
+  onCheckpoint = async () => {},
+}) {
+  const account = createVerifiedAccount(privateKey, expectedAddress);
+  let checkpoint = validateRecovery(recovery, {
+    expectedAddress: account.address,
+    displayName,
+  });
 
   try {
-    activePublicClient ??= createPublicClient({
-      chain: sepolia,
-      transport: http(rpcUrl, {
-        retryCount: RPC_RETRY_COUNT,
-        timeout: RPC_TIMEOUT_MILLISECONDS,
-      }),
-    });
-    activeWalletClient ??= createWalletClient({
+    const {
+      activePublicClient,
+      activeWalletClient,
+    } = createRegistrationClients({
       account,
-      chain: sepolia,
-      transport: http(rpcUrl, {
-        retryCount: RPC_RETRY_COUNT,
-        timeout: RPC_TIMEOUT_MILLISECONDS,
-      }),
+      publicClient,
+      rpcUrl,
+      walletClient,
     });
+    await verifyOfficialRegistry(activePublicClient);
+
+    const agentId = normalizeAgentId(BigInt(checkpoint.agentId));
+    const document = buildRegistrationDocument({ displayName, agentId });
+    const finalURI = registrationDataUri(document);
+    let recoveredFromRevert = false;
+    let submissionRecovery = checkpoint;
+
+    if (checkpoint.metadataTx) {
+      const existingMetadataReceipt = await runStage(
+        () =>
+          activePublicClient.waitForTransactionReceipt({
+            hash: checkpoint.metadataTx,
+            confirmations: RECEIPT_CONFIRMATIONS,
+            timeout: RECEIPT_TIMEOUT_MILLISECONDS,
+          }),
+        "Metadata receipt wait failed.",
+      );
+      const existingMetadataBlock = validateReceiptEvidence(
+        existingMetadataReceipt,
+        checkpoint.metadataTx,
+        "Metadata",
+      );
+
+      if (isSuccessfulReceipt(existingMetadataReceipt)) {
+        await verifyFinalReadback({
+          account,
+          agentId,
+          finalURI,
+          publicClient: activePublicClient,
+        });
+        return createCompletedEvidence({
+          document,
+          metadataBlock: existingMetadataBlock,
+          metadataTx: checkpoint.metadataTx,
+          recovery: checkpoint,
+        });
+      }
+
+      if (!isRevertedReceipt(existingMetadataReceipt)) {
+        throw new Error("Metadata receipt status is invalid.");
+      }
+
+      recoveredFromRevert = true;
+      submissionRecovery = withoutMetadataTransaction(checkpoint);
+    }
+
+    const pendingNonceValue = await runStage(
+      () =>
+        activePublicClient.getTransactionCount({
+          address: account.address,
+          blockTag: "pending",
+        }),
+      "Metadata wallet nonce verification failed.",
+    );
+    const pendingNonce = normalizePendingNonce(pendingNonceValue);
+    if (
+      (!recoveredFromRevert && pendingNonce !== 1) ||
+      (recoveredFromRevert && pendingNonce < 2)
+    ) {
+      throw new Error("Metadata wallet nonce is unsafe.");
+    }
+
+    const metadataBalance = await runStage(
+      () => activePublicClient.getBalance({ address: account.address }),
+      "Metadata wallet balance verification failed.",
+    );
+    if (
+      typeof metadataBalance !== "bigint" ||
+      metadataBalance <= 0n
+    ) {
+      throw new Error(
+        "Metadata wallet balance must be greater than zero.",
+      );
+    }
+
+    const metadataFees = await estimateFeeQuote(
+      activePublicClient,
+      "Metadata",
+    );
+    const metadataGasEstimate = await runStage(
+      () =>
+        activePublicClient.estimateContractGas({
+          address: REGISTRY_ADDRESS,
+          abi: ERC8004_ABI,
+          functionName: "setAgentURI",
+          args: [agentId, finalURI],
+          account,
+        }),
+      "Metadata gas estimation failed.",
+    );
+    let metadataGas;
+
+    try {
+      metadataGas = addGasHeadroom(metadataGasEstimate);
+    } catch {
+      throw new Error("Metadata gas estimate is invalid.");
+    }
+
+    if (metadataBalance < metadataGas * metadataFees.unitPrice) {
+      throw new Error(
+        "Wallet balance cannot fund metadata finalization at current fees.",
+      );
+    }
+
+    const metadataTx = await runStage(
+      () =>
+        activeWalletClient.writeContract({
+          address: REGISTRY_ADDRESS,
+          abi: ERC8004_ABI,
+          functionName: "setAgentURI",
+          args: [agentId, finalURI],
+          account,
+          chainId: CHAIN_ID,
+          gas: metadataGas,
+          nonce: pendingNonce,
+          ...metadataFees.transactionFields,
+        }),
+      "Metadata transaction submission failed.",
+    );
+    validateTransactionHash(metadataTx, "Metadata");
+    checkpoint = withMetadataTransaction(
+      submissionRecovery,
+      metadataTx,
+    );
+    await invokeCheckpoint(onCheckpoint, checkpoint);
+
+    const metadataReceipt = await runStage(
+      () =>
+        activePublicClient.waitForTransactionReceipt({
+          hash: metadataTx,
+          confirmations: RECEIPT_CONFIRMATIONS,
+          timeout: RECEIPT_TIMEOUT_MILLISECONDS,
+        }),
+      "Metadata receipt wait failed.",
+    );
+    const metadataBlock = validateReceipt(
+      metadataReceipt,
+      metadataTx,
+      "Metadata",
+    );
+    await verifyFinalReadback({
+      account,
+      agentId,
+      finalURI,
+      publicClient: activePublicClient,
+    });
+
+    return createCompletedEvidence({
+      document,
+      metadataBlock,
+      metadataTx,
+      recovery: checkpoint,
+    });
+  } catch (error) {
+    if (error instanceof PartialRegistrationError) {
+      throw error;
+    }
+
+    throw new PartialRegistrationError(checkpoint);
+  }
+}
+
+export async function registerIdentity({
+  privateKey,
+  expectedAddress,
+  displayName,
+  rpcUrl = RPC_URL,
+  publicClient,
+  walletClient,
+  onCheckpoint = async () => {},
+}) {
+  const account = createVerifiedAccount(privateKey, expectedAddress);
+  let activePublicClient;
+  let activeWalletClient;
+
+  try {
+    ({
+      activePublicClient,
+      activeWalletClient,
+    } = createRegistrationClients({
+      account,
+      publicClient,
+      rpcUrl,
+      walletClient,
+    }));
   } catch {
     throw new Error("Registration clients could not be created.");
   }
 
-  const chainId = await runStage(
-    () => activePublicClient.getChainId(),
-    "Ethereum Sepolia chain verification failed.",
-  );
-  if (chainId !== CHAIN_ID) {
-    throw new Error("Ethereum Sepolia chain verification failed.");
-  }
-
-  const bytecode = await runStage(
-    () => activePublicClient.getCode({ address: REGISTRY_ADDRESS }),
-    "Official registry contract verification failed.",
-  );
-  if (
-    typeof bytecode !== "string" ||
-    !/^0x(?:[0-9a-fA-F]{2})+$/.test(bytecode)
-  ) {
-    throw new Error("Official registry contract is not deployed.");
-  }
-
-  const version = await runStage(
-    () =>
-      activePublicClient.readContract({
-        address: REGISTRY_ADDRESS,
-        abi: ERC8004_ABI,
-        functionName: "getVersion",
-      }),
-    "Official registry version verification failed.",
-  );
-  if (version !== REGISTRY_VERSION) {
-    throw new Error("Official registry version is unsupported.");
-  }
+  await verifyOfficialRegistry(activePublicClient);
 
   const nonce = await runStage(
     () =>
@@ -432,7 +592,11 @@ export async function registerIdentity({
     throw new Error("Initial registration metadata is invalid.");
   }
 
-  const registerGas = await runStage(
+  const registerFees = await estimateFeeQuote(
+    activePublicClient,
+    "Registration",
+  );
+  const registerGasEstimate = await runStage(
     () =>
       activePublicClient.estimateContractGas({
         address: REGISTRY_ADDRESS,
@@ -443,8 +607,21 @@ export async function registerIdentity({
       }),
     "Registration gas estimation failed.",
   );
-  if (typeof registerGas !== "bigint" || registerGas <= 0n) {
+  let registerGas;
+
+  try {
+    registerGas = addGasHeadroom(registerGasEstimate);
+  } catch {
     throw new Error("Registration gas estimate is invalid.");
+  }
+
+  const requiredRegisterBalance =
+    (registerGas + CONSERVATIVE_METADATA_GAS_RESERVE) *
+    registerFees.unitPrice;
+  if (balance < requiredRegisterBalance) {
+    throw new Error(
+      "Wallet balance cannot fund the registration and metadata fee envelope.",
+    );
   }
 
   const registerTx = await runStage(
@@ -455,7 +632,10 @@ export async function registerIdentity({
         functionName: "register",
         args: [initialURI],
         account,
+        chainId: CHAIN_ID,
         gas: registerGas,
+        nonce: 0,
+        ...registerFees.transactionFields,
       }),
     "Registration transaction submission failed.",
   );
@@ -465,7 +645,7 @@ export async function registerIdentity({
     () =>
       activePublicClient.waitForTransactionReceipt({
         hash: registerTx,
-        confirmations: 1,
+        confirmations: RECEIPT_CONFIRMATIONS,
         timeout: RECEIPT_TIMEOUT_MILLISECONDS,
       }),
     "Registration receipt wait failed.",
@@ -487,114 +667,31 @@ export async function registerIdentity({
     throw new Error("Registration event verification failed.");
   }
 
-  let document;
-  let finalURI;
+  const recovery = createRecovery({
+    address: account.address,
+    agentId,
+    displayName,
+    registerBlock,
+    registerTx,
+  });
 
   try {
-    document = buildRegistrationDocument({ displayName, agentId });
-    finalURI = registrationDataUri(document);
-  } catch {
-    throw new Error("Final registration metadata is invalid.");
+    await invokeCheckpoint(onCheckpoint, recovery);
+    return await finalizeIdentityRegistration({
+      privateKey,
+      expectedAddress,
+      displayName,
+      recovery,
+      rpcUrl,
+      publicClient: activePublicClient,
+      walletClient: activeWalletClient,
+      onCheckpoint,
+    });
+  } catch (error) {
+    if (error instanceof PartialRegistrationError) {
+      throw error;
+    }
+
+    throw new PartialRegistrationError(recovery);
   }
-
-  const metadataGas = await runStage(
-    () =>
-      activePublicClient.estimateContractGas({
-        address: REGISTRY_ADDRESS,
-        abi: ERC8004_ABI,
-        functionName: "setAgentURI",
-        args: [agentId, finalURI],
-        account,
-      }),
-    "Metadata gas estimation failed.",
-  );
-  if (typeof metadataGas !== "bigint" || metadataGas <= 0n) {
-    throw new Error("Metadata gas estimate is invalid.");
-  }
-
-  const metadataTx = await runStage(
-    () =>
-      activeWalletClient.writeContract({
-        address: REGISTRY_ADDRESS,
-        abi: ERC8004_ABI,
-        functionName: "setAgentURI",
-        args: [agentId, finalURI],
-        account,
-        gas: metadataGas,
-      }),
-    "Metadata transaction submission failed.",
-  );
-  validateTransactionHash(metadataTx, "Metadata");
-
-  const metadataReceipt = await runStage(
-    () =>
-      activePublicClient.waitForTransactionReceipt({
-        hash: metadataTx,
-        confirmations: 1,
-        timeout: RECEIPT_TIMEOUT_MILLISECONDS,
-      }),
-    "Metadata receipt wait failed.",
-  );
-  const metadataBlock = validateReceipt(
-    metadataReceipt,
-    metadataTx,
-    "Metadata",
-  );
-
-  const owner = await runStage(
-    () =>
-      activePublicClient.readContract({
-        address: REGISTRY_ADDRESS,
-        abi: ERC8004_ABI,
-        functionName: "ownerOf",
-        args: [agentId],
-      }),
-    "Final owner read failed.",
-  );
-  if (!addressesEqual(owner, account.address)) {
-    throw new Error("Final owner verification failed.");
-  }
-
-  const agentWallet = await runStage(
-    () =>
-      activePublicClient.readContract({
-        address: REGISTRY_ADDRESS,
-        abi: ERC8004_ABI,
-        functionName: "getAgentWallet",
-        args: [agentId],
-      }),
-    "Final agent wallet read failed.",
-  );
-  if (!addressesEqual(agentWallet, account.address)) {
-    throw new Error("Final agent wallet verification failed.");
-  }
-
-  const tokenURI = await runStage(
-    () =>
-      activePublicClient.readContract({
-        address: REGISTRY_ADDRESS,
-        abi: ERC8004_ABI,
-        functionName: "tokenURI",
-        args: [agentId],
-      }),
-    "Final token URI read failed.",
-  );
-  if (tokenURI !== finalURI) {
-    throw new Error("Final token URI verification failed.");
-  }
-
-  return {
-    chainId,
-    registryAddress: REGISTRY_ADDRESS,
-    registryNamespace: registryNamespace(),
-    identityReference: identityReference(agentId),
-    agentId: agentId.toString(10),
-    address: account.address,
-    displayName,
-    registerTx,
-    registerBlock: registerBlock.toString(10),
-    metadataTx,
-    metadataBlock: metadataBlock.toString(10),
-    document,
-  };
 }

@@ -3,13 +3,22 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  createWalletClient,
+  custom,
+  decodeFunctionData,
   encodeAbiParameters,
   encodeEventTopics,
+  keccak256,
+  parseTransaction,
 } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { sepolia } from "viem/chains";
 
 import {
   ERC8004_ABI,
+  PartialRegistrationError,
   buildRegistrationDocument,
+  finalizeIdentityRegistration,
   identityReference,
   parseRegisteredAgentId,
   registerIdentity,
@@ -29,6 +38,7 @@ const PRIVATE_KEY = `0x${"11".repeat(32)}`;
 const DERIVED_ADDRESS = "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A";
 const REGISTER_HASH = `0x${"33".repeat(32)}`;
 const METADATA_HASH = `0x${"44".repeat(32)}`;
+const RETRY_METADATA_HASH = `0x${"55".repeat(32)}`;
 const DESCRIPTION =
   "Ephemeral Clockchain Handshake testnet identity; registration does not establish capability or trust.";
 
@@ -71,9 +81,14 @@ function createRegisteredLog({
 
 function createFakeClients(options = {}) {
   const state = {
+    balanceReads: 0,
     calls: [],
+    feeReads: 0,
     finalURI: null,
     initialURI: null,
+    nonceReads: 0,
+    metadataReceipts: 0,
+    waits: 0,
   };
   const registerHash = option(options, "registerHash", REGISTER_HASH);
   const metadataHash = option(options, "metadataHash", METADATA_HASH);
@@ -123,8 +138,21 @@ function createFakeClients(options = {}) {
   }
 
   function createMetadataReceipt(hash) {
+    const metadataStatuses = option(
+      options,
+      "metadataStatuses",
+      [option(options, "metadataStatus", "success")],
+    );
+    const status =
+      metadataStatuses[
+        Math.min(
+          state.metadataReceipts,
+          metadataStatuses.length - 1,
+        )
+      ];
+    state.metadataReceipts += 1;
     return {
-      status: option(options, "metadataStatus", "success"),
+      status,
       transactionHash: option(
         options,
         "metadataReceiptHash",
@@ -152,6 +180,9 @@ function createFakeClients(options = {}) {
 
     async readContract(parameters) {
       record(`read:${parameters.functionName}`, parameters);
+      if (options.readError === parameters.functionName) {
+        throw new Error(`Sensitive RPC failure ${PRIVATE_KEY}`);
+      }
 
       switch (parameters.functionName) {
         case "getVersion":
@@ -169,29 +200,88 @@ function createFakeClients(options = {}) {
 
     async getTransactionCount(parameters) {
       record("getTransactionCount", parameters);
-      return option(options, "nonce", 0);
+      if (Object.hasOwn(options, "nonce")) {
+        return options.nonce;
+      }
+
+      const nonces = option(options, "nonces", [0, 1]);
+      const nonce = nonces[Math.min(state.nonceReads, nonces.length - 1)];
+      state.nonceReads += 1;
+      return nonce;
     },
 
     async getBalance(parameters) {
       record("getBalance", parameters);
-      return option(options, "balance", 1_000_000_000_000_000n);
+      if (Object.hasOwn(options, "balance")) {
+        return options.balance;
+      }
+
+      const balances = option(
+        options,
+        "balances",
+        [1_000_000_000_000_000n, 1_000_000_000_000_000n],
+      );
+      const balance =
+        balances[Math.min(state.balanceReads, balances.length - 1)];
+      state.balanceReads += 1;
+      return balance;
+    },
+
+    async estimateFeesPerGas(parameters) {
+      record("estimateFeesPerGas", parameters);
+      if (
+        options.feeErrorAt === "registration" &&
+        state.feeReads === 0
+      ) {
+        throw new Error(`Sensitive fee failure ${PRIVATE_KEY}`);
+      }
+      if (
+        options.feeErrorAt === "metadata" &&
+        state.feeReads > 0
+      ) {
+        throw new Error(`Sensitive fee failure ${PRIVATE_KEY}`);
+      }
+      const feeQuotes = option(options, "feeQuotes", [
+        { maxFeePerGas: 2n, maxPriorityFeePerGas: 1n },
+        { maxFeePerGas: 2n, maxPriorityFeePerGas: 1n },
+      ]);
+      const fees =
+        feeQuotes[Math.min(state.feeReads, feeQuotes.length - 1)];
+      state.feeReads += 1;
+      return fees;
     },
 
     async estimateContractGas(parameters) {
       record(`estimate:${parameters.functionName}`, parameters);
       if (parameters.functionName === "register") {
+        if (options.registerEstimateError) {
+          throw new Error(`Sensitive estimate failure ${PRIVATE_KEY}`);
+        }
         return option(options, "registerGas", 180_000n);
       }
       if (parameters.functionName === "setAgentURI") {
+        if (options.metadataEstimateError) {
+          throw new Error(`Sensitive estimate failure ${PRIVATE_KEY}`);
+        }
         return option(options, "metadataGas", 90_000n);
       }
       throw new Error("Unexpected estimateContractGas call.");
     },
 
     async waitForTransactionReceipt(parameters) {
+      const firstWaitStage = option(options, "firstWaitStage", "register");
       const stage =
-        parameters.hash === registerHash ? "register" : "metadata";
+        state.waits === 0
+          ? firstWaitStage
+          : "metadata";
+      state.waits += 1;
       record(`wait:${stage}`, parameters);
+      if (
+        (stage === "register" && options.registerWaitError) ||
+        (stage === "metadata" && options.metadataWaitError)
+      ) {
+        throw new Error(`Sensitive receipt failure ${PRIVATE_KEY}`);
+      }
       return stage === "register"
         ? createRegisterReceipt(parameters.hash)
         : createMetadataReceipt(parameters.hash);
@@ -203,10 +293,16 @@ function createFakeClients(options = {}) {
       record(`write:${parameters.functionName}`, parameters);
 
       if (parameters.functionName === "register") {
+        if (options.registerWriteError) {
+          throw new Error(`Sensitive write failure ${PRIVATE_KEY}`);
+        }
         state.initialURI = parameters.args[0];
         return registerHash;
       }
       if (parameters.functionName === "setAgentURI") {
+        if (options.metadataWriteError) {
+          throw new Error(`Sensitive write failure ${PRIVATE_KEY}`);
+        }
         state.finalURI = parameters.args[1];
         return metadataHash;
       }
@@ -250,6 +346,32 @@ function decodeRegistrationDataURI(uri) {
   );
 }
 
+function expectedRecovery(overrides = {}) {
+  return {
+    schema: "clockchain.handshake-registration-recovery/v1",
+    chainId: 11_155_111,
+    registryAddress: REGISTRY_ADDRESS,
+    registryNamespace: REGISTRY_NAMESPACE,
+    identityReference: `${REGISTRY_NAMESPACE}:42`,
+    agentId: "42",
+    address: DERIVED_ADDRESS,
+    displayName: "Billy",
+    registerTx: REGISTER_HASH,
+    registerBlock: "123456",
+    ...overrides,
+  };
+}
+
+function assertPublicPartialError(error, expected) {
+  assert.ok(error instanceof PartialRegistrationError);
+  assert.equal(error.code, "ERC8004_PARTIAL_REGISTRATION");
+  assert.deepEqual(error.recovery, expected);
+  assert.doesNotThrow(() => JSON.stringify(error.recovery));
+  assert.equal(JSON.stringify(error.recovery).includes(PRIVATE_KEY), false);
+  assert.equal(`${error.message}\n${error.stack ?? ""}`.includes(PRIVATE_KEY), false);
+  assert.equal(Object.hasOwn(error, "cause"), false);
+}
+
 async function runWithFakeClients(fake, overrides = {}) {
   return registerIdentity({
     privateKey: PRIVATE_KEY,
@@ -259,6 +381,39 @@ async function runWithFakeClients(fake, overrides = {}) {
     walletClient: fake.walletClient,
     ...overrides,
   });
+}
+
+function createRealSigningWallet(fake) {
+  const rawTransactions = [];
+  const walletClient = createWalletClient({
+    account: privateKeyToAccount(PRIVATE_KEY),
+    chain: sepolia,
+    transport: custom({
+      async request({ method, params }) {
+        if (method !== "eth_sendRawTransaction") {
+          throw new Error(`Unexpected wallet RPC method: ${method}`);
+        }
+
+        const rawTransaction = params[0];
+        const transaction = parseTransaction(rawTransaction);
+        const decoded = decodeFunctionData({
+          abi: ERC8004_ABI,
+          data: transaction.data,
+        });
+        rawTransactions.push(rawTransaction);
+
+        if (decoded.functionName === "register") {
+          fake.state.initialURI = decoded.args[0];
+        } else if (decoded.functionName === "setAgentURI") {
+          fake.state.finalURI = decoded.args[1];
+        }
+
+        return keccak256(rawTransaction);
+      },
+    }),
+  });
+
+  return { rawTransactions, walletClient };
 }
 
 test("builds exact official identity references", () => {
@@ -467,9 +622,16 @@ test("registers then finalizes metadata in strict order and returns public JSON 
       "read:getVersion",
       "getTransactionCount",
       "getBalance",
+      "estimateFeesPerGas",
       "estimate:register",
       "write:register",
       "wait:register",
+      "getChainId",
+      "getCode",
+      "read:getVersion",
+      "getTransactionCount",
+      "getBalance",
+      "estimateFeesPerGas",
       "estimate:setAgentURI",
       "write:setAgentURI",
       "wait:metadata",
@@ -505,14 +667,20 @@ test("registers then finalizes metadata in strict order and returns public JSON 
   assert.equal(registerEstimate.address, REGISTRY_ADDRESS);
   assert.equal(registerEstimate.account.address, DERIVED_ADDRESS);
   assert.deepEqual(registerEstimate.args, [fake.state.initialURI]);
-  assert.equal(registerWrite.gas, 180_000n);
+  assert.equal(registerWrite.gas, 226_000n);
   assert.equal(registerWrite.account.address, DERIVED_ADDRESS);
+  assert.equal(registerWrite.nonce, 0);
+  assert.equal(registerWrite.maxFeePerGas, 2n);
+  assert.equal(registerWrite.maxPriorityFeePerGas, 1n);
   assert.deepEqual(registerWrite.args, registerEstimate.args);
   assert.equal(metadataEstimate.address, REGISTRY_ADDRESS);
   assert.equal(metadataEstimate.account.address, DERIVED_ADDRESS);
   assert.deepEqual(metadataEstimate.args, [42n, fake.state.finalURI]);
-  assert.equal(metadataWrite.gas, 90_000n);
+  assert.equal(metadataWrite.gas, 118_000n);
   assert.equal(metadataWrite.account.address, DERIVED_ADDRESS);
+  assert.equal(metadataWrite.nonce, 1);
+  assert.equal(metadataWrite.maxFeePerGas, 2n);
+  assert.equal(metadataWrite.maxPriorityFeePerGas, 1n);
   assert.deepEqual(metadataWrite.args, metadataEstimate.args);
 
   const waits = fake.state.calls.filter(({ name }) => name.startsWith("wait:"));
@@ -521,12 +689,12 @@ test("registers then finalizes metadata in strict order and returns public JSON 
     [
       {
         hash: REGISTER_HASH,
-        confirmations: 1,
+        confirmations: 2,
         timeout: 120_000,
       },
       {
         hash: METADATA_HASH,
-        confirmations: 1,
+        confirmations: 2,
         timeout: 120_000,
       },
     ],
@@ -548,6 +716,538 @@ test("registers then finalizes metadata in strict order and returns public JSON 
   });
   assert.doesNotThrow(() => JSON.stringify(evidence));
   assert.equal(JSON.stringify(evidence).includes(PRIVATE_KEY), false);
+});
+
+test("rejects a positive balance that cannot fund the conservative two-transaction envelope", async () => {
+  const bufferedRegisterGas = 226_000n;
+  const conservativeMetadataReserve = 250_000n;
+  const maxFeePerGas = 2n;
+  const requiredBalance =
+    (bufferedRegisterGas + conservativeMetadataReserve) * maxFeePerGas;
+  const fake = createFakeClients({ balance: requiredBalance - 1n });
+  const error = await captureRejection(() => runWithFakeClients(fake));
+
+  assert.match(error.message, /balance|fee/i);
+  assert.equal(
+    fake.state.calls.some(({ name }) => name === "write:register"),
+    false,
+  );
+});
+
+test("adds deterministic gas headroom and explicit fee and nonce fields to both writes", async () => {
+  const fake = createFakeClients();
+  await runWithFakeClients(fake);
+
+  const registerWrite = fake.state.calls.find(
+    ({ name }) => name === "write:register",
+  ).parameters;
+  const metadataWrite = fake.state.calls.find(
+    ({ name }) => name === "write:setAgentURI",
+  ).parameters;
+  assert.deepEqual(
+    {
+      chainId: registerWrite.chainId,
+      gas: registerWrite.gas,
+      maxFeePerGas: registerWrite.maxFeePerGas,
+      maxPriorityFeePerGas: registerWrite.maxPriorityFeePerGas,
+      nonce: registerWrite.nonce,
+    },
+    {
+      chainId: 11_155_111,
+      gas: 226_000n,
+      maxFeePerGas: 2n,
+      maxPriorityFeePerGas: 1n,
+      nonce: 0,
+    },
+  );
+  assert.deepEqual(
+    {
+      chainId: metadataWrite.chainId,
+      gas: metadataWrite.gas,
+      maxFeePerGas: metadataWrite.maxFeePerGas,
+      maxPriorityFeePerGas: metadataWrite.maxPriorityFeePerGas,
+      nonce: metadataWrite.nonce,
+    },
+    {
+      chainId: 11_155_111,
+      gas: 118_000n,
+      maxFeePerGas: 2n,
+      maxPriorityFeePerGas: 1n,
+      nonce: 1,
+    },
+  );
+});
+
+test("uses validated legacy gas prices for both explicitly signed writes", async () => {
+  const fake = createFakeClients({
+    feeQuotes: [{ gasPrice: 3n }, { gasPrice: 4n }],
+  });
+  await runWithFakeClients(fake);
+
+  const registerWrite = fake.state.calls.find(
+    ({ name }) => name === "write:register",
+  ).parameters;
+  const metadataWrite = fake.state.calls.find(
+    ({ name }) => name === "write:setAgentURI",
+  ).parameters;
+  assert.deepEqual(
+    {
+      gasPrice: registerWrite.gasPrice,
+      maxFeePerGas: registerWrite.maxFeePerGas,
+      maxPriorityFeePerGas: registerWrite.maxPriorityFeePerGas,
+    },
+    {
+      gasPrice: 3n,
+      maxFeePerGas: undefined,
+      maxPriorityFeePerGas: undefined,
+    },
+  );
+  assert.deepEqual(
+    {
+      gasPrice: metadataWrite.gasPrice,
+      maxFeePerGas: metadataWrite.maxFeePerGas,
+      maxPriorityFeePerGas: metadataWrite.maxPriorityFeePerGas,
+    },
+    {
+      gasPrice: 4n,
+      maxFeePerGas: undefined,
+      maxPriorityFeePerGas: undefined,
+    },
+  );
+});
+
+test("rejects malformed fee quotes before their corresponding write", async () => {
+  const invalidRegistration = createFakeClients({
+    feeQuotes: [
+      { maxFeePerGas: 2n, maxPriorityFeePerGas: 3n },
+    ],
+  });
+  const registrationError = await captureRejection(() =>
+    runWithFakeClients(invalidRegistration),
+  );
+  assert.match(registrationError.message, /fee quote/i);
+  assert.equal(
+    invalidRegistration.state.calls.some(
+      ({ name }) => name === "write:register",
+    ),
+    false,
+  );
+
+  const invalidMetadata = createFakeClients({
+    feeQuotes: [
+      { maxFeePerGas: 2n, maxPriorityFeePerGas: 1n },
+      {
+        gasPrice: 2n,
+        maxFeePerGas: 2n,
+        maxPriorityFeePerGas: 1n,
+      },
+    ],
+  });
+  const metadataError = await captureRejection(() =>
+    runWithFakeClients(invalidMetadata),
+  );
+  assertPublicPartialError(metadataError, expectedRecovery());
+  assert.equal(
+    invalidMetadata.state.calls.some(
+      ({ name }) => name === "write:setAgentURI",
+    ),
+    false,
+  );
+});
+
+test("signs and decodes both contract writes through a real viem wallet transport", async () => {
+  const fake = createFakeClients();
+  const { rawTransactions, walletClient } = createRealSigningWallet(fake);
+
+  await registerIdentity({
+    privateKey: PRIVATE_KEY,
+    expectedAddress: DERIVED_ADDRESS,
+    displayName: "Billy",
+    publicClient: fake.publicClient,
+    walletClient,
+  });
+
+  assert.equal(rawTransactions.length, 2);
+  const transactions = rawTransactions.map((rawTransaction) =>
+    parseTransaction(rawTransaction),
+  );
+  const calls = transactions.map((transaction) =>
+    decodeFunctionData({
+      abi: ERC8004_ABI,
+      data: transaction.data,
+    }),
+  );
+
+  assert.deepEqual(
+    transactions.map(
+      ({
+        chainId,
+        gas,
+        maxFeePerGas,
+        maxPriorityFeePerGas,
+        nonce,
+        to,
+      }) => ({
+        chainId,
+        gas,
+        maxFeePerGas,
+        maxPriorityFeePerGas,
+        nonce,
+        to: to.toLowerCase(),
+      }),
+    ),
+    [
+      {
+        chainId: 11_155_111,
+        gas: 226_000n,
+        maxFeePerGas: 2n,
+        maxPriorityFeePerGas: 1n,
+        nonce: 0,
+        to: REGISTRY_ADDRESS.toLowerCase(),
+      },
+      {
+        chainId: 11_155_111,
+        gas: 118_000n,
+        maxFeePerGas: 2n,
+        maxPriorityFeePerGas: 1n,
+        nonce: 1,
+        to: REGISTRY_ADDRESS.toLowerCase(),
+      },
+    ],
+  );
+  assert.deepEqual(calls, [
+    {
+      functionName: "register",
+      args: [fake.state.initialURI],
+    },
+    {
+      functionName: "setAgentURI",
+      args: [42n, fake.state.finalURI],
+    },
+  ]);
+  assert.deepEqual(
+    decodeRegistrationDataURI(fake.state.initialURI).registrations,
+    [],
+  );
+  assert.deepEqual(
+    decodeRegistrationDataURI(fake.state.finalURI).registrations,
+    [{ agentRegistry: REGISTRY_NAMESPACE, agentId: 42 }],
+  );
+});
+
+test("returns a secret-free public partial checkpoint for every post-registration failure stage", async () => {
+  const scenarios = [
+    {
+      name: "registration checkpoint callback",
+      options: {},
+      onCheckpoint: async () => {
+        throw new Error(`Sensitive checkpoint failure ${PRIVATE_KEY}`);
+      },
+      expected: expectedRecovery(),
+    },
+    {
+      name: "metadata balance",
+      options: {
+        balances: [1_000_000_000_000_000n, 0n],
+      },
+      expected: expectedRecovery(),
+    },
+    {
+      name: "metadata fee quote",
+      options: { feeErrorAt: "metadata" },
+      expected: expectedRecovery(),
+    },
+    {
+      name: "metadata estimate",
+      options: { metadataEstimateError: true },
+      expected: expectedRecovery(),
+    },
+    {
+      name: "metadata write",
+      options: { metadataWriteError: true },
+      expected: expectedRecovery(),
+    },
+    {
+      name: "metadata checkpoint callback",
+      options: {},
+      onCheckpoint: async (checkpoint) => {
+        if (checkpoint.metadataTx) {
+          throw new Error(`Sensitive checkpoint failure ${PRIVATE_KEY}`);
+        }
+      },
+      expected: expectedRecovery({ metadataTx: METADATA_HASH }),
+    },
+    {
+      name: "metadata wait",
+      options: { metadataWaitError: true },
+      expected: expectedRecovery({ metadataTx: METADATA_HASH }),
+    },
+    {
+      name: "final readback",
+      options: { finalOwner: FOREIGN_ADDRESS },
+      expected: expectedRecovery({ metadataTx: METADATA_HASH }),
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const fake = createFakeClients(scenario.options);
+    const error = await captureRejection(() =>
+      runWithFakeClients(fake, {
+        onCheckpoint: scenario.onCheckpoint,
+      }),
+    );
+
+    assertPublicPartialError(error, scenario.expected);
+  }
+});
+
+test("checkpoints immediately after registration and after metadata submission", async () => {
+  const fake = createFakeClients();
+  const checkpoints = [];
+
+  await runWithFakeClients(fake, {
+    onCheckpoint: async (checkpoint) => {
+      const stage = checkpoint.metadataTx ? "metadata" : "registration";
+      fake.state.calls.push({ name: `checkpoint:${stage}` });
+      checkpoints.push(structuredClone(checkpoint));
+    },
+  });
+
+  assert.deepEqual(checkpoints, [
+    expectedRecovery(),
+    expectedRecovery({ metadataTx: METADATA_HASH }),
+  ]);
+  const names = fake.state.calls.map(({ name }) => name);
+  assert.ok(
+    names.indexOf("wait:register") <
+      names.indexOf("checkpoint:registration"),
+  );
+  assert.ok(
+    names.indexOf("checkpoint:registration") <
+      names.lastIndexOf("getTransactionCount"),
+  );
+  assert.ok(
+    names.indexOf("write:setAgentURI") <
+      names.indexOf("checkpoint:metadata"),
+  );
+  assert.ok(
+    names.indexOf("checkpoint:metadata") <
+      names.indexOf("wait:metadata"),
+  );
+});
+
+test("resumes a clean public checkpoint without registering again", async () => {
+  const firstFake = createFakeClients({
+    balances: [1_000_000_000_000_000n, 0n],
+  });
+  const partial = await captureRejection(() =>
+    runWithFakeClients(firstFake),
+  );
+  assertPublicPartialError(partial, expectedRecovery());
+
+  const resumedFake = createFakeClients({
+    firstWaitStage: "metadata",
+    nonces: [1],
+  });
+  const evidence = await finalizeIdentityRegistration({
+    privateKey: PRIVATE_KEY,
+    expectedAddress: DERIVED_ADDRESS,
+    displayName: "Billy",
+    recovery: partial.recovery,
+    publicClient: resumedFake.publicClient,
+    walletClient: resumedFake.walletClient,
+  });
+
+  assert.deepEqual(evidence, {
+    chainId: 11_155_111,
+    registryAddress: REGISTRY_ADDRESS,
+    registryNamespace: REGISTRY_NAMESPACE,
+    identityReference: `${REGISTRY_NAMESPACE}:42`,
+    agentId: "42",
+    address: DERIVED_ADDRESS,
+    displayName: "Billy",
+    registerTx: REGISTER_HASH,
+    registerBlock: "123456",
+    metadataTx: METADATA_HASH,
+    metadataBlock: "123457",
+    document: buildRegistrationDocument({
+      displayName: "Billy",
+      agentId: 42n,
+    }),
+  });
+  assert.equal(
+    resumedFake.state.calls.some(({ name }) => name === "write:register"),
+    false,
+  );
+  assert.equal(
+    resumedFake.state.calls.filter(
+      ({ name }) => name === "write:setAgentURI",
+    ).length,
+    1,
+  );
+});
+
+test("waits and verifies an existing metadata transaction before any resubmission", async () => {
+  const finalURI = registrationDataUri(
+    buildRegistrationDocument({ displayName: "Billy", agentId: 42n }),
+  );
+  const fake = createFakeClients({
+    finalTokenURI: finalURI,
+    firstWaitStage: "metadata",
+  });
+  const evidence = await finalizeIdentityRegistration({
+    privateKey: PRIVATE_KEY,
+    expectedAddress: DERIVED_ADDRESS,
+    displayName: "Billy",
+    recovery: expectedRecovery({ metadataTx: METADATA_HASH }),
+    publicClient: fake.publicClient,
+    walletClient: fake.walletClient,
+  });
+
+  assert.equal(evidence.metadataTx, METADATA_HASH);
+  assert.equal(evidence.metadataBlock, "123457");
+  assert.equal(
+    fake.state.calls.some(({ name }) => name.startsWith("write:")),
+    false,
+  );
+  assert.equal(
+    fake.state.calls.some(({ name }) => name.startsWith("estimate:")),
+    false,
+  );
+  assert.ok(
+    fake.state.calls.some(({ name }) => name === "wait:metadata"),
+  );
+});
+
+test("resubmits metadata only after the checkpoint transaction is confirmed reverted", async () => {
+  const fake = createFakeClients({
+    firstWaitStage: "metadata",
+    metadataHash: RETRY_METADATA_HASH,
+    metadataStatuses: ["reverted", "success"],
+    nonces: [2],
+  });
+  const checkpoints = [];
+  const evidence = await finalizeIdentityRegistration({
+    privateKey: PRIVATE_KEY,
+    expectedAddress: DERIVED_ADDRESS,
+    displayName: "Billy",
+    recovery: expectedRecovery({ metadataTx: METADATA_HASH }),
+    publicClient: fake.publicClient,
+    walletClient: fake.walletClient,
+    onCheckpoint: async (checkpoint) => {
+      checkpoints.push(structuredClone(checkpoint));
+    },
+  });
+
+  const names = fake.state.calls.map(({ name }) => name);
+  assert.ok(
+    names.indexOf("wait:metadata") <
+      names.indexOf("write:setAgentURI"),
+  );
+  assert.equal(
+    fake.state.calls.find(
+      ({ name }) => name === "write:setAgentURI",
+    ).parameters.nonce,
+    2,
+  );
+  assert.deepEqual(checkpoints, [
+    expectedRecovery({ metadataTx: RETRY_METADATA_HASH }),
+  ]);
+  assert.equal(evidence.metadataTx, RETRY_METADATA_HASH);
+});
+
+test("retains a confirmed reverted hash until a replacement hash exists", async () => {
+  const fake = createFakeClients({
+    firstWaitStage: "metadata",
+    metadataStatuses: ["reverted"],
+    metadataWriteError: true,
+    nonces: [2],
+  });
+  const checkpoints = [];
+  const recovery = expectedRecovery({ metadataTx: METADATA_HASH });
+  const error = await captureRejection(() =>
+    finalizeIdentityRegistration({
+      privateKey: PRIVATE_KEY,
+      expectedAddress: DERIVED_ADDRESS,
+      displayName: "Billy",
+      recovery,
+      publicClient: fake.publicClient,
+      walletClient: fake.walletClient,
+      onCheckpoint: async (checkpoint) => {
+        checkpoints.push(structuredClone(checkpoint));
+      },
+    }),
+  );
+
+  assertPublicPartialError(error, recovery);
+  assert.deepEqual(checkpoints, []);
+  assert.ok(
+    fake.state.calls.indexOf(
+      fake.state.calls.find(({ name }) => name === "wait:metadata"),
+    ) <
+      fake.state.calls.indexOf(
+        fake.state.calls.find(
+          ({ name }) => name === "write:setAgentURI",
+        ),
+      ),
+  );
+});
+
+test("does not guess when a clean checkpoint has an unknown pending nonce", async () => {
+  const fake = createFakeClients({
+    firstWaitStage: "metadata",
+    nonces: [2],
+  });
+  const error = await captureRejection(() =>
+    finalizeIdentityRegistration({
+      privateKey: PRIVATE_KEY,
+      expectedAddress: DERIVED_ADDRESS,
+      displayName: "Billy",
+      recovery: expectedRecovery(),
+      publicClient: fake.publicClient,
+      walletClient: fake.walletClient,
+    }),
+  );
+
+  assertPublicPartialError(error, expectedRecovery());
+  assert.equal(
+    fake.state.calls.some(({ name }) => name.startsWith("write:")),
+    false,
+  );
+});
+
+test("strictly validates recovery schema and caller identity before RPC calls", async () => {
+  const invalidRecoveries = [
+    { ...expectedRecovery(), extra: true },
+    { ...expectedRecovery(), chainId: 1 },
+    { ...expectedRecovery(), registryAddress: FOREIGN_ADDRESS },
+    { ...expectedRecovery(), registryNamespace: "eip155:1:wrong" },
+    { ...expectedRecovery(), identityReference: `${REGISTRY_NAMESPACE}:41` },
+    { ...expectedRecovery(), agentId: "042" },
+    { ...expectedRecovery(), address: FOREIGN_ADDRESS },
+    { ...expectedRecovery(), displayName: "Iris" },
+    { ...expectedRecovery(), registerTx: "0x1234" },
+    { ...expectedRecovery(), registerBlock: "0x123456" },
+    { ...expectedRecovery(), metadataTx: "0x1234" },
+  ];
+
+  for (const recovery of invalidRecoveries) {
+    const fake = createFakeClients({ firstWaitStage: "metadata" });
+    const error = await captureRejection(() =>
+      finalizeIdentityRegistration({
+        privateKey: PRIVATE_KEY,
+        expectedAddress: DERIVED_ADDRESS,
+        displayName: "Billy",
+        recovery,
+        publicClient: fake.publicClient,
+        walletClient: fake.walletClient,
+      }),
+    );
+
+    assert.equal(error instanceof PartialRegistrationError, false);
+    assert.match(error.message, /recovery/i);
+    assert.deepEqual(fake.state.calls, []);
+  }
 });
 
 test("rejects malformed keys and derived-address mismatches without key leakage", async () => {
@@ -666,7 +1366,10 @@ test("rejects reverted first and second transaction receipts", async () => {
   const secondError = await captureRejection(() =>
     runWithFakeClients(secondFake),
   );
-  assert.match(secondError.message, /metadata receipt/i);
+  assertPublicPartialError(
+    secondError,
+    expectedRecovery({ metadataTx: METADATA_HASH }),
+  );
   assert.deepEqual(
     secondFake.state.calls.slice(-3).map(({ name }) => name),
     [
@@ -700,31 +1403,48 @@ test("rejects foreign, duplicate, wrong-owner, wrong-URI, and malformed registra
   }
 });
 
-test("rejects final owner, agent wallet, and token URI mismatches", async () => {
-  for (const [options, pattern] of [
-    [{ finalOwner: FOREIGN_ADDRESS }, /owner/i],
-    [{ finalWallet: FOREIGN_ADDRESS }, /agent wallet/i],
-    [{ finalTokenURI: `${FIXTURE_URI}-wrong` }, /token uri/i],
+test("returns partial recovery for final owner, agent wallet, and token URI mismatches", async () => {
+  for (const options of [
+    { finalOwner: FOREIGN_ADDRESS },
+    { finalWallet: FOREIGN_ADDRESS },
+    { finalTokenURI: `${FIXTURE_URI}-wrong` },
   ]) {
     const fake = createFakeClients(options);
     const error = await captureRejection(() => runWithFakeClients(fake));
 
-    assert.match(error.message, pattern);
+    assertPublicPartialError(
+      error,
+      expectedRecovery({ metadataTx: METADATA_HASH }),
+    );
   }
 });
 
 test("rejects missing transaction hashes and receipt evidence fields", async () => {
   for (const options of [
     { registerHash: undefined },
-    { metadataHash: undefined },
     { registerReceiptHash: undefined },
-    { metadataReceiptHash: undefined },
     { registerBlockNumber: undefined },
-    { metadataBlockNumber: undefined },
   ]) {
     const fake = createFakeClients(options);
     const error = await captureRejection(() => runWithFakeClients(fake));
 
     assert.match(error.message, /transaction|receipt/i);
+  }
+
+  for (const [options, expected] of [
+    [{ metadataHash: undefined }, expectedRecovery()],
+    [
+      { metadataReceiptHash: undefined },
+      expectedRecovery({ metadataTx: METADATA_HASH }),
+    ],
+    [
+      { metadataBlockNumber: undefined },
+      expectedRecovery({ metadataTx: METADATA_HASH }),
+    ],
+  ]) {
+    const fake = createFakeClients(options);
+    const error = await captureRejection(() => runWithFakeClients(fake));
+
+    assertPublicPartialError(error, expected);
   }
 });
