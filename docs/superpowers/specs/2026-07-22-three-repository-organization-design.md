@@ -2,7 +2,20 @@
 
 Date: 2026-07-22
 
-Status: Approved direction, awaiting written-spec review
+Status: Approved direction; extraction is gated by the turnkey demo
+
+## Execution-order addendum
+
+The repository boundaries remain approved, but product truth and the live
+stakeholder exercise now come first. Before Handshake UI code is extracted from
+Research, this repository must complete the CLI-first design in
+`2026-07-22-turnkey-handshake-demo-design.md`: official ERC-8004 identity
+registration, direct Clockchain receipt creation and verification, the public
+copy/paste prompt, and clean Codex/Claude acceptance runs.
+
+This reverses the earlier assumption that page extraction is Phase 1. The first
+implementation milestone is a real protocol exercise with no AgentDash; UI
+extraction begins only after its facts and evidence format are accepted.
 
 ## Outcome
 
