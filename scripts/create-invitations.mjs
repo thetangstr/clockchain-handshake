@@ -24,6 +24,14 @@ const WRITE_FLAGS =
   fsConstants.O_CREAT |
   fsConstants.O_EXCL |
   (fsConstants.O_NOFOLLOW ?? 0);
+const DEFAULT_FILE_SYSTEM = Object.freeze({
+  link,
+  lstat,
+  mkdir,
+  open,
+  rename,
+  unlink,
+});
 
 class InvitationCreationError extends Error {
   constructor() {
@@ -128,9 +136,9 @@ function isSafeDisplayName(value) {
   );
 }
 
-async function inspectDirectory(path) {
+async function inspectDirectory(path, fileSystem) {
   try {
-    const metadata = await lstat(path);
+    const metadata = await fileSystem.lstat(path);
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
       fail();
     }
@@ -146,35 +154,42 @@ async function inspectDirectory(path) {
   }
 }
 
-async function prepareDirectories(publicDirectory, secretDirectory) {
-  const publicExists = await inspectDirectory(publicDirectory);
+async function prepareDirectories(
+  publicDirectory,
+  secretDirectory,
+  fileSystem,
+) {
+  const publicExists = await inspectDirectory(
+    publicDirectory,
+    fileSystem,
+  );
   const secretExists =
     secretDirectory === publicDirectory
       ? publicExists
-      : await inspectDirectory(secretDirectory);
+      : await inspectDirectory(secretDirectory, fileSystem);
 
   if (!publicExists) {
-    await createDirectory(publicDirectory, 0o755);
+    await createDirectory(publicDirectory, 0o755, fileSystem);
   }
   if (!secretExists && secretDirectory !== publicDirectory) {
-    await createDirectory(secretDirectory, 0o700);
+    await createDirectory(secretDirectory, 0o700, fileSystem);
   }
 }
 
-async function createDirectory(path, mode) {
+async function createDirectory(path, mode, fileSystem) {
   try {
-    await mkdir(path, { recursive: true, mode });
+    await fileSystem.mkdir(path, { recursive: true, mode });
   } catch {
     fail();
   }
-  if (!(await inspectDirectory(path))) {
+  if (!(await inspectDirectory(path, fileSystem))) {
     fail();
   }
 }
 
-async function inspectTarget(path, force) {
+async function inspectTarget(path, force, fileSystem) {
   try {
-    const metadata = await lstat(path);
+    const metadata = await fileSystem.lstat(path);
     if (
       !force ||
       !metadata.isFile() ||
@@ -194,37 +209,38 @@ async function inspectTarget(path, force) {
   }
 }
 
-async function preflightTargets(targets, force) {
+async function preflightTargets(targets, force, fileSystem) {
   for (const target of targets) {
-    await inspectTarget(target, force);
+    target.existed = await inspectTarget(
+      target.path,
+      force,
+      fileSystem,
+    );
   }
 }
 
-function temporaryPath(path) {
+function temporaryPath(path, purpose) {
   return join(
     dirname(path),
-    `.${basename(path)}.${process.pid}.${randomBytes(12).toString("hex")}.tmp`,
+    `.${basename(path)}.${process.pid}.${randomBytes(12).toString("hex")}.${purpose}`,
   );
 }
 
-async function atomicWrite(path, contents, { force, mode }) {
-  const temporary = temporaryPath(path);
+async function stageTarget(target, fileSystem) {
+  const temporary = temporaryPath(target.path, "tmp");
   let fileHandle;
 
   try {
-    fileHandle = await open(temporary, WRITE_FLAGS, mode);
-    await fileHandle.writeFile(contents, "utf8");
+    fileHandle = await fileSystem.open(
+      temporary,
+      WRITE_FLAGS,
+      target.mode,
+    );
+    await fileHandle.writeFile(target.contents, "utf8");
     await fileHandle.sync();
     await fileHandle.close();
     fileHandle = undefined;
-
-    if (force) {
-      await inspectTarget(path, true);
-      await rename(temporary, path);
-    } else {
-      await link(temporary, path);
-      await unlink(temporary);
-    }
+    target.temporary = temporary;
   } catch (error) {
     if (fileHandle !== undefined) {
       try {
@@ -234,10 +250,160 @@ async function atomicWrite(path, contents, { force, mode }) {
       }
     }
     try {
-      await unlink(temporary);
+      await fileSystem.unlink(temporary);
     } catch {
-      // The temporary may already have been linked and removed.
+      // The temporary may not have been created.
     }
+    if (error instanceof InvitationCreationError) {
+      throw error;
+    }
+    fail();
+  }
+}
+
+async function removePaths(paths, fileSystem) {
+  let firstError;
+
+  for (const path of paths) {
+    if (path === undefined) {
+      continue;
+    }
+    try {
+      await fileSystem.unlink(path);
+    } catch (error) {
+      if (error?.code !== "ENOENT" && firstError === undefined) {
+        firstError = error;
+      }
+    }
+  }
+
+  return firstError;
+}
+
+async function prepareBackups(targets, fileSystem) {
+  for (const target of targets) {
+    if (!target.existed) {
+      continue;
+    }
+
+    if (!(await inspectTarget(target.path, true, fileSystem))) {
+      fail();
+    }
+    const backup = temporaryPath(target.path, "bak");
+    await fileSystem.link(target.path, backup);
+    target.backup = backup;
+    const metadata = await fileSystem.lstat(backup);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      await removePaths([backup], fileSystem);
+      target.backup = undefined;
+      fail();
+    }
+  }
+}
+
+async function assertTargetState(target, fileSystem) {
+  if (target.existed) {
+    if (!(await inspectTarget(target.path, true, fileSystem))) {
+      fail();
+    }
+    return;
+  }
+
+  await inspectTarget(target.path, false, fileSystem);
+}
+
+async function publishTargets(targets, force, fileSystem) {
+  const published = [];
+
+  try {
+    if (force) {
+      await prepareBackups(targets, fileSystem);
+    }
+
+    for (const target of targets) {
+      if (force) {
+        await assertTargetState(target, fileSystem);
+        await fileSystem.rename(target.temporary, target.path);
+      } else {
+        await fileSystem.link(target.temporary, target.path);
+      }
+      target.published = true;
+      published.push(target);
+    }
+  } catch (publicationError) {
+    let rollbackError;
+    for (const target of published.reverse()) {
+      try {
+        if (target.backup !== undefined) {
+          await fileSystem.rename(target.backup, target.path);
+          target.backup = undefined;
+        } else {
+          await fileSystem.unlink(target.path);
+        }
+        target.published = false;
+      } catch (error) {
+        rollbackError ??= error;
+      }
+    }
+
+    const recoveryBackups = new Set(
+      targets
+        .filter((target) => target.published)
+        .map((target) => target.backup),
+    );
+    const cleanupError = await removePaths(
+      [
+        ...targets.map((target) => target.temporary),
+        ...targets
+          .map((target) => target.backup)
+          .filter((path) => !recoveryBackups.has(path)),
+      ],
+      fileSystem,
+    );
+
+    if (
+      publicationError instanceof InvitationCreationError &&
+      rollbackError === undefined &&
+      cleanupError === undefined
+    ) {
+      throw publicationError;
+    }
+    fail();
+  }
+
+  const cleanupError = await removePaths(
+    [
+      ...targets.map((target) => target.temporary),
+      ...targets.map((target) => target.backup),
+    ],
+    fileSystem,
+  );
+  if (cleanupError !== undefined) {
+    fail();
+  }
+}
+
+async function writeInvitationBatch(targets, force, fileSystem) {
+  try {
+    for (const target of targets) {
+      await stageTarget(target, fileSystem);
+    }
+    await publishTargets(targets, force, fileSystem);
+  } catch (error) {
+    const recoveryBackups = new Set(
+      targets
+        .filter((target) => target.published)
+        .map((target) => target.backup),
+    );
+    await removePaths(
+      [
+        ...targets.map((target) => target.temporary),
+        ...targets
+          .map((target) => target.backup)
+          .filter((path) => !recoveryBackups.has(path)),
+      ],
+      fileSystem,
+    );
     if (error instanceof InvitationCreationError) {
       throw error;
     }
@@ -274,7 +440,7 @@ async function createDistinctInvitation({
   fail();
 }
 
-async function createInvitations(configuration) {
+async function createInvitations(configuration, fileSystem) {
   const {
     force,
     ids,
@@ -282,13 +448,12 @@ async function createInvitations(configuration) {
     publicDirectory,
     secretDirectory,
   } = configuration;
-  const targets = ids.flatMap((id) => [
-    join(publicDirectory, `${id}.enc.json`),
-    join(secretDirectory, `${id}.secret.json`),
-  ]);
 
-  await prepareDirectories(publicDirectory, secretDirectory);
-  await preflightTargets(targets, force);
+  await prepareDirectories(
+    publicDirectory,
+    secretDirectory,
+    fileSystem,
+  );
 
   const usedAddresses = new Set();
   const usedCodes = new Set();
@@ -304,15 +469,9 @@ async function createInvitations(configuration) {
     });
   }
 
-  for (const invitation of invitations) {
-    await atomicWrite(
-      join(publicDirectory, `${invitation.id}.enc.json`),
-      `${JSON.stringify(invitation.bundle, null, 2)}\n`,
-      { force, mode: 0o644 },
-    );
-    await atomicWrite(
-      join(secretDirectory, `${invitation.id}.secret.json`),
-      `${JSON.stringify(
+  const targets = invitations.flatMap((invitation) => [
+    {
+      contents: `${JSON.stringify(
         {
           bundle: invitation.bundle,
           code: invitation.code,
@@ -320,18 +479,40 @@ async function createInvitations(configuration) {
         null,
         2,
       )}\n`,
-      { force, mode: 0o600 },
-    );
-  }
+      mode: 0o600,
+      path: join(
+        secretDirectory,
+        `${invitation.id}.secret.json`,
+      ),
+    },
+    {
+      contents: `${JSON.stringify(invitation.bundle, null, 2)}\n`,
+      mode: 0o644,
+      path: join(
+        publicDirectory,
+        `${invitation.id}.enc.json`,
+      ),
+    },
+  ]);
+
+  await preflightTargets(targets, force, fileSystem);
+  await writeInvitationBatch(targets, force, fileSystem);
 
   return {
     created: invitations.map(({ id, address }) => ({ id, address })),
   };
 }
 
-export async function main(arguments_ = process.argv.slice(2)) {
+export async function main(
+  arguments_ = process.argv.slice(2),
+  { fileSystem: fileSystemOverrides = {} } = {},
+) {
   const configuration = parseArguments(arguments_);
-  return createInvitations(configuration);
+  const fileSystem = {
+    ...DEFAULT_FILE_SYSTEM,
+    ...fileSystemOverrides,
+  };
+  return createInvitations(configuration, fileSystem);
 }
 
 const isEntryPoint =

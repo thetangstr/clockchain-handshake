@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import {
+  link,
   lstat,
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
+  rename,
   stat,
   symlink,
   writeFile,
@@ -26,6 +29,7 @@ import {
   decryptInvitation,
   encryptInvitation,
 } from "../src/invitation.mjs";
+import { main as createInvitations } from "../scripts/create-invitations.mjs";
 
 const REPOSITORY_ROOT = resolve(
   dirname(new URL(import.meta.url).pathname),
@@ -349,6 +353,120 @@ test("refuses overwrites unless force is explicit and preserves mode 0600", asyn
     (await stat(join(secretDirectory, "codex.secret.json"))).mode & 0o777,
     0o600,
   );
+});
+
+test("rolls back a fresh invitation pair when its second publication fails", async (t) => {
+  const directory = await makeTemporaryDirectory(t);
+  const publicDirectory = join(directory, "public");
+  const secretDirectory = join(directory, "secret");
+  let publicationCount = 0;
+  const publicationTargets = [];
+
+  await assert.rejects(
+    createInvitations(
+      createArguments({
+        publicDirectory,
+        secretDirectory,
+        ids: "codex",
+        names: "Billy",
+      }),
+      {
+        fileSystem: {
+          async link(source, target) {
+            publicationCount += 1;
+            publicationTargets.push(target);
+            if (publicationCount === 2) {
+              throw new Error("injected publication failure");
+            }
+            return link(source, target);
+          },
+        },
+      },
+    ),
+    {
+      name: "InvitationCreationError",
+      message: "Invitation creation failed safely.",
+    },
+  );
+
+  assert.equal(publicationCount, 2);
+  assert.deepEqual(publicationTargets, [
+    join(secretDirectory, "codex.secret.json"),
+    join(publicDirectory, "codex.enc.json"),
+  ]);
+  assert.deepEqual(await readdir(publicDirectory), []);
+  assert.deepEqual(await readdir(secretDirectory), []);
+});
+
+test("restores every old invitation pair when a forced batch publication fails", async (t) => {
+  const directory = await makeTemporaryDirectory(t);
+  const publicDirectory = join(directory, "public");
+  const secretDirectory = join(directory, "secret");
+  const arguments_ = createArguments({
+    publicDirectory,
+    secretDirectory,
+  });
+
+  await createInvitations(arguments_);
+  const expectedFiles = {
+    public: ["claude.enc.json", "codex.enc.json"],
+    secret: ["claude.secret.json", "codex.secret.json"],
+  };
+  const originals = new Map();
+  for (const [kind, filenames] of Object.entries(expectedFiles)) {
+    const outputDirectory =
+      kind === "public" ? publicDirectory : secretDirectory;
+    for (const filename of filenames) {
+      originals.set(
+        join(outputDirectory, filename),
+        {
+          contents: await readFile(
+            join(outputDirectory, filename),
+            "utf8",
+          ),
+          mode:
+            (await stat(join(outputDirectory, filename))).mode &
+            0o777,
+        },
+      );
+    }
+  }
+
+  let renameCount = 0;
+  let failureInjected = false;
+  await assert.rejects(
+    createInvitations([...arguments_, "--force"], {
+      fileSystem: {
+        async rename(...arguments_) {
+          renameCount += 1;
+          if (!failureInjected && renameCount === 3) {
+            failureInjected = true;
+            throw new Error("injected forced-publication failure");
+          }
+          return rename(...arguments_);
+        },
+      },
+    }),
+    {
+      name: "InvitationCreationError",
+      message: "Invitation creation failed safely.",
+    },
+  );
+
+  assert.equal(failureInjected, true);
+  assert.ok(renameCount > 3);
+  assert.deepEqual(
+    (await readdir(publicDirectory)).sort(),
+    expectedFiles.public,
+  );
+  assert.deepEqual(
+    (await readdir(secretDirectory)).sort(),
+    expectedFiles.secret,
+  );
+  for (const [path, original] of originals) {
+    assert.equal(await readFile(path, "utf8"), original.contents);
+    assert.equal((await stat(path)).mode & 0o777, original.mode);
+  }
 });
 
 test("never follows special output paths, including with force", async (t) => {
