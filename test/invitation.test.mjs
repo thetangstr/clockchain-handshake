@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -114,6 +122,25 @@ test("rejects a wrong invitation code without echoing it", async () => {
   assertErrorOmits(error, correctCode, wrongCode, PRIVATE_KEY);
 });
 
+test("rejects invitation codes larger than 1024 UTF-8 bytes before scrypt", async () => {
+  const validCode = "bounded-code";
+  const oversizedCode = "é".repeat(513);
+  const bundle = await encryptInvitation(PAYLOAD, validCode);
+
+  const encryptError = await captureRejection(() =>
+    encryptInvitation(PAYLOAD, oversizedCode),
+  );
+  assert.match(encryptError.message, /too large/i);
+  assertErrorOmits(encryptError, oversizedCode, PRIVATE_KEY);
+
+  const decryptError = await captureRejection(() =>
+    decryptInvitation(bundle, oversizedCode),
+  );
+  assert.match(decryptError.message, /too large/i);
+  assert.doesNotMatch(decryptError.message, /authentication/i);
+  assertErrorOmits(decryptError, oversizedCode, PRIVATE_KEY);
+});
+
 test("rejects malformed schema, KDF, and cipher metadata before decryption", async () => {
   const code = "metadata-validation-code";
   const bundle = await encryptInvitation(PAYLOAD, code);
@@ -147,6 +174,21 @@ test("rejects malformed schema, KDF, and cipher metadata before decryption", asy
     assert.doesNotMatch(error.message, /authentication/i);
     assertErrorOmits(error, code, PRIVATE_KEY);
   }
+});
+
+test("rejects canonical ciphertext larger than 4096 bytes before scrypt", async () => {
+  const code = "oversized-ciphertext-code";
+  const bundle = await encryptInvitation(PAYLOAD, code);
+  const oversized = structuredClone(bundle);
+  oversized.crypto.ciphertext = "ab".repeat(4_097);
+
+  const error = await captureRejection(() =>
+    decryptInvitation(oversized, code),
+  );
+
+  assert.match(error.message, /invalid or unsupported/i);
+  assert.doesNotMatch(error.message, /authentication/i);
+  assertErrorOmits(error, code, PRIVATE_KEY);
 });
 
 test("authenticates the public invitation header as AES-GCM AAD", async () => {
@@ -205,7 +247,7 @@ test("readSecretInvitation accepts only an owner-readable regular file", async (
   assert.match(emptyCodeError.message, /invalid/i);
   assertErrorOmits(emptyCodeError, PRIVATE_KEY);
 
-  const symlinkPath = join(directory, "invitation-link.json");
+  const symlinkPath = join(directory, `${code}.json`);
   await symlink(invitationPath, symlinkPath);
   const symlinkError = await captureRejection(() =>
     readSecretInvitation(symlinkPath),
@@ -221,4 +263,67 @@ test("readSecretInvitation accepts only an owner-readable regular file", async (
     assert.match(permissionError.message, /permissions/i);
     assertErrorOmits(permissionError, code, PRIVATE_KEY);
   }
+});
+
+test("closes the secret file descriptor after parse and validation failures", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "clockchain-invalid-invitation-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  const malformedPath = join(directory, "malformed.json");
+  const invalidPath = join(directory, "invalid.json");
+  await writeFile(malformedPath, "{", { encoding: "utf8", mode: 0o600 });
+  await writeFile(invalidPath, JSON.stringify({ bundle: {}, code: "invalid" }), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  await chmod(malformedPath, 0o600);
+  await chmod(invalidPath, 0o600);
+
+  let descriptorsBefore;
+  try {
+    descriptorsBefore = (await readdir("/dev/fd")).length;
+  } catch {
+    descriptorsBefore = undefined;
+  }
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await captureRejection(() => readSecretInvitation(malformedPath));
+    await captureRejection(() => readSecretInvitation(invalidPath));
+  }
+
+  if (descriptorsBefore !== undefined) {
+    const descriptorsAfter = (await readdir("/dev/fd")).length;
+    assert.ok(
+      descriptorsAfter <= descriptorsBefore + 1,
+      "secret invitation failures must not leak file descriptors",
+    );
+  }
+
+  const movedPath = join(directory, "moved-after-rejection.json");
+  await rename(malformedPath, movedPath);
+  await rm(movedPath);
+});
+
+test("rejects a mode-0600 secret invitation larger than 16384 bytes before reading", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "clockchain-large-invitation-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  const code = "oversized-file-code-never-echo";
+  const bundle = await encryptInvitation(PAYLOAD, code);
+  const serialized = JSON.stringify({ bundle, code });
+  const oversized = serialized.padEnd(16_385, " ");
+  assert.equal(Buffer.byteLength(oversized, "utf8"), 16_385);
+
+  const invitationPath = join(directory, "oversized.json");
+  await writeFile(invitationPath, oversized, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  await chmod(invitationPath, 0o600);
+
+  const error = await captureRejection(() =>
+    readSecretInvitation(invitationPath),
+  );
+  assert.match(error.message, /too large/i);
+  assertErrorOmits(error, code, PRIVATE_KEY);
 });

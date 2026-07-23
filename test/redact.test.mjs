@@ -130,6 +130,32 @@ test("detects labeled private keys and bearer tokens without treating transactio
   assert.doesNotThrow(() => assertSecretFree(clean));
 });
 
+test("detects standalone Clockchain cc_ tokens in whole and embedded strings", () => {
+  const token = `cc_${"A".repeat(88)}.${"b".repeat(89)}`;
+  const transactionHash = `0x${"12".repeat(32)}`;
+  assert.equal(token.length, 181);
+  const input = {
+    standalone: token,
+    embedded: `Clockchain transport rejected ${token} during setup`,
+    publicText: "cc_demo",
+    transactionHash,
+  };
+  const error = captureThrow(() => assertSecretFree(input));
+
+  assert.match(error.message, /secret material detected/i);
+  assert.equal(error.message.includes(token), false);
+
+  const clean = redact(input);
+  assert.equal(clean.standalone, REDACTED);
+  assert.equal(
+    clean.embedded,
+    `Clockchain transport rejected ${REDACTED} during setup`,
+  );
+  assert.equal(clean.publicText, input.publicText);
+  assert.equal(clean.transactionHash, transactionHash);
+  assert.doesNotThrow(() => assertSecretFree(clean));
+});
+
 test("accepts a sanitized object without false positives", () => {
   const publicTransactionHash = `0x${"ef".repeat(32)}`;
   const value = {

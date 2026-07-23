@@ -10,6 +10,10 @@ const BEARER_TOKEN =
   /(\bBearer[ \t]+)((?:(?:clockchain|cc|mcp)[_-][A-Za-z0-9._~+/-]{8,}|[A-Za-z0-9._~+/-]{24,})(?:={0,2}))(?![A-Za-z0-9._~+/-])/gi;
 const BEARER_TOKEN_DETECT =
   /\bBearer[ \t]+(?:(?:clockchain|cc|mcp)[_-][A-Za-z0-9._~+/-]{8,}|[A-Za-z0-9._~+/-]{24,})(?:={0,2})(?![A-Za-z0-9._~+/-])/i;
+const CLOCKCHAIN_TOKEN =
+  /\bcc_[A-Za-z0-9_-][A-Za-z0-9._-]{19,}(?![A-Za-z0-9._-])/g;
+const CLOCKCHAIN_TOKEN_DETECT =
+  /\bcc_[A-Za-z0-9_-][A-Za-z0-9._-]{19,}(?![A-Za-z0-9._-])/;
 
 function normalizeCanaries(canaries) {
   if (
@@ -46,10 +50,11 @@ function redactString(value, canaries) {
     LABELED_PRIVATE_KEY,
     (_match, prefix) => `${prefix}${REDACTED}`,
   );
-  return redacted.replace(
+  redacted = redacted.replace(
     BEARER_TOKEN,
     (_match, prefix) => `${prefix}${REDACTED}`,
   );
+  return redacted.replace(CLOCKCHAIN_TOKEN, REDACTED);
 }
 
 function redactError(error, canaries, seen) {
@@ -129,7 +134,8 @@ function stringContainsSecret(value, canaries) {
   return (
     canaries.some((canary) => value.includes(canary)) ||
     LABELED_PRIVATE_KEY_DETECT.test(value) ||
-    BEARER_TOKEN_DETECT.test(value)
+    BEARER_TOKEN_DETECT.test(value) ||
+    CLOCKCHAIN_TOKEN_DETECT.test(value)
   );
 }
 

@@ -4,7 +4,8 @@ import {
   randomBytes,
   scrypt as scryptCallback,
 } from "node:crypto";
-import { lstat, readFile, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { open } from "node:fs/promises";
 import { promisify } from "node:util";
 
 import { INVITATION_SCHEMA } from "./constants.mjs";
@@ -13,6 +14,11 @@ const scrypt = promisify(scryptCallback);
 
 const INVITATION_VERSION = 1;
 const MAX_DISPLAY_NAME_LENGTH = 128;
+const MAX_CODE_BYTES = 1_024;
+const MAX_CIPHERTEXT_BYTES = 4_096;
+const MAX_SECRET_FILE_BYTES = 16_384;
+const SECRET_FILE_OPEN_FLAGS =
+  fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
 const KDF = Object.freeze({
   name: "scrypt",
   N: 16_384,
@@ -107,6 +113,7 @@ function isCanonicalCiphertext(value) {
   return (
     typeof value === "string" &&
     value.length > 0 &&
+    value.length <= MAX_CIPHERTEXT_BYTES * 2 &&
     value.length % 2 === 0 &&
     /^[0-9a-f]+$/.test(value)
   );
@@ -115,6 +122,10 @@ function isCanonicalCiphertext(value) {
 function validateCode(code) {
   if (typeof code !== "string" || code.trim().length === 0) {
     throw new Error("Invitation code is invalid.");
+  }
+
+  if (Buffer.byteLength(code, "utf8") > MAX_CODE_BYTES) {
+    throw new Error("Invitation code is too large.");
   }
 }
 
@@ -238,19 +249,26 @@ export async function encryptInvitation(payload, code) {
     },
   };
   const plaintext = Buffer.from(JSON.stringify(validatedPayload), "utf8");
-  const key = await deriveKey(code, salt);
-  const cipher = createCipheriv(CIPHER.name, key, iv, {
-    authTagLength: CIPHER.tagLength,
-  });
-  cipher.setAAD(encodeAad(bundle));
-  const ciphertext = Buffer.concat([
-    cipher.update(plaintext),
-    cipher.final(),
-  ]);
+  let key;
 
-  bundle.crypto.ciphertext = ciphertext.toString(ENCODING);
-  bundle.crypto.tag = cipher.getAuthTag().toString(ENCODING);
-  return bundle;
+  try {
+    key = await deriveKey(code, salt);
+    const cipher = createCipheriv(CIPHER.name, key, iv, {
+      authTagLength: CIPHER.tagLength,
+    });
+    cipher.setAAD(encodeAad(bundle));
+    const ciphertext = Buffer.concat([
+      cipher.update(plaintext),
+      cipher.final(),
+    ]);
+
+    bundle.crypto.ciphertext = ciphertext.toString(ENCODING);
+    bundle.crypto.tag = cipher.getAuthTag().toString(ENCODING);
+    return bundle;
+  } finally {
+    key?.fill(0);
+    plaintext.fill(0);
+  }
 }
 
 export async function decryptInvitation(bundle, code) {
@@ -263,41 +281,48 @@ export async function decryptInvitation(bundle, code) {
     ENCODING,
   );
   const tag = Buffer.from(validatedBundle.crypto.tag, ENCODING);
-  const key = await deriveKey(code, salt);
+  let key;
   let plaintext;
 
   try {
-    const decipher = createDecipheriv(CIPHER.name, key, iv, {
-      authTagLength: CIPHER.tagLength,
-    });
-    decipher.setAAD(encodeAad(validatedBundle));
-    decipher.setAuthTag(tag);
-    plaintext = Buffer.concat([
-      decipher.update(ciphertext),
-      decipher.final(),
-    ]);
-  } catch {
-    throw new Error("Invitation authentication failed.");
+    key = await deriveKey(code, salt);
+
+    try {
+      const decipher = createDecipheriv(CIPHER.name, key, iv, {
+        authTagLength: CIPHER.tagLength,
+      });
+      decipher.setAAD(encodeAad(validatedBundle));
+      decipher.setAuthTag(tag);
+      plaintext = Buffer.concat([
+        decipher.update(ciphertext),
+        decipher.final(),
+      ]);
+    } catch {
+      throw new Error("Invitation authentication failed.");
+    }
+
+    let payload;
+
+    try {
+      payload = validatePayload(JSON.parse(plaintext.toString("utf8")));
+    } catch {
+      throw new Error("Decrypted invitation payload is invalid.");
+    }
+
+    if (
+      payload.address !== validatedBundle.address ||
+      payload.displayName !== validatedBundle.displayName
+    ) {
+      throw new Error(
+        "Decrypted invitation payload does not match its public header.",
+      );
+    }
+
+    return payload;
+  } finally {
+    key?.fill(0);
+    plaintext?.fill(0);
   }
-
-  let payload;
-
-  try {
-    payload = validatePayload(JSON.parse(plaintext.toString("utf8")));
-  } catch {
-    throw new Error("Decrypted invitation payload is invalid.");
-  }
-
-  if (
-    payload.address !== validatedBundle.address ||
-    payload.displayName !== validatedBundle.displayName
-  ) {
-    throw new Error(
-      "Decrypted invitation payload does not match its public header.",
-    );
-  }
-
-  return payload;
 }
 
 function sameFile(left, right) {
@@ -305,23 +330,37 @@ function sameFile(left, right) {
     left.dev === right.dev &&
     left.ino === right.ino &&
     left.size === right.size &&
-    left.mtimeMs === right.mtimeMs
+    left.mtimeMs === right.mtimeMs &&
+    left.mode === right.mode
+  );
+}
+
+function safeFileError(error) {
+  if (error instanceof SecretInvitationFileError) {
+    return error;
+  }
+
+  if (error?.code === "ELOOP") {
+    return new SecretInvitationFileError(
+      "Secret invitation must be a regular file.",
+    );
+  }
+
+  return new SecretInvitationFileError(
+    "Unable to read secret invitation file.",
   );
 }
 
 export async function readSecretInvitation(path) {
+  let fileHandle;
+  let failure;
+  let result;
+
   try {
-    const linkMetadata = await lstat(path);
+    fileHandle = await open(path, SECRET_FILE_OPEN_FLAGS);
+    const fileMetadata = await fileHandle.stat();
 
-    if (linkMetadata.isSymbolicLink() || !linkMetadata.isFile()) {
-      throw new SecretInvitationFileError(
-        "Secret invitation must be a regular file.",
-      );
-    }
-
-    const fileMetadata = await stat(path);
-
-    if (!fileMetadata.isFile() || !sameFile(linkMetadata, fileMetadata)) {
+    if (!fileMetadata.isFile()) {
       throw new SecretInvitationFileError(
         "Secret invitation must be a regular file.",
       );
@@ -336,16 +375,27 @@ export async function readSecretInvitation(path) {
       );
     }
 
-    const serialized = await readFile(path, "utf8");
-    const finalMetadata = await lstat(path);
+    if (fileMetadata.size > MAX_SECRET_FILE_BYTES) {
+      throw new SecretInvitationFileError(
+        "Secret invitation file is too large.",
+      );
+    }
+
+    const serialized = await fileHandle.readFile("utf8");
+    const finalMetadata = await fileHandle.stat();
 
     if (
-      finalMetadata.isSymbolicLink() ||
       !finalMetadata.isFile() ||
       !sameFile(fileMetadata, finalMetadata)
     ) {
       throw new SecretInvitationFileError(
         "Secret invitation file changed while it was being read.",
+      );
+    }
+
+    if (Buffer.byteLength(serialized, "utf8") > MAX_SECRET_FILE_BYTES) {
+      throw new SecretInvitationFileError(
+        "Secret invitation file is too large.",
       );
     }
 
@@ -374,17 +424,27 @@ export async function readSecretInvitation(path) {
       );
     }
 
-    return {
+    result = {
       bundle: invitation.bundle,
       code: invitation.code,
     };
   } catch (error) {
-    if (error instanceof SecretInvitationFileError) {
-      throw error;
+    failure = safeFileError(error);
+  } finally {
+    if (fileHandle !== undefined) {
+      try {
+        await fileHandle.close();
+      } catch {
+        failure ??= new SecretInvitationFileError(
+          "Unable to close secret invitation file.",
+        );
+      }
     }
-
-    throw new SecretInvitationFileError(
-      "Unable to read secret invitation file.",
-    );
   }
+
+  if (failure !== undefined) {
+    throw failure;
+  }
+
+  return result;
 }
