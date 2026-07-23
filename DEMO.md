@@ -5,6 +5,8 @@ Clockchain® Agent Trust Handshake exercise. Use the
 [published universal prompt](prompts/run-turnkey-demo.md) from a clean coding-agent
 session. The [README](README.md) provides the one-block copy surface, and the
 [invitation notes](invites/README.md) explain how disposable bundles are handled.
+The public evidence is available as a
+[sanitized recovery evidence summary](docs/demo-evidence/latest.md).
 
 ## Operator-only clean-client acceptance
 

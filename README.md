@@ -13,10 +13,12 @@ through the official ERC-8004 Identity Registry at
 
 Read the [stakeholder and operator runbook](DEMO.md), the
 [standalone prompt](prompts/run-turnkey-demo.md), and the
-[invitation handling notes](invites/README.md). The expected live run takes
-roughly 30–90 seconds under normal testnet conditions. A passing `npm run demo`
-writes sanitized `RESULT.md` and `result.json`; neither a narrative nor a
-submitted transaction is a PASS by itself.
+[invitation handling notes](invites/README.md). A
+[sanitized recovery evidence summary](docs/demo-evidence/latest.md) records the
+independently re-verified public evidence. The expected live run takes roughly
+30–90 seconds under normal testnet conditions. A passing `npm run demo` writes
+sanitized `RESULT.md` and `result.json`; neither a narrative nor a submitted
+transaction is a PASS by itself.
 
 ## Operator-only clean-client acceptance
 

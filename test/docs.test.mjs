@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   cp,
   mkdtemp,
@@ -17,6 +18,7 @@ import {
   checkDocumentation,
   extractReadmePrompt,
 } from "../scripts/check-docs.mjs";
+import { assertSecretFree } from "../src/redact.mjs";
 
 const ROOT_DIRECTORY = fileURLToPath(
   new URL("..", import.meta.url),
@@ -30,11 +32,22 @@ const SUPPORT_FILES = Object.freeze([
   "package.json",
   "bin/handshake-demo.mjs",
   "invites/README.md",
+  "docs/demo-evidence/latest.md",
 ]);
 const OFFICIAL_REGISTRY =
   "0x8004A818BFB912233c491871b3d84c89A494BD9e";
 const OFFICIAL_REPOSITORY =
   "https://github.com/thetangstr/clockchain-handshake.git";
+const PUBLISHED_EVIDENCE_PATH =
+  "docs/demo-evidence/latest.md";
+const PUBLISHED_EVIDENCE_SHA256 =
+  "7d95b9e759ebd8e5c1092f96740a23612f399427dad3a16e662c9a8f78580014";
+const PUBLISHED_TRANSACTIONS = Object.freeze([
+  "0x511c1c379295c0ac1cb9a162a3e45f45c700e4e07eaa41dc3b2e0d1500c6af46",
+  "0xb4a5f37e6356c0d3e1291e1038bc85017f558b16b9fda5b09192adab5aa03c5b",
+  "0x6981f9250589fc550a68e6ee2b0146323066c64332c3542e4bbb6d9f9f47c676",
+  "0xbb9435c8f9d46f0f57e0aab6208610f2b4c37177b33d27319f1b0311db16b160",
+]);
 
 async function temporaryDocumentationFixture(t) {
   const directory = await mkdtemp(
@@ -174,6 +187,115 @@ test("README exposes exactly the prompt bytes consumed by clean clients", async 
   assert.ok(enterCheckout < prompt.indexOf("Read `DEMO.md`"));
   assert.ok(enterCheckout < prompt.indexOf("Run `npm ci --ignore-scripts`"));
   assert.ok(enterCheckout < prompt.indexOf("Run `npm run demo`"));
+});
+
+test("links public docs to the sanitized recovery evidence summary", async () => {
+  for (const relativePath of ["README.md", "DEMO.md"]) {
+    const contents = await readFile(
+      join(ROOT_DIRECTORY, relativePath),
+      "utf8",
+    );
+    assert.match(
+      contents,
+      /\[sanitized recovery evidence summary\]\(docs\/demo-evidence\/latest\.md\)/,
+    );
+  }
+});
+
+test("limits the recovery verification side-effect claim to writes", async () => {
+  const evidence = await readFile(
+    join(ROOT_DIRECTORY, PUBLISHED_EVIDENCE_PATH),
+    "utf8",
+  );
+  assert.ok(
+    evidence.includes(
+      "No invitation rerun, Ethereum transaction, or Clockchain receipt write occurred during recovery verification.",
+    ),
+  );
+});
+
+test("locks the sanitized recovery evidence to canonical bytes", async () => {
+  const evidence = await readFile(
+    join(ROOT_DIRECTORY, PUBLISHED_EVIDENCE_PATH),
+    "utf8",
+  );
+
+  assertSecretFree(evidence);
+  assert.equal(
+    createHash("sha256").update(evidence).digest("hex"),
+    PUBLISHED_EVIDENCE_SHA256,
+  );
+});
+
+test("publishes only the approved sanitized live evidence summary", async () => {
+  const [readme, demo, evidence] = await Promise.all([
+    readFile(join(ROOT_DIRECTORY, "README.md"), "utf8"),
+    readFile(join(ROOT_DIRECTORY, "DEMO.md"), "utf8"),
+    readFile(join(ROOT_DIRECTORY, PUBLISHED_EVIDENCE_PATH), "utf8").catch(
+      (error) => {
+        if (error.code === "ENOENT") {
+          return "";
+        }
+        throw error;
+      },
+    ),
+  ]);
+
+  for (const contents of [readme, demo]) {
+    assert.match(
+      contents,
+      /\[sanitized recovery evidence summary\]\(docs\/demo-evidence\/latest\.md\)/,
+    );
+  }
+
+  const normalizedEvidence = evidence.replace(/\s+/g, " ");
+  for (const requiredText of [
+    "# Sanitized Handshake demo evidence — 2026-07-23",
+    "Live execution and independent re-verification occurred on 2026-07-23.",
+    "`a603572a5d0a2773a273fc68b5312d9f1100d1f1`",
+    "`8aac14d00c5de105422af7c6d8f312cc72025e1bec30bfd298cd49c1f1152711`",
+    "Ethereum Sepolia chain ID `11155111`",
+    `official registry \`${OFFICIAL_REGISTRY}\``,
+    "Codex CLI `0.144.1`",
+    "Billy",
+    "agent `8677`",
+    "`0x706Ae524866Dd3921Fa40B4AC2831538D8AD1cB1`",
+    "`02313136-82d8-4eb0-a571-94c836661fc9`",
+    "block `1781135`",
+    "Claude Code `2.1.218`",
+    "Iris",
+    "agent `8679`",
+    "`0x8Ebb593AE8e55B0a93d320e05d2a7BCCA7CE8B99`",
+    "`737bf7e6-4ac2-4e41-8c8c-e6eb8b2b58a1`",
+    "block `1781359`",
+    "Scenario: `100 USD`; `moved: false`.",
+    "Both receipts have status `anchored`, commitment verification `true`, cross-party verification `true`, verification against an on-chain block, and `keyless: true`.",
+    "The original aggregate harness remains `FAIL`. Codex is the original harness-bound `PASS`. Claude exited 0 and produced a schema-valid `PASS` pair, but that pair was outside the harness collection root; it was recovered from its captured temporary path, remained hash-preserved, and was independently verified. Claude is **not** harness-bound and is not an original aggregate `PASS`.",
+    "No invitation rerun, Ethereum transaction, or Clockchain receipt write occurred during recovery verification.",
+    "No raw JSON/Markdown pairs, manifest, logs, invitation material, keys, or tokens are published here.",
+    "This evidence proves anchoring and independent re-verifiability; it does not prove multi-validator consensus, mainnet security, court-grade evidence, or trustless security.",
+  ]) {
+    assert.ok(
+      normalizedEvidence.includes(requiredText),
+      `missing published evidence text: ${requiredText}`,
+    );
+  }
+
+  const expectedLinks = PUBLISHED_TRANSACTIONS.map(
+    (transaction) =>
+      `https://sepolia.etherscan.io/tx/${transaction}`,
+  );
+  for (const link of expectedLinks) {
+    assert.ok(
+      evidence.includes(`](${link})`),
+      `missing transaction link: ${link}`,
+    );
+  }
+
+  assert.deepEqual(
+    evidence.match(/0x[0-9a-fA-F]{64}/g) ?? [],
+    PUBLISHED_TRANSACTIONS,
+  );
 });
 
 test("prompt treats the invitation as opaque runner-only input", async () => {
