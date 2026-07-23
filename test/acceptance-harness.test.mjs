@@ -1959,8 +1959,16 @@ test("independently verifies both identities and recomputed receipt hashes befor
   assert.equal(observations.factoryTokens.length, 1);
   assert.equal(observations.completions.length, 2);
   assert.deepEqual(observations.crossParty, [
-    { ledgerId: LEDGER_A, blockHeight: "9001" },
-    { ledgerId: LEDGER_B, blockHeight: "9002" },
+    {
+      ledgerId: LEDGER_A,
+      blockHeight: "9001",
+      hash: expectedReceiptHash(CODEX_RESULT),
+    },
+    {
+      ledgerId: LEDGER_B,
+      blockHeight: "9002",
+      hash: expectedReceiptHash(CLAUDE_RESULT),
+    },
   ]);
   const functions = publicClient.calls.map(({ functionName }) =>
     functionName);

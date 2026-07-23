@@ -1168,15 +1168,28 @@ test("requires keyless cross-party verification against an on-chain block", () =
     onChain: {
       keyless: true,
       verifiedAgainst: "on-chain block",
+      ledgerId: "ledger-1",
+      blockHeight: 12,
+      anchoredHash: RECEIPT_EVENT_HASH,
+      assetReferenceId: "agent:demo:trust_handshake:1",
     },
   };
+  const expected = {
+    ledgerId: "ledger-1",
+    blockHeight: "12",
+    anchoredHash: RECEIPT_EVENT_HASH,
+    assetReferenceId: "agent:demo:trust_handshake:1",
+  };
 
-  assert.equal(assertCrossPartyVerification(result), result);
+  assert.equal(
+    assertCrossPartyVerification(result, expected),
+    result,
+  );
   assert.throws(
     () =>
       assertCrossPartyVerification({
         onChain: { ...result.onChain, keyless: false },
-      }),
+      }, expected),
     /keyless/i,
   );
   assert.throws(
@@ -1186,9 +1199,83 @@ test("requires keyless cross-party verification against an on-chain block", () =
           ...result.onChain,
           verifiedAgainst: "cache",
         },
-      }),
+      }, expected),
     /on-chain block/i,
   );
+});
+
+test("requires an expected binding for cross-party verification", () => {
+  const result = {
+    onChain: {
+      keyless: true,
+      verifiedAgainst: "on-chain block",
+      ledgerId: "ledger-1",
+      blockHeight: "12",
+      anchoredHash: RECEIPT_EVENT_HASH,
+    },
+  };
+
+  assert.throws(
+    () => assertCrossPartyVerification(result, undefined),
+    (error) => {
+      assert.ok(error instanceof McpVerificationError);
+      assert.equal(
+        error.code,
+        "MCP_CROSS_PARTY_BINDING_REQUIRED",
+      );
+      return true;
+    },
+  );
+});
+
+test("rejects cross-party evidence that differs from the expected receipt binding", async (t) => {
+  const expected = {
+    ledgerId: "ledger-1",
+    blockHeight: "12",
+    anchoredHash: RECEIPT_EVENT_HASH,
+    assetReferenceId: "agent:demo:trust_handshake:1",
+  };
+  const onChain = {
+    keyless: true,
+    verifiedAgainst: "on-chain block",
+    ...expected,
+  };
+  const cases = [
+    ["ledger ID", "ledgerId", "untrusted-ledger-canary"],
+    [
+      "block height",
+      "blockHeight",
+      "98765432109876543210",
+    ],
+    ["anchored hash", "anchoredHash", "b".repeat(64)],
+    [
+      "asset reference",
+      "assetReferenceId",
+      "untrusted-asset-reference-canary",
+    ],
+  ];
+
+  for (const [name, key, value] of cases) {
+    await t.test(name, () => {
+      const error = captureThrow(() =>
+        assertCrossPartyVerification(
+          {
+            onChain: {
+              ...onChain,
+              [key]: value,
+            },
+          },
+          expected,
+        ));
+
+      assert.ok(error instanceof McpVerificationError);
+      assert.equal(
+        error.code,
+        "MCP_CROSS_PARTY_BINDING_MISMATCH",
+      );
+      assertErrorOmits(error, String(value));
+    });
+  }
 });
 
 test("returns full deployed response objects without dropping receipt evidence", async () => {

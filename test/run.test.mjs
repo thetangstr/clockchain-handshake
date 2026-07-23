@@ -22,6 +22,7 @@ import { writeEvidence } from "../src/evidence.mjs";
 import {
   McpNetworkError,
   McpVerificationError,
+  assertCrossPartyVerification,
   completeReceipt,
 } from "../src/mcp.mjs";
 import {
@@ -311,6 +312,11 @@ function createAdapters({
         onChain: {
           keyless: true,
           verifiedAgainst: "on-chain block",
+          ledgerId: identifiers.ledgerId,
+          blockHeight: identifiers.blockHeight,
+          anchoredHash: identifiers.hash,
+          assetReferenceId:
+            anchoredReceipt().anchor.assetReferenceId,
         },
       };
     },
@@ -379,6 +385,10 @@ function createAdapters({
       assert.deepEqual(receipt, submittedReceipt());
       return anchoredReceipt();
     },
+    assertCrossPartyVerification(result, expected) {
+      captured.crossPartyBinding = expected;
+      return assertCrossPartyVerification(result, expected);
+    },
     async writeEvidence(options) {
       calls.push("write evidence");
       maybeFail("write evidence");
@@ -440,6 +450,12 @@ test("runs the first-time flow in order and writes only strict sanitized PASS ev
     ledgerId: LEDGER_ID,
     blockHeight: "321",
     hash: EVENT_HASH,
+  });
+  assert.deepEqual(captured.crossPartyBinding, {
+    ledgerId: LEDGER_ID,
+    blockHeight: "321",
+    anchoredHash: EVENT_HASH,
+    assetReferenceId: "agent:42:trust_handshake:1",
   });
   assert.deepEqual(captured.evidence.canaries, [
     INVITATION_CODE,

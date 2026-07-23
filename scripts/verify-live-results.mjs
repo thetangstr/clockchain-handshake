@@ -933,16 +933,21 @@ async function verifyIdentityTransactions(publicClient, result) {
 
 async function verifyClockchain(mcpClient, result) {
   const event = expectedReceiptEvent(result);
+  const expectedHash = expectedReceiptHash(result);
   const identifiers = {
     ledgerId: result.clockchain.ledgerId,
     blockHeight: result.clockchain.blockHeight,
+    hash: expectedHash,
   };
   const verification = await mcpClient.verifyCrossParty(
     identifiers,
   );
-  assertCrossPartyVerification(verification);
+  assertCrossPartyVerification(verification, {
+    ledgerId: result.clockchain.ledgerId,
+    blockHeight: result.clockchain.blockHeight,
+    anchoredHash: expectedHash,
+  });
   const { onChain } = verification;
-  const expectedHash = expectedReceiptHash(result);
   const expectedReferencePrefix =
     `${result.identity.agentId}:trust_handshake:`;
   if (

@@ -1474,7 +1474,57 @@ export function assertReceiptVerification(result) {
   return result;
 }
 
-export function assertCrossPartyVerification(result) {
+function canonicalDecimalText(value) {
+  if (
+    typeof value === "string" &&
+    /^(0|[1-9]\d*)$/.test(value)
+  ) {
+    return value;
+  }
+  if (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+  ) {
+    return String(value);
+  }
+  if (typeof value === "bigint" && value >= 0n) {
+    return String(value);
+  }
+  return null;
+}
+
+function hasExpectedCrossPartyBinding(expected) {
+  return (
+    isPlainObject(expected) &&
+    Object.hasOwn(expected, "ledgerId") &&
+    typeof expected.ledgerId === "string" &&
+    expected.ledgerId.length > 0 &&
+    Object.hasOwn(expected, "blockHeight") &&
+    canonicalDecimalText(expected.blockHeight) !== null &&
+    Object.hasOwn(expected, "anchoredHash") &&
+    typeof expected.anchoredHash === "string" &&
+    expected.anchoredHash.length > 0 &&
+    (
+      !Object.hasOwn(expected, "assetReferenceId") ||
+      (
+        typeof expected.assetReferenceId === "string" &&
+        expected.assetReferenceId.length > 0
+      )
+    )
+  );
+}
+
+export function assertCrossPartyVerification(
+  result,
+  expected,
+) {
+  if (!hasExpectedCrossPartyBinding(expected)) {
+    throw new McpVerificationError(
+      "Clockchain cross-party verification requires an expected receipt binding.",
+      "MCP_CROSS_PARTY_BINDING_REQUIRED",
+    );
+  }
   if (
     !isPlainObject(result) ||
     !isPlainObject(result.onChain) ||
@@ -1489,6 +1539,22 @@ export function assertCrossPartyVerification(result) {
     throw new McpVerificationError(
       "Clockchain cross-party verification must be keyless.",
       "MCP_CROSS_PARTY_NOT_KEYLESS",
+    );
+  }
+  if (
+    result.onChain.ledgerId !== expected.ledgerId ||
+    canonicalDecimalText(result.onChain.blockHeight) !==
+      canonicalDecimalText(expected.blockHeight) ||
+    result.onChain.anchoredHash !== expected.anchoredHash ||
+    (
+      Object.hasOwn(expected, "assetReferenceId") &&
+      result.onChain.assetReferenceId !==
+        expected.assetReferenceId
+    )
+  ) {
+    throw new McpVerificationError(
+      "Clockchain cross-party verification does not match the expected receipt binding.",
+      "MCP_CROSS_PARTY_BINDING_MISMATCH",
     );
   }
   return result;

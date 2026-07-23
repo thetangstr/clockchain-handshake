@@ -1079,6 +1079,13 @@ export async function runHandshake({
       });
       return activeAdapters.assertCrossPartyVerification(
         verification,
+        {
+          ledgerId: receipt.anchor.ledgerId,
+          blockHeight: receipt.anchor.blockHeight,
+          anchoredHash: receipt.eventHash,
+          assetReferenceId:
+            receipt.anchor.assetReferenceId,
+        },
       );
     },
   );
