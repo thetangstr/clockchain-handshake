@@ -54,7 +54,7 @@ const CONTEXTUAL_PRESENT_CAPABILITIES = Object.freeze([
   "multi-validator",
 ]);
 const CLAIM_BOUNDARY_PATTERN =
-  /[.!?;,]+|\b(?:but|yet|however|although|though|while|whereas|and|because|since)\b/gi;
+  /[.!?;,:]+|\b(?:but|yet|however|although|though|while|whereas|and|because|since)\b/gi;
 const EXPLICIT_LIMITATION_PATTERN =
   /\b(?:no|never|cannot|can't|isn't|aren't|wasn't|weren't|doesn't|don't|didn't|won't|wouldn't|couldn't|shouldn't|mustn't|not(?!\s+only))\b|\b(?:is|are|was|were|does|do|did|will|would|can|could|should|must|has|have|had)\s+not(?!\s+only)\b/i;
 const TOKEN_BOUNDARY_PATTERN =
@@ -65,6 +65,8 @@ const EXTERNAL_LINK_PATTERN =
   /^(?:[a-z][a-z+.-]*:|\/\/)/i;
 const MARKDOWN_LINK_PATTERN =
   /!?\[[^\]]*]\(\s*(?:<([^>]+)>|([^\s)]+))(?:\s+["'][^"']*["'])?\s*\)/g;
+const MARKDOWN_REFERENCE_DEFINITION_PATTERN =
+  /^ {0,3}\[[^\]\r\n]+]:[ \t]*(?:<([^>\r\n]+)>|([^\s\r\n]+))(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$/gm;
 const DEFAULT_ROOT_DIRECTORY = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -117,6 +119,24 @@ const PROMPT_INVITATION_POLICY = `6. Perform only the metadata-only checks \`tes
    \`test -r "$HANDSHAKE_INVITE_FILE"\` for my separately delivered invitation.
    Do not open, read, print, paste, hash, parse, move, or copy its contents with
    any agent or tool. Only \`npm run demo\` may open and read the invitation.`;
+const CANONICAL_PROMPT = `Run the Clockchain Agent Trust Handshake demo exactly as documented.
+
+${PROMPT_SAFETY_SECTION}
+Use only the official ERC-8004 Identity Registry at
+${OFFICIAL_REGISTRY}.
+
+1. Create and enter a new temporary directory.
+${PROMPT_REPOSITORY_POLICY}
+4. Read \`DEMO.md\` and follow its safety boundary.
+5. Confirm the Node.js major version is 22.
+${PROMPT_INVITATION_POLICY}
+7. Run \`npm ci --ignore-scripts\`.
+8. Run \`npm run demo\`. A verified run writes \`RESULT.md\` and \`result.json\`.
+9. Return only the sanitized \`RESULT.md\` summary and the paths to \`RESULT.md\` and
+   \`result.json\`.
+10. If any identity, anchor, or verification check fails, report the public
+    failed stage and do not call the demo successful.
+`;
 
 const REQUIRED_DOCUMENT_PATTERNS = Object.freeze([
   Object.freeze({
@@ -410,10 +430,14 @@ function noncanonicalCommandFailures(
     }
   }
 
-  for (const match of contents.matchAll(
-    /\bnpm run demo[ \t]+(?=(?:--?[^\s`]|&&|\|\||[;|<>]))([^\r\n`]*)/g,
+  const unfolded = contents.replace(
+    /\\\r?\n[ \t]*/g,
+    " ",
+  );
+  for (const match of unfolded.matchAll(
+    /\bnpm run demo((?:[ \t]*(?:&&|\|\||[;|<>])|[ \t]+--?[^\s`])[^`\r\n]*)/g,
   )) {
-    const command = `npm run demo ${match[1]}`.trimEnd();
+    const command = `npm run demo${match[1]}`.trimEnd();
     failures.push(
       `${relativePath}: contains noncanonical command "${command}" derived from "npm run demo".`,
     );
@@ -423,9 +447,16 @@ function noncanonicalCommandFailures(
 }
 
 function markdownLinks(contents) {
-  return [...contents.matchAll(MARKDOWN_LINK_PATTERN)].map(
-    (match) => match[1] ?? match[2],
-  );
+  return [
+    ...[...contents.matchAll(MARKDOWN_LINK_PATTERN)].map(
+      (match) => match[1] ?? match[2],
+    ),
+    ...[
+      ...contents.matchAll(
+        MARKDOWN_REFERENCE_DEFINITION_PATTERN,
+      ),
+    ].map((match) => match[1] ?? match[2]),
+  ];
 }
 
 function localLinkTarget(rootDirectory, documentPath, link) {
@@ -518,12 +549,31 @@ function markdownLines(contents) {
   return lines;
 }
 
+function markdownContainerLine(body) {
+  let content = body;
+  let blockquoteDepth = 0;
+
+  while (true) {
+    const prefix = content.match(/^ {0,3}>[ \t]?/);
+    if (!prefix) {
+      break;
+    }
+    content = content.slice(prefix[0].length);
+    blockquoteDepth += 1;
+  }
+
+  return { blockquoteDepth, content };
+}
+
 function fencedBlocks(contents) {
   const lines = markdownLines(contents);
   const blocks = [];
 
   for (let index = 0; index < lines.length; index += 1) {
-    const opening = lines[index].body.match(
+    const openingLine = markdownContainerLine(
+      lines[index].body,
+    );
+    const opening = openingLine.content.match(
       /^( {0,3})(`{3,}|~{3,})([^\r\n]*)$/,
     );
     if (!opening) {
@@ -549,11 +599,16 @@ function fencedBlocks(contents) {
       candidate < lines.length;
       candidate += 1
     ) {
-      const closing = lines[candidate].body.match(
+      const candidateLine = markdownContainerLine(
+        lines[candidate].body,
+      );
+      const closing = candidateLine.content.match(
         /^( {0,3})(`+|~+)[ \t]*$/,
       );
       if (
         closing &&
+        candidateLine.blockquoteDepth ===
+          openingLine.blockquoteDepth &&
         closing[2][0] === markerCharacter &&
         closing[2].length >= marker.length
       ) {
@@ -589,6 +644,11 @@ export function extractReadmePrompt(readme) {
 
 function promptContractFailures(prompt) {
   const failures = [];
+  if (prompt !== CANONICAL_PROMPT) {
+    failures.push(
+      "prompts/run-turnkey-demo.md: must match the complete canonical prompt byte-for-byte.",
+    );
+  }
   if (prompt.includes("HANDSHAKE_REPO_URL")) {
     failures.push(
       "prompts/run-turnkey-demo.md: must not accept a repository URL from the environment.",
