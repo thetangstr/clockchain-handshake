@@ -49,6 +49,14 @@ const FORBIDDEN_PRESENT_CAPABILITIES = Object.freeze([
   "consensus-secure",
   "permissionless",
 ]);
+const CONTEXTUAL_PRESENT_CAPABILITIES = Object.freeze([
+  "production-ready",
+  "multi-validator",
+]);
+const CLAIM_BOUNDARY_PATTERN =
+  /[.!?;,]+|\b(?:but|yet|however|although|though|while|whereas|and|because|since)\b/gi;
+const EXPLICIT_LIMITATION_PATTERN =
+  /\b(?:no|never|cannot|can't|isn't|aren't|wasn't|weren't|doesn't|don't|didn't|won't|wouldn't|couldn't|shouldn't|mustn't|not(?!\s+only))\b|\b(?:is|are|was|were|does|do|did|will|would|can|could|should|must|has|have|had)\s+not(?!\s+only)\b/i;
 const TOKEN_BOUNDARY_PATTERN =
   /[\s`"'()[\]{}<>,;!?/]/;
 const TOKEN_EXTENSION_PATTERN =
@@ -205,6 +213,39 @@ function canonicalSafetyRemainder(relativePath, contents) {
   return { failures, remainder };
 }
 
+function contextualPresentClaimFailures(
+  relativePath,
+  contents,
+) {
+  const failures = [];
+  const segments = contents
+    .replace(/\r?\n/g, " ")
+    .split(CLAIM_BOUNDARY_PATTERN);
+
+  for (const capability of CONTEXTUAL_PRESENT_CAPABILITIES) {
+    const escaped = capability.replace(
+      /[.*+?^${}()|[\]\\]/g,
+      "\\$&",
+    );
+    const pattern = new RegExp(`\\b${escaped}\\b`, "gi");
+    const unsafe = segments.some((segment) =>
+      [...segment.matchAll(pattern)].some(
+        (match) =>
+          !EXPLICIT_LIMITATION_PATTERN.test(
+            segment.slice(0, match.index),
+          ),
+      ),
+    );
+    if (unsafe) {
+      failures.push(
+        `${relativePath}: mentions forbidden capability "${capability}" as a present claim.`,
+      );
+    }
+  }
+
+  return failures;
+}
+
 function structuredSafetyFailures(relativePath, contents) {
   const { failures, remainder } =
     canonicalSafetyRemainder(relativePath, contents);
@@ -244,6 +285,13 @@ function structuredSafetyFailures(relativePath, contents) {
       );
     }
   }
+
+  failures.push(
+    ...contextualPresentClaimFailures(
+      relativePath,
+      remainder,
+    ),
+  );
 
   return failures;
 }

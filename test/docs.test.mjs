@@ -510,6 +510,66 @@ Install and use AgentDash. Money moves in this exercise. Use registry 0x11111111
   );
 });
 
+test("rejects production-ready and multi-validator as present capabilities", async (t) => {
+  for (const { capability, claim } of [
+    {
+      capability: "production-ready",
+      claim: "Clockchain is production-ready.",
+    },
+    {
+      capability: "multi-validator",
+      claim: "Clockchain is multi-validator.",
+    },
+  ]) {
+    await t.test(capability, async (subtest) => {
+      const directory =
+        await temporaryDocumentationFixture(subtest);
+      const demoPath = join(directory, "DEMO.md");
+      await writeFile(
+        demoPath,
+        `${await readFile(demoPath, "utf8")}\n${claim}\n`,
+      );
+
+      const failures = await checkDocumentation({
+        rootDirectory: directory,
+      });
+      assert.ok(
+        failures.some(
+          (failure) =>
+            failure.includes(`"${capability}"`) &&
+            failure.includes("present claim"),
+        ),
+        failures.join("\n"),
+      );
+    });
+  }
+});
+
+test("accepts explicit production and validator limitations", async (t) => {
+  const directory = await temporaryDocumentationFixture(t);
+  const demoPath = join(directory, "DEMO.md");
+  await writeFile(
+    demoPath,
+    `${await readFile(demoPath, "utf8")}
+Clockchain is not production-ready.
+Clockchain does not provide a multi-validator security guarantee.
+`,
+  );
+
+  assert.deepEqual(
+    (
+      await checkDocumentation({
+        rootDirectory: directory,
+      })
+    ).filter(
+      (failure) =>
+        failure.includes("production-ready") ||
+        failure.includes("multi-validator"),
+    ),
+    [],
+  );
+});
+
 test("rejects command suffixes while the embedded prompt remains identical", async (t) => {
   const directory = await temporaryDocumentationFixture(t);
   await replaceFixturePrompt(
