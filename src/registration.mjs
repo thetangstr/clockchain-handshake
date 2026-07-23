@@ -49,6 +49,10 @@ const REGISTRATION_TYPE =
 const REGISTRATION_DESCRIPTION =
   "Ephemeral Clockchain Handshake testnet identity; registration does not establish capability or trust.";
 const REGISTRY_VERSION = "2.0.0";
+const PILOT_MINIMUM_BALANCE_WEI =
+  5_000_000_000_000_000n;
+const PILOT_MAXIMUM_BALANCE_WEI =
+  20_000_000_000_000_000n;
 
 export const ERC8004_ABI = [
   {
@@ -791,16 +795,6 @@ export async function registerIdentity({
     );
   }
 
-  const balance = await runStage(
-    () => activePublicClient.getBalance({ address: account.address }),
-    "Wallet balance verification failed.",
-  );
-  if (typeof balance !== "bigint" || balance <= 0n) {
-    throw new RegistrationConfigurationError(
-      "Wallet balance must be greater than zero.",
-    );
-  }
-
   let initialDocument;
   let initialURI;
 
@@ -837,6 +831,20 @@ export async function registerIdentity({
     registerGas = addGasHeadroom(registerGasEstimate);
   } catch {
     throw new Error("Registration gas estimate is invalid.");
+  }
+
+  const balance = await runStage(
+    () => activePublicClient.getBalance({ address: account.address }),
+    "Wallet balance verification failed.",
+  );
+  if (
+    typeof balance !== "bigint" ||
+    balance < PILOT_MINIMUM_BALANCE_WEI ||
+    balance > PILOT_MAXIMUM_BALANCE_WEI
+  ) {
+    throw new RegistrationConfigurationError(
+      "Wallet pilot balance must be within 0.005 through 0.02 Sepolia ETH, inclusive.",
+    );
   }
 
   const requiredRegisterBalance =

@@ -32,8 +32,10 @@ card, USDC, private-limit ZK, or ERC-8004 Validation Registry writeback.
   into chat.
 - The machine needs outbound HTTPS access to the pinned Ethereum Sepolia RPC,
   GitHub, and the hosted Clockchain MCP service.
-- The disposable invitation wallet must already be funded within the pilot
-  Sepolia ETH bounds described in the invitation notes.
+- The disposable invitation wallet must already hold from `0.005` through `0.02`
+  Sepolia ETH, inclusive, as described in the invitation notes. The runner reads
+  this fresh balance immediately before its first chain write and stops outside
+  that range.
 
 No Clockchain token is supplied by the stakeholder. The runner mints one ephemeral
 demo transport token and keeps it out of logs and evidence.
@@ -45,7 +47,8 @@ demo transport token and keeps it out of logs and evidence.
 1. Opens the separately delivered invitation safely, authenticates it, and
    decrypts the disposable testnet key in process memory.
 2. Confirms Ethereum Sepolia, deployed bytecode, ERC-8004 version `2.0.0`, wallet
-   ownership, a zero starting nonce, and a bounded balance.
+   ownership, a zero starting nonce, and a fresh balance within the inclusive
+   `0.005`–`0.02` Sepolia ETH pilot range immediately before the first write.
 3. Sends one `register(string)` transaction and one `setAgentURI` transaction to
    the official registry, then reads back owner, agent wallet, and token URI.
 4. Resolves the resulting numeric agent ID through Clockchain®, obtains an

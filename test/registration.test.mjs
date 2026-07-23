@@ -43,6 +43,8 @@ const REGISTER_HASH = `0x${"33".repeat(32)}`;
 const METADATA_HASH = `0x${"44".repeat(32)}`;
 const RETRY_METADATA_HASH = `0x${"55".repeat(32)}`;
 const UNRELATED_HASH = `0x${"66".repeat(32)}`;
+const PILOT_MINIMUM_BALANCE_WEI = 5_000_000_000_000_000n;
+const PILOT_MAXIMUM_BALANCE_WEI = 20_000_000_000_000_000n;
 const DESCRIPTION =
   "Ephemeral Clockchain Handshake testnet identity; registration does not establish capability or trust.";
 
@@ -308,7 +310,10 @@ function createFakeClients(options = {}) {
       const balances = option(
         options,
         "balances",
-        [1_000_000_000_000_000n, 1_000_000_000_000_000n],
+        [
+          10_000_000_000_000_000n,
+          10_000_000_000_000_000n,
+        ],
       );
       const balance =
         balances[Math.min(state.balanceReads, balances.length - 1)];
@@ -590,7 +595,9 @@ test("classifies caught RPC failures without retaining raw network details", asy
 });
 
 test("classifies pre-write wallet and funding failures as configuration errors", async (t) => {
-  const requiredBalance = (226_000n + 250_000n) * 2n;
+  const pilotFeePerGas = 20_000_000_000n;
+  const requiredBalance =
+    (226_000n + 250_000n) * pilotFeePerGas;
   const malformedKey = "malformed-private-key-do-not-echo";
   const scenarios = [
     {
@@ -629,7 +636,15 @@ test("classifies pre-write wallet and funding failures as configuration errors",
       name: "insufficient fee envelope",
       run: () =>
         runWithFakeClients(
-          createFakeClients({ balance: requiredBalance - 1n }),
+          createFakeClients({
+            balance: requiredBalance - 1n,
+            feeQuotes: [
+              {
+                maxFeePerGas: pilotFeePerGas,
+                maxPriorityFeePerGas: 1n,
+              },
+            ],
+          }),
         ),
       canaries: [PRIVATE_KEY],
     },
@@ -666,7 +681,7 @@ test("carries stable safe categories through partial registration errors", async
     {
       name: "configuration failure after registration",
       options: {
-        balances: [1_000_000_000_000_000n, 0n],
+        balances: [10_000_000_000_000_000n, 0n],
       },
       category: "configuration",
       expected: expectedRecovery(),
@@ -905,9 +920,9 @@ test("registers then finalizes metadata in strict order and returns public JSON 
       "getCode",
       "read:getVersion",
       "getTransactionCount",
-      "getBalance",
       "estimateFeesPerGas",
       "estimate:register",
+      "getBalance",
       "write:register",
       "wait:register",
       "getChainId",
@@ -1013,16 +1028,95 @@ test("registers then finalizes metadata in strict order and returns public JSON 
 test("rejects a positive balance that cannot fund the conservative two-transaction envelope", async () => {
   const bufferedRegisterGas = 226_000n;
   const conservativeMetadataReserve = 250_000n;
-  const maxFeePerGas = 2n;
+  const maxFeePerGas = 20_000_000_000n;
   const requiredBalance =
     (bufferedRegisterGas + conservativeMetadataReserve) * maxFeePerGas;
-  const fake = createFakeClients({ balance: requiredBalance - 1n });
+  const fake = createFakeClients({
+    balance: requiredBalance - 1n,
+    feeQuotes: [
+      {
+        maxFeePerGas,
+        maxPriorityFeePerGas: 1n,
+      },
+    ],
+  });
   const error = await captureRejection(() => runWithFakeClients(fake));
 
   assert.match(error.message, /balance|fee/i);
   assert.equal(
     fake.state.calls.some(({ name }) => name === "write:register"),
     false,
+  );
+});
+
+test("enforces the inclusive pilot balance range immediately before the first write", async (t) => {
+  for (const { label, balance } of [
+    {
+      label: "below minimum",
+      balance: PILOT_MINIMUM_BALANCE_WEI - 1n,
+    },
+    {
+      label: "above maximum",
+      balance: PILOT_MAXIMUM_BALANCE_WEI + 1n,
+    },
+  ]) {
+    await t.test(label, async () => {
+      const fake = createFakeClients({ balance });
+      const error = await captureRejection(() =>
+        runWithFakeClients(fake),
+      );
+
+      assert.ok(
+        error instanceof RegistrationConfigurationError,
+      );
+      assert.match(error.message, /0\.005.*0\.02|pilot balance/i);
+      assert.equal(
+        fake.state.calls.some(
+          ({ name }) => name === "write:register",
+        ),
+        false,
+      );
+    });
+  }
+
+  for (const { label, balance } of [
+    {
+      label: "minimum",
+      balance: PILOT_MINIMUM_BALANCE_WEI,
+    },
+    {
+      label: "maximum",
+      balance: PILOT_MAXIMUM_BALANCE_WEI,
+    },
+  ]) {
+    await t.test(label, async () => {
+      const fake = createFakeClients({ balance });
+      await runWithFakeClients(fake);
+      const callNames = fake.state.calls.map(
+        ({ name }) => name,
+      );
+
+      assert.equal(
+        callNames[callNames.indexOf("write:register") - 1],
+        "getBalance",
+      );
+    });
+  }
+});
+
+test("does not apply the initial pilot balance floor to recovery finalization", async () => {
+  const fake = createFakeClients({
+    balance: 1_000_000_000_000_000n,
+    nonce: 1,
+  });
+
+  await finalizeWithFakeClients(fake, expectedRecovery());
+
+  assert.equal(
+    fake.state.calls.some(
+      ({ name }) => name === "write:setAgentURI",
+    ),
+    true,
   );
 });
 
@@ -1240,7 +1334,7 @@ test("returns a secret-free public partial checkpoint for every post-registratio
     {
       name: "metadata balance",
       options: {
-        balances: [1_000_000_000_000_000n, 0n],
+        balances: [10_000_000_000_000_000n, 0n],
       },
       expected: expectedRecovery(),
     },
@@ -1667,7 +1761,7 @@ test("binds a valid resumed recovery to exact registration and metadata evidence
 
 test("resumes a clean public checkpoint without registering again", async () => {
   const firstFake = createFakeClients({
-    balances: [1_000_000_000_000_000n, 0n],
+    balances: [10_000_000_000_000_000n, 0n],
   });
   const partial = await captureRejection(() =>
     runWithFakeClients(firstFake),
@@ -2085,7 +2179,7 @@ test("rejects a nonzero pending nonce before balance and writes", async () => {
   });
 });
 
-test("rejects a zero balance before gas estimation or writes", async () => {
+test("rejects a zero balance immediately before the first write", async () => {
   const fake = createFakeClients({ balance: 0n });
   const error = await captureRejection(() => runWithFakeClients(fake));
 
@@ -2097,6 +2191,8 @@ test("rejects a zero balance before gas estimation or writes", async () => {
       "getCode",
       "read:getVersion",
       "getTransactionCount",
+      "estimateFeesPerGas",
+      "estimate:register",
       "getBalance",
     ],
   );
@@ -2110,7 +2206,7 @@ test("rejects reverted first and second transaction receipts", async () => {
   assert.match(firstError.message, /registration receipt/i);
   assert.deepEqual(
     firstFake.state.calls.slice(-3).map(({ name }) => name),
-    ["estimate:register", "write:register", "wait:register"],
+    ["getBalance", "write:register", "wait:register"],
   );
   assert.equal(
     firstFake.state.calls.some(({ name }) => name === "write:setAgentURI"),

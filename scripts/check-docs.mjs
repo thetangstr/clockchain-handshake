@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 
-import { lstat, readFile } from "node:fs/promises";
+import {
+  lstat,
+  readFile,
+  realpath,
+} from "node:fs/promises";
 import {
   dirname,
   isAbsolute,
@@ -36,16 +40,15 @@ const REQUIRED_LINKS = Object.freeze({
 });
 const OFFICIAL_REGISTRY =
   "0x8004A818BFB912233c491871b3d84c89A494BD9e";
+const OFFICIAL_REPOSITORY =
+  "https://github.com/thetangstr/clockchain-handshake.git";
 const FORBIDDEN_PRESENT_CAPABILITIES = Object.freeze([
   "court-grade",
   "trustless",
   "mainnet",
   "consensus-secure",
+  "permissionless",
 ]);
-const NEGATION_PATTERN =
-  /\b(?:no|never|without|neither|nor|cannot|can't|doesn't|isn't|aren't|(?:does|do|is|are|was|were|will|can|must)\s+not(?!\s+only)|not(?!\s+only))\b/i;
-const CLAUSE_BOUNDARY_PATTERN =
-  /(?<=[.!?])\s+|[;:]|,\s*(?=which\b)|\b(?:but|yet|however|although|though|while|whereas|and|because|since|if|unless)\b|\bor(?=\s+(?:does|do|is|are|was|were|will|can|must|has|have|it|this|that|the|Clockchain)\b)/gi;
 const TOKEN_BOUNDARY_PATTERN =
   /[\s`"'()[\]{}<>,;!?/]/;
 const TOKEN_EXTENSION_PATTERN =
@@ -58,24 +61,59 @@ const DEFAULT_ROOT_DIRECTORY = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "..",
 );
+const DEMO_SAFETY_SECTION = `This is an Ethereum Sepolia and Clockchain® single-validator testnet exercise.
+No money moves. Do not install or use AgentDash. It is not mainnet, court-grade,
+consensus-secure, or trustless.`;
+const PROMPT_SAFETY_SECTION = `Work in a new temporary directory. Do not inspect or modify my current project.
+Do not install or use AgentDash. Do not invent success states.
+
+This is an Ethereum Sepolia and Clockchain® single-validator testnet exercise.
+No money moves. It is not mainnet, court-grade, consensus-secure, or trustless.`;
+const README_SAFETY_SECTION = `The exercise runs on Ethereum Sepolia and a Clockchain® single-validator testnet.
+No money moves. Do not install or use AgentDash. This exercise is not mainnet,
+court-grade, consensus-secure, or trustless.`;
+const CANONICAL_SAFETY_SECTIONS = Object.freeze({
+  "README.md": Object.freeze([
+    Object.freeze({
+      label: "repository safety summary",
+      text: README_SAFETY_SECTION,
+    }),
+    Object.freeze({
+      label: "embedded prompt safety summary",
+      text: PROMPT_SAFETY_SECTION,
+    }),
+  ]),
+  "DEMO.md": Object.freeze([
+    Object.freeze({
+      label: "runbook safety summary",
+      text: DEMO_SAFETY_SECTION,
+    }),
+  ]),
+  "prompts/run-turnkey-demo.md": Object.freeze([
+    Object.freeze({
+      label: "prompt safety summary",
+      text: PROMPT_SAFETY_SECTION,
+    }),
+  ]),
+});
+const PROMPT_REPOSITORY_POLICY = `2. Clone only \`${OFFICIAL_REPOSITORY}\` into a
+   named \`clockchain-handshake\` directory. When \`HANDSHAKE_REPO_REF\` is absent,
+   clone branch \`main\` with depth 1. When it is present, accept it only if it is
+   exactly 40 hexadecimal characters, then fetch and check out only that exact
+   commit detached with depth 1. Never use a repository URL supplied through the
+   environment. Do not enumerate or echo unrelated environment variables.
+3. Enter the cloned \`clockchain-handshake\` directory. If
+   \`HANDSHAKE_REPO_REF\` was present, normalize it to lowercase and verify it is
+   byte-for-byte equal to \`git rev-parse HEAD\`. Stop if the check fails.`;
+const PROMPT_INVITATION_POLICY = `6. Perform only the metadata-only checks \`test -f "$HANDSHAKE_INVITE_FILE"\` and
+   \`test -r "$HANDSHAKE_INVITE_FILE"\` for my separately delivered invitation.
+   Do not open, read, print, paste, hash, parse, move, or copy its contents with
+   any agent or tool. Only \`npm run demo\` may open and read the invitation.`;
 
 const REQUIRED_DOCUMENT_PATTERNS = Object.freeze([
   Object.freeze({
     label: "Clockchain®",
     pattern: /Clockchain®/,
-  }),
-  Object.freeze({
-    label: "single-validator testnet",
-    pattern: /single-validator testnet/i,
-  }),
-  Object.freeze({
-    label: "No money moves",
-    pattern: /\bno money moves\b/i,
-  }),
-  Object.freeze({
-    label: "AgentDash prohibition",
-    pattern:
-      /(?:\bdo not\b|\bnever\b|\bno\b)[^\n.!?]{0,80}\bAgentDash\b|\bAgentDash\b[^\n.!?]{0,80}(?:\bis not\b|\bnot required\b)/i,
   }),
   Object.freeze({
     label: OFFICIAL_REGISTRY,
@@ -109,44 +147,104 @@ function isPlainRoot(rootDirectory) {
   );
 }
 
-async function regularFile(path) {
+function containedBy(rootDirectory, target) {
+  const fromRoot = relative(rootDirectory, target);
+  return !(
+    fromRoot === ".." ||
+    fromRoot.startsWith("../") ||
+    isAbsolute(fromRoot)
+  );
+}
+
+async function canonicalRoot(rootDirectory) {
+  if (!isPlainRoot(rootDirectory)) {
+    return null;
+  }
+
   try {
-    return (await lstat(path)).isFile();
+    const canonical = await realpath(rootDirectory);
+    return (await lstat(canonical)).isDirectory()
+      ? canonical
+      : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-function clauseSegments(contents) {
-  return contents
-    .replace(/\r?\n/g, " ")
-    .split(CLAUSE_BOUNDARY_PATTERN)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
+async function canonicalRegularFile(rootDirectory, path) {
+  try {
+    const canonical = await realpath(path);
+    if (!containedBy(rootDirectory, canonical)) {
+      return null;
+    }
+    return (await lstat(canonical)).isFile()
+      ? canonical
+      : null;
+  } catch {
+    return null;
+  }
 }
 
-function forbiddenCapabilityFailures(
-  relativePath,
-  contents,
-) {
+function countOccurrences(contents, exact) {
+  return tokenOccurrences(contents, exact).length;
+}
+
+function canonicalSafetyRemainder(relativePath, contents) {
   const failures = [];
-  const segments = clauseSegments(contents);
+  let remainder = contents;
+  for (const { label, text } of
+    CANONICAL_SAFETY_SECTIONS[relativePath] ?? []) {
+    if (countOccurrences(contents, text) !== 1) {
+      failures.push(
+        `${relativePath}: canonical ${label} is missing or duplicated.`,
+      );
+    }
+    remainder = remainder.replaceAll(text, "");
+  }
+
+  return { failures, remainder };
+}
+
+function structuredSafetyFailures(relativePath, contents) {
+  const { failures, remainder } =
+    canonicalSafetyRemainder(relativePath, contents);
+
   for (const capability of FORBIDDEN_PRESENT_CAPABILITIES) {
     const pattern = new RegExp(
       `\\b${capability.replace("-", "\\-")}\\b`,
       "i",
     );
-    const unsafe = segments.some(
-      (segment) =>
-        pattern.test(segment) &&
-        !NEGATION_PATTERN.test(segment),
-    );
-    if (unsafe) {
+    if (pattern.test(remainder)) {
       failures.push(
-        `${relativePath}: presents forbidden capability "${capability}" without an explicit negation.`,
+        `${relativePath}: mentions forbidden capability "${capability}" outside its canonical safety section.`,
       );
     }
   }
+
+  if (/\bAgentDash\b/i.test(remainder)) {
+    failures.push(
+      `${relativePath}: contains "AgentDash" outside its canonical prohibition.`,
+    );
+  }
+  if (/\bmoney\b/i.test(remainder)) {
+    failures.push(
+      `${relativePath}: contains "Money moves" outside its canonical no-money boundary.`,
+    );
+  }
+
+  for (const match of remainder.matchAll(
+    /\b0x[0-9a-fA-F]{40}\b/g,
+  )) {
+    if (
+      match[0].toLowerCase() !==
+      OFFICIAL_REGISTRY.toLowerCase()
+    ) {
+      failures.push(
+        `${relativePath}: references non-official registry address "${match[0]}".`,
+      );
+    }
+  }
+
   return failures;
 }
 
@@ -245,6 +343,37 @@ function noncanonicalTokenFailures(
   return failures;
 }
 
+function noncanonicalCommandFailures(
+  relativePath,
+  contents,
+) {
+  const failures = [];
+  for (const match of contents.matchAll(
+    /(?<!`)`([^`\r\n]+)`(?!`)/g,
+  )) {
+    const command = match[1];
+    if (
+      command.startsWith("npm run demo") &&
+      command !== "npm run demo"
+    ) {
+      failures.push(
+        `${relativePath}: contains noncanonical command "${command}" derived from "npm run demo".`,
+      );
+    }
+  }
+
+  for (const match of contents.matchAll(
+    /\bnpm run demo[ \t]+(?=(?:--?[^\s`]|&&|\|\||[;|<>]))([^\r\n`]*)/g,
+  )) {
+    const command = `npm run demo ${match[1]}`.trimEnd();
+    failures.push(
+      `${relativePath}: contains noncanonical command "${command}" derived from "npm run demo".`,
+    );
+  }
+
+  return failures;
+}
+
 function markdownLinks(contents) {
   return [...contents.matchAll(MARKDOWN_LINK_PATTERN)].map(
     (match) => match[1] ?? match[2],
@@ -307,7 +436,13 @@ async function linkFailures({
     if (target === null) {
       continue;
     }
-    if (target === false || !(await regularFile(target))) {
+    if (
+      target === false ||
+      !(await canonicalRegularFile(
+        rootDirectory,
+        target,
+      ))
+    ) {
       failures.push(
         `${relativePath}: broken relative link "${link}".`,
       );
@@ -316,22 +451,141 @@ async function linkFailures({
   return failures;
 }
 
+function markdownLines(contents) {
+  const lines = [];
+  let start = 0;
+  while (start < contents.length) {
+    const newline = contents.indexOf("\n", start);
+    const end =
+      newline === -1 ? contents.length : newline + 1;
+    const raw = contents.slice(start, end);
+    const body = raw.endsWith("\n")
+      ? raw
+          .slice(0, -1)
+          .replace(/\r$/, "")
+      : raw;
+    lines.push({ body, end, start });
+    start = end;
+  }
+  return lines;
+}
+
+function fencedBlocks(contents) {
+  const lines = markdownLines(contents);
+  const blocks = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const opening = lines[index].body.match(
+      /^( {0,3})(`{3,}|~{3,})([^\r\n]*)$/,
+    );
+    if (!opening) {
+      continue;
+    }
+
+    const marker = opening[2];
+    const markerCharacter = marker[0];
+    const info = opening[3].trim();
+    if (
+      markerCharacter === "`" &&
+      info.includes("`")
+    ) {
+      continue;
+    }
+
+    const contentStart = lines[index].end;
+    let contentEnd = contents.length;
+    let closed = false;
+    let closingIndex = lines.length;
+    for (
+      let candidate = index + 1;
+      candidate < lines.length;
+      candidate += 1
+    ) {
+      const closing = lines[candidate].body.match(
+        /^( {0,3})(`+|~+)[ \t]*$/,
+      );
+      if (
+        closing &&
+        closing[2][0] === markerCharacter &&
+        closing[2].length >= marker.length
+      ) {
+        contentEnd = lines[candidate].start;
+        closed = true;
+        closingIndex = candidate;
+        break;
+      }
+    }
+
+    blocks.push({
+      closed,
+      content: contents.slice(contentStart, contentEnd),
+      info: info.split(/[ \t]+/, 1)[0],
+    });
+    index = closed ? closingIndex : lines.length;
+  }
+
+  return blocks;
+}
+
 export function extractReadmePrompt(readme) {
   if (typeof readme !== "string") {
     return null;
   }
-  const fences = [
-    ...readme.matchAll(
-      /^```text[ \t]*\r?\n([\s\S]*?)^```[ \t]*$/gm,
-    ),
-  ];
-  return fences.length === 1 ? fences[0][1] : null;
+  const prompts = fencedBlocks(readme).filter(
+    ({ info }) => info === "text",
+  );
+  return prompts.length === 1 && prompts[0].closed
+    ? prompts[0].content
+    : null;
+}
+
+function promptContractFailures(prompt) {
+  const failures = [];
+  if (prompt.includes("HANDSHAKE_REPO_URL")) {
+    failures.push(
+      "prompts/run-turnkey-demo.md: must not accept a repository URL from the environment.",
+    );
+  }
+  if (!prompt.includes(PROMPT_REPOSITORY_POLICY)) {
+    failures.push(
+      "prompts/run-turnkey-demo.md: canonical fixed-repository and immutable-ref policy is missing.",
+    );
+  }
+  if (!prompt.includes(PROMPT_INVITATION_POLICY)) {
+    failures.push(
+      "prompts/run-turnkey-demo.md: canonical metadata-only invitation policy is missing.",
+    );
+  }
+
+  const policyRemainder = prompt
+    .replace(PROMPT_REPOSITORY_POLICY, "")
+    .replace(PROMPT_INVITATION_POLICY, "");
+  if (
+    /\bHANDSHAKE_REPO_REF\b/.test(policyRemainder) ||
+    /https:\/\/github\.com\/[^\s`)]+/i.test(
+      policyRemainder,
+    )
+  ) {
+    failures.push(
+      "prompts/run-turnkey-demo.md: contains repository checkout instructions outside the canonical policy.",
+    );
+  }
+  if (
+    /\bHANDSHAKE_INVITE_FILE\b/.test(policyRemainder) ||
+    /\binvitation\b/i.test(policyRemainder)
+  ) {
+    failures.push(
+      "prompts/run-turnkey-demo.md: contains invitation handling instructions outside the canonical metadata-only policy.",
+    );
+  }
+  return failures;
 }
 
 export async function checkDocumentation({
   rootDirectory = DEFAULT_ROOT_DIRECTORY,
 } = {}) {
-  if (!isPlainRoot(rootDirectory)) {
+  const root = await canonicalRoot(rootDirectory);
+  if (root === null) {
     return ["documentation root must be an absolute path."];
   }
 
@@ -339,10 +593,12 @@ export async function checkDocumentation({
   const documents = new Map();
 
   for (const relativePath of PUBLIC_DOCUMENTS) {
-    const path = resolve(rootDirectory, relativePath);
+    const path = await canonicalRegularFile(
+      root,
+      resolve(root, relativePath),
+    );
     try {
-      const metadata = await lstat(path);
-      if (!metadata.isFile()) {
+      if (path === null) {
         throw new Error("not a regular file");
       }
       documents.set(relativePath, await readFile(path, "utf8"));
@@ -355,7 +611,10 @@ export async function checkDocumentation({
 
   for (const relativePath of REQUIRED_REPOSITORY_FILES) {
     if (
-      !(await regularFile(resolve(rootDirectory, relativePath)))
+      !(await canonicalRegularFile(
+        root,
+        resolve(root, relativePath),
+      ))
     ) {
       failures.push(
         `${relativePath}: required referenced file is missing or not a regular file.`,
@@ -379,10 +638,11 @@ export async function checkDocumentation({
       }
     }
     failures.push(
-      ...forbiddenCapabilityFailures(relativePath, contents),
+      ...structuredSafetyFailures(relativePath, contents),
       ...noncanonicalTokenFailures(relativePath, contents),
+      ...noncanonicalCommandFailures(relativePath, contents),
       ...(await linkFailures({
-        rootDirectory,
+        rootDirectory: root,
         relativePath,
         contents,
       })),
@@ -399,6 +659,9 @@ export async function checkDocumentation({
 
   const readme = documents.get("README.md");
   const prompt = documents.get("prompts/run-turnkey-demo.md");
+  if (prompt !== undefined) {
+    failures.push(...promptContractFailures(prompt));
+  }
   if (readme !== undefined) {
     const embeddedPrompt = extractReadmePrompt(readme);
     if (embeddedPrompt === null) {
