@@ -6,7 +6,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  readFile,
+  open,
   readdir,
   realpath,
   rename,
@@ -386,6 +386,23 @@ function terminateProcessGroup(child, signal) {
   }
 }
 
+function processGroupExists(child) {
+  if (
+    process.platform === "win32" ||
+    !child ||
+    !Number.isSafeInteger(child.pid) ||
+    child.pid <= 0
+  ) {
+    return false;
+  }
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
 async function runProcess({
   args,
   cwd,
@@ -510,6 +527,16 @@ async function runProcess({
     child.once("close", (exitCode, signal) => {
       clearTimeout(timeout);
       closeResult = { exitCode, signal };
+      if (!terminationStarted && processGroupExists(child)) {
+        terminationStarted = true;
+        terminateProcessGroup(child, "SIGTERM");
+        setTimeout(() => {
+          terminateProcessGroup(child, "SIGKILL");
+          hardKillCompleted = true;
+          finalize();
+        }, terminationGraceMs);
+        return;
+      }
       finalize();
     });
 
@@ -517,17 +544,81 @@ async function runProcess({
   });
 }
 
-async function readBounded(path, maximum) {
-  const stat = await lstat(path);
-  if (
-    !stat.isFile() ||
-    stat.isSymbolicLink() ||
-    stat.size < 1 ||
-    stat.size > maximum
-  ) {
-    throw new Error("File boundary rejected.");
+const BOUNDED_READ_FLAGS =
+  fileSystemConstants.O_RDONLY |
+  fileSystemConstants.O_NOFOLLOW |
+  fileSystemConstants.O_NONBLOCK;
+
+export const BOUNDED_READ_FLAGS_FOR_TESTING =
+  BOUNDED_READ_FLAGS;
+
+function unchangedFile(before, after) {
+  return (
+    after.isFile() &&
+    before.dev === after.dev &&
+    before.ino === after.ino &&
+    before.mode === after.mode &&
+    before.nlink === after.nlink &&
+    before.uid === after.uid &&
+    before.gid === after.gid &&
+    before.rdev === after.rdev &&
+    before.size === after.size &&
+    before.mtimeMs === after.mtimeMs &&
+    before.ctimeMs === after.ctimeMs
+  );
+}
+
+async function readBoundedFile(path, maximum, afterRead) {
+  let bytes;
+  let failure;
+  let handle;
+  try {
+    handle = await open(path, BOUNDED_READ_FLAGS);
+    const before = await handle.stat();
+    if (
+      !before.isFile() ||
+      before.size < 1 ||
+      before.size > maximum
+    ) {
+      throw new Error("File boundary rejected.");
+    }
+    bytes = await handle.readFile();
+    await afterRead?.();
+    const after = await handle.stat();
+    if (
+      !unchangedFile(before, after) ||
+      bytes.length !== before.size
+    ) {
+      throw new Error("File boundary rejected.");
+    }
+  } catch (error) {
+    failure = error;
   }
-  return readFile(path);
+  if (handle) {
+    try {
+      await handle.close();
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  if (failure) {
+    throw failure;
+  }
+  return bytes;
+}
+
+export async function readBoundedFileForTesting(
+  path,
+  maximum,
+  { afterRead } = {},
+) {
+  if (
+    afterRead !== undefined &&
+    typeof afterRead !== "function"
+  ) {
+    throw new HarnessConfigurationError();
+  }
+  return readBoundedFile(path, maximum, afterRead);
 }
 
 function isWithin(root, candidate) {
@@ -639,11 +730,11 @@ async function publishEvidence({
   clientRoot,
 }) {
   const pair = await discoverEvidence(clientRoot);
-  const jsonBytes = await readBounded(
+  const jsonBytes = await readBoundedFile(
     pair.json,
     MAX_EVIDENCE_BYTES,
   );
-  const markdownBytes = await readBounded(
+  const markdownBytes = await readBoundedFile(
     pair.markdown,
     MAX_EVIDENCE_BYTES,
   );
@@ -918,6 +1009,7 @@ export async function runCleanClients({
   invitations,
   maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES,
   now = () => new Date(),
+  operatorRiskAcknowledged,
   outputRoot = DEFAULT_OUTPUT_ROOT,
   promptFile = DEFAULT_PROMPT_FILE,
   readInvitation = readSecretInvitation,
@@ -926,6 +1018,9 @@ export async function runCleanClients({
   terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 } = {}) {
+  if (operatorRiskAcknowledged !== true) {
+    throw new HarnessConfigurationError();
+  }
   if (
     !isPlainObject(invitations) ||
     typeof now !== "function" ||
@@ -964,7 +1059,7 @@ export async function runCleanClients({
     maximum: 16 * 1_024 * 1_024,
   });
 
-  const prompt = await readBounded(
+  const prompt = await readBoundedFile(
     activePromptFile,
     DEFAULT_MAX_PROMPT_BYTES,
   );
@@ -1131,6 +1226,7 @@ export async function main({
         codex: resolve(options.codexInvite),
         claude: resolve(options.claudeInvite),
       },
+      operatorRiskAcknowledged: true,
       outputRoot: resolve(options.outputRoot),
       repositoryRef: options.repositoryRef,
     });

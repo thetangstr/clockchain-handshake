@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { constants as fileSystemConstants } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -7,6 +8,7 @@ import {
   readFile,
   readdir,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import {
@@ -26,9 +28,11 @@ import {
 } from "viem";
 
 import {
+  BOUNDED_READ_FLAGS_FOR_TESTING,
   DEFAULT_CLIENT_COMMANDS,
   buildClientEnvironment,
   main as runClientsMain,
+  readBoundedFileForTesting,
   runCleanClients,
 } from "../scripts/run-clean-clients.mjs";
 import {
@@ -293,6 +297,15 @@ if (mode === "hang") {
   process.stderr.write(
     "diagnostic 0x" + "9".repeat(64) + "\\n",
   );
+  if (mode === "lingering-success") {
+    spawn(process.execPath, [
+      "-e",
+      "process.on('SIGTERM', () => {});" +
+        "setTimeout(() => require('node:fs').writeFileSync(" +
+        JSON.stringify(marker) + ", 'escaped'), 650);" +
+        "setInterval(() => {}, 10000)",
+    ], { stdio: "ignore" });
+  }
   process.exit(mode === "fail" ? 7 : 0);
 }
 `,
@@ -390,6 +403,7 @@ function harnessOptions({
       codex: CODEX_INVITE,
       claude: CLAUDE_INVITE,
     },
+    operatorRiskAcknowledged: true,
     outputRoot: join(directory, "artifacts"),
     promptFile: join(directory, "prompt.md"),
     readInvitation: async (path) => {
@@ -786,6 +800,7 @@ test("client CLI requires an immutable repository SHA and never exposes executab
 
     assert.equal(exitCode, 0);
     assert.deepEqual(captured.commands, DEFAULT_CLIENT_COMMANDS);
+    assert.equal(captured.operatorRiskAcknowledged, true);
   });
 });
 
@@ -1253,6 +1268,66 @@ test("publishes parsed evidence only through canonical JSON serialization", asyn
   );
 });
 
+test("requires an exact programmatic risk acknowledgement before invitation reads, spawning, or artifacts", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-programmatic-ack-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+
+  for (const acknowledgement of [
+    undefined,
+    false,
+    "true",
+    1,
+  ]) {
+    let invitationReads = 0;
+    let spawnCalls = 0;
+    const options = harnessOptions({
+      claudeFixture,
+      codexFixture,
+      directory,
+      executable,
+    });
+    if (acknowledgement === undefined) {
+      delete options.operatorRiskAcknowledged;
+    } else {
+      options.operatorRiskAcknowledged = acknowledgement;
+    }
+    options.readInvitation = async () => {
+      invitationReads += 1;
+      throw new Error("must not read");
+    };
+    options.spawnImpl = () => {
+      spawnCalls += 1;
+      throw new Error("must not spawn");
+    };
+
+    await assert.rejects(
+      runCleanClients(options),
+      (error) =>
+        error?.name === "HarnessConfigurationError" &&
+        error?.code === "HARNESS_CONFIGURATION",
+    );
+    assert.equal(invitationReads, 0);
+    assert.equal(spawnCalls, 0);
+  }
+  await assert.rejects(
+    readFile(join(directory, "artifacts")),
+    /ENOENT/,
+  );
+});
+
 test("rejects a mutable repository ref before reading invitations or launching clients", async (t) => {
   const directory = await mkdtemp(
     join(process.env.TMPDIR, "handshake-mutable-ref-"),
@@ -1434,6 +1509,73 @@ test("SIGKILLs descendants after grace even when the timed-out leader exits on S
   await assert.rejects(readFile(marker), /ENOENT/);
 });
 
+test("reaps lingering descendants after a successful leader exit without reporting a timeout", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-descendant-success-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const marker = join(directory, "escaped-success-descendant.txt");
+
+  const result = await runCleanClients(
+    harnessOptions({
+      claudeFixture,
+      codexFixture,
+      codexMode: "lingering-success",
+      directory,
+      executable,
+      marker,
+      terminationGraceMs: 50,
+    }),
+  );
+  await delay(800);
+
+  assert.equal(result.status, "PASS");
+  assert.equal(result.clients.codex.timedOut, false);
+  assert.equal(result.clients.codex.outputLimitExceeded, false);
+  await assert.rejects(readFile(marker), /ENOENT/);
+});
+
+test("bounded evidence reads own no-follow descriptor flags and reject metadata changes", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-evidence-descriptor-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  const evidencePath = join(directory, "result.json");
+  const symlinkTarget = join(directory, "target.json");
+  const symlinkPath = join(directory, "linked-result.json");
+  await writeFile(evidencePath, '{"status":"PASS"}\n');
+  await writeFile(symlinkTarget, '{"status":"PASS"}\n');
+  await symlink(symlinkTarget, symlinkPath);
+
+  assert.equal(
+    BOUNDED_READ_FLAGS_FOR_TESTING,
+    fileSystemConstants.O_RDONLY |
+      fileSystemConstants.O_NOFOLLOW |
+      fileSystemConstants.O_NONBLOCK,
+  );
+  await assert.rejects(
+    readBoundedFileForTesting(evidencePath, 1_024, {
+      afterRead: () => writeFile(evidencePath, "changed\n"),
+    }),
+    /boundary/i,
+  );
+  await assert.rejects(
+    readBoundedFileForTesting(symlinkPath, 1_024),
+  );
+});
+
 test("a nonzero client exit fails the aggregate while the other isolated client still runs", async (t) => {
   const directory = await mkdtemp(
     join(process.env.TMPDIR, "handshake-failure-"),
@@ -1496,6 +1638,7 @@ test("client CLI resolves documented relative invitation paths without accepting
   });
 
   assert.equal(exitCode, 0);
+  assert.equal(captured.operatorRiskAcknowledged, true);
   assert.equal(
     captured.invitations.codex,
     join(
