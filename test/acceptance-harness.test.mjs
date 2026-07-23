@@ -13,11 +13,20 @@ import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 
 import {
+  encodeAbiParameters,
+  encodeEventTopics,
+  encodeFunctionData,
+} from "viem";
+
+import {
   DEFAULT_CLIENT_COMMANDS,
+  buildClientEnvironment,
+  main as runClientsMain,
   runCleanClients,
 } from "../scripts/run-clean-clients.mjs";
 import {
   expectedReceiptHash,
+  main as verifyResultsMain,
   verifyLiveResults,
 } from "../scripts/verify-live-results.mjs";
 import {
@@ -32,11 +41,17 @@ const PROMPT = Buffer.from(
   "Run this exact Handshake prompt.\nSecond line stays byte-identical.\n",
   "utf8",
 );
-const REPOSITORY_URL =
-  "https://github.com/example/clockchain-handshake.git";
-const REPOSITORY_REF = "feature/turnkey";
+const REPOSITORY_REF = "A".repeat(40);
 const CODEX_INVITE = "/private/codex.secret.json";
 const CLAUDE_INVITE = "/private/claude.secret.json";
+const CODEX_INVITE_CODE =
+  "codex-invitation-code-canary-value";
+const CLAUDE_INVITE_CODE =
+  "claude-invitation-code-canary-value";
+const CODEX_CIPHERTEXT =
+  "codex-unlabeled-ciphertext-canary-value";
+const CLAUDE_CIPHERTEXT =
+  "claude-unlabeled-ciphertext-canary-value";
 const REGISTER_TX_A = `0x${"a".repeat(64)}`;
 const METADATA_TX_A = `0x${"b".repeat(64)}`;
 const REGISTER_TX_B = `0x${"c".repeat(64)}`;
@@ -125,6 +140,21 @@ const CLAUDE_RESULT = passResult({
   runId: RUN_B,
 });
 
+function memoryOutput() {
+  let value = "";
+  return {
+    stream: {
+      write(chunk) {
+        value += String(chunk);
+        return true;
+      },
+    },
+    text() {
+      return value;
+    },
+  };
+}
+
 async function writeFixture(directory, result) {
   await mkdir(directory, { recursive: true });
   const jsonPath = join(directory, "result.json");
@@ -139,6 +169,14 @@ async function writeFixture(directory, result) {
     renderResultMarkdown(result),
     { mode: 0o600 },
   );
+  await Promise.all([
+    writeFile(join(directory, "stdout.log"), "", {
+      mode: 0o600,
+    }),
+    writeFile(join(directory, "stderr.log"), "", {
+      mode: 0o600,
+    }),
+  ]);
   return { jsonPath, markdownPath };
 }
 
@@ -154,6 +192,7 @@ async function writeFakeClient(directory) {
     executable,
     `#!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -162,7 +201,14 @@ if (process.argv.includes("--version")) {
   process.exit(0);
 }
 
-const [mode, jsonFixture, markdownFixture, marker] =
+const [
+  mode,
+  jsonFixture,
+  markdownFixture,
+  marker,
+  leakedCode,
+  leakedCiphertext,
+] =
   process.argv.slice(2);
 if (mode === "hang") {
   spawn(process.execPath, [
@@ -171,6 +217,18 @@ if (mode === "hang") {
       JSON.stringify(marker) + ", 'escaped'), 650)",
   ], { stdio: "ignore" });
   process.on("SIGTERM", () => {});
+  setInterval(() => {}, 10_000);
+} else if (mode === "leader-exits") {
+  const descendant = spawn(process.execPath, [
+    "-e",
+    "process.on('SIGTERM', () => {});" +
+      "process.stdout.write('ready');" +
+      "setTimeout(() => require('node:fs').writeFileSync(" +
+      JSON.stringify(marker) + ", 'escaped'), 650);" +
+      "setInterval(() => {}, 10000)",
+  ], { stdio: ["ignore", "pipe", "ignore"] });
+  await once(descendant.stdout, "data");
+  process.on("SIGTERM", () => process.exit(0));
   setInterval(() => {}, 10_000);
 } else {
   let input = "";
@@ -199,7 +257,9 @@ if (mode === "hang") {
     "invite=" + process.env.HANDSHAKE_INVITE_FILE +
       " openai=" + (process.env.OPENAI_API_KEY ?? "") +
       " anthropic=" + (process.env.ANTHROPIC_API_KEY ?? "") +
-      " Bearer cc_abcdefghijklmnopqrstuvwxyz123456\\n",
+      " Bearer cc_abcdefghijklmnopqrstuvwxyz123456 " +
+      leakedCode + " " +
+      JSON.stringify({ code: leakedCiphertext }) + "\\n",
   );
   process.stderr.write(
     "wallet private key: 0x" + "9".repeat(64) + "\\n",
@@ -244,6 +304,8 @@ function harnessOptions({
           codexFixture.jsonPath,
           codexFixture.markdownPath,
           marker ?? "",
+          CODEX_INVITE_CODE,
+          CODEX_CIPHERTEXT,
         ],
         versionArgs: ["--version"],
       },
@@ -254,6 +316,8 @@ function harnessOptions({
           claudeFixture.jsonPath,
           claudeFixture.markdownPath,
           marker ?? "",
+          CLAUDE_INVITE_CODE,
+          CLAUDE_CIPHERTEXT,
         ],
         versionArgs: ["--version"],
       },
@@ -264,8 +328,26 @@ function harnessOptions({
     },
     outputRoot: join(directory, "artifacts"),
     promptFile: join(directory, "prompt.md"),
+    readInvitation: async (path) => {
+      if (path === CODEX_INVITE) {
+        return {
+          code: CODEX_INVITE_CODE,
+          bundle: {
+            crypto: { ciphertext: CODEX_CIPHERTEXT },
+          },
+        };
+      }
+      if (path === CLAUDE_INVITE) {
+        return {
+          code: CLAUDE_INVITE_CODE,
+          bundle: {
+            crypto: { ciphertext: CLAUDE_CIPHERTEXT },
+          },
+        };
+      }
+      throw new Error("unexpected invitation path");
+    },
     repositoryRef: REPOSITORY_REF,
-    repositoryUrl: REPOSITORY_URL,
     terminationGraceMs,
     timeoutMs,
   };
@@ -279,6 +361,8 @@ test("defines the exact native Codex and Claude clean-client commands", () => {
         "exec",
         "--ephemeral",
         "--skip-git-repo-check",
+        "--ignore-user-config",
+        "--ignore-rules",
         "--dangerously-bypass-approvals-and-sandbox",
         "-",
       ],
@@ -292,10 +376,50 @@ test("defines the exact native Codex and Claude clean-client commands", () => {
         "--permission-mode",
         "bypassPermissions",
         "--dangerously-skip-permissions",
+        "--safe-mode",
       ],
       versionArgs: ["--version"],
     },
   });
+});
+
+test("omits repository overrides on main and accepts only a normalized immutable commit", () => {
+  const base = {
+    baseEnvironment: {
+      PATH: "/usr/bin",
+      HOME: "/tmp/home",
+      HANDSHAKE_REPO_URL: "https://attacker.invalid/repo.git",
+    },
+    clientName: "codex",
+    invitationFile: CODEX_INVITE,
+    temporaryDirectory: "/tmp/handshake-client",
+  };
+  const mainEnvironment = buildClientEnvironment(base);
+  assert.equal(
+    Object.hasOwn(mainEnvironment, "HANDSHAKE_REPO_URL"),
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(mainEnvironment, "HANDSHAKE_REPO_REF"),
+    false,
+  );
+
+  const commitEnvironment = buildClientEnvironment({
+    ...base,
+    repositoryRef: REPOSITORY_REF,
+  });
+  assert.equal(
+    commitEnvironment.HANDSHAKE_REPO_REF,
+    REPOSITORY_REF.toLowerCase(),
+  );
+  assert.throws(
+    () =>
+      buildClientEnvironment({
+        ...base,
+        repositoryRef: "feature/turnkey",
+      }),
+    /configuration/i,
+  );
 });
 
 test("matches the deployed Clockchain canonical event-hash contract", () => {
@@ -380,8 +504,14 @@ test("runs clean clients sequentially with identical prompts and isolated minima
     false,
   );
   for (const capture of [codexCapture, claudeCapture]) {
-    assert.equal(capture.env.HANDSHAKE_REPO_URL, REPOSITORY_URL);
-    assert.equal(capture.env.HANDSHAKE_REPO_REF, REPOSITORY_REF);
+    assert.equal(
+      Object.hasOwn(capture.env, "HANDSHAKE_REPO_URL"),
+      false,
+    );
+    assert.equal(
+      capture.env.HANDSHAKE_REPO_REF,
+      REPOSITORY_REF.toLowerCase(),
+    );
     assert.equal(
       Object.hasOwn(capture.env, "HANDSHAKE_CODEX_INVITE_FILE"),
       false,
@@ -408,6 +538,10 @@ test("runs clean clients sequentially with identical prompts and isolated minima
     CLAUDE_INVITE,
     CODEX_AUTH_CANARY,
     CLAUDE_AUTH_CANARY,
+    CODEX_INVITE_CODE,
+    CLAUDE_INVITE_CODE,
+    CODEX_CIPHERTEXT,
+    CLAUDE_CIPHERTEXT,
   ]) {
     assert.equal(manifest.includes(forbidden), false);
   }
@@ -426,9 +560,95 @@ test("runs clean clients sequentially with identical prompts and isolated minima
     assert.equal(stdout.includes(CODEX_AUTH_CANARY), false);
     assert.equal(stdout.includes(CLAUDE_AUTH_CANARY), false);
     assert.equal(stdout.includes("cc_abcdefghijklmnopqrstuvwxyz123456"), false);
+    assert.equal(stdout.includes(CODEX_INVITE_CODE), false);
+    assert.equal(stdout.includes(CLAUDE_INVITE_CODE), false);
+    assert.equal(stdout.includes(CODEX_CIPHERTEXT), false);
+    assert.equal(stdout.includes(CLAUDE_CIPHERTEXT), false);
     assert.equal(stderr.includes(`0x${"9".repeat(64)}`), false);
     assert.match(`${stdout}${stderr}`, /\[REDACTED\]/);
   }
+});
+
+test("fails closed without publishing client evidence that contains an invitation canary", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-evidence-canary-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const contaminatedResult = structuredClone(CODEX_RESULT);
+  contaminatedResult.identity.displayName = CODEX_INVITE_CODE;
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    contaminatedResult,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+
+  const result = await runCleanClients(
+    harnessOptions({
+      claudeFixture,
+      codexFixture,
+      directory,
+      executable,
+    }),
+  );
+
+  assert.equal(result.status, "FAIL");
+  assert.equal(result.clients.codex.status, "FAIL");
+  assert.equal(
+    result.clients.codex.errorCode,
+    "CLIENT_EVIDENCE_INVALID",
+  );
+  assert.equal(result.clients.codex.resultPaths, null);
+  assert.equal(result.clients.claude.status, "PASS");
+  await assert.rejects(
+    readFile(
+      join(directory, "artifacts", "codex", "result.json"),
+    ),
+    /ENOENT/,
+  );
+  const manifest = await readFile(result.manifestPath, "utf8");
+  assert.equal(manifest.includes(CODEX_INVITE_CODE), false);
+});
+
+test("rejects a mutable repository ref before reading invitations or launching clients", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-mutable-ref-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  let invitationReads = 0;
+  const options = harnessOptions({
+    claudeFixture,
+    codexFixture,
+    directory,
+    executable,
+  });
+  options.repositoryRef = "feature/turnkey";
+  options.readInvitation = async () => {
+    invitationReads += 1;
+    throw new Error("must not read");
+  };
+
+  await assert.rejects(
+    runCleanClients(options),
+    /configuration/i,
+  );
+  assert.equal(invitationReads, 0);
 });
 
 test("rejects a shared invitation path before launching either client", async (t) => {
@@ -491,7 +711,7 @@ test("terminates a timed-out client process group and fails the aggregate verdic
       executable,
       marker,
       terminationGraceMs: 50,
-      timeoutMs: 100,
+      timeoutMs: 300,
     }),
   );
   await delay(800);
@@ -499,6 +719,43 @@ test("terminates a timed-out client process group and fails the aggregate verdic
   assert.equal(result.status, "FAIL");
   assert.equal(result.clients.codex.timedOut, true);
   assert.equal(result.clients.claude.status, "PASS");
+  await assert.rejects(readFile(marker), /ENOENT/);
+});
+
+test("SIGKILLs descendants after grace even when the timed-out leader exits on SIGTERM", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-descendant-timeout-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const marker = join(directory, "escaped-descendant.txt");
+
+  const result = await runCleanClients(
+    harnessOptions({
+      claudeFixture,
+      codexFixture,
+      codexMode: "leader-exits",
+      directory,
+      executable,
+      marker,
+      terminationGraceMs: 50,
+      timeoutMs: 100,
+    }),
+  );
+  await delay(800);
+
+  assert.equal(result.status, "FAIL");
+  assert.equal(result.clients.codex.timedOut, true);
   await assert.rejects(readFile(marker), /ENOENT/);
 });
 
@@ -534,8 +791,218 @@ test("a nonzero client exit fails the aggregate while the other isolated client 
   assert.equal(result.clients.claude.exitCode, 7);
 });
 
+test("client CLI resolves documented relative invitation paths without accepting a repository URL", async () => {
+  const stdout = memoryOutput();
+  const stderr = memoryOutput();
+  let captured;
+  const exitCode = await runClientsMain({
+    argv: [
+      "--codex-invite",
+      ".context/invitations/codex.secret.json",
+      "--claude-invite",
+      ".context/invitations/claude.secret.json",
+      "--repo-ref",
+      REPOSITORY_REF,
+    ],
+    environment: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+    },
+    async run(options) {
+      captured = options;
+      return {
+        status: "PASS",
+        manifestPath: "/tmp/client-acceptance.json",
+      };
+    },
+    stderr: stderr.stream,
+    stdout: stdout.stream,
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(
+    captured.invitations.codex,
+    join(
+      process.cwd(),
+      ".context/invitations/codex.secret.json",
+    ),
+  );
+  assert.equal(
+    captured.invitations.claude,
+    join(
+      process.cwd(),
+      ".context/invitations/claude.secret.json",
+    ),
+  );
+  assert.equal(
+    Object.hasOwn(captured, "repositoryUrl"),
+    false,
+  );
+  assert.equal(stderr.text(), "");
+  assert.match(stdout.text(), /PASS/);
+});
+
+function registrationUris(result) {
+  const initial = {
+    type: "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
+    name: result.identity.displayName,
+    description:
+      "Ephemeral Clockchain Handshake testnet identity; registration does not establish capability or trust.",
+    services: [],
+    x402Support: false,
+    active: true,
+    registrations: [],
+  };
+  const final = {
+    ...initial,
+    registrations: [
+      {
+        agentRegistry:
+          `eip155:11155111:${REGISTRY_ADDRESS}`,
+        agentId: Number(result.identity.agentId),
+      },
+    ],
+  };
+  const uri = (document) =>
+    `data:application/json;base64,${
+      Buffer.from(JSON.stringify(document), "utf8").toString("base64")
+    }`;
+  return {
+    initial: uri(initial),
+    final: uri(final),
+  };
+}
+
+function transactionEvidence(result, index) {
+  const { initial, final } = registrationUris(result);
+  const registerBlock = 10_000n + BigInt(index * 2);
+  const metadataBlock = registerBlock + 1n;
+  const registerInput = encodeFunctionData({
+    abi: [
+      {
+        type: "function",
+        name: "register",
+        stateMutability: "nonpayable",
+        inputs: [{ name: "agentURI", type: "string" }],
+        outputs: [{ name: "agentId", type: "uint256" }],
+      },
+    ],
+    functionName: "register",
+    args: [initial],
+  });
+  const metadataInput = encodeFunctionData({
+    abi: [
+      {
+        type: "function",
+        name: "setAgentURI",
+        stateMutability: "nonpayable",
+        inputs: [
+          { name: "agentId", type: "uint256" },
+          { name: "newURI", type: "string" },
+        ],
+        outputs: [],
+      },
+    ],
+    functionName: "setAgentURI",
+    args: [BigInt(result.identity.agentId), final],
+  });
+  const registeredLog = {
+    address: REGISTRY_ADDRESS,
+    data: encodeAbiParameters(
+      [{ name: "agentURI", type: "string" }],
+      [initial],
+    ),
+    topics: encodeEventTopics({
+      abi: [
+        {
+          type: "event",
+          name: "Registered",
+          anonymous: false,
+          inputs: [
+            {
+              name: "agentId",
+              type: "uint256",
+              indexed: true,
+            },
+            {
+              name: "agentURI",
+              type: "string",
+              indexed: false,
+            },
+            {
+              name: "owner",
+              type: "address",
+              indexed: true,
+            },
+          ],
+        },
+      ],
+      eventName: "Registered",
+      args: {
+        agentId: BigInt(result.identity.agentId),
+        owner: result.identity.owner,
+      },
+    }),
+    blockNumber: registerBlock,
+    transactionHash: result.identity.registerTx,
+  };
+  const transaction = ({
+    blockNumber,
+    hash,
+    input,
+    nonce,
+  }) => ({
+    hash,
+    blockNumber,
+    chainId: 11155111,
+    from: result.identity.owner,
+    to: REGISTRY_ADDRESS,
+    value: 0n,
+    nonce,
+    input,
+    transactionIndex: 0,
+  });
+  const receipt = ({
+    blockNumber,
+    hash,
+    logs = [],
+  }) => ({
+    status: "success",
+    transactionHash: hash,
+    blockNumber,
+    transactionIndex: 0,
+    from: result.identity.owner,
+    to: REGISTRY_ADDRESS,
+    logs,
+  });
+  return {
+    registerTransaction: transaction({
+      blockNumber: registerBlock,
+      hash: result.identity.registerTx,
+      input: registerInput,
+      nonce: 0,
+    }),
+    metadataTransaction: transaction({
+      blockNumber: metadataBlock,
+      hash: result.identity.metadataTx,
+      input: metadataInput,
+      nonce: 1,
+    }),
+    registerReceipt: receipt({
+      blockNumber: registerBlock,
+      hash: result.identity.registerTx,
+      logs: [registeredLog],
+    }),
+    metadataReceipt: receipt({
+      blockNumber: metadataBlock,
+      hash: result.identity.metadataTx,
+    }),
+  };
+}
+
 function fakePublicClient(results) {
   const calls = [];
+  const transactions = results.map(transactionEvidence);
   return {
     calls,
     async getChainId() {
@@ -545,6 +1012,33 @@ function fakePublicClient(results) {
     async getCode({ address }) {
       calls.push({ address, functionName: "getCode" });
       return "0x6000";
+    },
+    async getTransaction({ hash }) {
+      calls.push({ functionName: "getTransaction", hash });
+      for (const evidence of transactions) {
+        if (evidence.registerTransaction.hash === hash) {
+          return structuredClone(evidence.registerTransaction);
+        }
+        if (evidence.metadataTransaction.hash === hash) {
+          return structuredClone(evidence.metadataTransaction);
+        }
+      }
+      throw new Error("Unknown transaction");
+    },
+    async getTransactionReceipt({ hash }) {
+      calls.push({
+        functionName: "getTransactionReceipt",
+        hash,
+      });
+      for (const evidence of transactions) {
+        if (evidence.registerReceipt.transactionHash === hash) {
+          return structuredClone(evidence.registerReceipt);
+        }
+        if (evidence.metadataReceipt.transactionHash === hash) {
+          return structuredClone(evidence.metadataReceipt);
+        }
+      }
+      throw new Error("Unknown receipt");
     },
     async readContract({ address, args, functionName }) {
       calls.push({ address, args, functionName });
@@ -559,32 +1053,18 @@ function fakePublicClient(results) {
         return result.identity.owner;
       }
       if (functionName === "tokenURI") {
-        const document = {
-          type: "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
-          name: result.identity.displayName,
-          description:
-            "Ephemeral Clockchain Handshake testnet identity; registration does not establish capability or trust.",
-          services: [],
-          x402Support: false,
-          active: true,
-          registrations: [
-            {
-              agentRegistry:
-                `eip155:11155111:${REGISTRY_ADDRESS}`,
-              agentId: Number(result.identity.agentId),
-            },
-          ],
-        };
-        return `data:application/json;base64,${
-          Buffer.from(JSON.stringify(document), "utf8").toString("base64")
-        }`;
+        return registrationUris(result).final;
       }
       throw new Error(`Unexpected read ${functionName}`);
     },
   };
 }
 
-function fakeClockchain(results, observations) {
+function fakeClockchain(
+  results,
+  observations,
+  { mutateCompleted = (receipt) => receipt } = {},
+) {
   return {
     async tokenIssuer(options) {
       observations.tokenSubjects.push(options.subject);
@@ -593,6 +1073,42 @@ function fakeClockchain(results, observations) {
     clientFactory({ token }) {
       observations.factoryTokens.push(token);
       return {
+        async completeAttestation(receipt) {
+          observations.completions.push(receipt);
+          const result = results.find(
+            ({ clockchain }) =>
+              clockchain.ledgerId === receipt.anchor.ledgerId,
+          );
+          assert.ok(result);
+          const completed = {
+            schema: "clockchain.receipt/v1",
+            network: "testnet",
+            status: "anchored",
+            agentId: result.identity.agentId,
+            action: "trust_handshake",
+            eventHash: expectedReceiptHash(result),
+            hashType: "SHA-256",
+            payload: structuredClone(receipt.payload),
+            anchor: {
+              ledgerId: result.clockchain.ledgerId,
+              assetReferenceId:
+                `${result.identity.agentId}:trust_handshake:1780000000000`,
+              blockHeight: result.clockchain.blockHeight,
+              recordedAt: "2026-07-23T08:00:00.000Z",
+              consensusTime: result.clockchain.consensusTime,
+              confirmed: true,
+            },
+            poolHealth: {
+              totalNodes:
+                result.clockchain.poolHealth.totalNodes,
+              nodeParticipationPct:
+                result.clockchain.poolHealth.nodeParticipationPct,
+              degraded:
+                result.clockchain.poolHealth.degradedAtSubmission,
+            },
+          };
+          return mutateCompleted(completed, result);
+        },
         async verifyCrossParty(identifiers) {
           observations.crossParty.push(identifiers);
           const result = results.find(
@@ -635,6 +1151,7 @@ test("independently verifies both identities and recomputed receipt hashes befor
     CLAUDE_RESULT,
   ]);
   const observations = {
+    completions: [],
     crossParty: [],
     factoryTokens: [],
     tokenSubjects: [],
@@ -673,6 +1190,7 @@ test("independently verifies both identities and recomputed receipt hashes befor
   assert.equal(verdict.aggregate.distinctBlockHeights, true);
   assert.equal(observations.tokenSubjects.length, 1);
   assert.equal(observations.factoryTokens.length, 1);
+  assert.equal(observations.completions.length, 2);
   assert.deepEqual(observations.crossParty, [
     { ledgerId: LEDGER_A, blockHeight: "9001" },
     { ledgerId: LEDGER_B, blockHeight: "9002" },
@@ -690,6 +1208,16 @@ test("independently verifies both identities and recomputed receipt hashes befor
       "getAgentWallet",
       "tokenURI",
     ],
+  );
+  assert.equal(
+    functions.filter((name) => name === "getTransaction").length,
+    4,
+  );
+  assert.equal(
+    functions.filter(
+      (name) => name === "getTransactionReceipt",
+    ).length,
+    4,
   );
   assert.equal(
     publicClient.calls
@@ -729,6 +1257,7 @@ test("extracts secret canaries from operator files and fails closed without echo
     CLAUDE_RESULT,
   ]);
   const observations = {
+    completions: [],
     crossParty: [],
     factoryTokens: [],
     tokenSubjects: [],
@@ -784,6 +1313,7 @@ test("fails a client whose live ERC-8004 owner differs from its evidence", async
     return originalRead.call(publicClient, options);
   };
   const observations = {
+    completions: [],
     crossParty: [],
     factoryTokens: [],
     tokenSubjects: [],
@@ -834,6 +1364,7 @@ test("rejects two otherwise verified runs that reuse one ERC-8004 identity", asy
     duplicateIdentity,
   ]);
   const observations = {
+    completions: [],
     crossParty: [],
     factoryTokens: [],
     tokenSubjects: [],
@@ -860,4 +1391,215 @@ test("rejects two otherwise verified runs that reuse one ERC-8004 identity", asy
   assert.equal(verdict.aggregate.distinctLedgerIds, true);
   assert.equal(verdict.aggregate.distinctBlockHeights, true);
   assert.equal(verdict.status, "FAIL");
+});
+
+test("rejects forged ERC-8004 transaction proof even when final owner and URI reads match", async (t) => {
+  const cases = [
+    {
+      name: "registry target",
+      mutateTransaction(transaction) {
+        transaction.to = OWNER_B;
+      },
+    },
+    {
+      name: "register calldata",
+      mutateTransaction(transaction) {
+        transaction.input = "0x12345678";
+      },
+    },
+    {
+      name: "receipt status",
+      mutateReceipt(receipt) {
+        receipt.status = "reverted";
+      },
+    },
+    {
+      name: "Registered event",
+      mutateReceipt(receipt) {
+        receipt.logs = [];
+      },
+    },
+  ];
+
+  for (const attack of cases) {
+    await t.test(attack.name, async (subtest) => {
+      const directory = await mkdtemp(
+        join(process.env.TMPDIR, "handshake-forged-tx-"),
+      );
+      subtest.after(() =>
+        rm(directory, { force: true, recursive: true }));
+      const codexDirectory = join(directory, "codex");
+      const claudeDirectory = join(directory, "claude");
+      await writeFixture(codexDirectory, CODEX_RESULT);
+      await writeFixture(claudeDirectory, CLAUDE_RESULT);
+      const publicClient = fakePublicClient([
+        CODEX_RESULT,
+        CLAUDE_RESULT,
+      ]);
+      const originalGetTransaction =
+        publicClient.getTransaction;
+      const originalGetTransactionReceipt =
+        publicClient.getTransactionReceipt;
+      publicClient.getTransaction = async (options) => {
+        const transaction = await originalGetTransaction.call(
+          publicClient,
+          options,
+        );
+        if (options.hash === CODEX_RESULT.identity.registerTx) {
+          attack.mutateTransaction?.(transaction);
+        }
+        return transaction;
+      };
+      publicClient.getTransactionReceipt = async (options) => {
+        const receipt =
+          await originalGetTransactionReceipt.call(
+            publicClient,
+            options,
+          );
+        if (options.hash === CODEX_RESULT.identity.registerTx) {
+          attack.mutateReceipt?.(receipt);
+        }
+        return receipt;
+      };
+      const observations = {
+        completions: [],
+        crossParty: [],
+        factoryTokens: [],
+        tokenSubjects: [],
+      };
+      const clockchain = fakeClockchain(
+        [CODEX_RESULT, CLAUDE_RESULT],
+        observations,
+      );
+
+      const verdict = await verifyLiveResults({
+        clientFactory: clockchain.clientFactory,
+        outputFile: join(directory, "verdict.json"),
+        publicClient,
+        resultDirectories: {
+          codex: codexDirectory,
+          claude: claudeDirectory,
+        },
+        tokenIssuer: clockchain.tokenIssuer,
+      });
+
+      assert.equal(verdict.status, "FAIL");
+      assert.equal(
+        verdict.clients.codex.errorCode,
+        "ERC8004_TRANSACTION_MISMATCH",
+      );
+      assert.equal(verdict.clients.claude.status, "PASS");
+    });
+  }
+});
+
+test("rejects forged consensus time and pool-health result fields against a read-only completed receipt", async (t) => {
+  for (const field of ["consensusTime", "poolHealth"]) {
+    await t.test(field, async () => {
+      const directory = await mkdtemp(
+        join(
+          process.env.TMPDIR,
+          `handshake-forged-${field}-`,
+        ),
+      );
+      t.after(() =>
+        rm(directory, { force: true, recursive: true }));
+      const codexDirectory = join(directory, "codex");
+      const claudeDirectory = join(directory, "claude");
+      await writeFixture(codexDirectory, CODEX_RESULT);
+      await writeFixture(claudeDirectory, CLAUDE_RESULT);
+      const publicClient = fakePublicClient([
+        CODEX_RESULT,
+        CLAUDE_RESULT,
+      ]);
+      const observations = {
+        completions: [],
+        crossParty: [],
+        factoryTokens: [],
+        tokenSubjects: [],
+      };
+      const clockchain = fakeClockchain(
+        [CODEX_RESULT, CLAUDE_RESULT],
+        observations,
+        {
+          mutateCompleted(receipt, result) {
+            if (result.identity.agentId !== "101") {
+              return receipt;
+            }
+            if (field === "consensusTime") {
+              receipt.anchor.consensusTime =
+                "2026-07-23T09:09:09.000Z";
+            } else {
+              receipt.poolHealth.totalNodes = 2;
+            }
+            return receipt;
+          },
+        },
+      );
+
+      const verdict = await verifyLiveResults({
+        clientFactory: clockchain.clientFactory,
+        outputFile: join(directory, "verdict.json"),
+        publicClient,
+        resultDirectories: {
+          codex: codexDirectory,
+          claude: claudeDirectory,
+        },
+        tokenIssuer: clockchain.tokenIssuer,
+      });
+
+      assert.equal(verdict.status, "FAIL");
+      assert.equal(
+        verdict.clients.codex.errorCode,
+        "CLOCKCHAIN_RECEIPT_MISMATCH",
+      );
+      assert.equal(verdict.clients.claude.status, "PASS");
+    });
+  }
+});
+
+test("verifier CLI accepts two documented result paths and activates conventional secret canaries", async () => {
+  const stdout = memoryOutput();
+  const stderr = memoryOutput();
+  let captured;
+  const customOutput = "artifacts/custom-verdict.json";
+  const exitCode = await verifyResultsMain({
+    argv: [
+      "artifacts/codex/result.json",
+      "artifacts/claude/result.json",
+      "--output",
+      customOutput,
+    ],
+    async verify(options) {
+      captured = options;
+      return { status: "PASS" };
+    },
+    stderr: stderr.stream,
+    stdout: stdout.stream,
+  });
+
+  assert.equal(exitCode, 0);
+  assert.deepEqual(captured.resultDirectories, {
+    codex: join(process.cwd(), "artifacts/codex"),
+    claude: join(process.cwd(), "artifacts/claude"),
+  });
+  assert.deepEqual(captured.canaryFiles, [
+    join(
+      process.cwd(),
+      ".context/invitations/codex.secret.json",
+    ),
+    join(
+      process.cwd(),
+      ".context/invitations/claude.secret.json",
+    ),
+  ]);
+  assert.equal(
+    captured.outputFile,
+    join(process.cwd(), customOutput),
+  );
+  assert.equal(stderr.text(), "");
+  assert.match(
+    stdout.text(),
+    new RegExp(customOutput.replace(".", "\\.")),
+  );
 });

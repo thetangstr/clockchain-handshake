@@ -25,6 +25,7 @@ import {
   renderResultMarkdown,
   validatePassResult,
 } from "../src/evidence.mjs";
+import { readSecretInvitation } from "../src/invitation.mjs";
 import {
   assertSecretFree,
   redact,
@@ -41,9 +42,6 @@ const DEFAULT_OUTPUT_ROOT = join(
   REPOSITORY_DIRECTORY,
   "artifacts",
 );
-const DEFAULT_REPOSITORY_URL =
-  "https://github.com/thetangstr/clockchain-handshake.git";
-const DEFAULT_REPOSITORY_REF = "main";
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1_000;
 const DEFAULT_TERMINATION_GRACE_MS = 2_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1_024 * 1_024;
@@ -51,6 +49,7 @@ const DEFAULT_MAX_PROMPT_BYTES = 256 * 1_024;
 const MAX_DISCOVERY_ENTRIES = 20_000;
 const MAX_DISCOVERY_DEPTH = 16;
 const MAX_EVIDENCE_BYTES = 2 * 1_024 * 1_024;
+const COMMIT_REF_PATTERN = /^[0-9a-f]{40}$/i;
 const CLIENT_NAMES = Object.freeze(["codex", "claude"]);
 const COMMON_ENVIRONMENT_KEYS = Object.freeze([
   "PATH",
@@ -92,6 +91,8 @@ export const DEFAULT_CLIENT_COMMANDS = Object.freeze({
       "exec",
       "--ephemeral",
       "--skip-git-repo-check",
+      "--ignore-user-config",
+      "--ignore-rules",
       "--dangerously-bypass-approvals-and-sandbox",
       "-",
     ]),
@@ -105,6 +106,7 @@ export const DEFAULT_CLIENT_COMMANDS = Object.freeze({
       "--permission-mode",
       "bypassPermissions",
       "--dangerously-skip-permissions",
+      "--safe-mode",
     ]),
     versionArgs: Object.freeze(["--version"]),
   }),
@@ -197,12 +199,24 @@ function environmentValue(source, key) {
     : undefined;
 }
 
+function normalizeRepositoryRef(value) {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    typeof value !== "string" ||
+    !COMMIT_REF_PATTERN.test(value)
+  ) {
+    throw new HarnessConfigurationError();
+  }
+  return value.toLowerCase();
+}
+
 export function buildClientEnvironment({
   baseEnvironment,
   clientName,
   invitationFile,
   repositoryRef,
-  repositoryUrl,
   temporaryDirectory,
 }) {
   if (
@@ -235,16 +249,37 @@ export function buildClientEnvironment({
   environment.TMPDIR = absolutePath(temporaryDirectory);
   environment.HANDSHAKE_INVITE_FILE =
     absolutePath(invitationFile);
-  environment.HANDSHAKE_REPO_URL =
-    nonemptyString(repositoryUrl);
-  environment.HANDSHAKE_REPO_REF =
-    nonemptyString(repositoryRef);
+  const commitRef = normalizeRepositoryRef(repositoryRef);
+  if (commitRef !== undefined) {
+    environment.HANDSHAKE_REPO_REF = commitRef;
+  }
   return environment;
 }
 
-function secretEnvironmentCanaries(environment, clientName) {
+function invitationCanaries(invitation) {
+  const code = invitation?.code;
+  const ciphertext = invitation?.bundle?.crypto?.ciphertext;
+  if (
+    typeof code !== "string" ||
+    code.length === 0 ||
+    code.length > 16_384 ||
+    typeof ciphertext !== "string" ||
+    ciphertext.length === 0 ||
+    ciphertext.length > 16_384
+  ) {
+    throw new HarnessConfigurationError();
+  }
+  return [code, ciphertext];
+}
+
+function secretEnvironmentCanaries(
+  environment,
+  clientName,
+  derivedInvitationCanaries,
+) {
   return [
     environment.HANDSHAKE_INVITE_FILE,
+    ...derivedInvitationCanaries,
     ...CLIENT_CREDENTIAL_KEYS[clientName]
       .map((key) => environment[key])
       .filter((value) => typeof value === "string"),
@@ -343,22 +378,46 @@ async function runProcess({
     let timedOut = false;
     let outputLimitExceeded = false;
     let spawnFailed = false;
-    let hardKillTimer;
+    let terminationStarted = false;
+    let hardKillCompleted = false;
+    let closeResult;
 
-    const terminate = (reason) => {
-      if (settled) {
+    const finalize = () => {
+      if (
+        settled ||
+        closeResult === undefined ||
+        (terminationStarted && !hardKillCompleted)
+      ) {
         return;
       }
+      settled = true;
+      resolveProcess({
+        exitCode: closeResult.exitCode,
+        outputLimitExceeded,
+        signal: closeResult.signal,
+        spawnFailed,
+        stderr: Buffer.concat(stderr),
+        stdout: Buffer.concat(stdout),
+        timedOut,
+      });
+    };
+
+    const terminate = (reason) => {
+      if (settled || terminationStarted) {
+        return;
+      }
+      terminationStarted = true;
       if (reason === "timeout") {
         timedOut = true;
       } else {
         outputLimitExceeded = true;
       }
       terminateProcessGroup(child, "SIGTERM");
-      hardKillTimer = setTimeout(() => {
+      setTimeout(() => {
         terminateProcessGroup(child, "SIGKILL");
+        hardKillCompleted = true;
+        finalize();
       }, terminationGraceMs);
-      hardKillTimer.unref?.();
     };
 
     const capture = (chunks, chunk, stream) => {
@@ -399,20 +458,9 @@ async function runProcess({
     timeout.unref?.();
 
     child.once("close", (exitCode, signal) => {
-      settled = true;
       clearTimeout(timeout);
-      if (hardKillTimer) {
-        clearTimeout(hardKillTimer);
-      }
-      resolveProcess({
-        exitCode,
-        outputLimitExceeded,
-        signal,
-        spawnFailed,
-        stderr: Buffer.concat(stderr),
-        stdout: Buffer.concat(stdout),
-        timedOut,
-      });
+      closeResult = { exitCode, signal };
+      finalize();
     });
 
     child.stdin?.end(input);
@@ -563,11 +611,11 @@ async function runOneClient({
   clientName,
   command,
   invitationFile,
+  derivedInvitationCanaries,
   maxOutputBytes,
   now,
   prompt,
   repositoryRef,
-  repositoryUrl,
   spawnImpl,
   terminationGraceMs,
   timeoutMs,
@@ -584,12 +632,12 @@ async function runOneClient({
     clientName,
     invitationFile,
     repositoryRef,
-    repositoryUrl,
     temporaryDirectory,
   });
   const canaries = secretEnvironmentCanaries(
     environment,
     clientName,
+    derivedInvitationCanaries,
   );
   const startedAt = now().toISOString();
   const versionResult = await runProcess({
@@ -716,8 +764,8 @@ export async function runCleanClients({
   now = () => new Date(),
   outputRoot = DEFAULT_OUTPUT_ROOT,
   promptFile = DEFAULT_PROMPT_FILE,
-  repositoryRef = DEFAULT_REPOSITORY_REF,
-  repositoryUrl = DEFAULT_REPOSITORY_URL,
+  readInvitation = readSecretInvitation,
+  repositoryRef,
   spawnImpl = spawn,
   terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS,
   timeoutMs = DEFAULT_TIMEOUT_MS,
@@ -725,6 +773,7 @@ export async function runCleanClients({
   if (
     !isPlainObject(invitations) ||
     typeof now !== "function" ||
+    typeof readInvitation !== "function" ||
     typeof spawnImpl !== "function"
   ) {
     throw new HarnessConfigurationError();
@@ -745,13 +794,13 @@ export async function runCleanClients({
   ) {
     throw new HarnessConfigurationError();
   }
+  const activeRepositoryRef =
+    normalizeRepositoryRef(repositoryRef);
   boundedInteger(timeoutMs, { maximum: 60 * 60 * 1_000 });
   boundedInteger(terminationGraceMs, { maximum: 30_000 });
   boundedInteger(maxOutputBytes, {
     maximum: 16 * 1_024 * 1_024,
   });
-  nonemptyString(repositoryUrl);
-  nonemptyString(repositoryRef);
 
   const prompt = await readBounded(
     activePromptFile,
@@ -760,6 +809,12 @@ export async function runCleanClients({
   const promptSha256 = createHash("sha256")
     .update(prompt)
     .digest("hex");
+  const derivedCanaries = {};
+  for (const name of CLIENT_NAMES) {
+    derivedCanaries[name] = invitationCanaries(
+      await readInvitation(activeInvitations[name]),
+    );
+  }
   await mkdir(activeOutputRoot, {
     mode: 0o700,
     recursive: true,
@@ -780,12 +835,12 @@ export async function runCleanClients({
       baseTemporaryDirectory: activeTemporaryDirectory,
       clientName: name,
       command: activeCommands[name],
+      derivedInvitationCanaries: derivedCanaries[name],
       invitationFile: activeInvitations[name],
       maxOutputBytes,
       now,
       prompt,
-      repositoryRef,
-      repositoryUrl,
+      repositoryRef: activeRepositoryRef,
       spawnImpl,
       terminationGraceMs,
       timeoutMs,
@@ -804,6 +859,10 @@ export async function runCleanClients({
     completedAt: now().toISOString(),
     clients,
   };
+  assertSecretFree(manifest, [
+    ...derivedCanaries.codex,
+    ...derivedCanaries.claude,
+  ]);
   manifest.manifestPath = await writeManifest(
     activeOutputRoot,
     manifest,
@@ -821,11 +880,7 @@ function parseArguments(argv, environment) {
       environment.HANDSHAKE_ACCEPTANCE_OUTPUT ??
       DEFAULT_OUTPUT_ROOT,
     repositoryRef:
-      environment.HANDSHAKE_REPO_REF ??
-      DEFAULT_REPOSITORY_REF,
-    repositoryUrl:
-      environment.HANDSHAKE_REPO_URL ??
-      DEFAULT_REPOSITORY_URL,
+      environment.HANDSHAKE_REPO_REF,
     codexExecutable:
       environment.HANDSHAKE_CODEX_EXECUTABLE ??
       DEFAULT_CLIENT_COMMANDS.codex.executable,
@@ -838,7 +893,6 @@ function parseArguments(argv, environment) {
     "--claude-invite": "claudeInvite",
     "--output": "outputRoot",
     "--repo-ref": "repositoryRef",
-    "--repo-url": "repositoryUrl",
     "--codex-command": "codexExecutable",
     "--claude-command": "claudeExecutable",
   };
@@ -858,10 +912,11 @@ export async function main({
   environment = process.env,
   stderr = process.stderr,
   stdout = process.stdout,
+  run = runCleanClients,
 } = {}) {
   try {
     const options = parseArguments(argv, environment);
-    const result = await runCleanClients({
+    const result = await run({
       baseEnvironment: environment,
       commands: {
         codex: {
@@ -874,12 +929,11 @@ export async function main({
         },
       },
       invitations: {
-        codex: options.codexInvite,
-        claude: options.claudeInvite,
+        codex: resolve(options.codexInvite),
+        claude: resolve(options.claudeInvite),
       },
       outputRoot: resolve(options.outputRoot),
       repositoryRef: options.repositoryRef,
-      repositoryUrl: options.repositoryUrl,
     });
     stdout.write(
       `${result.status} ${result.manifestPath}\n`,

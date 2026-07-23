@@ -2,9 +2,14 @@ import {
   createHash,
   randomUUID as defaultRandomUUID,
 } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import {
+  constants as fileSystemConstants,
+} from "node:fs";
 import {
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   realpath,
@@ -12,6 +17,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import {
+  basename,
   dirname,
   extname,
   isAbsolute,
@@ -24,6 +30,8 @@ import { fileURLToPath } from "node:url";
 
 import {
   createPublicClient,
+  decodeFunctionData,
+  encodeFunctionData,
   http,
 } from "viem";
 import { sepolia } from "viem/chains";
@@ -45,6 +53,7 @@ import {
 import {
   ERC8004_ABI,
   buildRegistrationDocument,
+  parseRegisteredAgentId,
   registrationDataUri,
 } from "../src/registration.mjs";
 import {
@@ -144,9 +153,9 @@ function canonicalize(value) {
   return JSON.stringify(sortDeep(value) ?? null);
 }
 
-export function expectedReceiptHash(result) {
+function expectedReceiptEvent(result) {
   validatePassResult(result);
-  const event = {
+  return {
     agentId: result.identity.agentId,
     action: result.scenario.action,
     inputs: {
@@ -165,6 +174,10 @@ export function expectedReceiptHash(result) {
       paymentMoved: false,
     },
   };
+}
+
+export function expectedReceiptHash(result) {
+  const event = expectedReceiptEvent(result);
   return createHash("sha256")
     .update(canonicalize(event), "utf8")
     .digest("hex");
@@ -256,6 +269,47 @@ function assertArtifactText(text, canaries) {
   }
 }
 
+async function readArtifactFile(path) {
+  let handle;
+  try {
+    handle = await open(
+      path,
+      fileSystemConstants.O_RDONLY |
+        fileSystemConstants.O_NOFOLLOW,
+    );
+    const stat = await handle.stat();
+    if (
+      !stat.isFile() ||
+      stat.size > MAX_ARTIFACT_FILE_BYTES
+    ) {
+      throw new LiveVerificationError(
+        "ARTIFACT_FILE_INVALID",
+      );
+    }
+    const bytes = await handle.readFile();
+    if (
+      bytes.length > MAX_ARTIFACT_FILE_BYTES
+    ) {
+      throw new LiveVerificationError(
+        "ARTIFACT_SCAN_LIMIT",
+      );
+    }
+    return {
+      size: bytes.length,
+      text: bytes.toString("utf8"),
+    };
+  } catch (error) {
+    if (error instanceof LiveVerificationError) {
+      throw error;
+    }
+    throw new LiveVerificationError(
+      "ARTIFACT_FILE_INVALID",
+    );
+  } finally {
+    await handle?.close();
+  }
+}
+
 async function scanArtifactDirectory(directory, canaries) {
   const rootStat = await lstat(directory);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
@@ -265,6 +319,7 @@ async function scanArtifactDirectory(directory, canaries) {
   }
   const canonicalRoot = await realpath(directory);
   const queue = [{ directory: canonicalRoot, depth: 0 }];
+  const files = new Map();
   let fileCount = 0;
   let totalBytes = 0;
 
@@ -303,19 +358,18 @@ async function scanArtifactDirectory(directory, canaries) {
           "ARTIFACT_FILE_INVALID",
         );
       }
-      const stat = await lstat(path);
+      const file = await readArtifactFile(path);
       fileCount += 1;
-      totalBytes += stat.size;
+      totalBytes += file.size;
       if (
         fileCount > MAX_ARTIFACT_FILES ||
-        stat.size > MAX_ARTIFACT_FILE_BYTES ||
         totalBytes > MAX_ARTIFACT_TOTAL_BYTES
       ) {
         throw new LiveVerificationError(
           "ARTIFACT_SCAN_LIMIT",
         );
       }
-      const text = await readFile(path, "utf8");
+      const { text } = file;
       assertArtifactText(text, canaries);
       if (extname(path).toLowerCase() === ".json") {
         try {
@@ -328,36 +382,34 @@ async function scanArtifactDirectory(directory, canaries) {
           }
         }
       }
+      files.set(relative(canonicalRoot, path), text);
     }
   }
+  return files;
 }
 
 async function loadLocalResult(directory, canaries) {
-  await scanArtifactDirectory(directory, canaries);
+  const files = await scanArtifactDirectory(
+    directory,
+    canaries,
+  );
   const jsonPath = join(directory, "result.json");
   const markdownPath = join(directory, "RESULT.md");
-  const [jsonStat, markdownStat] = await Promise.all([
-    lstat(jsonPath),
-    lstat(markdownPath),
-  ]);
+  const jsonText = files.get("result.json");
+  const markdown = files.get("RESULT.md");
   if (
-    !jsonStat.isFile() ||
-    jsonStat.isSymbolicLink() ||
-    !markdownStat.isFile() ||
-    markdownStat.isSymbolicLink() ||
-    jsonStat.size > MAX_ARTIFACT_FILE_BYTES ||
-    markdownStat.size > MAX_ARTIFACT_FILE_BYTES
+    typeof jsonText !== "string" ||
+    typeof markdown !== "string"
   ) {
     throw new LiveVerificationError("RESULT_FILES_INVALID");
   }
   let result;
   try {
-    result = JSON.parse(await readFile(jsonPath, "utf8"));
+    result = JSON.parse(jsonText);
     validatePassResult(result);
   } catch {
     throw new LiveVerificationError("RESULT_SCHEMA_INVALID");
   }
-  const markdown = await readFile(markdownPath, "utf8");
   if (markdown !== renderResultMarkdown(result)) {
     throw new LiveVerificationError(
       "RESULT_MARKDOWN_MISMATCH",
@@ -427,7 +479,203 @@ async function verifyIdentity(publicClient, result) {
   };
 }
 
+function sameHash(left, right) {
+  return (
+    typeof left === "string" &&
+    typeof right === "string" &&
+    /^0x[0-9a-f]{64}$/i.test(left) &&
+    /^0x[0-9a-f]{64}$/i.test(right) &&
+    left.toLowerCase() === right.toLowerCase()
+  );
+}
+
+function transactionIndex(value) {
+  if (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+  ) {
+    return BigInt(value);
+  }
+  if (typeof value === "bigint" && value >= 0n) {
+    return value;
+  }
+  throw new LiveVerificationError(
+    "ERC8004_TRANSACTION_MISMATCH",
+  );
+}
+
+function assertTransactionEnvelope({
+  expectedHash,
+  expectedNonce,
+  receipt,
+  transaction,
+  owner,
+}) {
+  if (
+    !isPlainObject(transaction) ||
+    !isPlainObject(receipt) ||
+    !sameHash(transaction.hash, expectedHash) ||
+    transaction.chainId !== CHAIN_ID ||
+    !addressesEqual(transaction.from, owner) ||
+    !addressesEqual(transaction.to, REGISTRY_ADDRESS) ||
+    transaction.value !== 0n ||
+    transaction.nonce !== expectedNonce ||
+    typeof transaction.input !== "string" ||
+    typeof transaction.blockNumber !== "bigint" ||
+    receipt.status !== "success" ||
+    !sameHash(receipt.transactionHash, expectedHash) ||
+    receipt.blockNumber !== transaction.blockNumber ||
+    !addressesEqual(receipt.from, owner) ||
+    !addressesEqual(receipt.to, REGISTRY_ADDRESS) ||
+    transactionIndex(receipt.transactionIndex) !==
+      transactionIndex(transaction.transactionIndex) ||
+    !Array.isArray(receipt.logs)
+  ) {
+    throw new LiveVerificationError(
+      "ERC8004_TRANSACTION_MISMATCH",
+    );
+  }
+}
+
+function assertExactCalldata({
+  args,
+  functionName,
+  input,
+}) {
+  try {
+    const decoded = decodeFunctionData({
+      abi: ERC8004_ABI,
+      data: input,
+    });
+    const expected = encodeFunctionData({
+      abi: ERC8004_ABI,
+      functionName,
+      args,
+    });
+    if (
+      decoded.functionName !== functionName ||
+      decoded.args.length !== args.length ||
+      decoded.args.some(
+        (value, index) => value !== args[index],
+      ) ||
+      input.toLowerCase() !== expected.toLowerCase()
+    ) {
+      throw new Error();
+    }
+  } catch {
+    throw new LiveVerificationError(
+      "ERC8004_TRANSACTION_MISMATCH",
+    );
+  }
+}
+
+async function verifyIdentityTransactions(publicClient, result) {
+  const [
+    registerTransaction,
+    registerReceipt,
+    metadataTransaction,
+    metadataReceipt,
+  ] = await Promise.all([
+    publicClient.getTransaction({
+      hash: result.identity.registerTx,
+    }),
+    publicClient.getTransactionReceipt({
+      hash: result.identity.registerTx,
+    }),
+    publicClient.getTransaction({
+      hash: result.identity.metadataTx,
+    }),
+    publicClient.getTransactionReceipt({
+      hash: result.identity.metadataTx,
+    }),
+  ]);
+  assertTransactionEnvelope({
+    expectedHash: result.identity.registerTx,
+    expectedNonce: 0,
+    owner: result.identity.owner,
+    receipt: registerReceipt,
+    transaction: registerTransaction,
+  });
+  assertTransactionEnvelope({
+    expectedHash: result.identity.metadataTx,
+    expectedNonce: 1,
+    owner: result.identity.owner,
+    receipt: metadataReceipt,
+    transaction: metadataTransaction,
+  });
+
+  const agentId = BigInt(result.identity.agentId);
+  const initialUri = registrationDataUri(
+    buildRegistrationDocument({
+      displayName: result.identity.displayName,
+      agentId: null,
+    }),
+  );
+  const finalUri = registrationDataUri(
+    buildRegistrationDocument({
+      displayName: result.identity.displayName,
+      agentId,
+    }),
+  );
+  assertExactCalldata({
+    args: [initialUri],
+    functionName: "register",
+    input: registerTransaction.input,
+  });
+  assertExactCalldata({
+    args: [agentId, finalUri],
+    functionName: "setAgentURI",
+    input: metadataTransaction.input,
+  });
+  let registeredAgentId;
+  try {
+    registeredAgentId = parseRegisteredAgentId(
+      registerReceipt,
+      {
+        expectedOwner: result.identity.owner,
+        expectedAgentURI: initialUri,
+      },
+    );
+  } catch {
+    throw new LiveVerificationError(
+      "ERC8004_TRANSACTION_MISMATCH",
+    );
+  }
+  if (registeredAgentId.toString() !== result.identity.agentId) {
+    throw new LiveVerificationError(
+      "ERC8004_TRANSACTION_MISMATCH",
+    );
+  }
+
+  const registerIndex = transactionIndex(
+    registerTransaction.transactionIndex,
+  );
+  const metadataIndex = transactionIndex(
+    metadataTransaction.transactionIndex,
+  );
+  if (
+    metadataTransaction.blockNumber <
+      registerTransaction.blockNumber ||
+    (
+      metadataTransaction.blockNumber ===
+        registerTransaction.blockNumber &&
+      metadataIndex <= registerIndex
+    )
+  ) {
+    throw new LiveVerificationError(
+      "ERC8004_TRANSACTION_MISMATCH",
+    );
+  }
+  return {
+    registerBlock: registerTransaction.blockNumber.toString(),
+    metadataBlock: metadataTransaction.blockNumber.toString(),
+    transactionOrderMatches: true,
+  };
+}
+
 async function verifyClockchain(mcpClient, result) {
+  const event = expectedReceiptEvent(result);
   const identifiers = {
     ledgerId: result.clockchain.ledgerId,
     blockHeight: result.clockchain.blockHeight,
@@ -464,6 +712,66 @@ async function verifyClockchain(mcpClient, result) {
       "CLOCKCHAIN_RECEIPT_MISMATCH",
     );
   }
+
+  const rehydrated = await mcpClient.completeAttestation({
+    schema: "clockchain.receipt/v1",
+    network: "testnet",
+    status: "anchored",
+    agentId: event.agentId,
+    action: event.action,
+    eventHash: expectedHash,
+    hashType: "SHA-256",
+    payload: {
+      inputs: event.inputs,
+      outputs: event.outputs,
+    },
+    anchor: {
+      ledgerId: result.clockchain.ledgerId,
+      assetReferenceId: onChain.assetReferenceId,
+      blockHeight: result.clockchain.blockHeight,
+      consensusTime: null,
+      confirmed: true,
+    },
+    identity: {
+      resolved: true,
+      status: "active",
+    },
+  });
+  const poolHealth = rehydrated?.poolHealth;
+  if (
+    !isPlainObject(rehydrated) ||
+    rehydrated.schema !== "clockchain.receipt/v1" ||
+    rehydrated.network !== "testnet" ||
+    rehydrated.status !== result.clockchain.receiptStatus ||
+    rehydrated.agentId !== event.agentId ||
+    rehydrated.action !== event.action ||
+    rehydrated.eventHash !== expectedHash ||
+    rehydrated.hashType !== "SHA-256" ||
+    !isDeepStrictEqual(rehydrated.payload, {
+      inputs: event.inputs,
+      outputs: event.outputs,
+    }) ||
+    rehydrated.anchor?.ledgerId !==
+      result.clockchain.ledgerId ||
+    rehydrated.anchor?.assetReferenceId !==
+      onChain.assetReferenceId ||
+    rehydrated.anchor?.blockHeight !==
+      result.clockchain.blockHeight ||
+    rehydrated.anchor?.consensusTime !==
+      result.clockchain.consensusTime ||
+    rehydrated.anchor?.confirmed !== true ||
+    !isPlainObject(poolHealth) ||
+    poolHealth.totalNodes !==
+      result.clockchain.poolHealth.totalNodes ||
+    poolHealth.nodeParticipationPct !==
+      result.clockchain.poolHealth.nodeParticipationPct ||
+    poolHealth.degraded !==
+      result.clockchain.poolHealth.degradedAtSubmission
+  ) {
+    throw new LiveVerificationError(
+      "CLOCKCHAIN_RECEIPT_MISMATCH",
+    );
+  }
   return {
     ledgerId: result.clockchain.ledgerId,
     blockHeight: result.clockchain.blockHeight,
@@ -471,6 +779,8 @@ async function verifyClockchain(mcpClient, result) {
     hashMatches: true,
     verifiedAgainst: result.clockchain.verifiedAgainst,
     keyless: result.clockchain.keyless,
+    consensusTimeMatches: true,
+    poolHealthMatchesCurrentRead: true,
   };
 }
 
@@ -567,6 +877,8 @@ export async function verifyLiveResults({
     !publicClient ||
     typeof publicClient.getChainId !== "function" ||
     typeof publicClient.getCode !== "function" ||
+    typeof publicClient.getTransaction !== "function" ||
+    typeof publicClient.getTransactionReceipt !== "function" ||
     typeof publicClient.readContract !== "function"
   ) {
     throw new LiveVerificationConfigurationError();
@@ -640,7 +952,8 @@ export async function verifyLiveResults({
       mcpClient = clientFactory({ token });
       if (
         !mcpClient ||
-        typeof mcpClient.verifyCrossParty !== "function"
+        typeof mcpClient.verifyCrossParty !== "function" ||
+        typeof mcpClient.completeAttestation !== "function"
       ) {
         throw new LiveVerificationError(
           "CLOCKCHAIN_CLIENT_INVALID",
@@ -672,6 +985,8 @@ export async function verifyLiveResults({
         status: "PASS",
         resultPath: localResults[name].jsonPath,
         identity: await verifyIdentity(publicClient, result),
+        identityTransactions:
+          await verifyIdentityTransactions(publicClient, result),
         clockchain: await verifyClockchain(mcpClient, result),
       };
     } catch (error) {
@@ -711,29 +1026,66 @@ export async function verifyLiveResults({
 
 function parseArguments(argv) {
   const values = {
-    resultDirectories: { ...DEFAULT_RESULT_DIRECTORIES },
+    resultFiles: [],
     outputFile: DEFAULT_OUTPUT_FILE,
     canaryFiles: [],
   };
   for (let index = 0; index < argv.length;) {
     const option = argv[index];
-    const value = argv[index + 1];
-    if (value === undefined) {
-      throw new LiveVerificationConfigurationError();
-    }
-    if (option === "--codex") {
-      values.resultDirectories.codex = resolve(value);
-    } else if (option === "--claude") {
-      values.resultDirectories.claude = resolve(value);
-    } else if (option === "--output") {
+    if (option === "--output") {
+      const value = argv[index + 1];
+      if (value === undefined) {
+        throw new LiveVerificationConfigurationError();
+      }
       values.outputFile = resolve(value);
+      index += 2;
     } else if (option === "--canary-file") {
+      const value = argv[index + 1];
+      if (value === undefined) {
+        throw new LiveVerificationConfigurationError();
+      }
       values.canaryFiles.push(resolve(value));
+      index += 2;
+    } else if (
+      typeof option === "string" &&
+      !option.startsWith("--")
+    ) {
+      values.resultFiles.push(resolve(option));
+      index += 1;
     } else {
       throw new LiveVerificationConfigurationError();
     }
-    index += 2;
   }
+  if (
+    values.resultFiles.length !== 2 ||
+    values.resultFiles.some(
+      (path) => basename(path) !== "result.json",
+    ) ||
+    ![0, 2].includes(values.canaryFiles.length)
+  ) {
+    throw new LiveVerificationConfigurationError();
+  }
+  if (values.canaryFiles.length === 0) {
+    values.canaryFiles = [
+      join(
+        REPOSITORY_DIRECTORY,
+        ".context",
+        "invitations",
+        "codex.secret.json",
+      ),
+      join(
+        REPOSITORY_DIRECTORY,
+        ".context",
+        "invitations",
+        "claude.secret.json",
+      ),
+    ];
+  }
+  values.resultDirectories = {
+    codex: dirname(values.resultFiles[0]),
+    claude: dirname(values.resultFiles[1]),
+  };
+  delete values.resultFiles;
   return values;
 }
 
@@ -741,13 +1093,13 @@ export async function main({
   argv = process.argv.slice(2),
   stderr = process.stderr,
   stdout = process.stdout,
+  verify = verifyLiveResults,
 } = {}) {
   try {
-    const verdict = await verifyLiveResults(
-      parseArguments(argv),
-    );
+    const options = parseArguments(argv);
+    const verdict = await verify(options);
     stdout.write(
-      `${verdict.status} ${DEFAULT_OUTPUT_FILE}\n`,
+      `${verdict.status} ${options.outputFile}\n`,
     );
     return verdict.status === "PASS" ? 0 : 1;
   } catch {
