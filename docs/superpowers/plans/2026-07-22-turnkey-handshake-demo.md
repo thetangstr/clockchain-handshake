@@ -6,7 +6,7 @@
 
 **Architecture:** A small Node.js 22 ESM application decrypts a pre-funded testnet invitation in memory, registers and verifies an ERC-8004 identity on Ethereum Sepolia, calls the hosted Clockchain MCP over SSE JSON-RPC, and emits redacted evidence. The repository also carries the universal GitHub prompt, Codex/Claude role routing, operator-only invitation tooling, deterministic tests, and an acceptance harness that runs the unchanged prompt through real Codex and Claude Code CLIs.
 
-**Tech Stack:** Node.js 22, npm, ESM JavaScript, `viem`, Node `crypto`, Node `test`, Ethereum Sepolia, ERC-8004 v2, Clockchain hosted MCP, Codex CLI, Claude Code CLI.
+**Tech Stack:** Node.js 22, npm, ESM JavaScript, `viem` 2.55.8, Node `crypto`, Node `test`, Ethereum Sepolia, ERC-8004 v2, Clockchain hosted MCP, Codex CLI, Claude Code CLI.
 
 ---
 
@@ -62,7 +62,7 @@
 - Create: `.claude/agents/explore.md`
 - Create: `.claude/agents/lightweight-executor.md`
 
-- [ ] **Step 1: Add exclusions before generating local state**
+- [x] **Step 1: Add exclusions before generating local state**
 
 ```gitignore
 node_modules/
@@ -80,7 +80,7 @@ coverage/
 *.token
 ```
 
-- [ ] **Step 2: Add the minimal package contract**
+- [x] **Step 2: Add the minimal package contract**
 
 ```json
 {
@@ -103,18 +103,18 @@ coverage/
     "docs:check": "node scripts/check-docs.mjs"
   },
   "dependencies": {
-    "viem": "2.38.5"
+    "viem": "2.55.8"
   }
 }
 ```
 
-- [ ] **Step 3: Install dependencies and verify the lockfile is reproducible**
+- [x] **Step 3: Install dependencies and verify the lockfile is reproducible**
 
 Run: `npm install --ignore-scripts`
 
 Expected: `package-lock.json` is created and `npm ci --ignore-scripts` exits 0.
 
-- [ ] **Step 4: Add shared Conductor commands**
+- [x] **Step 4: Add shared Conductor commands**
 
 ```toml
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
@@ -133,19 +133,24 @@ command = "npm run demo"
 icon = "terminal"
 ```
 
-- [ ] **Step 5: Add the Codex leader contract**
+- [x] **Step 5: Add the Codex leader contract**
 
 ```toml
 model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
 
-[agents]
-enabled = true
-default_subagent_model = "gpt-5.6-terra"
-default_subagent_reasoning_effort = "medium"
+[agents.executor]
+description = "Terra executor for substantive, scoped implementation and tests"
+config_file = "agents/executor.toml"
 ```
 
-Create the five custom agent files with these model assignments:
+Conductor's bundled Codex 0.144.1 predates the global `[agents]` scalar
+settings supported by current Codex. Use the documented explicit
+`[agents.<role>]` registration form so both installed CLIs accept the project.
+Register the five roles below plus `worker` as an alias for `executor` and
+`explorer` as an alias for `explore`.
+
+Create the five custom agent configuration layers with these model assignments:
 
 ```text
 planner              gpt-5.6-sol    high
@@ -155,12 +160,14 @@ explore               gpt-5.6-luna   low, read-only
 lightweight-executor  gpt-5.6-luna   low
 ```
 
-Each file must define `name`, `description`, `model`,
-`model_reasoning_effort`, and scoped `developer_instructions`. `AGENTS.md`
-must state that Sol alone owns orchestration, synthesis, shared-file
-coordination, and the final completion verdict.
+The root registration defines each role's name and description. Each referenced
+file defines `model`, `model_reasoning_effort`, and scoped
+`developer_instructions`; the Luna explorer also sets
+`sandbox_mode = "read-only"`. `AGENTS.md` must state that Sol alone owns
+orchestration, synthesis, shared-file coordination, and the final completion
+verdict.
 
-- [ ] **Step 6: Add Claude Code role mirrors**
+- [x] **Step 6: Add Claude Code role mirrors**
 
 `CLAUDE.md` begins with:
 
@@ -178,12 +185,13 @@ enforced by Codex project configuration, not by native Claude model names.
 Use `model: opus`, `model: sonnet`, and `model: haiku` in the corresponding
 Claude agent frontmatter.
 
-- [ ] **Step 7: Validate configuration discovery**
+- [x] **Step 7: Validate configuration discovery**
 
 Run:
 
 ```bash
-codex mcp list >/dev/null
+"/Users/Kailor/Library/Application Support/com.conductor.app/bin/codex" mcp list >/dev/null
+/Applications/ChatGPT.app/Contents/Resources/codex mcp list >/dev/null
 test -f .codex/config.toml
 test -f .codex/agents/executor.toml
 test -f .claude/agents/executor.md
@@ -191,7 +199,7 @@ test -f .claude/agents/executor.md
 
 Expected: all commands exit 0.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add .gitignore package.json package-lock.json .conductor AGENTS.md .codex CLAUDE.md .claude
