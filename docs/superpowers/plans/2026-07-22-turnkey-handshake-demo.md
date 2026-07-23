@@ -354,6 +354,7 @@ Tested: Invitation round-trip, tamper rejection, nested redaction, and secret-ca
 
 **Files:**
 - Create: `src/registration.mjs`
+- Create: `src/registration-internal.mjs`
 - Create: `test/registration.test.mjs`
 - Create: `test/fixtures/registered-receipt.json`
 
@@ -362,7 +363,7 @@ The ABI and invariants below were verified read-only against official
 `68fc6765761a10fb26f0692df21c8a6f9d12b1be` and the live Ethereum Sepolia
 deployment reporting version `2.0.0`.
 
-- [ ] **Step 1: Write failing metadata and event tests**
+- [x] **Step 1: Write failing metadata and event tests**
 
 ```js
 import test from "node:test";
@@ -392,13 +393,13 @@ test("extracts agentId only from the official Registered event", () => {
 });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `node --test test/registration.test.mjs`
 
 Expected: FAIL with `ERR_MODULE_NOT_FOUND`.
 
-- [ ] **Step 3: Implement pinned ABI and pure helpers**
+- [x] **Step 3: Implement pinned ABI and pure helpers**
 
 Use a deliberately minimal ABI even though the official v2 contract has three
 `register` overloads. The demo calls only `register(string)`. The event must
@@ -440,7 +441,7 @@ require exactly one `Registered` event, and match both indexed `owner` and
 nonindexed `agentURI`. Add negative cases for a foreign registry log and
 duplicate official `Registered` logs.
 
-- [ ] **Step 4: Write failing RPC invariant tests with a mock viem client**
+- [x] **Step 4: Write failing RPC invariant tests with a mock viem client**
 
 Cover:
 
@@ -456,9 +457,12 @@ wrong/multiple/foreign Registered event -> reject
 owner mismatch -> reject
 agentWallet mismatch -> reject
 tokenURI mismatch -> reject
+positive but insufficient two-transaction fee envelope -> reject before write
+mutated or unrelated recovery transactions/receipts/calldata -> reject
+pending, missing, or nonce-gapped recovery evidence -> never resubmit
 ```
 
-- [ ] **Step 5: Implement the live registration adapter**
+- [x] **Step 5: Implement the live registration adapter**
 
 Export:
 
@@ -470,6 +474,16 @@ export async function registerIdentity({
   rpcUrl,
   publicClient,
   walletClient,
+}) {}
+export async function finalizeIdentityRegistration({
+  privateKey,
+  expectedAddress,
+  displayName,
+  recovery,
+  rpcUrl,
+  publicClient,
+  walletClient,
+  onCheckpoint,
 }) {}
 ```
 
@@ -490,16 +504,29 @@ The ordered implementation:
     canonical registry namespace plus separate agentId,
     transaction hashes, block numbers, and final registration document.
 
-- [ ] **Step 6: Run focused tests**
+The verified implementation adds a conservative two-transaction fee envelope,
+20% plus 10,000 gas headroom, explicit fee/nonce fields, and two confirmations.
+Immediately after the irreversible registration receipt, it emits a strict
+JSON-safe public recovery checkpoint. `finalizeIdentityRegistration` binds that
+checkpoint back to the exact Ethereum transactions, receipts, blocks, calldata,
+indexed event, owner, URI, agent ID, and metadata nonce before accepting or
+resuming it. It never resubmits on missing, pending, unknown, or nonce-gapped
+evidence; only a confirmed revert at exactly the next nonce is retryable.
+
+At least one deterministic test must use a real viem wallet client with a
+mocked custom transport, capture both raw signed transactions, and decode their
+nonce, fee, gas, registry target, and calldata.
+
+- [x] **Step 6: Run focused tests**
 
 Run: `node --test test/registration.test.mjs`
 
-Expected: all registration tests pass with no network calls.
+Expected and verified: 75 registration tests pass with no network calls.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
-git add src/registration.mjs test/registration.test.mjs test/fixtures/registered-receipt.json
+git add src/registration.mjs src/registration-internal.mjs test/registration.test.mjs test/fixtures/registered-receipt.json
 git commit -m "Bind demo agents to the official ERC-8004 registry" \
   -m "Constraint: The stakeholder wallet must remain the on-chain owner and agent wallet.
 Rejected: Clockchain DID minting | The product consumes ERC-8004 identity instead of competing with it.
@@ -516,6 +543,10 @@ Not-tested: Live registration waits for funded invitations."
 - Create: `test/mcp.test.mjs`
 - Create: `test/fixtures/mcp-sse.txt`
 
+The transport and tool shapes below were verified live against
+`https://mcp.clockchain.network` and against developer-tools commit
+`901490c7d09c90742bd4723455807fbc25435c61`.
+
 - [ ] **Step 1: Write failing SSE parsing tests**
 
 ```js
@@ -523,15 +554,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseSseJsonRpc, parseToolResult } from "../src/mcp.mjs";
 
-test("uses the final SSE data event and parses nested tool JSON", () => {
-  const raw = "event: message\\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\\\"status\\\\\":\\\\\"active\\\\\"}\"}]}}\\n\\n";
-  assert.deepEqual(parseToolResult(parseSseJsonRpc(raw)), { status: "active" });
+test("selects the matching SSE JSON-RPC id and parses nested tool JSON", () => {
+  const raw = "event: message\\r\\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\\\"status\\\\\":\\\\\"active\\\\\"}\"}]}}\\r\\n\\r\\n";
+  assert.deepEqual(parseToolResult(parseSseJsonRpc(raw, { expectedId: 1 })), { status: "active" });
 });
 
 test("rejects JSON-RPC errors", () => {
   assert.throws(() => parseSseJsonRpc('data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"message\":\"no\"}}\\n'), /no/);
 });
 ```
+
+Add cases for LF and CRLF framing, multiple events, multiline `data`, a
+nonmatching JSON-RPC ID, direct JSON error bodies, empty HTTP 202 notification
+responses, `result.isError === true`, and optional `structuredContent`.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -544,11 +579,28 @@ Expected: FAIL with `ERR_MODULE_NOT_FOUND`.
 Export:
 
 ```js
-export function parseSseJsonRpc(raw) {}
+export function parseSseJsonRpc(raw, { expectedId } = {}) {}
 export function parseToolResult(jsonRpc) {}
 export async function mintDemoToken({ fetchImpl = fetch, subject }) {}
 export function createMcpClient({ token, fetchImpl = fetch }) {}
 ```
+
+`mintDemoToken` sends an empty `POST /token`; when `subject` is present it uses
+the `x-clockchain-sub` header (or equivalent query field), not a JSON body.
+Subject is sanitized, unauthenticated, and non-authoritative. The token response
+is `no-store`, lasts seven days, and the token must never enter errors or logs.
+
+Every MCP request sends:
+
+```text
+x-api-key: <same token for the entire run>
+Content-Type: application/json
+Accept: application/json, text/event-stream
+```
+
+The service is stateless for this demo: no `Mcp-Session-Id` is issued or
+required. Successful initialize, tools/list, and tool-call responses are SSE
+frames whose tool payload is normally JSON text in `result.content[0].text`.
 
 `createMcpClient` returns:
 
@@ -560,14 +612,29 @@ export function createMcpClient({ token, fetchImpl = fetch }) {}
   attestAction: async (args) => {},
   completeAttestation: async (receipt) => {},
   verifyReceipt: async (receipt) => {},
-  verifyCrossParty: async ({ ledgerId, blockHeight }) => {},
+  verifyCrossParty: async ({ ledgerId, blockHeight, hash }) => {},
 }
 ```
 
 The client sends `accept: application/json, text/event-stream`, never exposes
 the token in an error, fails immediately on 401/403, honors `Retry-After` on a
-429 without minting another token, and retries only transient 5xx responses a
-bounded two times.
+429 without minting another token, and retries read-only calls only for bounded
+transient 5xx/network failures. `attest_action` may be retried only with the
+same required idempotency key; other write tools are never blindly retried.
+HTTP 200 is not sufficient: reject both JSON-RPC `error` and
+`result.isError === true`. Bound request time and response size.
+
+Public wrappers map to the exact deployed snake-case tool fields:
+
+```text
+resolve_agent       { agent_id }
+get_timestamp       {}
+attest_action       { agent_id, action, inputs?, outputs?, wait?, wait_ms?,
+                      idempotency_key?, allow_degraded? }
+complete_attestation { receipt }
+verify_receipt      { receipt }
+verify_cross_party  { ledger_id?, block_height?, hash? }
+```
 
 - [ ] **Step 4: Add receipt-completion tests**
 
@@ -578,7 +645,9 @@ resolved identity must be active
 attest_action pending -> complete_attestation polling
 anchored receipt requires anchor.confirmed true and non-null blockHeight
 verify_receipt must report match true
-verify_cross_party must report verifiedAgainst on-chain block and keyless true
+verify_receipt must report verifiedAgainst on-chain block
+verify_cross_party must report onChain.verifiedAgainst on-chain block
+verify_cross_party must report onChain.keyless true
 ```
 
 - [ ] **Step 5: Implement strict completion helpers**
@@ -592,6 +661,11 @@ export function assertReceiptVerification(result) {}
 export function assertCrossPartyVerification(result) {}
 export async function completeReceipt(client, receipt, { attempts = 8, intervalMs = 1500 } = {}) {}
 ```
+
+The current hosted resolver returns `unknown` for official agent 8639 while the
+platform still uses its legacy registry default. Task 4 tests mock an active
+identity, but live acceptance is blocked until the official-registry platform
+plan is complete.
 
 - [ ] **Step 6: Run focused tests**
 
