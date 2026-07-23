@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { constants as fileSystemConstants } from "node:fs";
 import {
+  access,
   lstat,
   mkdir,
   mkdtemp,
@@ -12,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
+  delimiter,
   dirname,
   isAbsolute,
   join,
@@ -523,6 +526,56 @@ function isWithin(root, candidate) {
   );
 }
 
+async function resolveExecutableFromPath(executable, searchPath) {
+  for (const directory of searchPath.split(delimiter)) {
+    if (!isAbsolute(directory)) {
+      continue;
+    }
+    const candidate = join(directory, executable);
+    try {
+      await access(candidate, fileSystemConstants.X_OK);
+      const canonical = await realpath(candidate);
+      const stat = await lstat(canonical);
+      if (stat.isFile() && !stat.isSymbolicLink()) {
+        return canonical;
+      }
+    } catch {
+      // Continue through the inherited PATH.
+    }
+  }
+  throw new HarnessConfigurationError();
+}
+
+function shellSingleQuote(value) {
+  return `'${value.replaceAll("'", "'\"'\"'")}'`;
+}
+
+async function writeMktempShim({
+  directory,
+  systemMktemp,
+  temporaryDirectory,
+}) {
+  const path = join(directory, "mktemp");
+  const executable = shellSingleQuote(systemMktemp);
+  const template = shellSingleQuote(
+    join(
+      temporaryDirectory,
+      "clockchain-handshake.XXXXXXXXXX",
+    ),
+  );
+  await writeFile(
+    path,
+    `#!/bin/sh
+if [ "$#" -eq 1 ] && [ "$1" = "-d" ]; then
+  exec ${executable} -d ${template}
+fi
+exec ${executable} "$@"
+`,
+    { flag: "wx", mode: 0o700 },
+  );
+  return path;
+}
+
 async function discoverEvidence(root) {
   const canonicalRoot = await realpath(root);
   const queue = [{ directory: canonicalRoot, depth: 0 }];
@@ -693,8 +746,10 @@ async function runOneClient({
   );
   const workDirectory = join(clientRoot, "work");
   const temporaryDirectory = join(clientRoot, "tmp");
+  const commandDirectory = join(clientRoot, "bin");
   await mkdir(workDirectory, { mode: 0o700 });
   await mkdir(temporaryDirectory, { mode: 0o700 });
+  await mkdir(commandDirectory, { mode: 0o700 });
   const environment = buildClientEnvironment({
     baseEnvironment,
     clientName,
@@ -702,6 +757,19 @@ async function runOneClient({
     repositoryRef,
     temporaryDirectory,
   });
+  const systemMktemp = await resolveExecutableFromPath(
+    "mktemp",
+    environment.PATH,
+  );
+  await writeMktempShim({
+    directory: commandDirectory,
+    systemMktemp,
+    temporaryDirectory,
+  });
+  environment.PATH = [
+    commandDirectory,
+    environment.PATH,
+  ].join(delimiter);
   const canaries = secretEnvironmentCanaries(
     environment,
     clientName,

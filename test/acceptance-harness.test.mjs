@@ -5,10 +5,17 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import {
+  delimiter,
+  dirname,
+  join,
+  relative,
+  sep,
+} from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 
@@ -200,7 +207,7 @@ async function writeFakeClient(directory) {
     await writeFile(
       executable,
       `#!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -251,6 +258,11 @@ if (mode === "hang") {
   let input = "";
   process.stdin.setEncoding("utf8");
   for await (const chunk of process.stdin) input += chunk;
+  const runDirectory = mode === "bare-mktemp"
+    ? spawnSync("mktemp", ["-d"], {
+        encoding: "utf8",
+      }).stdout.trim()
+    : join(process.env.TMPDIR, "agent-run");
   writeFileSync(
     join(process.cwd(), "capture.json"),
     JSON.stringify({
@@ -258,9 +270,9 @@ if (mode === "hang") {
       cwd: process.cwd(),
       env: process.env,
       promptBase64: Buffer.from(input, "utf8").toString("base64"),
+      runDirectory,
     }),
   );
-  const runDirectory = join(process.env.TMPDIR, "agent-run");
   mkdirSync(runDirectory, { recursive: true });
   writeFileSync(
     join(runDirectory, "result.json"),
@@ -290,6 +302,43 @@ if (mode === "hang") {
     executables[role] = executable;
   }
   return executables;
+}
+
+async function writeMacLikeMktemp(directory) {
+  const binDirectory = join(directory, "macos-bin");
+  const macosTemporaryDirectory = join(
+    directory,
+    "macos-user-temp",
+  );
+  await mkdir(binDirectory, { mode: 0o700 });
+  await mkdir(macosTemporaryDirectory, { mode: 0o700 });
+  const executable = join(binDirectory, "mktemp");
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
+
+const args = process.argv.slice(2);
+const template = args.length === 1 && args[0] === "-d"
+  ? join(
+      ${JSON.stringify(macosTemporaryDirectory)},
+      "tmp.XXXXXXXXXX",
+    )
+  : args.length === 2 && args[0] === "-d"
+    ? args[1]
+    : null;
+if (template === null || !/X+$/.test(template)) {
+  process.exit(64);
+}
+process.stdout.write(
+  mkdtempSync(template.replace(/X+$/, "")) + "\\n",
+);
+`,
+    { mode: 0o700 },
+  );
+  await chmod(executable, 0o700);
+  return binDirectory;
 }
 
 function harnessOptions({
@@ -741,6 +790,65 @@ test("runs clean clients sequentially with identical prompts and isolated minima
     assert.equal(stderr.includes(`0x${"9".repeat(64)}`), false);
     assert.match(`${stdout}${stderr}`, /\[REDACTED\]/);
   }
+});
+
+test("contains bare macOS mktemp directories inside each clean-client root", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-macos-mktemp-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const macosBin = await writeMacLikeMktemp(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const options = harnessOptions({
+    claudeFixture,
+    claudeMode: "bare-mktemp",
+    codexFixture,
+    codexMode: "bare-mktemp",
+    directory,
+    executable,
+  });
+  options.baseEnvironment.PATH = [
+    macosBin,
+    process.env.PATH,
+  ].join(delimiter);
+
+  const result = await runCleanClients(options);
+
+  for (const client of ["codex", "claude"]) {
+    const capture = JSON.parse(
+      await readFile(
+        join(result.clients[client].workDirectory, "capture.json"),
+        "utf8",
+      ),
+    );
+    const clientRoot = dirname(
+      result.clients[client].workDirectory,
+    );
+    const evidenceRelativePath = relative(
+      clientRoot,
+      capture.runDirectory,
+    );
+    assert.equal(
+      evidenceRelativePath === ".." ||
+        evidenceRelativePath.startsWith(`..${sep}`),
+      false,
+    );
+    assert.deepEqual(
+      (await readdir(capture.runDirectory)).sort(),
+      ["RESULT.md", "result.json"],
+    );
+  }
+  assert.equal(result.status, "PASS");
 });
 
 test("fails closed without publishing client evidence that contains an invitation canary", async (t) => {
