@@ -18,6 +18,29 @@ roughly 30–90 seconds under normal testnet conditions. A passing `npm run demo
 writes sanitized `RESULT.md` and `result.json`; neither a narrative nor a
 submitted transaction is a PASS by itself.
 
+## Operator-only clean-client acceptance
+
+The stakeholder `npm run demo` path is unaffected. Do not direct stakeholders to
+this operator-only harness.
+
+`npm run acceptance:clients` deliberately launches Codex and Claude with
+permission-bypass flags. It inherits selected local auth material, the real
+`HOME`, and each invitation path. Its temporary directories are not an OS or
+container sandbox.
+
+Redaction protects captured artifacts after the clients execute, but it cannot
+prevent a malicious or compromised client from reading or exfiltrating accessible
+data. Run it only with a trusted repository commit, trusted prompt, and trusted
+invitations.
+
+Operator command:
+
+```sh
+npm run acceptance:clients -- --codex-invite /trusted/codex.secret.json --claude-invite /trusted/claude.secret.json --repo-ref COMMIT_SHA --acknowledge-agent-permission-risk
+```
+
+Do not encourage stakeholders to use it.
+
 ## Copy this entire prompt
 
 Use the exact same block in Codex or Claude Code:

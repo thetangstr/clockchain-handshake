@@ -102,6 +102,52 @@ test("public documentation satisfies the turnkey exercise contract", async () =>
   }
 });
 
+test("operator-only clean-client acceptance is prominently disclosed", async (t) => {
+  for (const relativePath of ["README.md", "DEMO.md"]) {
+    await t.test(relativePath, async () => {
+      const contents = await readFile(
+        join(ROOT_DIRECTORY, relativePath),
+        "utf8",
+      );
+
+      assert.match(contents, /operator-only/i);
+      assert.match(
+        contents,
+        /stakeholder `npm run demo`[^.]*unaffected/i,
+      );
+      assert.match(
+        contents,
+        /`npm run acceptance:clients`[^.]*permission-bypass flags/i,
+      );
+      assert.match(
+        contents,
+        /selected local (?:auth|authentication) material[^.]*real\s+`HOME`[^.]*invitation path/i,
+      );
+      assert.match(contents, /not an OS or\s+container sandbox/i);
+      assert.match(
+        contents,
+        /redaction[^.]*after (?:the clients execute|execution)/i,
+      );
+      assert.match(
+        contents,
+        /cannot\s+prevent[^.]*malicious or compromised client[^.]*reading or exfiltrating accessible\s+data/i,
+      );
+      assert.match(
+        contents,
+        /trusted repository[^.]*trusted prompt[^.]*trusted\s+invitations/i,
+      );
+      assert.match(
+        contents,
+        /npm run acceptance:clients -- --codex-invite \S+ --claude-invite \S+ --repo-ref COMMIT_SHA --acknowledge-agent-permission-risk/,
+      );
+      assert.match(
+        contents,
+        /do not (?:direct|encourage)[^.]*stakeholders/i,
+      );
+    });
+  }
+});
+
 test("README exposes exactly the prompt bytes consumed by clean clients", async () => {
   const [readme, prompt] = await Promise.all([
     readFile(join(ROOT_DIRECTORY, "README.md"), "utf8"),

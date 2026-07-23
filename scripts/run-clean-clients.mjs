@@ -52,6 +52,10 @@ const DEFAULT_MAX_PROMPT_BYTES = 256 * 1_024;
 const MAX_DISCOVERY_ENTRIES = 20_000;
 const MAX_DISCOVERY_DEPTH = 16;
 const MAX_EVIDENCE_BYTES = 2 * 1_024 * 1_024;
+const OPERATOR_RISK_ACKNOWLEDGEMENT_FLAG =
+  "--acknowledge-agent-permission-risk";
+const OPERATOR_RISK_WARNING =
+  `Clean-client acceptance is operator-only: it disables client permission safeguards, inherits selected local credentials, HOME, and invitation access, and is not an OS or container sandbox. Re-run only with ${OPERATOR_RISK_ACKNOWLEDGEMENT_FLAG}.\n`;
 const COMMIT_REF_PATTERN = /^[0-9a-f]{40}$/i;
 const PRIVATE_KEY_SHAPE = /0x[0-9a-f]{64}(?![0-9a-f])/i;
 const PRIVATE_KEY_SHAPE_GLOBAL =
@@ -127,6 +131,14 @@ class HarnessConfigurationError extends Error {
     super("Clean-client acceptance configuration is invalid.");
     this.name = "HarnessConfigurationError";
     this.code = "HARNESS_CONFIGURATION";
+  }
+}
+
+class MissingRiskAcknowledgementError
+  extends HarnessConfigurationError {
+  constructor() {
+    super();
+    this.name = "MissingRiskAcknowledgementError";
   }
 }
 
@@ -1048,6 +1060,8 @@ export async function runCleanClients({
 }
 
 function parseArguments(argv, environment) {
+  let riskAcknowledged = false;
+  const seenOptions = new Set();
   const values = {
     codexInvite:
       environment.HANDSHAKE_CODEX_INVITE_FILE,
@@ -1065,13 +1079,35 @@ function parseArguments(argv, environment) {
     "--output": "outputRoot",
     "--repo-ref": "repositoryRef",
   };
-  for (let index = 0; index < argv.length; index += 2) {
-    const key = keys[argv[index]];
+  for (let index = 0; index < argv.length;) {
+    const argument = argv[index];
+    if (argument === OPERATOR_RISK_ACKNOWLEDGEMENT_FLAG) {
+      if (riskAcknowledged) {
+        throw new HarnessConfigurationError();
+      }
+      riskAcknowledged = true;
+      index += 1;
+      continue;
+    }
+    const key = Object.hasOwn(keys, argument)
+      ? keys[argument]
+      : undefined;
     const value = argv[index + 1];
-    if (!key || value === undefined) {
+    if (
+      !key ||
+      value === undefined ||
+      value === OPERATOR_RISK_ACKNOWLEDGEMENT_FLAG ||
+      Object.hasOwn(keys, value) ||
+      seenOptions.has(argument)
+    ) {
       throw new HarnessConfigurationError();
     }
+    seenOptions.add(argument);
     values[key] = value;
+    index += 2;
+  }
+  if (!riskAcknowledged) {
+    throw new MissingRiskAcknowledgementError();
   }
   values.repositoryRef = normalizeRepositoryRef(
     values.repositoryRef,
@@ -1102,8 +1138,12 @@ export async function main({
       `${result.status} ${result.manifestPath}\n`,
     );
     return result.status === "PASS" ? 0 : 1;
-  } catch {
-    stderr.write("Clean-client acceptance configuration failed.\n");
+  } catch (error) {
+    stderr.write(
+      error instanceof MissingRiskAcknowledgementError
+        ? OPERATOR_RISK_WARNING
+        : "Clean-client acceptance configuration failed.\n",
+    );
     return 2;
   }
 }

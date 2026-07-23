@@ -6,6 +6,29 @@ Clockchain® Agent Trust Handshake exercise. Use the
 session. The [README](README.md) provides the one-block copy surface, and the
 [invitation notes](invites/README.md) explain how disposable bundles are handled.
 
+## Operator-only clean-client acceptance
+
+The stakeholder `npm run demo` path is unaffected. Do not direct stakeholders to
+this operator-only harness.
+
+`npm run acceptance:clients` deliberately launches Codex and Claude with
+permission-bypass flags. It inherits selected local auth material, the real
+`HOME`, and each invitation path. Its temporary directories are not an OS or
+container sandbox.
+
+Redaction protects captured artifacts after the clients execute, but it cannot
+prevent a malicious or compromised client from reading or exfiltrating accessible
+data. Run it only with a trusted repository commit, trusted prompt, and trusted
+invitations.
+
+Operator command:
+
+```sh
+npm run acceptance:clients -- --codex-invite /trusted/codex.secret.json --claude-invite /trusted/claude.secret.json --repo-ref COMMIT_SHA --acknowledge-agent-permission-risk
+```
+
+Do not encourage stakeholders to use it.
+
 ## Safety boundary
 
 This is an Ethereum Sepolia and Clockchain® single-validator testnet exercise.

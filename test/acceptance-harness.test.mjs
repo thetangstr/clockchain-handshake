@@ -511,6 +511,183 @@ test("accepts the Node process environment for production client isolation", () 
   }
 });
 
+test("client CLI refuses to launch without explicit operator risk acknowledgement", async () => {
+  const stdout = memoryOutput();
+  const stderr = memoryOutput();
+  let calls = 0;
+  const exitCode = await runClientsMain({
+    argv: [
+      "--codex-invite",
+      CODEX_INVITE,
+      "--claude-invite",
+      CLAUDE_INVITE,
+      "--repo-ref",
+      REPOSITORY_REF,
+    ],
+    environment: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+    },
+    async run() {
+      calls += 1;
+      return {
+        status: "PASS",
+        manifestPath: "/tmp/client-acceptance.json",
+      };
+    },
+    stderr: stderr.stream,
+    stdout: stdout.stream,
+  });
+
+  assert.equal(exitCode, 2);
+  assert.equal(calls, 0);
+  assert.equal(stdout.text(), "");
+  assert.equal(
+    stderr.text(),
+    "Clean-client acceptance is operator-only: it disables client permission safeguards, inherits selected local credentials, HOME, and invitation access, and is not an OS or container sandbox. Re-run only with --acknowledge-agent-permission-risk.\n",
+  );
+});
+
+test("client CLI accepts risk acknowledgement only as one exact valueless flag", async (t) => {
+  const baseArguments = [
+    "--codex-invite",
+    CODEX_INVITE,
+    "--claude-invite",
+    CLAUDE_INVITE,
+    "--repo-ref",
+    REPOSITORY_REF,
+  ];
+  const cases = [
+    {
+      label: "duplicate flag",
+      argv: [
+        ...baseArguments,
+        "--acknowledge-agent-permission-risk",
+        "--acknowledge-agent-permission-risk",
+      ],
+      environment: {},
+    },
+    {
+      label: "value after flag",
+      argv: [
+        ...baseArguments,
+        "--acknowledge-agent-permission-risk",
+        "acknowledgement-value-canary",
+      ],
+      environment: {},
+    },
+    {
+      label: "environment substitute",
+      argv: baseArguments,
+      environment: {
+        HANDSHAKE_ACKNOWLEDGE_AGENT_PERMISSION_RISK:
+          "environment-acknowledgement-canary",
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.label, async () => {
+      const stdout = memoryOutput();
+      const stderr = memoryOutput();
+      let calls = 0;
+      const exitCode = await runClientsMain({
+        argv: testCase.argv,
+        environment: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          ...testCase.environment,
+        },
+        async run() {
+          calls += 1;
+          return {
+            status: "PASS",
+            manifestPath: "/tmp/client-acceptance.json",
+          };
+        },
+        stderr: stderr.stream,
+        stdout: stdout.stream,
+      });
+
+      assert.equal(exitCode, 2);
+      assert.equal(calls, 0);
+      assert.equal(stdout.text(), "");
+      assert.notEqual(stderr.text(), "");
+      assert.doesNotMatch(
+        stderr.text(),
+        /(?:acknowledgement-value|environment-acknowledgement)-canary/,
+      );
+    });
+  }
+});
+
+test("client CLI rejects option collisions without echoing their values", async (t) => {
+  const cases = [
+    {
+      label: "acknowledgement flag consumed as an option value",
+      argv: [
+        "--codex-invite",
+        "--acknowledge-agent-permission-risk",
+        "--claude-invite",
+        CLAUDE_INVITE,
+        "--repo-ref",
+        REPOSITORY_REF,
+        "--acknowledge-agent-permission-risk",
+      ],
+    },
+    {
+      label: "duplicate valued option",
+      argv: [
+        "--codex-invite",
+        CODEX_INVITE,
+        "--codex-invite",
+        "/private/duplicate-invite-canary.secret.json",
+        "--claude-invite",
+        CLAUDE_INVITE,
+        "--repo-ref",
+        REPOSITORY_REF,
+        "--acknowledge-agent-permission-risk",
+      ],
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.label, async () => {
+      const stdout = memoryOutput();
+      const stderr = memoryOutput();
+      let calls = 0;
+      const exitCode = await runClientsMain({
+        argv: testCase.argv,
+        environment: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+        },
+        async run() {
+          calls += 1;
+          return {
+            status: "PASS",
+            manifestPath: "/tmp/client-acceptance.json",
+          };
+        },
+        stderr: stderr.stream,
+        stdout: stdout.stream,
+      });
+
+      assert.equal(exitCode, 2);
+      assert.equal(calls, 0);
+      assert.equal(stdout.text(), "");
+      assert.equal(
+        stderr.text(),
+        "Clean-client acceptance configuration failed.\n",
+      );
+      assert.doesNotMatch(
+        stderr.text(),
+        /duplicate-invite-canary/,
+      );
+    });
+  }
+});
+
 test("client CLI requires an immutable repository SHA and never exposes executable overrides", async (t) => {
   await t.test("missing repository SHA", async () => {
     const stdout = memoryOutput();
@@ -522,6 +699,7 @@ test("client CLI requires an immutable repository SHA and never exposes executab
         CODEX_INVITE,
         "--claude-invite",
         CLAUDE_INVITE,
+        "--acknowledge-agent-permission-risk",
       ],
       environment: {
         PATH: process.env.PATH,
@@ -554,6 +732,7 @@ test("client CLI requires an immutable repository SHA and never exposes executab
         CLAUDE_INVITE,
         "--repo-ref",
         REPOSITORY_REF,
+        "--acknowledge-agent-permission-risk",
         "--codex-command",
         "/tmp/attacker-codex",
       ],
@@ -586,6 +765,7 @@ test("client CLI requires an immutable repository SHA and never exposes executab
         CLAUDE_INVITE,
         "--repo-ref",
         REPOSITORY_REF,
+        "--acknowledge-agent-permission-risk",
       ],
       environment: {
         PATH: process.env.PATH,
@@ -1298,6 +1478,7 @@ test("client CLI resolves documented relative invitation paths without accepting
       ".context/invitations/claude.secret.json",
       "--repo-ref",
       REPOSITORY_REF,
+      "--acknowledge-agent-permission-risk",
     ],
     environment: {
       PATH: process.env.PATH,
