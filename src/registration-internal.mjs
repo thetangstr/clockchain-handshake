@@ -17,6 +17,24 @@ export const RECEIPT_TIMEOUT_MILLISECONDS = 120_000;
 export const RECEIPT_CONFIRMATIONS = 2;
 export const CONSERVATIVE_METADATA_GAS_RESERVE = 250_000n;
 
+export class RegistrationNetworkError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "RegistrationNetworkError";
+    this.code = "HANDSHAKE_REGISTRATION_NETWORK";
+    this.category = "network";
+  }
+}
+
+export class RegistrationConfigurationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "RegistrationConfigurationError";
+    this.code = "HANDSHAKE_REGISTRATION_CONFIGURATION";
+    this.category = "configuration";
+  }
+}
+
 const MAX_DISPLAY_NAME_LENGTH = 128;
 const MAX_UINT256 = (1n << 256n) - 1n;
 const RPC_TIMEOUT_MILLISECONDS = 10_000;
@@ -249,7 +267,7 @@ export async function runStage(operation, errorMessage) {
   try {
     return await operation();
   } catch {
-    throw new Error(errorMessage);
+    throw new RegistrationNetworkError(errorMessage);
   }
 }
 
@@ -412,7 +430,9 @@ export function withoutMetadataTransaction(recovery) {
 
 export function validateCheckpointCallback(onCheckpoint) {
   if (typeof onCheckpoint !== "function") {
-    throw new Error("Registration checkpoint callback is invalid.");
+    throw new RegistrationConfigurationError(
+      "Registration checkpoint callback is invalid.",
+    );
   }
 }
 

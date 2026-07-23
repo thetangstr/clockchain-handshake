@@ -18,6 +18,8 @@ import { sepolia } from "viem/chains";
 import {
   ERC8004_ABI,
   PartialRegistrationError,
+  RegistrationConfigurationError,
+  RegistrationNetworkError,
   buildRegistrationDocument,
   finalizeIdentityRegistration,
   identityReference,
@@ -550,6 +552,153 @@ function createRealSigningWallet(fake) {
 
   return { rawTransactions, walletClient };
 }
+
+test("exports stable secret-safe registration error types", () => {
+  assert.equal(typeof RegistrationNetworkError, "function");
+  assert.equal(typeof RegistrationConfigurationError, "function");
+
+  const networkError = new RegistrationNetworkError("Safe network failure.");
+  assert.equal(networkError.name, "RegistrationNetworkError");
+  assert.equal(networkError.code, "HANDSHAKE_REGISTRATION_NETWORK");
+  assert.equal(networkError.category, "network");
+  assert.equal(Object.hasOwn(networkError, "cause"), false);
+
+  const configurationError = new RegistrationConfigurationError(
+    "Safe configuration failure.",
+  );
+  assert.equal(configurationError.name, "RegistrationConfigurationError");
+  assert.equal(
+    configurationError.code,
+    "HANDSHAKE_REGISTRATION_CONFIGURATION",
+  );
+  assert.equal(configurationError.category, "configuration");
+  assert.equal(Object.hasOwn(configurationError, "cause"), false);
+});
+
+test("classifies caught RPC failures without retaining raw network details", async () => {
+  const fake = createFakeClients({ feeErrorAt: "registration" });
+  const error = await captureRejection(() => runWithFakeClients(fake));
+
+  assert.ok(error instanceof RegistrationNetworkError);
+  assert.equal(error.name, "RegistrationNetworkError");
+  assert.equal(error.code, "HANDSHAKE_REGISTRATION_NETWORK");
+  assert.equal(error.category, "network");
+  assert.equal(error.message, "Registration fee estimation failed.");
+  assert.equal(Object.hasOwn(error, "cause"), false);
+  assertErrorOmits(error, PRIVATE_KEY, "Sensitive fee failure");
+  assert.equal(JSON.stringify(error).includes(PRIVATE_KEY), false);
+});
+
+test("classifies pre-write wallet and funding failures as configuration errors", async (t) => {
+  const requiredBalance = (226_000n + 250_000n) * 2n;
+  const malformedKey = "malformed-private-key-do-not-echo";
+  const scenarios = [
+    {
+      name: "invalid private key",
+      run: () => {
+        const fake = createFakeClients();
+        return registerIdentity({
+          privateKey: malformedKey,
+          expectedAddress: DERIVED_ADDRESS,
+          displayName: "Billy",
+          publicClient: fake.publicClient,
+          walletClient: fake.walletClient,
+        });
+      },
+      canaries: [malformedKey],
+    },
+    {
+      name: "derived address mismatch",
+      run: () =>
+        runWithFakeClients(createFakeClients(), {
+          expectedAddress: FOREIGN_ADDRESS,
+        }),
+      canaries: [PRIVATE_KEY],
+    },
+    {
+      name: "nonzero initial nonce",
+      run: () => runWithFakeClients(createFakeClients({ nonce: 1 })),
+      canaries: [PRIVATE_KEY],
+    },
+    {
+      name: "zero balance",
+      run: () => runWithFakeClients(createFakeClients({ balance: 0n })),
+      canaries: [PRIVATE_KEY],
+    },
+    {
+      name: "insufficient fee envelope",
+      run: () =>
+        runWithFakeClients(
+          createFakeClients({ balance: requiredBalance - 1n }),
+        ),
+      canaries: [PRIVATE_KEY],
+    },
+    {
+      name: "invalid initial metadata",
+      run: () =>
+        runWithFakeClients(createFakeClients(), { displayName: "" }),
+      canaries: [PRIVATE_KEY],
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const error = await captureRejection(scenario.run);
+
+      assert.ok(error instanceof RegistrationConfigurationError);
+      assert.equal(error.name, "RegistrationConfigurationError");
+      assert.equal(error.code, "HANDSHAKE_REGISTRATION_CONFIGURATION");
+      assert.equal(error.category, "configuration");
+      assert.equal(Object.hasOwn(error, "cause"), false);
+      assertErrorOmits(error, ...scenario.canaries);
+    });
+  }
+});
+
+test("carries stable safe categories through partial registration errors", async (t) => {
+  const scenarios = [
+    {
+      name: "network failure after registration",
+      options: { metadataWaitError: true },
+      category: "network",
+      expected: expectedRecovery({ metadataTx: METADATA_HASH }),
+    },
+    {
+      name: "configuration failure after registration",
+      options: {
+        balances: [1_000_000_000_000_000n, 0n],
+      },
+      category: "configuration",
+      expected: expectedRecovery(),
+    },
+    {
+      name: "protocol failure after registration",
+      options: { finalOwner: FOREIGN_ADDRESS },
+      category: "protocol",
+      expected: expectedRecovery({ metadataTx: METADATA_HASH }),
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const error = await captureRejection(() =>
+        runWithFakeClients(createFakeClients(scenario.options)),
+      );
+
+      assertPublicPartialError(error, scenario.expected);
+      assert.equal(error.code, "ERC8004_PARTIAL_REGISTRATION");
+      assert.equal(error.category, scenario.category);
+      assert.equal(Object.hasOwn(error, "cause"), false);
+      assert.equal(Object.hasOwn(error, "originalError"), false);
+      assertErrorOmits(
+        error,
+        PRIVATE_KEY,
+        "Sensitive receipt failure",
+      );
+      assert.equal(JSON.stringify(error).includes(PRIVATE_KEY), false);
+    });
+  }
+});
 
 test("builds exact official identity references", () => {
   assert.equal(registryNamespace(), REGISTRY_NAMESPACE);
@@ -1833,6 +1982,9 @@ test("rejects an invalid checkpoint callback before the registration write", asy
   );
 
   assert.equal(error instanceof PartialRegistrationError, false);
+  assert.ok(error instanceof RegistrationConfigurationError);
+  assert.equal(error.code, "HANDSHAKE_REGISTRATION_CONFIGURATION");
+  assert.equal(error.category, "configuration");
   assert.match(error.message, /checkpoint callback/i);
   assert.deepEqual(fake.state.calls, []);
 });
@@ -1846,6 +1998,9 @@ test("rejects an invalid checkpoint callback before a resumed metadata write", a
   );
 
   assert.equal(error instanceof PartialRegistrationError, false);
+  assert.ok(error instanceof RegistrationConfigurationError);
+  assert.equal(error.code, "HANDSHAKE_REGISTRATION_CONFIGURATION");
+  assert.equal(error.category, "configuration");
   assert.match(error.message, /checkpoint callback/i);
   assert.deepEqual(fake.state.calls, []);
 });

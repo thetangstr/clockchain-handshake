@@ -14,6 +14,8 @@ import {
   CONSERVATIVE_METADATA_GAS_RESERVE,
   RECEIPT_CONFIRMATIONS,
   RECEIPT_TIMEOUT_MILLISECONDS,
+  RegistrationConfigurationError,
+  RegistrationNetworkError,
   addGasHeadroom,
   addressesEqual,
   createRecovery,
@@ -36,6 +38,11 @@ import {
   withMetadataTransaction,
   withoutMetadataTransaction,
 } from "./registration-internal.mjs";
+
+export {
+  RegistrationConfigurationError,
+  RegistrationNetworkError,
+};
 
 const REGISTRATION_TYPE =
   "https://eips.ethereum.org/EIPS/eip-8004#registration-v1";
@@ -416,10 +423,16 @@ async function verifyMetadataTransactionEvidence({
 }
 
 export class PartialRegistrationError extends Error {
-  constructor(recovery) {
+  constructor(recovery, underlyingError) {
     super("ERC-8004 identity registration is incomplete.");
     this.name = "PartialRegistrationError";
     this.code = "ERC8004_PARTIAL_REGISTRATION";
+    this.category =
+      underlyingError instanceof RegistrationNetworkError
+        ? "network"
+        : underlyingError instanceof RegistrationConfigurationError
+          ? "configuration"
+          : "protocol";
     this.recovery = Object.freeze(validateRecovery(recovery));
   }
 }
@@ -430,11 +443,11 @@ function createVerifiedAccount(privateKey, expectedAddress) {
   try {
     account = privateKeyToAccount(privateKey);
   } catch {
-    throw new Error("Private key is invalid.");
+    throw new RegistrationConfigurationError("Private key is invalid.");
   }
 
   if (!addressesEqual(account.address, expectedAddress)) {
-    throw new Error(
+    throw new RegistrationConfigurationError(
       "Derived wallet address does not match the expected address.",
     );
   }
@@ -632,7 +645,7 @@ export async function finalizeIdentityRegistration({
       typeof metadataBalance !== "bigint" ||
       metadataBalance <= 0n
     ) {
-      throw new Error(
+      throw new RegistrationConfigurationError(
         "Metadata wallet balance must be greater than zero.",
       );
     }
@@ -661,7 +674,7 @@ export async function finalizeIdentityRegistration({
     }
 
     if (metadataBalance < metadataGas * metadataFees.unitPrice) {
-      throw new Error(
+      throw new RegistrationConfigurationError(
         "Wallet balance cannot fund metadata finalization at current fees.",
       );
     }
@@ -728,7 +741,7 @@ export async function finalizeIdentityRegistration({
       throw error;
     }
 
-    throw new PartialRegistrationError(checkpoint);
+    throw new PartialRegistrationError(checkpoint, error);
   }
 }
 
@@ -757,7 +770,9 @@ export async function registerIdentity({
       walletClient,
     }));
   } catch {
-    throw new Error("Registration clients could not be created.");
+    throw new RegistrationConfigurationError(
+      "Registration clients could not be created.",
+    );
   }
 
   await verifyOfficialRegistry(activePublicClient);
@@ -771,7 +786,9 @@ export async function registerIdentity({
     "Pending wallet nonce verification failed.",
   );
   if (nonce !== 0 && nonce !== 0n) {
-    throw new Error("Pending wallet nonce must be zero.");
+    throw new RegistrationConfigurationError(
+      "Pending wallet nonce must be zero.",
+    );
   }
 
   const balance = await runStage(
@@ -779,7 +796,9 @@ export async function registerIdentity({
     "Wallet balance verification failed.",
   );
   if (typeof balance !== "bigint" || balance <= 0n) {
-    throw new Error("Wallet balance must be greater than zero.");
+    throw new RegistrationConfigurationError(
+      "Wallet balance must be greater than zero.",
+    );
   }
 
   let initialDocument;
@@ -792,7 +811,9 @@ export async function registerIdentity({
     });
     initialURI = registrationDataUri(initialDocument);
   } catch {
-    throw new Error("Initial registration metadata is invalid.");
+    throw new RegistrationConfigurationError(
+      "Initial registration metadata is invalid.",
+    );
   }
 
   const registerFees = await estimateFeeQuote(
@@ -822,7 +843,7 @@ export async function registerIdentity({
     (registerGas + CONSERVATIVE_METADATA_GAS_RESERVE) *
     registerFees.unitPrice;
   if (balance < requiredRegisterBalance) {
-    throw new Error(
+    throw new RegistrationConfigurationError(
       "Wallet balance cannot fund the registration and metadata fee envelope.",
     );
   }
@@ -895,6 +916,6 @@ export async function registerIdentity({
       throw error;
     }
 
-    throw new PartialRegistrationError(recovery);
+    throw new PartialRegistrationError(recovery, error);
   }
 }
