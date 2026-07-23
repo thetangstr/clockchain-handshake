@@ -659,6 +659,52 @@ test("retries only eligible calls for bounded network and 5xx failures", async (
   assert.equal(writeAttempts, 1);
 });
 
+test("retries read-only complete_attestation across transient 5xx failures", async () => {
+  const bodies = [];
+  const pending = {
+    schema: "clockchain.receipt/v1",
+    status: "pending",
+    anchor: {
+      blockHeight: null,
+      confirmed: false,
+      consensusTime: null,
+      ledgerId: "ledger-1",
+    },
+  };
+  const anchored = {
+    ...pending,
+    status: "anchored",
+    anchor: {
+      ...pending.anchor,
+      blockHeight: "12",
+      confirmed: true,
+      consensusTime: "2026-07-22T12:00:00Z",
+    },
+  };
+  const client = createMcpClient({
+    fetchImpl: async (_url, init) => {
+      bodies.push(init.body);
+      if (bodies.length === 1) {
+        return new Response(null, { status: 503 });
+      }
+      return jsonToolResponse(1, anchored);
+    },
+    sleeper: async () => {},
+    token: TOKEN,
+  });
+
+  assert.deepEqual(
+    await client.completeAttestation(pending),
+    anchored,
+  );
+  assert.equal(bodies.length, 2);
+  assert.equal(new Set(bodies).size, 1);
+  assert.equal(
+    JSON.parse(bodies[0]).params.name,
+    "complete_attestation",
+  );
+});
+
 test("retries attest_action only when an idempotency key preserves the same request", async () => {
   let unkeyedAttempts = 0;
   const unkeyedClient = createMcpClient({
@@ -905,19 +951,41 @@ test("requires an active resolved identity and matches expected identity fields"
   );
 });
 
-test("requires an anchored and confirmed receipt with a non-null block height", () => {
+test("requires an anchored and confirmed receipt with a non-null anchor block height", () => {
   const receipt = {
     status: "anchored",
-    blockHeight: "12",
-    anchor: { confirmed: true },
+    anchor: {
+      blockHeight: "12",
+      confirmed: true,
+      consensusTime: "2026-07-22T12:00:00Z",
+      ledgerId: "ledger-1",
+    },
   };
 
   assert.equal(assertAnchoredReceipt(receipt), receipt);
   for (const malformed of [
     { ...receipt, status: "pending" },
-    { ...receipt, anchor: { confirmed: false } },
-    { ...receipt, blockHeight: null },
-    { ...receipt, blockHeight: undefined },
+    {
+      ...receipt,
+      anchor: { ...receipt.anchor, confirmed: false },
+    },
+    {
+      ...receipt,
+      anchor: { ...receipt.anchor, blockHeight: null },
+    },
+    {
+      ...receipt,
+      anchor: {
+        confirmed: receipt.anchor.confirmed,
+        consensusTime: receipt.anchor.consensusTime,
+        ledgerId: receipt.anchor.ledgerId,
+      },
+    },
+    {
+      ...receipt,
+      blockHeight: "12",
+      anchor: { ...receipt.anchor, blockHeight: null },
+    },
   ]) {
     assert.throws(
       () => assertAnchoredReceipt(malformed),
@@ -979,10 +1047,10 @@ test("returns full deployed response objects without dropping receipt evidence",
   const deployed = {
     status: "anchored",
     eventHash: "event-hash",
-    blockHeight: "12",
-    consensusTime: "2026-07-22T12:00:00Z",
     anchor: {
+      blockHeight: "12",
       confirmed: true,
+      consensusTime: "2026-07-22T12:00:00Z",
       ledgerId: "ledger-1",
       proof: { path: ["a", "b"] },
     },
@@ -1011,8 +1079,12 @@ test("polls a pending receipt with an injectable sleeper until it anchors", asyn
   const anchored = {
     ...initial,
     status: "anchored",
-    blockHeight: "12",
-    anchor: { confirmed: true },
+    anchor: {
+      blockHeight: "12",
+      confirmed: true,
+      consensusTime: "2026-07-22T12:00:00Z",
+      ledgerId: "ledger-1",
+    },
   };
   const calls = [];
   const delays = [];
@@ -1041,8 +1113,7 @@ test("polls a pending receipt with an injectable sleeper until it anchors", asyn
 test("returns an already anchored receipt and bounds pending completion attempts", async () => {
   const anchored = {
     status: "anchored",
-    blockHeight: 0,
-    anchor: { confirmed: true },
+    anchor: { blockHeight: 0, confirmed: true },
   };
   let calls = 0;
   const client = {

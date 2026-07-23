@@ -1364,8 +1364,8 @@ export function assertAnchoredReceipt(receipt) {
     receipt.status !== "anchored" ||
     !isPlainObject(receipt.anchor) ||
     receipt.anchor.confirmed !== true ||
-    receipt.blockHeight === null ||
-    receipt.blockHeight === undefined
+    receipt.anchor.blockHeight === null ||
+    receipt.anchor.blockHeight === undefined
   ) {
     throw new McpVerificationError(
       "Clockchain receipt must be anchored, confirmed, and include a block height.",
