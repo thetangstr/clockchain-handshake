@@ -1,6 +1,7 @@
 import { randomUUID as cryptoRandomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
+  lstat,
   mkdir,
   open,
   rename,
@@ -53,6 +54,11 @@ const RECOVERY_FILE_NAME =
 const RECOVERY_SCHEMA =
   "clockchain.handshake-registration-recovery/v1";
 const MAX_RECOVERY_BYTES = 16_384;
+const ATTESTATION_MARKER_FILE_NAME =
+  ".handshake-attestation-started.json";
+const ATTESTATION_MARKER_SCHEMA =
+  "clockchain.handshake-attestation-started/v1";
+const MAX_ATTESTATION_MARKER_BYTES = 1_024;
 const RECOVERY_FILE_OPEN_FLAGS =
   fsConstants.O_RDONLY |
   (fsConstants.O_NOFOLLOW ?? 0) |
@@ -603,6 +609,60 @@ async function prepareOutputDirectory(outputDirectory) {
   }
 }
 
+async function assertAttestationNotStarted(outputDirectory) {
+  try {
+    await lstat(
+      join(outputDirectory, ATTESTATION_MARKER_FILE_NAME),
+    );
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  throw new Error("Handshake attestation has already started.");
+}
+
+async function createAttestationMarker({
+  outputDirectory,
+  runId,
+  registration,
+  expectedEventHash,
+  canaries,
+}) {
+  const marker = {
+    schema: ATTESTATION_MARKER_SCHEMA,
+    runId,
+    agentId: registration.agentId,
+    identityReference: registration.identityReference,
+    expectedEventHash,
+  };
+  if (
+    marker.agentId.length > 128 ||
+    marker.identityReference.length > 512 ||
+    !EVENT_HASH_PATTERN.test(marker.expectedEventHash)
+  ) {
+    throw new Error("Handshake attestation marker is invalid.");
+  }
+  assertSecretFree(marker, canaries);
+  const serialized = `${JSON.stringify(marker, null, 2)}\n`;
+  if (
+    Buffer.byteLength(serialized, "utf8") >
+    MAX_ATTESTATION_MARKER_BYTES
+  ) {
+    throw new Error("Handshake attestation marker is invalid.");
+  }
+  await writeFile(
+    join(outputDirectory, ATTESTATION_MARKER_FILE_NAME),
+    serialized,
+    {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    },
+  );
+}
+
 function validateRegistrationEvidence(
   registration,
   invitation,
@@ -881,6 +941,9 @@ export async function runHandshake({
     now,
     randomUUID,
   });
+  await invokeStage("attestation", () =>
+    assertAttestationNotStarted(outputDirectory),
+  );
   const started = readClock(now);
   const runId = createRunId(randomUUID);
 
@@ -1026,10 +1089,16 @@ export async function runHandshake({
   const submitted = await invokeStage(
     "attestation",
     async () => {
-      // Deliberate residual risk: an ambiguous transport failure can
-      // leave an accepted attestation without a local result. There is
-      // no safe read-by-idempotency operation, so this write is invoked
-      // exactly once and an ambiguous failure never produces PASS.
+      await createAttestationMarker({
+        outputDirectory,
+        runId,
+        registration,
+        expectedEventHash,
+        canaries: [
+          ...registrationCanaries,
+          token,
+        ],
+      });
       const receipt = await client.attestAction({
         agent_id: registration.agentId,
         action: "trust_handshake",

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import {
   chmod,
   mkdir,
@@ -7,11 +8,14 @@ import {
   readFile,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { main } from "../bin/handshake-demo.mjs";
 import {
@@ -19,6 +23,7 @@ import {
   SINGLE_VALIDATOR_DISCLAIMER,
 } from "../src/constants.mjs";
 import {
+  beginEvidenceAttempt,
   computeReceiptEventHash,
   writeEvidence,
 } from "../src/evidence.mjs";
@@ -60,8 +65,16 @@ const INVITATION_CODE = "fresh-invitation-code-canary";
 const MCP_TOKEN = `cc_${"t".repeat(48)}`;
 const DISPLAY_NAME = "Billy";
 const RECOVERY_FILE = ".handshake-registration-recovery.json";
+const ATTESTATION_MARKER_FILE =
+  ".handshake-attestation-started.json";
+const ATTESTATION_MARKER_SCHEMA =
+  "clockchain.handshake-attestation-started/v1";
 const EVIDENCE_HISTORY_DIRECTORY =
   ".handshake-evidence-history";
+const REPOSITORY_ROOT = fileURLToPath(
+  new URL("../", import.meta.url),
+);
+const execFileAsync = promisify(execFile);
 
 function registrationRecovery({ metadata = true } = {}) {
   return {
@@ -511,6 +524,246 @@ test("runs the first-time flow in order and writes only strict sanitized PASS ev
     expectedUri,
     registrationDataUri(completedRegistration().document),
   );
+});
+
+test("refuses a rerun after PASS before archiving evidence or touching an adapter", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const firstCalls = [];
+  await runHandshake({
+    invitationFile: "/operator/invite.secret.json",
+    outputDirectory,
+    adapters: createAdapters({
+      calls: firstCalls,
+      captured: {},
+      resumed: false,
+    }),
+    now: clock(),
+    randomUUID: () => RUN_ID,
+  });
+  const jsonPath = join(outputDirectory, "result.json");
+  const markdownPath = join(outputDirectory, "RESULT.md");
+  const markerPath = join(
+    outputDirectory,
+    ATTESTATION_MARKER_FILE,
+  );
+  const priorJson = await readFile(jsonPath);
+  const priorMarkdown = await readFile(markdownPath);
+
+  let evidenceAttempts = 0;
+  const secondCalls = [];
+  const secondAdapters = createAdapters({
+    calls: secondCalls,
+    captured: {},
+    resumed: true,
+  });
+  secondAdapters.beginEvidenceAttempt = async (options) => {
+    evidenceAttempts += 1;
+    return beginEvidenceAttempt(options);
+  };
+
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters: secondAdapters,
+        now: clock(),
+        randomUUID: () => PRIOR_RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "attestation");
+      assert.equal(error.category, "protocol");
+      assert.equal(error.code, "HANDSHAKE_ATTESTATION_FAILED");
+      return true;
+    },
+  );
+
+  assert.equal(evidenceAttempts, 0);
+  assert.deepEqual(secondCalls, []);
+  assert.equal(
+    [...firstCalls, ...secondCalls].filter(
+      (call) => call === "attest",
+    ).length,
+    1,
+  );
+  assert.deepEqual(await readFile(jsonPath), priorJson);
+  assert.deepEqual(await readFile(markdownPath), priorMarkdown);
+  assert.deepEqual(
+    JSON.parse(await readFile(markerPath, "utf8")),
+    {
+      schema: ATTESTATION_MARKER_SCHEMA,
+      runId: RUN_ID,
+      agentId: "42",
+      identityReference:
+        `eip155:11155111:${REGISTRY}:42`,
+      expectedEventHash: EVENT_HASH,
+    },
+  );
+  assert.equal((await stat(markerPath)).mode & 0o777, 0o600);
+});
+
+test("refuses a rerun after an ambiguous attestation failure before every adapter call", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const firstCalls = [];
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters: createAdapters({
+          calls: firstCalls,
+          captured: {},
+          failAt: "attest",
+          resumed: false,
+        }),
+        now: clock(),
+        randomUUID: () => RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "attestation");
+      return true;
+    },
+  );
+
+  let evidenceAttempts = 0;
+  const secondCalls = [];
+  const secondAdapters = createAdapters({
+    calls: secondCalls,
+    captured: {},
+    resumed: true,
+  });
+  secondAdapters.beginEvidenceAttempt = async (options) => {
+    evidenceAttempts += 1;
+    return beginEvidenceAttempt(options);
+  };
+
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters: secondAdapters,
+        now: clock(),
+        randomUUID: () => PRIOR_RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "attestation");
+      assert.equal(error.category, "protocol");
+      assert.equal(error.code, "HANDSHAKE_ATTESTATION_FAILED");
+      return true;
+    },
+  );
+
+  assert.equal(evidenceAttempts, 0);
+  assert.deepEqual(secondCalls, []);
+  assert.equal(
+    [...firstCalls, ...secondCalls].filter(
+      (call) => call === "attest",
+    ).length,
+    1,
+  );
+});
+
+test("treats every existing marker entry, including a dangling symlink, as attestation started", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  await symlink(
+    "missing-marker-target",
+    join(outputDirectory, ATTESTATION_MARKER_FILE),
+  );
+  const calls = [];
+
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters: createAdapters({
+          calls,
+          captured: {},
+          resumed: false,
+        }),
+        now: clock(),
+        randomUUID: () => RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "attestation");
+      return true;
+    },
+  );
+  assert.deepEqual(calls, []);
+});
+
+test("uses atomic marker creation to allow only one concurrent attestation", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  await writeFile(
+    join(outputDirectory, RECOVERY_FILE),
+    `${JSON.stringify(registrationRecovery(), null, 2)}\n`,
+    { encoding: "utf8", mode: 0o644 },
+  );
+  const calls = [];
+  const runs = await Promise.allSettled(
+    [0, 1].map(() =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters: createAdapters({
+          calls,
+          captured: {},
+          resumed: true,
+        }),
+        now: clock(),
+        randomUUID: () => RUN_ID,
+      }),
+    ),
+  );
+
+  assert.equal(
+    calls.filter((call) => call === "attest").length,
+    1,
+  );
+  assert.equal(
+    runs.filter((result) => result.status === "fulfilled").length,
+    1,
+  );
+  const rejected = runs.find(
+    (result) => result.status === "rejected",
+  );
+  assert.ok(rejected?.reason instanceof HandshakeStageError);
+  assert.equal(rejected.reason.stage, "attestation");
+});
+
+test("ignores the exact repository-generated handshake lifecycle files", async () => {
+  const { stdout } = await execFileAsync(
+    "git",
+    [
+      "check-ignore",
+      "--no-index",
+      "-v",
+      "--",
+      RECOVERY_FILE,
+      ATTESTATION_MARKER_FILE,
+    ],
+    { cwd: REPOSITORY_ROOT },
+  );
+  const matches = stdout
+    .trim()
+    .split("\n")
+    .map((line) => {
+      const [source, path] = line.split("\t");
+      const [, , pattern] = source.split(":");
+      return { pattern, path };
+    });
+  assert.deepEqual(matches, [
+    { pattern: RECOVERY_FILE, path: RECOVERY_FILE },
+    {
+      pattern: ATTESTATION_MARKER_FILE,
+      path: ATTESTATION_MARKER_FILE,
+    },
+  ]);
 });
 
 test("integrates the production completion gate across degraded and time-enrichment states", async (t) => {

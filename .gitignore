@@ -11,3 +11,5 @@ coverage/
 *.secret.json
 *.key
 *.token
+.handshake-registration-recovery.json
+.handshake-attestation-started.json
