@@ -1,0 +1,23 @@
+{
+  "name": "@clockchain/handshake-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "demo": "node bin/handshake-demo.mjs",
+    "invitations:create": "node scripts/create-invitations.mjs",
+    "invitations:check": "node scripts/check-invitations.mjs",
+    "results:verify": "node scripts/verify-live-results.mjs",
+    "acceptance:clients": "node scripts/run-clean-clients.mjs",
+    "test": "node --test",
+    "test:unit": "node --test test/*.test.mjs",
+    "verify": "npm test && npm run docs:check",
+    "docs:check": "node scripts/check-docs.mjs"
+  },
+  "dependencies": {
+    "viem": "2.38.5"
+  }
+}

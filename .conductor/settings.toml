@@ -1,0 +1,14 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+[scripts]
+setup = "npm ci --ignore-scripts"
+run_mode = "concurrent"
+
+[scripts.run.verify]
+command = "npm run verify"
+default = true
+icon = "test-tube"
+
+[scripts.run.demo]
+command = "npm run demo"
+icon = "terminal"

@@ -1,0 +1,13 @@
+node_modules/
+.context/
+.omx/
+.env
+.env.*
+!.env.example
+result.json
+RESULT.md
+artifacts/
+coverage/
+*.secret.json
+*.key
+*.token
