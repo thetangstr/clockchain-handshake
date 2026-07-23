@@ -619,7 +619,7 @@ export async function finalizeIdentityRegistration({
     if (
       (!recoveredFromRevert && pendingNonce !== 1) ||
       (recoveredFromRevert &&
-        pendingNonce <= checkpoint.metadataNonce)
+        pendingNonce !== checkpoint.metadataNonce + 1)
     ) {
       throw new Error("Metadata wallet nonce is unsafe.");
     }

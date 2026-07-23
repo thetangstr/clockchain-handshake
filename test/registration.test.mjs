@@ -1678,6 +1678,29 @@ test("resubmits metadata only after the checkpoint transaction is confirmed reve
   assert.equal(evidence.metadataTx, RETRY_METADATA_HASH);
 });
 
+test("rejects an ambiguous nonce gap after a confirmed metadata revert", async () => {
+  const recovery = expectedRecovery({
+    metadataTx: METADATA_HASH,
+    metadataNonce: 1,
+  });
+  const fake = createFakeClients({
+    metadataHash: RETRY_METADATA_HASH,
+    metadataStatuses: ["reverted", "success"],
+    metadataTransactionOverrides: (hash) =>
+      hash === RETRY_METADATA_HASH ? { nonce: 3 } : {},
+    nonces: [3],
+  });
+  const error = await captureRejection(() =>
+    finalizeWithFakeClients(fake, recovery),
+  );
+
+  assertPublicPartialError(error, recovery);
+  assert.equal(
+    fake.state.calls.some(({ name }) => name === "write:setAgentURI"),
+    false,
+  );
+});
+
 test("does not reuse the nonce of a confirmed reverted metadata transaction", async () => {
   const recovery = expectedRecovery({
     metadataTx: METADATA_HASH,
