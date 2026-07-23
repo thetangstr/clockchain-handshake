@@ -18,7 +18,10 @@ import {
   RESULT_SCHEMA,
   SINGLE_VALIDATOR_DISCLAIMER,
 } from "../src/constants.mjs";
-import { writeEvidence } from "../src/evidence.mjs";
+import {
+  computeReceiptEventHash,
+  writeEvidence,
+} from "../src/evidence.mjs";
 import {
   McpNetworkError,
   McpVerificationError,
@@ -46,7 +49,13 @@ const ADDRESS = "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A";
 const PRIVATE_KEY = `0x${"11".repeat(32)}`;
 const REGISTER_TX = `0x${"22".repeat(32)}`;
 const METADATA_TX = `0x${"33".repeat(32)}`;
-const EVENT_HASH = "44".repeat(32);
+const EVENT_HASH = computeReceiptEventHash({
+  agentId: "42",
+  action: "trust_handshake",
+  inputs: receiptInputs(),
+  outputs: receiptOutputs(),
+});
+const WRONG_EVENT_HASH = "44".repeat(32);
 const INVITATION_CODE = "fresh-invitation-code-canary";
 const MCP_TOKEN = `cc_${"t".repeat(48)}`;
 const DISPLAY_NAME = "Billy";
@@ -117,14 +126,14 @@ function receiptOutputs() {
   };
 }
 
-function submittedReceipt() {
+function submittedReceipt(eventHash = EVENT_HASH) {
   return {
     schema: "clockchain.receipt/v1",
     network: "testnet",
     status: "degraded",
     agentId: "42",
     action: "trust_handshake",
-    eventHash: EVENT_HASH,
+    eventHash,
     hashType: "SHA-256",
     payload: {
       inputs: receiptInputs(),
@@ -161,9 +170,9 @@ function submittedReceipt() {
   };
 }
 
-function anchoredReceipt() {
+function anchoredReceipt(eventHash = EVENT_HASH) {
   return {
-    ...submittedReceipt(),
+    ...submittedReceipt(eventHash),
     status: "anchored",
     poolHealth: {
       totalNodes: 1,
@@ -171,7 +180,7 @@ function anchoredReceipt() {
       degraded: false,
     },
     anchor: {
-      ...submittedReceipt().anchor,
+      ...submittedReceipt(eventHash).anchor,
       blockHeight: "321",
       consensusTime: "23-07-2026_07:00:01:234",
       confirmed: true,
@@ -242,6 +251,7 @@ function clock() {
 function createAdapters({
   calls,
   captured,
+  eventHash = EVENT_HASH,
   failAt,
   onEvidence,
   resumed = false,
@@ -293,12 +303,12 @@ function createAdapters({
       calls.push("attest");
       maybeFail("attest");
       captured.attestArguments = args;
-      return submittedReceipt();
+      return submittedReceipt(eventHash);
     },
     async verifyReceipt(receipt) {
       calls.push("verify receipt");
       maybeFail("verify receipt");
-      assert.deepEqual(receipt, anchoredReceipt());
+      assert.deepEqual(receipt, anchoredReceipt(eventHash));
       return {
         match: true,
         verifiedAgainst: "on-chain block",
@@ -316,7 +326,7 @@ function createAdapters({
           blockHeight: identifiers.blockHeight,
           anchoredHash: identifiers.hash,
           assetReferenceId:
-            anchoredReceipt().anchor.assetReferenceId,
+            anchoredReceipt(eventHash).anchor.assetReferenceId,
         },
       };
     },
@@ -382,8 +392,8 @@ function createAdapters({
     async completeReceipt(_client, receipt) {
       calls.push("complete");
       maybeFail("complete");
-      assert.deepEqual(receipt, submittedReceipt());
-      return anchoredReceipt();
+      assert.deepEqual(receipt, submittedReceipt(eventHash));
+      return anchoredReceipt(eventHash);
     },
     assertCrossPartyVerification(result, expected) {
       captured.crossPartyBinding = expected;
@@ -876,6 +886,52 @@ test("never retries an ambiguous attestation write or emits PASS evidence", asyn
     calls.filter((call) => call === "attest").length,
     1,
   );
+  assert.equal(evidenceWrites, 0);
+  await assert.rejects(
+    () => stat(join(outputDirectory, "result.json")),
+    { code: "ENOENT" },
+  );
+  await assert.rejects(
+    () => stat(join(outputDirectory, "RESULT.md")),
+    { code: "ENOENT" },
+  );
+});
+
+test("rejects a service-supplied event hash that does not match the canonical receipt event", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const calls = [];
+  let evidenceWrites = 0;
+  const adapters = createAdapters({
+    calls,
+    captured: {},
+    eventHash: WRONG_EVENT_HASH,
+    resumed: false,
+    onEvidence: async () => {
+      evidenceWrites += 1;
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters,
+        now: clock(),
+        randomUUID: () => RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "attestation");
+      assert.equal(error.category, "protocol");
+      assert.equal(error.message.includes(WRONG_EVENT_HASH), false);
+      return true;
+    },
+  );
+  assert.deepEqual(calls.slice(-1), ["attest"]);
+  assert.equal(calls.includes("complete"), false);
+  assert.equal(calls.includes("verify receipt"), false);
+  assert.equal(calls.includes("verify cross-party"), false);
   assert.equal(evidenceWrites, 0);
   await assert.rejects(
     () => stat(join(outputDirectory, "result.json")),

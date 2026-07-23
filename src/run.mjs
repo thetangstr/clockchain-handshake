@@ -18,6 +18,7 @@ import {
 } from "./constants.mjs";
 import {
   beginEvidenceAttempt,
+  computeReceiptEventHash,
   EvidenceError,
   validatePassResult,
   writeEvidence,
@@ -731,6 +732,7 @@ function assertReceiptBinding(
   receipt,
   {
     agentId,
+    expectedEventHash,
     inputs,
     outputs,
     initialEventHash,
@@ -745,6 +747,7 @@ function assertReceiptBinding(
     !isDeepStrictEqual(receipt.payload.outputs, outputs) ||
     typeof receipt.eventHash !== "string" ||
     !EVENT_HASH_PATTERN.test(receipt.eventHash) ||
+    receipt.eventHash !== expectedEventHash ||
     (initialEventHash !== undefined &&
       receipt.eventHash !== initialEventHash)
   ) {
@@ -1010,6 +1013,16 @@ export async function runHandshake({
     registration.identityReference,
   );
   const outputs = receiptOutputs();
+  const expectedEventHash = await invokeStage(
+    "attestation",
+    () =>
+      computeReceiptEventHash({
+        agentId: registration.agentId,
+        action: "trust_handshake",
+        inputs,
+        outputs,
+      }),
+  );
   const submitted = await invokeStage(
     "attestation",
     async () => {
@@ -1028,6 +1041,7 @@ export async function runHandshake({
       });
       return assertReceiptBinding(receipt, {
         agentId: registration.agentId,
+        expectedEventHash,
         inputs,
         outputs,
       });
@@ -1049,6 +1063,7 @@ export async function runHandshake({
       await activeAdapters.assertAnchoredReceipt(completed);
       assertReceiptBinding(completed, {
         agentId: registration.agentId,
+        expectedEventHash,
         inputs,
         outputs,
         initialEventHash: submitted.eventHash,
@@ -1075,14 +1090,14 @@ export async function runHandshake({
       const verification = await client.verifyCrossParty({
         ledgerId: receipt.anchor.ledgerId,
         blockHeight: receipt.anchor.blockHeight,
-        hash: receipt.eventHash,
+        hash: expectedEventHash,
       });
       return activeAdapters.assertCrossPartyVerification(
         verification,
         {
           ledgerId: receipt.anchor.ledgerId,
           blockHeight: receipt.anchor.blockHeight,
-          anchoredHash: receipt.eventHash,
+          anchoredHash: expectedEventHash,
           assetReferenceId:
             receipt.anchor.assetReferenceId,
         },

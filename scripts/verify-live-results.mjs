@@ -41,6 +41,7 @@ import {
   RPC_URL,
 } from "../src/constants.mjs";
 import {
+  computeReceiptEventHash,
   renderResultMarkdown,
   validatePassResult,
 } from "../src/evidence.mjs";
@@ -173,24 +174,6 @@ function normalizedCanaries(canaries) {
   return [...new Set(canaries)];
 }
 
-function sortDeep(value) {
-  if (Array.isArray(value)) {
-    return value.map(sortDeep);
-  }
-  if (value && typeof value === "object") {
-    const result = {};
-    for (const key of Object.keys(value).sort()) {
-      result[key] = sortDeep(value[key]);
-    }
-    return result;
-  }
-  return value;
-}
-
-function canonicalize(value) {
-  return JSON.stringify(sortDeep(value) ?? null);
-}
-
 function expectedReceiptEvent(result) {
   validatePassResult(result);
   return {
@@ -215,10 +198,7 @@ function expectedReceiptEvent(result) {
 }
 
 export function expectedReceiptHash(result) {
-  const event = expectedReceiptEvent(result);
-  return createHash("sha256")
-    .update(canonicalize(event), "utf8")
-    .digest("hex");
+  return computeReceiptEventHash(expectedReceiptEvent(result));
 }
 
 function normalizeRepositorySha(value) {

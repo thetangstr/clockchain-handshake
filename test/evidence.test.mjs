@@ -12,7 +12,9 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  computeReceiptEventHash,
   EvidenceRedactionError,
+  EvidenceValidationError,
   renderResultMarkdown,
   validatePassResult,
   writeEvidence,
@@ -105,6 +107,85 @@ async function temporaryDirectory(t) {
   t.after(() => rm(directory, { recursive: true, force: true }));
   return directory;
 }
+
+function validReceiptEvent() {
+  return {
+    agentId: "42",
+    action: "trust_handshake",
+    inputs: {
+      runId: RUN_ID,
+      identityReference:
+        `eip155:11155111:${REGISTRY}:42`,
+      counterparty: "clockchain:handshake",
+      authorization: {
+        amount: "100",
+        currency: "USD",
+        settlement: "not-executed",
+      },
+    },
+    outputs: {
+      decision: "approved-for-demo",
+      scope: "identity-and-time-receipt-only",
+      paymentMoved: false,
+    },
+  };
+}
+
+test("computes the deployed canonical receipt event hash", () => {
+  assert.equal(
+    computeReceiptEventHash(validReceiptEvent()),
+    "19f9abc99b6d2b65e50629bd025bffebd991fd5ee22bad92234829d014cb3b10",
+  );
+});
+
+test("rejects non-plain or non-JSON-safe receipt events without echoing values", () => {
+  const secret = "receipt-event-secret-canary";
+  const accessorInputs = {};
+  Object.defineProperty(accessorInputs, "leak", {
+    enumerable: true,
+    get() {
+      throw new Error(secret);
+    },
+  });
+  const cyclicInputs = {};
+  cyclicInputs.self = cyclicInputs;
+  const cases = [
+    undefined,
+    {
+      ...validReceiptEvent(),
+      inputs: { omitted: undefined },
+    },
+    {
+      ...validReceiptEvent(),
+      inputs: { invalidNumber: Number.NaN },
+    },
+    {
+      ...validReceiptEvent(),
+      outputs: new Date("2026-07-23T07:00:00.000Z"),
+    },
+    {
+      ...validReceiptEvent(),
+      inputs: accessorInputs,
+    },
+    {
+      ...validReceiptEvent(),
+      inputs: cyclicInputs,
+    },
+  ];
+
+  for (const event of cases) {
+    assert.throws(
+      () => computeReceiptEventHash(event),
+      (error) => {
+        assert.ok(error instanceof EvidenceValidationError);
+        assert.equal(error.code, "HANDSHAKE_RESULT_INVALID");
+        assert.equal(error.message, "Handshake PASS result is invalid.");
+        assert.equal(error.message.includes(secret), false);
+        return true;
+      },
+    );
+  }
+});
 
 test("validates the exact PASS schema including truthful submission pool health", () => {
   const result = validResult();

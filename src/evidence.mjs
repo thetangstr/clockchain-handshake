@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
@@ -63,6 +63,12 @@ const POOL_HEALTH_KEYS = Object.freeze([
   "totalNodes",
   "nodeParticipationPct",
   "degradedAtSubmission",
+]);
+const RECEIPT_EVENT_KEYS = Object.freeze([
+  "agentId",
+  "action",
+  "inputs",
+  "outputs",
 ]);
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -137,6 +143,120 @@ function isPlainObject(value) {
 
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function canonicalizeReceiptEventValue(
+  value,
+  ancestors = new Set(),
+) {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new EvidenceValidationError();
+    }
+    return value;
+  }
+  if (typeof value !== "object" || ancestors.has(value)) {
+    throw new EvidenceValidationError();
+  }
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const keys = Reflect.ownKeys(value);
+      if (
+        keys.length !== value.length + 1 ||
+        keys.some(
+          (key) =>
+            key !== "length" &&
+            (typeof key !== "string" ||
+              !/^(?:0|[1-9][0-9]*)$/.test(key) ||
+              Number(key) >= value.length),
+        )
+      ) {
+        throw new EvidenceValidationError();
+      }
+      const result = [];
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(
+          value,
+          String(index),
+        );
+        if (
+          !descriptor ||
+          !descriptor.enumerable ||
+          !Object.hasOwn(descriptor, "value")
+        ) {
+          throw new EvidenceValidationError();
+        }
+        result.push(
+          canonicalizeReceiptEventValue(
+            descriptor.value,
+            ancestors,
+          ),
+        );
+      }
+      return result;
+    }
+
+    if (!isPlainObject(value)) {
+      throw new EvidenceValidationError();
+    }
+    const entries = [];
+    for (const key of Reflect.ownKeys(value)) {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        value,
+        key,
+      );
+      if (
+        typeof key !== "string" ||
+        !descriptor ||
+        !descriptor.enumerable ||
+        !Object.hasOwn(descriptor, "value")
+      ) {
+        throw new EvidenceValidationError();
+      }
+      entries.push([key, descriptor.value]);
+    }
+    const result = {};
+    for (const [key, entryValue] of entries.sort(
+      ([left], [right]) =>
+        left === right ? 0 : left < right ? -1 : 1,
+    )) {
+      result[key] = canonicalizeReceiptEventValue(
+        entryValue,
+        ancestors,
+      );
+    }
+    return result;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+export function computeReceiptEventHash(event) {
+  try {
+    const canonicalEvent =
+      canonicalizeReceiptEventValue(event);
+    if (
+      !hasExactKeys(canonicalEvent, RECEIPT_EVENT_KEYS) ||
+      typeof canonicalEvent.agentId !== "string" ||
+      typeof canonicalEvent.action !== "string"
+    ) {
+      throw new EvidenceValidationError();
+    }
+    return createHash("sha256")
+      .update(JSON.stringify(canonicalEvent), "utf8")
+      .digest("hex");
+  } catch {
+    throw new EvidenceValidationError();
+  }
 }
 
 function hasExactKeys(value, expectedKeys) {
