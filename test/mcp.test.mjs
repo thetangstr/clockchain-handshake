@@ -1214,7 +1214,53 @@ test("polls a pending receipt with an injectable sleeper until it anchors", asyn
   assert.deepEqual(delays, [25, 25]);
 });
 
-test("returns an already anchored receipt and bounds pending completion attempts", async () => {
+test("polls degraded receipts until strict anchored evidence arrives", async () => {
+  const initial = {
+    id: "receipt-degraded",
+    status: "degraded",
+    anchor: {
+      blockHeight: null,
+      confirmed: false,
+      consensusTime: null,
+      ledgerId: "ledger-1",
+    },
+  };
+  const degraded = { ...initial, stage: 2 };
+  const anchored = {
+    ...initial,
+    status: "anchored",
+    anchor: {
+      ...initial.anchor,
+      blockHeight: "13",
+      confirmed: true,
+      consensusTime: "1753228800.123456789",
+    },
+  };
+  const calls = [];
+  const delays = [];
+  const responses = [degraded, anchored];
+  const client = {
+    async completeAttestation(receipt) {
+      calls.push(receipt);
+      return responses.shift();
+    },
+  };
+
+  assert.equal(
+    await completeReceipt(client, initial, {
+      attempts: 3,
+      intervalMs: 25,
+      sleeper: async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+    }),
+    anchored,
+  );
+  assert.deepEqual(calls, [initial, degraded]);
+  assert.deepEqual(delays, [25, 25]);
+});
+
+test("returns an already anchored receipt and bounds pollable completion attempts", async () => {
   const anchored = {
     status: "anchored",
     anchor: {
@@ -1223,38 +1269,51 @@ test("returns an already anchored receipt and bounds pending completion attempts
       consensusTime: "2026-07-22T12:00:00Z",
     },
   };
-  let calls = 0;
-  const client = {
-    async completeAttestation(receipt) {
-      calls += 1;
-      return receipt;
+  let anchoredCalls = 0;
+  const anchoredClient = {
+    async completeAttestation() {
+      anchoredCalls += 1;
+      throw new Error("an anchored receipt must not be completed");
     },
   };
 
   assert.equal(
-    await completeReceipt(client, anchored, {
+    await completeReceipt(anchoredClient, anchored, {
       sleeper: async () => {
         throw new Error("an anchored receipt must not sleep");
       },
     }),
     anchored,
   );
-  assert.equal(calls, 0);
+  assert.equal(anchoredCalls, 0);
 
-  await assert.rejects(
-    completeReceipt(client, { status: "pending" }, {
-      attempts: 2,
-      intervalMs: 0,
-      sleeper: async () => {},
-    }),
-    /pending|attempt/i,
-  );
-  assert.equal(calls, 2);
+  for (const status of ["pending", "degraded"]) {
+    let calls = 0;
+    const pollable = { status };
+    const pollingClient = {
+      async completeAttestation(receipt) {
+        calls += 1;
+        return receipt;
+      },
+    };
+
+    await assert.rejects(
+      completeReceipt(pollingClient, pollable, {
+        attempts: 2,
+        intervalMs: 0,
+        sleeper: async () => {},
+      }),
+      /pending|degraded|unanchored|attempt/i,
+    );
+    assert.equal(calls, 2, `${status} must exhaust bounded attempts`);
+  }
 });
 
-test("rejects invalid receipt completion options and terminal non-anchored states", async () => {
+test("rejects invalid options and unknown initial or intermediate statuses", async () => {
+  let calls = 0;
   const client = {
     async completeAttestation() {
+      calls += 1;
       return { status: "rejected" };
     },
   };
@@ -1265,6 +1324,16 @@ test("rejects invalid receipt completion options and terminal non-anchored state
     }),
     /anchored|status/i,
   );
+  assert.equal(calls, 0);
+  await assert.rejects(
+    completeReceipt(client, { status: "degraded" }, {
+      attempts: 1,
+      intervalMs: 0,
+      sleeper: async () => {},
+    }),
+    /anchored|status/i,
+  );
+  assert.equal(calls, 1);
   await assert.rejects(
     completeReceipt(client, { status: "pending" }, {
       attempts: 0,

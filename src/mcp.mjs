@@ -25,6 +25,10 @@ const READ_RETRY_TOOLS = new Set([
   "verify_receipt",
   "verify_cross_party",
 ]);
+const POLLABLE_RECEIPT_STATUSES = new Set([
+  "pending",
+  "degraded",
+]);
 const ATTEST_ACTION_KEYS = new Set([
   "agent_id",
   "action",
@@ -1469,9 +1473,9 @@ export async function completeReceipt(
   if (receipt.status === "anchored") {
     return assertAnchoredReceipt(receipt);
   }
-  if (receipt.status !== "pending") {
+  if (!POLLABLE_RECEIPT_STATUSES.has(receipt.status)) {
     throw new McpVerificationError(
-      "Clockchain receipt status must be pending or anchored.",
+      "Clockchain receipt status must be pending, degraded, or anchored.",
       "MCP_INVALID_RECEIPT_STATUS",
     );
   }
@@ -1484,7 +1488,10 @@ export async function completeReceipt(
     if (current?.status === "anchored") {
       return assertAnchoredReceipt(current);
     }
-    if (!isPlainObject(current) || current.status !== "pending") {
+    if (
+      !isPlainObject(current) ||
+      !POLLABLE_RECEIPT_STATUSES.has(current.status)
+    ) {
       throw new McpVerificationError(
         "Clockchain receipt did not reach an anchored status.",
         "MCP_RECEIPT_COMPLETION_FAILED",
@@ -1493,7 +1500,7 @@ export async function completeReceipt(
   }
 
   throw new McpVerificationError(
-    "Clockchain receipt remained pending after bounded attempts.",
+    "Clockchain receipt remained unanchored after bounded attempts.",
     "MCP_RECEIPT_PENDING",
   );
 }
