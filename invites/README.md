@@ -3,7 +3,10 @@
 This directory holds encrypted, Ethereum Sepolia-only invitation bundles for the
 turnkey Handshake demo. A bundle exposes its display name and public wallet
 address, but it does not contain a plaintext private key or invitation code.
-Deliver each matching invitation code separately and privately.
+For the actual exercise, deliver the matching mode-`0600`
+`<id>.secret.json` file privately as one opaque stakeholder input. That file
+combines the public bundle with its invitation code so the operator never needs
+to paste or transmit the code separately.
 
 Operators create named bundles with explicit, path-safe IDs:
 
@@ -19,8 +22,10 @@ The command writes public `<id>.enc.json` files and mode-`0600` operator-only
 `<id>.secret.json` files. It refuses existing targets by default. `--force`
 replaces existing regular files only; it never follows symlinks or replaces
 directories and other special files. The command prints only each ID and public
-address. Public and secret output directories must be canonically distinct and
-must not contain one another, including through a symlinked parent.
+address. Treat a delivered secret file as opaque: do not open it in chat or
+split its code from its bundle. Public and secret output directories must be
+canonically distinct and must not contain one another, including through a
+symlinked parent.
 
 Creation takes owner-only exclusive locks in both canonical output directories,
 using the same deterministic order for every process. It holds those locks

@@ -15,7 +15,7 @@
 **Files:**
 - Create outside Git: `.context/platform/baseline.json`
 
-- [ ] **Step 1: Record non-secret Cloud Run state**
+- [x] **Step 1: Record non-secret Cloud Run state**
 
 Run:
 
@@ -43,9 +43,10 @@ Expected at plan authoring time: rollback revision is
 captured `.revision` value—not this historical expectation—as the rollback
 target.
 
-- [ ] **Step 2: Prove the current public behavior**
+- [x] **Step 2: Prove the current public behavior**
 
-Mint one demo token and call `resolve_agent` for official-registry agent `0`.
+Mint one demo token and call `resolve_agent` for a known official-registry
+identity (`8639` was used for the 2026-07-22 preflight).
 Expected before the override: `unknown` or data from the legacy registry that
 does not match the official owner/URI.
 
@@ -54,7 +55,7 @@ does not match the official owner/URI.
 **Files:**
 - External state only: Cloud Run service configuration
 
-- [ ] **Step 1: Update only the registry address**
+- [x] **Step 1: Update only the registry address**
 
 Run:
 
@@ -69,7 +70,7 @@ gcloud run services update clockchain-mcp \
 The existing source default already selects Ethereum Sepolia and its public RPC.
 Do not redeploy source and do not touch existing secret bindings.
 
-- [ ] **Step 2: Verify service and resolver behavior**
+- [x] **Step 2: Verify service and resolver behavior**
 
 Run:
 
@@ -77,12 +78,12 @@ Run:
 curl -fsS https://mcp.clockchain.network/health
 ```
 
-Then call `resolve_agent("0")` through the hosted MCP.
+Then call `resolve_agent("8639")` through the hosted MCP.
 
 Expected: health 200; status `active`; owner and URI match direct calls to the
 official registry.
 
-- [ ] **Step 3: Record rollback**
+- [x] **Step 3: Record rollback**
 
 If health or resolution fails:
 
@@ -103,7 +104,7 @@ gcloud run services update-traffic clockchain-mcp \
 **Files:**
 - Create under gitignored collaboration state: `.context/clockchain-developer-tools/`
 
-- [ ] **Step 1: Clone the verified remote default branch**
+- [x] **Step 1: Clone the verified remote default branch**
 
 Run:
 
@@ -117,7 +118,7 @@ Expected: clean `main` checkout. Do not use
 `/Volumes/home/Projects_Hosted/clockchain/specs`; it has unrelated commits and
 uncommitted files.
 
-- [ ] **Step 2: Install and run the baseline**
+- [x] **Step 2: Install and run the baseline**
 
 Run:
 
@@ -130,7 +131,7 @@ npm test
 
 Expected: baseline passes before edits.
 
-- [ ] **Step 3: Create a scoped branch**
+- [x] **Step 3: Create a scoped branch**
 
 Run: `git switch -c kailortang-prog/official-erc8004-registry`
 
@@ -142,7 +143,7 @@ Run: `git switch -c kailortang-prog/official-erc8004-registry`
 - Modify: `product-a-identity-decision.md`
 - Modify: `implementation-plan.md`
 
-- [ ] **Step 1: Write the failing default-address test**
+- [x] **Step 1: Write the failing default-address test**
 
 Extend the existing `../dist/index.js` import with
 `DEFAULT_ERC8004_REGISTRY`, `DEFAULT_ERC8004_CHAIN`, and
@@ -170,7 +171,7 @@ test("keeps an explicit registry override", () => {
 });
 ```
 
-- [ ] **Step 2: Build and run the focused test to verify it fails**
+- [x] **Step 2: Build and run the focused test to verify it fails**
 
 Run:
 
@@ -181,7 +182,7 @@ node --test packages/core/test/erc8004.test.mjs
 
 Expected: FAIL because the checked-in default is `0x7177…`.
 
-- [ ] **Step 3: Change the default and decision record**
+- [x] **Step 3: Change the default and decision record**
 
 Set:
 
@@ -198,7 +199,7 @@ legacy verified deployment: 0x7177...
 Clockchain consumes and resolves identity; it does not issue ERC-8004 identity
 ```
 
-- [ ] **Step 4: Run focused and full verification**
+- [x] **Step 4: Run focused and full verification**
 
 Run:
 
@@ -211,7 +212,7 @@ git diff --check
 
 Expected: all checks pass.
 
-- [ ] **Step 5: Commit with the Lore protocol**
+- [x] **Step 5: Commit with the Lore protocol**
 
 ```bash
 git add packages/core/src/config.ts packages/core/test/erc8004.test.mjs product-a-identity-decision.md implementation-plan.md
@@ -229,7 +230,7 @@ Tested: Core build, focused resolver tests, full test suite, and diff check."
 **Files:**
 - No further source changes unless review identifies a defect
 
-- [ ] **Step 1: Push and open the PR**
+- [x] **Step 1: Push and open the PR**
 
 ```bash
 git push -u origin kailortang-prog/official-erc8004-registry
@@ -239,18 +240,18 @@ gh pr create --repo thetangstr/clockchain-developer-tools --base main \
   --body-file ../platform-pr.md
 ```
 
-- [ ] **Step 2: Require build/test checks**
+- [x] **Step 2: Require build/test checks**
 
 Run: `gh pr checks --watch <PR_NUMBER> --repo thetangstr/clockchain-developer-tools`
 
 Expected: all required checks pass.
 
-- [ ] **Step 3: Merge and monitor deployment**
+- [x] **Step 3: Merge and monitor deployment**
 
 Squash-merge the PR. Watch the `Deploy MCP to Cloud Run` workflow through its
 test, deploy, and smoke-test jobs.
 
-- [ ] **Step 4: Verify the final live state**
+- [x] **Step 4: Verify the final live state**
 
 Confirm:
 
@@ -258,13 +259,56 @@ Confirm:
 /health returns 200
 latest ready revision serves 100% traffic
 ERC8004_REGISTRY_ADDRESS override remains present
-known official identity resolves
-fresh demo identity resolves with expected owner and URI
-existing Clockchain get_timestamp and receipt smoke test still pass
+[x] known official identity resolves
+[x] fresh demo identity resolves with expected owner and URI
+[x] existing Clockchain get_timestamp and receipt smoke test pass
 ```
 
-- [ ] **Step 5: Save deployment evidence**
+The 2026-07-23 operator smoke registered official-registry identity `8649`
+and the hosted resolver returned its expected owner and data URI. The same
+clean run anchored ledger `99ddfbd5-4833-4c9b-8407-3a1b26e99a52` at
+Clockchain block `1747145` with a non-null consensus time, then passed receipt
+and keyless cross-party verification.
+
+- [x] **Step 5: Save deployment evidence**
 
 Write a sanitized deployment summary to the Handshake repository under
 `.context/platform/deployment-result.json`, including PR URL, merge SHA,
 workflow URL, revision, official registry, health result, and resolver result.
+
+### Task 6: Restore strict receipt consensus-time enrichment
+
+The final live receipt smoke exposed a separate deployed incompatibility:
+the configured logging-scoped API key receives HTTP 401 from
+`/api/time/block`, while the same immutable block and its `blockTime` are
+publicly available from keyless `/searchAssetFromChain`.
+
+- [x] **Step 1: Reproduce the failure without another receipt write**
+
+Receipt `9400d78a-b017-43ab-8f49-acbafc1af611` anchored at block `1742929`,
+but 100 read-only completion polls retained `consensusTime: null`. The scoped
+block route returned 401; the public immutable block returned the matching
+ledger and RFC 3339 time.
+
+- [x] **Step 2: Add the narrow TDD fallback**
+
+Developer-tools PR
+[`#92`](https://github.com/thetangstr/clockchain-developer-tools/pull/92)
+preserves successful scoped reads and, only on a typed authorization failure,
+falls back keylessly to the exact immutable block. It validates canonical
+height, proposer text, and RFC 3339 calendar time before enrichment.
+
+- [x] **Step 3: Independently review, merge, and deploy**
+
+Node 20/22 CI, independent review, the gated Cloud Run test/deploy/smoke jobs,
+and live block validation passed. PR #92 first deployed revision
+`clockchain-mcp-00014-stg`. The current ready revision is
+`clockchain-mcp-00015-vqf` at 100% traffic and retains the official-registry
+override.
+
+- [x] **Step 4: Replay the existing receipt read-only**
+
+The original receipt now completes with
+`consensusTime: 2026-07-23T08:08:56.672021941Z`, verifies with
+`match: true` against the on-chain block, and passes keyless cross-party
+verification. No second attestation write was needed.

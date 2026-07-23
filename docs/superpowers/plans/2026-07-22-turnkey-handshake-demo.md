@@ -547,7 +547,7 @@ The transport and tool shapes below were verified live against
 `https://mcp.clockchain.network` and against developer-tools commit
 `901490c7d09c90742bd4723455807fbc25435c61`.
 
-- [ ] **Step 1: Write failing SSE parsing tests**
+- [x] **Step 1: Write failing SSE parsing tests**
 
 ```js
 import test from "node:test";
@@ -568,13 +568,13 @@ Add cases for LF and CRLF framing, multiple events, multiline `data`, a
 nonmatching JSON-RPC ID, direct JSON error bodies, empty HTTP 202 notification
 responses, `result.isError === true`, and optional `structuredContent`.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `node --test test/mcp.test.mjs`
 
 Expected: FAIL with `ERR_MODULE_NOT_FOUND`.
 
-- [ ] **Step 3: Implement token acquisition and JSON-RPC calls**
+- [x] **Step 3: Implement token acquisition and JSON-RPC calls**
 
 Export:
 
@@ -619,10 +619,11 @@ frames whose tool payload is normally JSON text in `result.content[0].text`.
 The client sends `accept: application/json, text/event-stream`, never exposes
 the token in an error, fails immediately on 401/403, honors `Retry-After` on a
 429 without minting another token, and retries read-only calls only for bounded
-transient 5xx/network failures. `attest_action` may be retried only with the
-same required idempotency key; other write tools are never blindly retried.
-HTTP 200 is not sufficient: reject both JSON-RPC `error` and
-`result.isError === true`. Bound request time and response size.
+transient 5xx/network failures. Every `attest_action` call includes a stable
+idempotency key but remains single-shot: the deployed cache is process-local,
+success-only, and does not reserve in-flight keys, so an ambiguous retry could
+duplicate the write. HTTP 200 is not sufficient: reject both JSON-RPC `error`
+and `result.isError === true`. Bound request time and response size.
 
 Public wrappers map to the exact deployed snake-case tool fields:
 
@@ -636,21 +637,23 @@ verify_receipt      { receipt }
 verify_cross_party  { ledger_id?, block_height?, hash? }
 ```
 
-- [ ] **Step 4: Add receipt-completion tests**
+- [x] **Step 4: Add receipt-completion tests**
 
 The mock responses prove:
 
 ```text
 resolved identity must be active
-attest_action pending -> complete_attestation polling
-anchored receipt requires anchor.confirmed true and non-null blockHeight
+attest_action pending/degraded, or anchored with consensus-time enrichment still
+pending -> complete_attestation polling
+anchored receipt requires anchor.confirmed true, a nonempty string
+anchor.blockHeight, and a nonempty string anchor.consensusTime
 verify_receipt must report match true
 verify_receipt must report verifiedAgainst on-chain block
 verify_cross_party must report onChain.verifiedAgainst on-chain block
 verify_cross_party must report onChain.keyless true
 ```
 
-- [ ] **Step 5: Implement strict completion helpers**
+- [x] **Step 5: Implement strict completion helpers**
 
 Export:
 
@@ -662,18 +665,17 @@ export function assertCrossPartyVerification(result) {}
 export async function completeReceipt(client, receipt, { attempts = 8, intervalMs = 1500 } = {}) {}
 ```
 
-The current hosted resolver returns `unknown` for official agent 8639 while the
-platform still uses its legacy registry default. Task 4 tests mock an active
-identity, but live acceptance is blocked until the official-registry platform
-plan is complete.
+The official-registry platform plan is complete. The hosted resolver returns
+`active` for known official identity `8639` and for fresh operator-smoke
+identity `8649`, with the expected owners and metadata URIs.
 
-- [ ] **Step 6: Run focused tests**
+- [x] **Step 6: Run focused tests**
 
 Run: `node --test test/mcp.test.mjs`
 
 Expected: all MCP tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/mcp.mjs test/mcp.test.mjs test/fixtures/mcp-sse.txt
@@ -694,7 +696,14 @@ Tested: SSE parsing, auth/rate-limit errors, pending polling, anchor, commitment
 - Create: `test/evidence.test.mjs`
 - Create: `test/run.test.mjs`
 
-- [ ] **Step 1: Write failing result-schema tests**
+The runner also owns a local, public recovery checkpoint at
+`<outputDirectory>/.handshake-registration-recovery.json`. The checkpoint
+contains only the validated JSON-safe value emitted by the registration
+adapter—never the invitation code, private key, MCP token, or raw error. It is
+retained after PASS so rerunning a consumed invitation resumes and verifies the
+same identity instead of trying to register another one.
+
+- [x] **Step 1: Write failing result-schema tests**
 
 The expected result shape is:
 
@@ -728,6 +737,11 @@ The expected result shape is:
     crossPartyVerified: true,
     verifiedAgainst: "on-chain block",
     keyless: true,
+    poolHealth: {
+      totalNodes: 1,
+      nodeParticipationPct: 0,
+      degradedAtSubmission: true,
+    },
   },
   disclaimer: "Single-validator testnet: ...",
 }
@@ -736,7 +750,7 @@ The expected result shape is:
 Tests reject missing transaction hashes, null block height, false verification,
 or forbidden secret canaries.
 
-- [ ] **Step 2: Implement evidence validation and Markdown rendering**
+- [x] **Step 2: Implement evidence validation and Markdown rendering**
 
 Export:
 
@@ -747,21 +761,29 @@ export async function writeEvidence({ directory, result, canaries }) {}
 ```
 
 `writeEvidence` redacts first, asserts secret-free second, writes to temporary
-files, re-reads and validates them, then atomically renames them to
-`result.json` and `RESULT.md`.
+files, rejects the result if redaction changed any value, re-reads and validates
+both temporary files, then atomically renames each to `result.json` and
+`RESULT.md`. It removes temporary files on failure. The two target renames are
+individually atomic; PASS is printed only after both final files are re-read and
+cross-checked.
 
-- [ ] **Step 3: Write a failing orchestration test**
+- [x] **Step 3: Write a failing orchestration test**
 
-Use injected fake registration and MCP adapters. Assert this exact call order:
+Use injected fake registration and MCP adapters. On a first run, assert this
+exact call order:
 
 ```text
-decrypt -> register -> mint token -> resolve -> timestamp -> attest ->
+read invitation -> decrypt -> register/checkpoint -> mint token -> resolve -> timestamp -> attest ->
 complete if needed -> verify receipt -> verify cross-party -> write evidence
 ```
 
-Assert no evidence is written after any failed stage.
+On a resumed run, replace `register/checkpoint` with
+`read checkpoint -> finalize registration`, and assert the registration write
+adapter is never called. A `PartialRegistrationError` recovery value is
+persisted once more before the safe error is returned. Assert no PASS evidence
+is written after any failed stage; the public recovery checkpoint may remain.
 
-- [ ] **Step 4: Implement `runHandshake`**
+- [x] **Step 4: Implement `runHandshake`**
 
 ```js
 export async function runHandshake({
@@ -772,6 +794,13 @@ export async function runHandshake({
   randomUUID,
 }) {}
 ```
+
+The default adapter table includes `readSecretInvitation`,
+`decryptInvitation`, `registerIdentity`, `finalizeIdentityRegistration`,
+`mintDemoToken`, `createMcpClient`, the Task 4 assertion/completion helpers,
+and `writeEvidence`. Validate all options before side effects. Registration and
+MCP typed errors are mapped to a secret-safe `HandshakeStageError`; the CLI
+classifies by explicit category/code, never by matching error text.
 
 The receipt inputs include:
 
@@ -794,7 +823,15 @@ The outputs include:
 }
 ```
 
-- [ ] **Step 5: Implement the CLI**
+The live single-validator pool can report zero participation while remaining
+synced. The runner therefore makes the write boundary explicit with
+`allow_degraded: true`, but still withholds PASS unless the receipt subsequently
+reaches the strict anchored/confirmed state with both consensus time and block
+height and passes both verification paths. Preserve the receipt's public
+`poolHealth` snapshot in evidence rather than describing the submission as
+healthy.
+
+- [x] **Step 5: Implement the CLI**
 
 The CLI:
 
@@ -808,7 +845,12 @@ returns exit 0 on PASS, 2 on safe user/config error, 3 on network failure,
 4 on protocol verification failure, and 5 on redaction failure
 ```
 
-- [ ] **Step 6: Run focused and full tests**
+Progress output is a fixed allowlist of stage labels plus already-validated
+public transaction, agent, ledger, and block identifiers. It never interpolates
+raw upstream errors. Display names and all other untrusted strings are escaped
+for Markdown and stripped of terminal control characters.
+
+- [x] **Step 6: Run focused and full tests**
 
 Run:
 
@@ -819,7 +861,7 @@ npm test
 
 Expected: all tests pass and no network request occurs.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/evidence.mjs src/run.mjs bin/handshake-demo.mjs test/evidence.test.mjs test/run.test.mjs
@@ -841,32 +883,40 @@ Tested: Ordered orchestration, fail-closed stages, result schema, atomic writes,
 - Generate: `invites/claude.enc.json`
 - Generate outside Git: `.context/invitations/codex.secret.json`
 - Generate outside Git: `.context/invitations/claude.secret.json`
+- Generate outside Git: `.context/smoke-public/smoke.enc.json`
+- Generate outside Git: `.context/invitations/smoke.secret.json`
+- Generate outside Git: `.context/sponsor-public/sponsor.enc.json`
+- Generate outside Git: `.context/invitations/sponsor.secret.json`
 
-- [ ] **Step 1: Write failing operator-tool tests**
+- [x] **Step 1: Write failing operator-tool tests**
 
 Tests use a temporary directory and assert:
 
 ```text
-two distinct wallets and invitation codes
+distinct wallets and invitation codes for every requested ID
 public bundle contains address but no private key/code
 secret file mode is 0600
 secret file references the matching bundle
 existing bundle paths are never overwritten without --force
+invalid, duplicate, or mismatched ID/name lists fail before creating files
 ```
 
-- [ ] **Step 2: Implement deterministic operator interfaces**
+- [x] **Step 2: Implement deterministic operator interfaces**
 
 `create-invitations.mjs` supports:
 
 ```text
 --output-public invites
 --output-secret .context/invitations
+--ids codex,claude
 --names Billy,Iris
 ```
 
 It uses `generatePrivateKey` and `privateKeyToAccount`, generates 32 random
 bytes for each invitation code, encrypts with `encryptInvitation`, and prints
-only bundle ID plus public address.
+only bundle ID plus public address. IDs and names are explicit same-length
+lists, so operator-only `smoke` and `sponsor` wallets can be generated without
+inventing a filename from untrusted display text.
 
 `check-invitations.mjs` reads public addresses only and reports:
 
@@ -878,13 +928,13 @@ official registry bytecode present
 ready true only when nonce is 0 and balance is within the configured pilot range
 ```
 
-- [ ] **Step 3: Run operator tests**
+- [x] **Step 3: Run operator tests**
 
 Run: `node --test test/operator-tools.test.mjs`
 
 Expected: all tests pass.
 
-- [ ] **Step 4: Generate the two real invitation bundles**
+- [x] **Step 4: Generate the two real invitation bundles**
 
 Run:
 
@@ -892,7 +942,20 @@ Run:
 npm run invitations:create -- \
   --output-public invites \
   --output-secret .context/invitations \
+  --ids codex,claude \
   --names Billy,Iris
+
+npm run invitations:create -- \
+  --output-public .context/smoke-public \
+  --output-secret .context/invitations \
+  --ids smoke \
+  --names Smoke
+
+npm run invitations:create -- \
+  --output-public .context/sponsor-public \
+  --output-secret .context/invitations \
+  --ids sponsor \
+  --names Sponsor
 ```
 
 Expected:
@@ -902,9 +965,11 @@ invites/codex.enc.json
 invites/claude.enc.json
 .context/invitations/codex.secret.json mode 0600
 .context/invitations/claude.secret.json mode 0600
+.context/invitations/smoke.secret.json mode 0600
+.context/invitations/sponsor.secret.json mode 0600
 ```
 
-- [ ] **Step 5: Verify no secret is tracked**
+- [x] **Step 5: Verify no secret is tracked**
 
 Run:
 
@@ -917,7 +982,7 @@ git check-ignore -q .context/invitations/codex.secret.json
 Expected: only encrypted public bundles are eligible for commit; secret files
 are ignored.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add scripts/create-invitations.mjs scripts/check-invitations.mjs test/operator-tools.test.mjs invites
@@ -939,7 +1004,7 @@ Not-tested: Funding and live consumption occur after platform preflight."
 - Create: `scripts/check-docs.mjs`
 - Create: `test/docs.test.mjs`
 
-- [ ] **Step 1: Write failing documentation contract tests**
+- [x] **Step 1: Write failing documentation contract tests**
 
 Tests assert that all three public documents:
 
@@ -953,10 +1018,14 @@ reference the official registry address
 use the same demo command and result filenames
 ```
 
-- [ ] **Step 2: Write the exact coding-agent prompt**
+- [x] **Step 2: Write the exact coding-agent prompt**
 
-The prompt begins. `HANDSHAKE_REPO_URL` and `HANDSHAKE_REPO_REF` are optional
-acceptance-only overrides; stakeholders use the public defaults:
+The canonical prompt is stored in `prompts/run-turnkey-demo.md` and embedded
+byte-for-byte in `README.md`. It fixes the repository URL rather than accepting
+one from the environment. A public stakeholder clones `main`; the pre-merge
+acceptance harness supplies `HANDSHAKE_REPO_REF` only as an exact 40-hex commit
+SHA and requires the detached checkout to match. The invitation is opaque to
+the coding agent: only `npm run demo` may open it.
 
 ```md
 Run the Clockchain Agent Trust Handshake demo exactly as documented.
@@ -964,19 +1033,17 @@ Run the Clockchain Agent Trust Handshake demo exactly as documented.
 Work in a new temporary directory. Do not inspect or modify my current project.
 Do not install or use AgentDash. Do not invent success states.
 
-1. Clone `${HANDSHAKE_REPO_URL:-https://github.com/thetangstr/clockchain-handshake.git}`
-   at `${HANDSHAKE_REPO_REF:-main}` with depth 1.
-2. Read DEMO.md and follow its safety boundary.
-3. Confirm HANDSHAKE_INVITE_FILE points to my separately delivered invitation file.
-   Never print or open that file in chat; pass its path to the runner.
-4. Run npm ci --ignore-scripts.
-5. Run npm run demo.
-6. Return only the sanitized RESULT.md summary and the paths to RESULT.md/result.json.
-7. If any identity, anchor, or verification check fails, report the failed stage and
-   do not call the demo successful.
+1. Clone only https://github.com/thetangstr/clockchain-handshake.git.
+2. Use main when HANDSHAKE_REPO_REF is absent; otherwise accept only an exact
+   40-hex commit, check it out detached, and verify git rev-parse HEAD matches.
+3. Read DEMO.md and follow its safety boundary.
+4. Check only that HANDSHAKE_INVITE_FILE exists and is readable; do not open it.
+5. Run npm ci --ignore-scripts, then npm run demo.
+6. Return only the sanitized RESULT.md summary and both evidence paths.
+7. Stop without a success claim if any identity, anchor, or verification fails.
 ```
 
-- [ ] **Step 3: Write README and DEMO runbook**
+- [x] **Step 3: Write README and DEMO runbook**
 
 `README.md` puts the prompt in one copyable fenced block. `DEMO.md` documents:
 
@@ -992,13 +1059,13 @@ identity registration is not capability validation
 no AgentDash/payment/ZK/Validation Registry writeback
 ```
 
-- [ ] **Step 4: Implement doc checks**
+- [x] **Step 4: Implement doc checks**
 
 `scripts/check-docs.mjs` loads the public documents, enforces required and
 forbidden phrases, verifies relative links and referenced files, and exits
 non-zero with exact failures.
 
-- [ ] **Step 5: Run documentation verification**
+- [x] **Step 5: Run documentation verification**
 
 Run:
 
@@ -1009,7 +1076,7 @@ npm run docs:check
 
 Expected: all documentation checks pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add README.md DEMO.md prompts scripts/check-docs.mjs test/docs.test.mjs
@@ -1028,7 +1095,7 @@ Tested: Required/forbidden claims, command parity, link integrity, and file refe
 - Create: `scripts/verify-live-results.mjs`
 - Create: `test/acceptance-harness.test.mjs`
 
-- [ ] **Step 1: Write failing harness command tests**
+- [x] **Step 1: Write failing harness command tests**
 
 Given temporary directories and fake executables, assert:
 
@@ -1041,51 +1108,64 @@ stdout/stderr are saved after redaction
 one failed client makes the aggregate verdict fail
 ```
 
-- [ ] **Step 2: Implement the client harness**
+- [x] **Step 2: Implement the client harness**
 
 The harness runs sequentially to avoid shared-IP token bursts:
 
 ```text
-codex exec --ephemeral --skip-git-repo-check - < prompts/run-turnkey-demo.md
-claude -p --no-session-persistence < prompts/run-turnkey-demo.md
+codex exec --ephemeral --skip-git-repo-check --ignore-user-config \
+  --ignore-rules --dangerously-bypass-approvals-and-sandbox -
+claude -p --no-session-persistence --permission-mode bypassPermissions \
+  --dangerously-skip-permissions --safe-mode
 ```
 
-It uses a minimal inherited environment allowlist plus:
+Production acceptance pins those executable names and arguments; command
+injection remains available only through the direct test seam. It uses a
+minimal inherited environment allowlist plus:
 
 ```text
 PATH
 HOME
 TMPDIR
 HANDSHAKE_INVITE_FILE
-HANDSHAKE_REPO_URL
 HANDSHAKE_REPO_REF
 ```
 
-Before the Handshake PR merges, the acceptance harness sets
-`HANDSHAKE_REPO_REF` to the pushed feature branch. The published stakeholder
-path omits both repository overrides and therefore consumes `main`.
+The acceptance CLI requires `HANDSHAKE_REPO_REF` to be the exact lowercase
+40-hex SHA of a pushed commit. It never accepts a repository URL or mutable
+branch. The published stakeholder path omits the ref and consumes public
+`main`.
 
-It records prompt SHA-256, CLI version, start/end time, exit code, and result
-paths. It never records the invite file content.
+Its canonical manifest records repository and prompt SHA-256 values; exact
+client command identities; CLI versions; sequential start/end times; exit
+semantics; and canonical result paths plus artifact SHA-256 values. It never
+records invitation content.
 
-- [ ] **Step 3: Implement independent result verification**
+- [x] **Step 3: Implement independent result verification**
 
-For each `result.json`, `verify-live-results.mjs`:
+`verify-live-results.mjs` first binds the trusted local manifest to the exact
+expected repository SHA, canonical prompt bytes, fixed client commands and
+version forms, sequential timestamps, result paths, and artifact hashes. For
+each ordered `result.json` and operator invitation, it then:
 
 1. Validates the local result schema and disclaimer.
-2. Reads `ownerOf`, `getAgentWallet`, and `tokenURI` from Ethereum Sepolia.
-3. Calls Clockchain `verify_cross_party` using a new demo token.
-4. Compares every public identity/receipt field.
-5. Scans the result directory for secret canaries.
-6. Produces an aggregate `artifacts/acceptance-verdict.json`.
+2. Requires the owner and display name to match the corresponding invitation.
+3. Verifies the registration and metadata transaction envelopes, calldata,
+   receipts, event, ordering, `ownerOf`, `getAgentWallet`, and `tokenURI`.
+4. Recomputes the receipt hash and calls Clockchain `verify_cross_party` plus
+   read-only `complete_attestation` using a new demo token.
+5. Compares every public identity/receipt field and current pool-health readback.
+6. Scans the complete artifact directories using canaries derived from both
+   operator invitation files.
+7. Produces an aggregate `artifacts/acceptance-verdict.json`.
 
-- [ ] **Step 4: Run deterministic harness tests**
+- [x] **Step 4: Run deterministic harness tests**
 
 Run: `node --test test/acceptance-harness.test.mjs`
 
 Expected: all tests pass without launching real agents.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/run-clean-clients.mjs scripts/verify-live-results.mjs test/acceptance-harness.test.mjs
@@ -1102,13 +1182,13 @@ Not-tested: Live client runs require funded invitations."
 **Files:**
 - Modify only if verification exposes a defect
 
-- [ ] **Step 1: Install from the lockfile**
+- [x] **Step 1: Install from the lockfile**
 
 Run: `rm -rf node_modules && npm ci --ignore-scripts`
 
 Expected: clean install exits 0.
 
-- [ ] **Step 2: Run all verification**
+- [x] **Step 2: Run all verification**
 
 Run:
 
@@ -1121,7 +1201,7 @@ git status --short
 Expected: all tests and docs checks pass; only intentional invitation bundles
 or plan tracking changes remain.
 
-- [ ] **Step 3: Run a security scan for forbidden material**
+- [x] **Step 3: Run a security scan for forbidden material**
 
 Run:
 
@@ -1132,10 +1212,19 @@ git grep -n -i -E 'BEGIN (RSA|EC|OPENSSH) PRIVATE KEY|0x[0-9a-fA-F]{64}|cc_[A-Za
 Expected: no real private key or Clockchain token appears. Test fixtures may use
 explicit repeated-byte dummy values only inside test files.
 
-- [ ] **Step 4: Commit any verification-only fixes**
+- [x] **Step 4: Commit any verification-only fixes**
 
 Use a Lore commit that states the exact failed invariant and fresh command
 evidence.
+
+- [ ] **Step 5: Audit the complete publishable Git history**
+
+Enumerate every blob reachable from all local and remote refs. Scan for common
+credential formats, secret-like filenames, labeled sensitive assignments, and
+exact values derived from the local operator invitation files without printing
+those values. Classify deliberate test canaries separately. Repeat the audit
+after the final evidence and handoff commits and immediately before changing
+repository visibility.
 
 ### Task 10: Execute the live stakeholder acceptance
 
@@ -1147,20 +1236,20 @@ evidence.
 Prerequisite: complete
 `docs/superpowers/plans/2026-07-22-official-erc8004-resolver.md`.
 
-- [ ] **Step 1: Fund invitation wallets**
+- [x] **Step 1: Fund invitation wallets**
 
 Use an official Ethereum Sepolia faucet or a testnet-only operator wallet.
 Record funding transaction hashes under `.context/invitations/funding.json`.
 Transfer only enough for `register` and `setAgentURI` plus bounded gas margin.
 
-- [ ] **Step 2: Verify invitations are unused and ready**
+- [x] **Step 2: Verify invitations are unused and ready**
 
 Run: `npm run invitations:check`
 
 Expected: both invitations report official chain/registry, nonce 0, and
 `ready: true`.
 
-- [ ] **Step 3: Run an operator live smoke test**
+- [x] **Step 3: Run an operator live smoke test**
 
 Use a third non-stakeholder invitation or a disposable operator wallet. Confirm
 official registration, MCP resolution, anchored receipt, and both verification
@@ -1173,14 +1262,25 @@ Run:
 ```bash
 npm run acceptance:clients -- \
   --codex-invite .context/invitations/codex.secret.json \
-  --claude-invite .context/invitations/claude.secret.json
+  --claude-invite .context/invitations/claude.secret.json \
+  --repo-ref <EXACT_PUSHED_40_HEX_SHA>
 ```
 
 Expected: both clients exit 0 and create separate PASS artifacts.
 
 - [ ] **Step 5: Independently re-verify both outputs**
 
-Run: `npm run results:verify -- artifacts/codex/result.json artifacts/claude/result.json`
+Run:
+
+```bash
+npm run results:verify -- \
+  artifacts/codex/result.json \
+  artifacts/claude/result.json \
+  --manifest artifacts/client-acceptance.json \
+  --repo-sha <EXACT_PUSHED_40_HEX_SHA> \
+  --canary-file .context/invitations/codex.secret.json \
+  --canary-file .context/invitations/claude.secret.json
+```
 
 Expected: aggregate verdict `PASS`, distinct identity references, distinct
 Clockchain ledger IDs and block heights, and no secret findings.
@@ -1229,16 +1329,20 @@ gh pr create --repo thetangstr/clockchain-handshake --base main \
   --body-file .context/handshake-pr.md
 ```
 
-- [ ] **Step 3: Require green checks and review the GitHub rendering**
+- [ ] **Step 3: Review checks and the GitHub rendering**
 
-Verify the README copy block, relative links, invitation downloads, and raw
-prompt URL directly on the PR.
+The repository currently has no GitHub Actions workflow or private-repository
+branch protection. Attach the clean-clone verification evidence to the PR,
+confirm any configured GitHub checks are green, and verify the README copy
+block, relative links, invitation downloads, and raw prompt URL directly on the
+PR.
 
-- [ ] **Step 4: Merge and re-run from `origin/main`**
+- [ ] **Step 4: Merge, publish, and re-run from public `origin/main`**
 
-After checks pass, squash-merge the PR. Create two new empty directories,
-fetch the raw prompt from `main`, and run a non-writing preflight to prove the
-published paths resolve.
+After checks pass, squash-merge the PR, audit every reachable Git blob again,
+and change the repository visibility to public. From an unauthenticated fresh
+clone of `main`, run the deterministic verification and a non-writing prompt
+preflight to prove the public copy-paste paths resolve.
 
 - [ ] **Step 5: Record the stable stakeholder handoff**
 
