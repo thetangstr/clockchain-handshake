@@ -58,6 +58,10 @@ const ATTESTATION_MARKER_FILE_NAME =
   ".handshake-attestation-started.json";
 const ATTESTATION_MARKER_SCHEMA =
   "clockchain.handshake-attestation-started/v1";
+const FINAL_EVIDENCE_FILE_NAMES = Object.freeze([
+  "result.json",
+  "RESULT.md",
+]);
 const MAX_ATTESTATION_MARKER_BYTES = 1_024;
 const RECOVERY_FILE_OPEN_FLAGS =
   fsConstants.O_RDONLY |
@@ -623,6 +627,22 @@ async function assertAttestationNotStarted(outputDirectory) {
   throw new Error("Handshake attestation has already started.");
 }
 
+async function assertFinalEvidenceAbsent(outputDirectory) {
+  for (const fileName of FINAL_EVIDENCE_FILE_NAMES) {
+    try {
+      await lstat(join(outputDirectory, fileName));
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        continue;
+      }
+      throw error;
+    }
+    throw new Error(
+      `Handshake final evidence already exists: ${fileName}.`,
+    );
+  }
+}
+
 async function createAttestationMarker({
   outputDirectory,
   runId,
@@ -943,6 +963,9 @@ export async function runHandshake({
   });
   await invokeStage("attestation", () =>
     assertAttestationNotStarted(outputDirectory),
+  );
+  await invokeStage("evidence", () =>
+    assertFinalEvidenceAbsent(outputDirectory),
   );
   const started = readClock(now);
   const runId = createRunId(randomUUID);

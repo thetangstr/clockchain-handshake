@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   open,
@@ -69,8 +70,6 @@ const ATTESTATION_MARKER_FILE =
   ".handshake-attestation-started.json";
 const ATTESTATION_MARKER_SCHEMA =
   "clockchain.handshake-attestation-started/v1";
-const EVIDENCE_HISTORY_DIRECTORY =
-  ".handshake-evidence-history";
 const REPOSITORY_ROOT = fileURLToPath(
   new URL("../", import.meta.url),
 );
@@ -981,7 +980,7 @@ test("persists PartialRegistrationError recovery again and returns only a typed 
   );
 });
 
-test("archives a seeded PASS pair before an early failed rerun", async (t) => {
+test("refuses a legacy PASS rerun before archiving evidence or touching adapters", async (t) => {
   const outputDirectory = await temporaryDirectory(t);
   const priorResult = {
     ...expectedPassResult(),
@@ -1010,9 +1009,13 @@ test("archives a seeded PASS pair before an early failed rerun", async (t) => {
   const adapters = createAdapters({
     calls,
     captured: {},
-    failAt: "read invitation",
     resumed: false,
   });
+  let evidenceAttempts = 0;
+  adapters.beginEvidenceAttempt = async (options) => {
+    evidenceAttempts += 1;
+    return beginEvidenceAttempt(options);
+  };
 
   await assert.rejects(
     () =>
@@ -1025,30 +1028,17 @@ test("archives a seeded PASS pair before an early failed rerun", async (t) => {
       }),
     (error) => {
       assert.ok(error instanceof HandshakeStageError);
-      assert.equal(error.stage, "invitation-read");
+      assert.equal(error.stage, "evidence");
       return true;
     },
   );
 
-  await assert.rejects(
-    () => stat(join(outputDirectory, "result.json")),
-    { code: "ENOENT" },
-  );
-  await assert.rejects(
-    () => stat(join(outputDirectory, "RESULT.md")),
-    { code: "ENOENT" },
-  );
-  const archive = join(
-    outputDirectory,
-    EVIDENCE_HISTORY_DIRECTORY,
-    RUN_ID,
-  );
   assert.equal(
-    await readFile(join(archive, "result.json"), "utf8"),
+    await readFile(join(outputDirectory, "result.json"), "utf8"),
     priorJson,
   );
   assert.equal(
-    await readFile(join(archive, "RESULT.md"), "utf8"),
+    await readFile(join(outputDirectory, "RESULT.md"), "utf8"),
     priorMarkdown,
   );
   assert.deepEqual(
@@ -1060,7 +1050,61 @@ test("archives a seeded PASS pair before an early failed rerun", async (t) => {
     ),
     recovery,
   );
-  assert.deepEqual(calls, ["read invitation"]);
+  assert.equal(evidenceAttempts, 0);
+  assert.deepEqual(calls, []);
+  assert.equal(
+    calls.filter((call) => call === "attest").length,
+    0,
+  );
+});
+
+test("refuses non-regular canonical evidence entries before touching adapters", async (t) => {
+  for (const entry of [
+    {
+      name: "result.json",
+      create: (path) => symlink("missing-result-target", path),
+    },
+    {
+      name: "RESULT.md",
+      create: (path) => mkdir(path),
+    },
+  ]) {
+    await t.test(entry.name, async () => {
+      const outputDirectory = await temporaryDirectory(t);
+      const entryPath = join(outputDirectory, entry.name);
+      await entry.create(entryPath);
+      const calls = [];
+      let evidenceAttempts = 0;
+      const adapters = createAdapters({
+        calls,
+        captured: {},
+        resumed: false,
+      });
+      adapters.beginEvidenceAttempt = async (options) => {
+        evidenceAttempts += 1;
+        return beginEvidenceAttempt(options);
+      };
+
+      await assert.rejects(
+        () =>
+          runHandshake({
+            invitationFile: "/operator/invite.secret.json",
+            outputDirectory,
+            adapters,
+            now: clock(),
+            randomUUID: () => RUN_ID,
+          }),
+        (error) => {
+          assert.ok(error instanceof HandshakeStageError);
+          assert.equal(error.stage, "evidence");
+          return true;
+        },
+      );
+      assert.equal(evidenceAttempts, 0);
+      assert.deepEqual(calls, []);
+      await lstat(entryPath);
+    });
+  }
 });
 
 test("withholds PASS artifacts after a typed MCP verification failure", async (t) => {
