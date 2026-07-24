@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import {
+  link,
+  lstat,
+  mkdir,
   mkdtemp,
   readFile,
+  readlink,
   readdir,
-  rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,6 +16,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  beginEvidenceAttempt,
   computeReceiptEventHash,
   EvidenceRedactionError,
   EvidenceValidationError,
@@ -352,7 +357,53 @@ test("fails closed when redaction changes a canary and leaves no artifact", asyn
   assert.deepEqual(await readdir(directory), []);
 });
 
-test("restores the exact prior pair when the second publication rename fails", async (t) => {
+test("evidence initialization refuses every canonical final entry type without moving it", async (t) => {
+  for (const name of ["result.json", "RESULT.md"]) {
+    for (const fixture of [
+      {
+        type: "regular",
+        create: (path) => writeFile(path, "prior-bytes\n", "utf8"),
+        verify: async (path) => {
+          assert.equal(await readFile(path, "utf8"), "prior-bytes\n");
+        },
+      },
+      {
+        type: "symlink",
+        create: (path) => symlink("missing-final-target", path),
+        verify: async (path) => {
+          assert.equal(await readlink(path), "missing-final-target");
+        },
+      },
+      {
+        type: "directory",
+        create: (path) => mkdir(path),
+        verify: async (path) => {
+          assert.equal((await lstat(path)).isDirectory(), true);
+        },
+      },
+    ]) {
+      await t.test(`${name} ${fixture.type}`, async () => {
+        const directory = await temporaryDirectory(t);
+        const path = join(directory, name);
+        await fixture.create(path);
+
+        await assert.rejects(
+          () =>
+            beginEvidenceAttempt({
+              directory,
+              runId: RUN_ID,
+            }),
+          /configuration/i,
+        );
+
+        await fixture.verify(path);
+        assert.deepEqual(await readdir(directory), [name]);
+      });
+    }
+  }
+});
+
+test("refuses an existing canonical pair without replacing or restoring it", async (t) => {
   const directory = await temporaryDirectory(t);
   const jsonPath = join(directory, "result.json");
   const markdownPath = join(directory, "RESULT.md");
@@ -360,7 +411,7 @@ test("restores the exact prior pair when the second publication rename fails", a
   const priorMarkdown = "# Prior PASS\n";
   await writeFile(jsonPath, priorJson, "utf8");
   await writeFile(markdownPath, priorMarkdown, "utf8");
-  let rejectedSecondRename = false;
+  let linkCalls = 0;
 
   await assert.rejects(
     () =>
@@ -369,23 +420,16 @@ test("restores the exact prior pair when the second publication rename fails", a
         result: validResult(),
         canaries: [],
         fileSystem: {
-          async rename(source, destination) {
-            if (
-              !rejectedSecondRename &&
-              destination === markdownPath &&
-              source.includes(".result.")
-            ) {
-              rejectedSecondRename = true;
-              throw new Error("injected second rename failure");
-            }
-            return rename(source, destination);
+          async link(source, destination) {
+            linkCalls += 1;
+            return link(source, destination);
           },
         },
       }),
     /evidence/i,
   );
 
-  assert.equal(rejectedSecondRename, true);
+  assert.equal(linkCalls, 0);
   assert.equal(await readFile(jsonPath, "utf8"), priorJson);
   assert.equal(
     await readFile(markdownPath, "utf8"),
@@ -397,10 +441,37 @@ test("restores the exact prior pair when the second publication rename fails", a
   );
 });
 
+test("removes the first new final when the second exclusive publication fails", async (t) => {
+  const directory = await temporaryDirectory(t);
+  let publicationLinks = 0;
+
+  await assert.rejects(
+    () =>
+      writeEvidence({
+        directory,
+        result: validResult(),
+        canaries: [],
+        fileSystem: {
+          async link(source, destination) {
+            publicationLinks += 1;
+            if (publicationLinks === 2) {
+              throw new Error("injected publication failure");
+            }
+            return link(source, destination);
+          },
+        },
+      }),
+    /evidence/i,
+  );
+
+  assert.equal(publicationLinks, 2);
+  assert.deepEqual(await readdir(directory), []);
+});
+
 test("removes newly published finals when final read-back fails without a prior pair", async (t) => {
   const directory = await temporaryDirectory(t);
   const jsonPath = join(directory, "result.json");
-  let publicationRenames = 0;
+  let publicationLinks = 0;
   let rejectedFinalRead = false;
 
   await assert.rejects(
@@ -412,7 +483,7 @@ test("removes newly published finals when final read-back fails without a prior 
         fileSystem: {
           async readFile(path, options) {
             if (
-              publicationRenames === 2 &&
+              publicationLinks === 2 &&
               path === jsonPath &&
               !rejectedFinalRead
             ) {
@@ -421,13 +492,13 @@ test("removes newly published finals when final read-back fails without a prior 
             }
             return readFile(path, options);
           },
-          async rename(source, destination) {
-            const value = await rename(source, destination);
+          async link(source, destination) {
+            const value = await link(source, destination);
             if (
               destination === jsonPath ||
               destination === join(directory, "RESULT.md")
             ) {
-              publicationRenames += 1;
+              publicationLinks += 1;
             }
             return value;
           },

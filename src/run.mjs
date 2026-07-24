@@ -974,6 +974,9 @@ export async function runHandshake({
     prepareOutputDirectory(outputDirectory),
   );
   await invokeStage("evidence", () =>
+    assertFinalEvidenceAbsent(outputDirectory),
+  );
+  await invokeStage("evidence", () =>
     activeAdapters.beginEvidenceAttempt({
       directory: outputDirectory,
       runId,

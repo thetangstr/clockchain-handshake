@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import {
   chmod,
   lstat,
@@ -1058,6 +1059,51 @@ test("refuses a legacy PASS rerun before archiving evidence or touching adapters
   );
 });
 
+test("refuses canonical evidence created by a setup callback before evidence initialization", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const jsonPath = join(outputDirectory, "result.json");
+  const priorJson = Buffer.from("legacy-final-bytes\n");
+  const calls = [];
+  const adapters = createAdapters({
+    calls,
+    captured: {},
+    failAt: "read invitation",
+    resumed: false,
+  });
+  let evidenceAttempts = 0;
+  adapters.beginEvidenceAttempt = async (options) => {
+    evidenceAttempts += 1;
+    return beginEvidenceAttempt(options);
+  };
+  let injected = false;
+
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters,
+        now: () => {
+          if (!injected) {
+            writeFileSync(jsonPath, priorJson);
+            injected = true;
+          }
+          return new Date("2026-07-23T07:00:00.000Z");
+        },
+        randomUUID: () => RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "evidence");
+      return true;
+    },
+  );
+
+  assert.equal(evidenceAttempts, 0);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(await readFile(jsonPath), priorJson);
+});
+
 test("refuses non-regular canonical evidence entries before touching adapters", async (t) => {
   for (const entry of [
     {
@@ -1105,6 +1151,49 @@ test("refuses non-regular canonical evidence entries before touching adapters", 
       await lstat(entryPath);
     });
   }
+});
+
+test("refuses canonical evidence injected after initialization without publishing PASS", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const jsonPath = join(outputDirectory, "result.json");
+  const markdownPath = join(outputDirectory, "RESULT.md");
+  const priorJson = Buffer.from("late-final-bytes\n");
+  const calls = [];
+  const adapters = createAdapters({
+    calls,
+    captured: {},
+    resumed: false,
+  });
+  const reportProgress = adapters.reportProgress;
+  adapters.reportProgress = async (event) => {
+    await reportProgress(event);
+    if (event.stage === "evidence-writing") {
+      writeFileSync(jsonPath, priorJson);
+    }
+  };
+
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters,
+        now: clock(),
+        randomUUID: () => RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "evidence");
+      return true;
+    },
+  );
+
+  assert.deepEqual(await readFile(jsonPath), priorJson);
+  await assert.rejects(readFile(markdownPath), { code: "ENOENT" });
+  assert.equal(
+    calls.filter((call) => call === "write evidence").length,
+    1,
+  );
 });
 
 test("withholds PASS artifacts after a typed MCP verification failure", async (t) => {
