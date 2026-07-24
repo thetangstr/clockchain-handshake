@@ -1,0 +1,1358 @@
+# Turnkey Handshake Demo Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Publish and prove a one-prompt stakeholder exercise that creates a fresh official ERC-8004 identity and a fresh independently verified Clockchain receipt without AgentDash.
+
+**Architecture:** A small Node.js 22 ESM application decrypts a pre-funded testnet invitation in memory, registers and verifies an ERC-8004 identity on Ethereum Sepolia, calls the hosted Clockchain MCP over SSE JSON-RPC, and emits redacted evidence. The repository also carries the universal GitHub prompt, Codex/Claude role routing, operator-only invitation tooling, deterministic tests, and an acceptance harness that runs the unchanged prompt through real Codex and Claude Code CLIs.
+
+**Tech Stack:** Node.js 22, npm, ESM JavaScript, `viem` 2.55.8, Node `crypto`, Node `test`, Ethereum Sepolia, ERC-8004 v2, Clockchain hosted MCP, Codex CLI, Claude Code CLI.
+
+---
+
+## File map
+
+| Path | Responsibility |
+|---|---|
+| `package.json` | Scripts, Node version, and the single runtime dependency |
+| `package-lock.json` | Reproducible dependency graph |
+| `.gitignore` | Secret, state, dependency, and generated-artifact exclusions |
+| `.conductor/settings.toml` | Shared setup and verification commands |
+| `AGENTS.md` | Sol/Terra/Luna ownership and verification contract |
+| `.codex/config.toml` | Project Codex leader and default subagent settings |
+| `.codex/agents/*.toml` | Planner, verifier, Terra executor, Luna explorer/light executor |
+| `CLAUDE.md` | Claude Code routing contract importing project guidance |
+| `.claude/agents/*.md` | Native Claude role mirrors |
+| `src/constants.mjs` | Fixed testnet, registry, endpoint, schema, and limit constants |
+| `src/redact.mjs` | Recursive secret detection and artifact redaction |
+| `src/invitation.mjs` | Invitation parsing, `scrypt`, AES-GCM decryption, and validation |
+| `src/registration.mjs` | ERC-8004 ABI, metadata, register/finalize/read-back flow |
+| `src/mcp.mjs` | Demo-token acquisition, SSE parsing, JSON-RPC tool calls |
+| `src/evidence.mjs` | Result schema validation and Markdown rendering |
+| `src/run.mjs` | Ordered fail-closed orchestration |
+| `bin/handshake-demo.mjs` | CLI entry point and deterministic exit codes |
+| `scripts/create-invitations.mjs` | Operator-only wallet/bundle/secret generation |
+| `scripts/check-invitations.mjs` | Read-only balance, nonce, and bundle readiness check |
+| `scripts/verify-live-results.mjs` | Independent live re-verification of sanitized results |
+| `scripts/run-clean-clients.mjs` | Empty-directory Codex/Claude acceptance harness |
+| `test/*.test.mjs` | Unit and mock integration tests |
+| `test/fixtures/*.json` | Sanitized deterministic protocol fixtures |
+| `invites/*.enc.json` | Publishable encrypted testnet invitation bundles |
+| `prompts/run-turnkey-demo.md` | Exact prompt consumed by both coding agents |
+| `README.md` | GitHub landing page and copy/paste prompt |
+| `DEMO.md` | Operator/stakeholder runbook and honesty constraints |
+
+### Task 1: Establish the repository and agent contracts
+
+**Files:**
+- Create: `.gitignore`
+- Create: `package.json`
+- Create: `.conductor/settings.toml`
+- Create: `AGENTS.md`
+- Create: `.codex/config.toml`
+- Create: `.codex/agents/planner.toml`
+- Create: `.codex/agents/verifier.toml`
+- Create: `.codex/agents/executor.toml`
+- Create: `.codex/agents/explore.toml`
+- Create: `.codex/agents/lightweight-executor.toml`
+- Create: `CLAUDE.md`
+- Create: `.claude/agents/planner.md`
+- Create: `.claude/agents/verifier.md`
+- Create: `.claude/agents/executor.md`
+- Create: `.claude/agents/explore.md`
+- Create: `.claude/agents/lightweight-executor.md`
+
+- [x] **Step 1: Add exclusions before generating local state**
+
+```gitignore
+node_modules/
+.context/
+.omx/
+.env
+.env.*
+!.env.example
+result.json
+RESULT.md
+artifacts/
+coverage/
+*.secret.json
+*.key
+*.token
+```
+
+- [x] **Step 2: Add the minimal package contract**
+
+```json
+{
+  "name": "@clockchain/handshake-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "demo": "node bin/handshake-demo.mjs",
+    "invitations:create": "node scripts/create-invitations.mjs",
+    "invitations:check": "node scripts/check-invitations.mjs",
+    "results:verify": "node scripts/verify-live-results.mjs",
+    "acceptance:clients": "node scripts/run-clean-clients.mjs",
+    "test": "node --test",
+    "test:unit": "node --test test/*.test.mjs",
+    "verify": "npm test && npm run docs:check",
+    "docs:check": "node scripts/check-docs.mjs"
+  },
+  "dependencies": {
+    "viem": "2.55.8"
+  }
+}
+```
+
+- [x] **Step 3: Install dependencies and verify the lockfile is reproducible**
+
+Run: `npm install --ignore-scripts`
+
+Expected: `package-lock.json` is created and `npm ci --ignore-scripts` exits 0.
+
+- [x] **Step 4: Add shared Conductor commands**
+
+```toml
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+[scripts]
+setup = "npm ci --ignore-scripts"
+run_mode = "concurrent"
+
+[scripts.run.verify]
+command = "npm run verify"
+default = true
+icon = "test-tube"
+
+[scripts.run.demo]
+command = "npm run demo"
+icon = "terminal"
+```
+
+- [x] **Step 5: Add the Codex leader contract**
+
+```toml
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+
+[agents.executor]
+description = "Terra executor for substantive, scoped implementation and tests"
+config_file = "agents/executor.toml"
+```
+
+Conductor's bundled Codex 0.144.1 predates the global `[agents]` scalar
+settings supported by current Codex. Use the documented explicit
+`[agents.<role>]` registration form so both installed CLIs accept the project.
+Register the five roles below plus `worker` as an alias for `executor` and
+`explorer` as an alias for `explore`.
+
+Create the five custom agent configuration layers with these model assignments:
+
+```text
+planner              gpt-5.6-sol    high
+verifier             gpt-5.6-sol    high
+executor              gpt-5.6-terra  medium
+explore               gpt-5.6-luna   low, read-only
+lightweight-executor  gpt-5.6-luna   low
+```
+
+The root registration defines each role's name and description. Each referenced
+file defines `model`, `model_reasoning_effort`, and scoped
+`developer_instructions`; the Luna explorer also sets
+`sandbox_mode = "read-only"`. `AGENTS.md` must state that Sol alone owns
+orchestration, synthesis, shared-file coordination, and the final completion
+verdict.
+
+- [x] **Step 6: Add Claude Code role mirrors**
+
+`CLAUDE.md` begins with:
+
+```md
+@AGENTS.md
+
+# Claude Code model mapping
+
+Claude Code mirrors the repository roles with native model tiers:
+planner/verifier use Opus, substantive executor uses Sonnet, and
+explore/lightweight-executor use Haiku. The canonical GPT-5.6 model contract is
+enforced by Codex project configuration, not by native Claude model names.
+```
+
+Use `model: opus`, `model: sonnet`, and `model: haiku` in the corresponding
+Claude agent frontmatter.
+
+- [x] **Step 7: Validate configuration discovery**
+
+Run:
+
+```bash
+"/Users/Kailor/Library/Application Support/com.conductor.app/bin/codex" mcp list >/dev/null
+/Applications/ChatGPT.app/Contents/Resources/codex mcp list >/dev/null
+test -f .codex/config.toml
+test -f .codex/agents/executor.toml
+test -f .claude/agents/executor.md
+```
+
+Expected: all commands exit 0.
+
+- [x] **Step 8: Commit**
+
+```bash
+git add .gitignore package.json package-lock.json .conductor AGENTS.md .codex CLAUDE.md .claude
+git commit -m "Make execution ownership explicit before building the demo" \
+  -m "Constraint: Sol coordinates and verifies while Terra implements and Luna handles bounded work.
+Confidence: high
+Scope-risk: narrow
+Tested: npm ci and repository configuration presence checks.
+Not-tested: Runtime demo behavior is implemented in later tasks."
+```
+
+### Task 2: Build invitation encryption and redaction with TDD
+
+**Files:**
+- Create: `src/constants.mjs`
+- Create: `src/redact.mjs`
+- Create: `src/invitation.mjs`
+- Create: `test/invitation.test.mjs`
+- Create: `test/redact.test.mjs`
+
+- [x] **Step 1: Write failing invitation tests**
+
+```js
+import test from "node:test";
+import assert from "node:assert/strict";
+import { encryptInvitation, decryptInvitation } from "../src/invitation.mjs";
+
+test("round-trips a testnet invitation without changing its address", async () => {
+  const payload = {
+    privateKey: `0x${"11".repeat(32)}`,
+    address: "0x1111111111111111111111111111111111111111",
+    displayName: "Billy",
+  };
+  const bundle = await encryptInvitation(payload, "correct horse battery staple");
+  assert.equal((await decryptInvitation(bundle, "correct horse battery staple")).address, payload.address);
+});
+
+test("rejects a modified ciphertext", async () => {
+  const bundle = await encryptInvitation({
+    privateKey: `0x${"22".repeat(32)}`,
+    address: "0x2222222222222222222222222222222222222222",
+    displayName: "Iris",
+  }, "secret");
+  bundle.crypto.ciphertext = `${bundle.crypto.ciphertext.slice(0, -2)}00`;
+  await assert.rejects(() => decryptInvitation(bundle, "secret"), /authentication/i);
+});
+```
+
+- [x] **Step 2: Run the test to verify it fails**
+
+Run: `node --test test/invitation.test.mjs`
+
+Expected: FAIL with `ERR_MODULE_NOT_FOUND`.
+
+- [x] **Step 3: Implement constants and invitation crypto**
+
+`src/constants.mjs` exports exact immutable values:
+
+```js
+export const CHAIN_ID = 11155111;
+export const CHAIN_NAME = "ethereum-sepolia";
+export const REGISTRY_ADDRESS = "0x8004A818BFB912233c491871b3d84c89A494BD9e";
+export const RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com";
+export const MCP_BASE_URL = "https://mcp.clockchain.network";
+export const MCP_URL = `${MCP_BASE_URL}/mcp`;
+export const RESULT_SCHEMA = "clockchain.handshake-result/v1";
+export const INVITATION_SCHEMA = "clockchain.handshake-invitation/v1";
+export const SINGLE_VALIDATOR_DISCLAIMER =
+  "Single-validator testnet: anchored and independently re-verifiable; not mainnet, court-grade, consensus-secure, or trustless.";
+```
+
+`src/invitation.mjs` uses:
+
+```js
+import { randomBytes, scrypt as scryptCallback, createCipheriv, createDecipheriv } from "node:crypto";
+import { promisify } from "node:util";
+
+const scrypt = promisify(scryptCallback);
+const KDF = { N: 16384, r: 8, p: 1, keyLength: 32 };
+```
+
+The public API is:
+
+```js
+export async function encryptInvitation(payload, secret) {}
+export async function decryptInvitation(bundle, secret) {}
+export async function readSecretInvitation(path) {}
+```
+
+`readSecretInvitation` accepts JSON containing only `bundle` and `code`, rejects
+group/world-readable files on POSIX, and never includes `code` in thrown errors.
+The verified implementation additionally bounds invitation codes to 1,024
+UTF-8 bytes, ciphertext to 4,096 decoded bytes, and secret files to 16,384
+bytes. It opens one `O_NONBLOCK | O_NOFOLLOW | O_RDONLY` descriptor and performs
+both metadata checks plus the read through that handle, so symlinks, path swaps,
+and blocking FIFOs fail before secret processing.
+
+- [x] **Step 4: Write failing redaction tests**
+
+```js
+import test from "node:test";
+import assert from "node:assert/strict";
+import { assertSecretFree, redact } from "../src/redact.mjs";
+
+test("redacts nested keys and exact secret canaries", () => {
+  const value = { nested: { privateKey: "CANARY", token: "cc_secret" }, safe: "ok" };
+  const clean = redact(value, ["CANARY", "cc_secret"]);
+  assert.deepEqual(clean, { nested: { privateKey: "[REDACTED]", token: "[REDACTED]" }, safe: "ok" });
+  assert.doesNotThrow(() => assertSecretFree(clean, ["CANARY", "cc_secret"]));
+});
+
+test("rejects a secret embedded inside a longer string", () => {
+  assert.throws(() => assertSecretFree({ message: "prefix-CANARY-suffix" }, ["CANARY"]), /secret/i);
+});
+```
+
+- [x] **Step 5: Implement recursive redaction**
+
+`src/redact.mjs` exports:
+
+```js
+export const SENSITIVE_KEY = /private.?key|secret|token|authorization|invite.?code|ciphertext/i;
+export function redact(value, canaries = []) {}
+export function assertSecretFree(value, canaries = []) {}
+```
+
+Arrays, plain objects, errors, and strings must be traversed. Sensitive values
+become `[REDACTED]`; keys remain so diagnostics preserve structure. Exact
+canaries, labeled private keys, bearer tokens, and standalone long `cc_` tokens
+are redacted while ordinary 32-byte transaction hashes remain public.
+
+- [x] **Step 6: Run the focused tests**
+
+Run: `node --test test/invitation.test.mjs test/redact.test.mjs`
+
+Expected and verified: 17 tests pass, including real symlink/FIFO and hostile
+input regressions.
+
+- [x] **Step 7: Commit**
+
+```bash
+git add src/constants.mjs src/invitation.mjs src/redact.mjs test/invitation.test.mjs test/redact.test.mjs
+git commit -m "Keep stakeholder invitations local and non-exportable" \
+  -m "Constraint: Testnet wallet material must never enter Git, logs, prompts, or result artifacts.
+Rejected: Plaintext private keys in environment variables | They are too easy for coding-agent tooling to echo.
+Confidence: high
+Scope-risk: narrow
+Tested: Invitation round-trip, tamper rejection, nested redaction, and secret-canary rejection."
+```
+
+### Task 3: Implement and verify official ERC-8004 registration
+
+**Files:**
+- Create: `src/registration.mjs`
+- Create: `src/registration-internal.mjs`
+- Create: `test/registration.test.mjs`
+- Create: `test/fixtures/registered-receipt.json`
+
+The ABI and invariants below were verified read-only against official
+`erc-8004-contracts` commit
+`68fc6765761a10fb26f0692df21c8a6f9d12b1be` and the live Ethereum Sepolia
+deployment reporting version `2.0.0`.
+
+- [x] **Step 1: Write failing metadata and event tests**
+
+```js
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  buildRegistrationDocument,
+  identityReference,
+  parseRegisteredAgentId,
+} from "../src/registration.mjs";
+
+test("builds a final registration document bound to the official registry", () => {
+  const ref = identityReference(42n);
+  assert.equal(ref, "eip155:11155111:0x8004A818BFB912233c491871b3d84c89A494BD9e:42");
+  const doc = buildRegistrationDocument({ displayName: "Billy", agentId: 42n });
+  assert.deepEqual(doc.registrations, [{
+    agentRegistry: "eip155:11155111:0x8004A818BFB912233c491871b3d84c89A494BD9e",
+    agentId: 42,
+  }]);
+});
+
+test("extracts agentId only from the official Registered event", () => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/registered-receipt.json", import.meta.url)));
+  assert.equal(parseRegisteredAgentId(fixture, {
+    expectedOwner: "0x1111111111111111111111111111111111111111",
+    expectedAgentURI: "data:application/json;base64,e30=",
+  }), 42n);
+});
+```
+
+- [x] **Step 2: Run the test to verify it fails**
+
+Run: `node --test test/registration.test.mjs`
+
+Expected: FAIL with `ERR_MODULE_NOT_FOUND`.
+
+- [x] **Step 3: Implement pinned ABI and pure helpers**
+
+Use a deliberately minimal ABI even though the official v2 contract has three
+`register` overloads. The demo calls only `register(string)`. The event must
+preserve its real indexed layout:
+
+```text
+string getVersion()
+uint256 register(string agentURI)
+setAgentURI(uint256 agentId,string newURI)
+address ownerOf(uint256 tokenId)
+string tokenURI(uint256 tokenId)
+address getAgentWallet(uint256 agentId)
+Registered(uint256 indexed agentId,string agentURI,address indexed owner)
+```
+
+Export:
+
+```js
+export const ERC8004_ABI = [];
+export function registryNamespace() {}
+export function identityReference(agentId) {}
+export function buildRegistrationDocument({ displayName, agentId = null }) {}
+export function registrationDataUri(document) {}
+export function parseRegisteredAgentId(receipt, { expectedOwner, expectedAgentURI }) {}
+```
+
+The document type is
+`https://eips.ethereum.org/EIPS/eip-8004#registration-v1`, advertises no live
+MCP/A2A endpoint for the ephemeral demo agent, sets `x402Support: false`, and
+sets `active: true`. It has no nonstandard top-level wallet/address property.
+`registrationDataUri` emits
+`data:application/json;base64,<base64 UTF-8 JSON>`. The canonical ERC-8004
+identity remains the pair of `agentRegistry` plus separate numeric `agentId`;
+`identityReference()` is an explicitly project-local display convenience.
+
+The receipt fixture is shaped like a real four-log registration receipt. Event
+tests must filter by the official registry address, decode strict ABI logs,
+require exactly one `Registered` event, and match both indexed `owner` and
+nonindexed `agentURI`. Add negative cases for a foreign registry log and
+duplicate official `Registered` logs.
+
+- [x] **Step 4: Write failing RPC invariant tests with a mock viem client**
+
+Cover:
+
+```text
+wrong chain id -> reject
+empty registry bytecode -> reject
+version other than 2.0.0 -> reject
+nonzero sender nonce before registration -> reject
+derived address mismatch -> reject
+zero balance -> reject
+reverted transaction receipt -> reject
+wrong/multiple/foreign Registered event -> reject
+owner mismatch -> reject
+agentWallet mismatch -> reject
+tokenURI mismatch -> reject
+positive but insufficient two-transaction fee envelope -> reject before write
+mutated or unrelated recovery transactions/receipts/calldata -> reject
+pending, missing, or nonce-gapped recovery evidence -> never resubmit
+```
+
+- [x] **Step 5: Implement the live registration adapter**
+
+Export:
+
+```js
+export async function registerIdentity({
+  privateKey,
+  expectedAddress,
+  displayName,
+  rpcUrl,
+  publicClient,
+  walletClient,
+}) {}
+export async function finalizeIdentityRegistration({
+  privateKey,
+  expectedAddress,
+  displayName,
+  recovery,
+  rpcUrl,
+  publicClient,
+  walletClient,
+  onCheckpoint,
+}) {}
+```
+
+The ordered implementation:
+
+1. Construct the account with `privateKeyToAccount`.
+2. Assert the derived address matches the encrypted bundle.
+3. Assert chain ID, registry bytecode, `getVersion()`, nonce, and balance.
+4. Estimate and send `register(initialDataUri)`.
+5. Wait for a successful receipt; filter logs by the official registry; decode
+   exactly one strict `Registered` event; match its `owner` and initial
+   `agentURI`.
+6. Build final metadata containing the resulting `agentId`.
+7. Estimate and send `setAgentURI(agentId, finalDataUri)`.
+8. Wait for success.
+9. Read `ownerOf`, `getAgentWallet`, and `tokenURI`.
+10. Return only public evidence: address, project-local full identity reference,
+    canonical registry namespace plus separate agentId,
+    transaction hashes, block numbers, and final registration document.
+
+The verified implementation adds a conservative two-transaction fee envelope,
+20% plus 10,000 gas headroom, explicit fee/nonce fields, and two confirmations.
+Immediately after the irreversible registration receipt, it emits a strict
+JSON-safe public recovery checkpoint. `finalizeIdentityRegistration` binds that
+checkpoint back to the exact Ethereum transactions, receipts, blocks, calldata,
+indexed event, owner, URI, agent ID, and metadata nonce before accepting or
+resuming it. It never resubmits on missing, pending, unknown, or nonce-gapped
+evidence; only a confirmed revert at exactly the next nonce is retryable.
+
+At least one deterministic test must use a real viem wallet client with a
+mocked custom transport, capture both raw signed transactions, and decode their
+nonce, fee, gas, registry target, and calldata.
+
+- [x] **Step 6: Run focused tests**
+
+Run: `node --test test/registration.test.mjs`
+
+Expected and verified: 75 registration tests pass with no network calls.
+
+- [x] **Step 7: Commit**
+
+```bash
+git add src/registration.mjs src/registration-internal.mjs test/registration.test.mjs test/fixtures/registered-receipt.json
+git commit -m "Bind demo agents to the official ERC-8004 registry" \
+  -m "Constraint: The stakeholder wallet must remain the on-chain owner and agent wallet.
+Rejected: Clockchain DID minting | The product consumes ERC-8004 identity instead of competing with it.
+Confidence: high
+Scope-risk: moderate
+Tested: Metadata, event decoding, chain/contract checks, and owner-wallet-URI invariants.
+Not-tested: Live registration waits for funded invitations."
+```
+
+### Task 4: Implement the hosted Clockchain MCP client
+
+**Files:**
+- Create: `src/mcp.mjs`
+- Create: `test/mcp.test.mjs`
+- Create: `test/fixtures/mcp-sse.txt`
+
+The transport and tool shapes below were verified live against
+`https://mcp.clockchain.network` and against developer-tools commit
+`901490c7d09c90742bd4723455807fbc25435c61`.
+
+- [x] **Step 1: Write failing SSE parsing tests**
+
+```js
+import test from "node:test";
+import assert from "node:assert/strict";
+import { parseSseJsonRpc, parseToolResult } from "../src/mcp.mjs";
+
+test("selects the matching SSE JSON-RPC id and parses nested tool JSON", () => {
+  const raw = "event: message\\r\\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\\\"status\\\\\":\\\\\"active\\\\\"}\"}]}}\\r\\n\\r\\n";
+  assert.deepEqual(parseToolResult(parseSseJsonRpc(raw, { expectedId: 1 })), { status: "active" });
+});
+
+test("rejects JSON-RPC errors", () => {
+  assert.throws(() => parseSseJsonRpc('data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"message\":\"no\"}}\\n'), /no/);
+});
+```
+
+Add cases for LF and CRLF framing, multiple events, multiline `data`, a
+nonmatching JSON-RPC ID, direct JSON error bodies, empty HTTP 202 notification
+responses, `result.isError === true`, and optional `structuredContent`.
+
+- [x] **Step 2: Run the test to verify it fails**
+
+Run: `node --test test/mcp.test.mjs`
+
+Expected: FAIL with `ERR_MODULE_NOT_FOUND`.
+
+- [x] **Step 3: Implement token acquisition and JSON-RPC calls**
+
+Export:
+
+```js
+export function parseSseJsonRpc(raw, { expectedId } = {}) {}
+export function parseToolResult(jsonRpc) {}
+export async function mintDemoToken({ fetchImpl = fetch, subject }) {}
+export function createMcpClient({ token, fetchImpl = fetch }) {}
+```
+
+`mintDemoToken` sends an empty `POST /token`; when `subject` is present it uses
+the `x-clockchain-sub` header (or equivalent query field), not a JSON body.
+Subject is sanitized, unauthenticated, and non-authoritative. The token response
+is `no-store`, lasts seven days, and the token must never enter errors or logs.
+
+Every MCP request sends:
+
+```text
+x-api-key: <same token for the entire run>
+Content-Type: application/json
+Accept: application/json, text/event-stream
+```
+
+The service is stateless for this demo: no `Mcp-Session-Id` is issued or
+required. Successful initialize, tools/list, and tool-call responses are SSE
+frames whose tool payload is normally JSON text in `result.content[0].text`.
+
+`createMcpClient` returns:
+
+```js
+{
+  call: async (name, args) => {},
+  resolveAgent: async (agentId) => {},
+  getTimestamp: async () => {},
+  attestAction: async (args) => {},
+  completeAttestation: async (receipt) => {},
+  verifyReceipt: async (receipt) => {},
+  verifyCrossParty: async ({ ledgerId, blockHeight, hash }) => {},
+}
+```
+
+The client sends `accept: application/json, text/event-stream`, never exposes
+the token in an error, fails immediately on 401/403, honors `Retry-After` on a
+429 without minting another token, and retries read-only calls only for bounded
+transient 5xx/network failures. Every `attest_action` call includes a stable
+idempotency key but remains single-shot: the deployed cache is process-local,
+success-only, and does not reserve in-flight keys, so an ambiguous retry could
+duplicate the write. HTTP 200 is not sufficient: reject both JSON-RPC `error`
+and `result.isError === true`. Bound request time and response size.
+
+Public wrappers map to the exact deployed snake-case tool fields:
+
+```text
+resolve_agent       { agent_id }
+get_timestamp       {}
+attest_action       { agent_id, action, inputs?, outputs?, wait?, wait_ms?,
+                      idempotency_key?, allow_degraded? }
+complete_attestation { receipt }
+verify_receipt      { receipt }
+verify_cross_party  { ledger_id?, block_height?, hash? }
+```
+
+- [x] **Step 4: Add receipt-completion tests**
+
+The mock responses prove:
+
+```text
+resolved identity must be active
+attest_action pending/degraded, or anchored with consensus-time enrichment still
+pending -> complete_attestation polling
+anchored receipt requires anchor.confirmed true, a nonempty string
+anchor.blockHeight, and a nonempty string anchor.consensusTime
+verify_receipt must report match true
+verify_receipt must report verifiedAgainst on-chain block
+verify_cross_party must report onChain.verifiedAgainst on-chain block
+verify_cross_party must report onChain.keyless true
+```
+
+- [x] **Step 5: Implement strict completion helpers**
+
+Export:
+
+```js
+export function assertResolvedIdentity(identity, expected) {}
+export function assertAnchoredReceipt(receipt) {}
+export function assertReceiptVerification(result) {}
+export function assertCrossPartyVerification(result) {}
+export async function completeReceipt(client, receipt, { attempts = 8, intervalMs = 1500 } = {}) {}
+```
+
+The official-registry platform plan is complete. The hosted resolver returns
+`active` for known official identity `8639` and for fresh operator-smoke
+identity `8649`, with the expected owners and metadata URIs.
+
+- [x] **Step 6: Run focused tests**
+
+Run: `node --test test/mcp.test.mjs`
+
+Expected: all MCP tests pass.
+
+- [x] **Step 7: Commit**
+
+```bash
+git add src/mcp.mjs test/mcp.test.mjs test/fixtures/mcp-sse.txt
+git commit -m "Fail closed unless Clockchain confirms and re-verifies the receipt" \
+  -m "Constraint: A submitted or cache-only record must never be narrated as success.
+Confidence: high
+Scope-risk: moderate
+Directive: Preserve the distinction between keyless cryptographic verification and token-gated MCP transport.
+Tested: SSE parsing, auth/rate-limit errors, pending polling, anchor, commitment, and on-chain verification gates."
+```
+
+### Task 5: Compose the runner and sanitized evidence
+
+**Files:**
+- Create: `src/evidence.mjs`
+- Create: `src/run.mjs`
+- Create: `bin/handshake-demo.mjs`
+- Create: `test/evidence.test.mjs`
+- Create: `test/run.test.mjs`
+
+The runner also owns a local, public recovery checkpoint at
+`<outputDirectory>/.handshake-registration-recovery.json`. The checkpoint
+contains only the validated JSON-safe value emitted by the registration
+adapter—never the invitation code, private key, MCP token, or raw error. It is
+retained after PASS so rerunning a consumed invitation resumes and verifies the
+same identity instead of trying to register another one.
+
+- [x] **Step 1: Write failing result-schema tests**
+
+The expected result shape is:
+
+```js
+{
+  schema: "clockchain.handshake-result/v1",
+  status: "PASS",
+  runId: "uuid",
+  startedAt: "RFC3339",
+  completedAt: "RFC3339",
+  elapsedMs: 1234,
+  scenario: {
+    action: "trust_handshake",
+    amount: { value: "100", currency: "USD", moved: false },
+    counterparty: "clockchain:handshake",
+  },
+  identity: {
+    reference: "eip155:11155111:0x...:42",
+    agentId: "42",
+    displayName: "Billy",
+    owner: "0x...",
+    registerTx: "0x...",
+    metadataTx: "0x...",
+  },
+  clockchain: {
+    ledgerId: "uuid",
+    blockHeight: "123",
+    consensusTime: "Clockchain timestamp",
+    receiptStatus: "anchored",
+    receiptVerified: true,
+    crossPartyVerified: true,
+    verifiedAgainst: "on-chain block",
+    keyless: true,
+    poolHealth: {
+      totalNodes: 1,
+      nodeParticipationPct: 0,
+      degradedAtSubmission: true,
+    },
+  },
+  disclaimer: "Single-validator testnet: ...",
+}
+```
+
+Tests reject missing transaction hashes, null block height, false verification,
+or forbidden secret canaries.
+
+- [x] **Step 2: Implement evidence validation and Markdown rendering**
+
+Export:
+
+```js
+export function validatePassResult(result) {}
+export function renderResultMarkdown(result) {}
+export async function writeEvidence({ directory, result, canaries }) {}
+```
+
+`writeEvidence` redacts first, asserts secret-free second, writes to temporary
+files, rejects the result if redaction changed any value, re-reads and validates
+both temporary files, then atomically renames each to `result.json` and
+`RESULT.md`. It removes temporary files on failure. The two target renames are
+individually atomic; PASS is printed only after both final files are re-read and
+cross-checked.
+
+- [x] **Step 3: Write a failing orchestration test**
+
+Use injected fake registration and MCP adapters. On a first run, assert this
+exact call order:
+
+```text
+read invitation -> decrypt -> register/checkpoint -> mint token -> resolve -> timestamp -> attest ->
+complete if needed -> verify receipt -> verify cross-party -> write evidence
+```
+
+On a resumed run, replace `register/checkpoint` with
+`read checkpoint -> finalize registration`, and assert the registration write
+adapter is never called. A `PartialRegistrationError` recovery value is
+persisted once more before the safe error is returned. Assert no PASS evidence
+is written after any failed stage; the public recovery checkpoint may remain.
+
+- [x] **Step 4: Implement `runHandshake`**
+
+```js
+export async function runHandshake({
+  invitationFile,
+  outputDirectory = process.cwd(),
+  adapters = {},
+  now = () => new Date(),
+  randomUUID,
+}) {}
+```
+
+The default adapter table includes `readSecretInvitation`,
+`decryptInvitation`, `registerIdentity`, `finalizeIdentityRegistration`,
+`mintDemoToken`, `createMcpClient`, the Task 4 assertion/completion helpers,
+and `writeEvidence`. Validate all options before side effects. Registration and
+MCP typed errors are mapped to a secret-safe `HandshakeStageError`; the CLI
+classifies by explicit category/code, never by matching error text.
+
+The receipt inputs include:
+
+```js
+{
+  runId,
+  identityReference,
+  counterparty: "clockchain:handshake",
+  authorization: { amount: "100", currency: "USD", settlement: "not-executed" },
+}
+```
+
+The outputs include:
+
+```js
+{
+  decision: "approved-for-demo",
+  scope: "identity-and-time-receipt-only",
+  paymentMoved: false,
+}
+```
+
+The live single-validator pool can report zero participation while remaining
+synced. The runner therefore makes the write boundary explicit with
+`allow_degraded: true`, but still withholds PASS unless the receipt subsequently
+reaches the strict anchored/confirmed state with both consensus time and block
+height and passes both verification paths. Preserve the receipt's public
+`poolHealth` snapshot in evidence rather than describing the submission as
+healthy.
+
+- [x] **Step 5: Implement the CLI**
+
+The CLI:
+
+```text
+requires HANDSHAKE_INVITE_FILE or --invite-file <path>
+accepts --output <directory>
+never accepts a private key, invite code, chain, registry, transfer, or RPC method
+prints stage names and public transaction/receipt identifiers
+prints PASS only after evidence is atomically written and validated
+returns exit 0 on PASS, 2 on safe user/config error, 3 on network failure,
+4 on protocol verification failure, and 5 on redaction failure
+```
+
+Progress output is a fixed allowlist of stage labels plus already-validated
+public transaction, agent, ledger, and block identifiers. It never interpolates
+raw upstream errors. Display names and all other untrusted strings are escaped
+for Markdown and stripped of terminal control characters.
+
+- [x] **Step 6: Run focused and full tests**
+
+Run:
+
+```bash
+node --test test/evidence.test.mjs test/run.test.mjs
+npm test
+```
+
+Expected: all tests pass and no network request occurs.
+
+- [x] **Step 7: Commit**
+
+```bash
+git add src/evidence.mjs src/run.mjs bin/handshake-demo.mjs test/evidence.test.mjs test/run.test.mjs
+git commit -m "Produce a receipt only after every identity and anchor check passes" \
+  -m "Constraint: Stakeholders need a self-contained evidence artifact, not a success narrative.
+Confidence: high
+Scope-risk: moderate
+Tested: Ordered orchestration, fail-closed stages, result schema, atomic writes, and secret-canary rejection."
+```
+
+### Task 6: Add operator invitation tooling
+
+**Files:**
+- Create: `scripts/create-invitations.mjs`
+- Create: `scripts/check-invitations.mjs`
+- Create: `test/operator-tools.test.mjs`
+- Create: `invites/README.md`
+- Generate: `invites/codex.enc.json`
+- Generate: `invites/claude.enc.json`
+- Generate outside Git: `.context/invitations/codex.secret.json`
+- Generate outside Git: `.context/invitations/claude.secret.json`
+- Generate outside Git: `.context/smoke-public/smoke.enc.json`
+- Generate outside Git: `.context/invitations/smoke.secret.json`
+- Generate outside Git: `.context/sponsor-public/sponsor.enc.json`
+- Generate outside Git: `.context/invitations/sponsor.secret.json`
+
+- [x] **Step 1: Write failing operator-tool tests**
+
+Tests use a temporary directory and assert:
+
+```text
+distinct wallets and invitation codes for every requested ID
+public bundle contains address but no private key/code
+secret file mode is 0600
+secret file references the matching bundle
+existing bundle paths are never overwritten without --force
+invalid, duplicate, or mismatched ID/name lists fail before creating files
+```
+
+- [x] **Step 2: Implement deterministic operator interfaces**
+
+`create-invitations.mjs` supports:
+
+```text
+--output-public invites
+--output-secret .context/invitations
+--ids codex,claude
+--names Billy,Iris
+```
+
+It uses `generatePrivateKey` and `privateKeyToAccount`, generates 32 random
+bytes for each invitation code, encrypts with `encryptInvitation`, and prints
+only bundle ID plus public address. IDs and names are explicit same-length
+lists, so operator-only `smoke` and `sponsor` wallets can be generated without
+inventing a filename from untrusted display text.
+
+`check-invitations.mjs` reads public addresses only and reports:
+
+```text
+chain id
+balance
+nonce
+official registry bytecode present
+ready true only when nonce is 0 and balance is within the configured pilot range
+```
+
+- [x] **Step 3: Run operator tests**
+
+Run: `node --test test/operator-tools.test.mjs`
+
+Expected: all tests pass.
+
+- [x] **Step 4: Generate the two real invitation bundles**
+
+Run:
+
+```bash
+npm run invitations:create -- \
+  --output-public invites \
+  --output-secret .context/invitations \
+  --ids codex,claude \
+  --names Billy,Iris
+
+npm run invitations:create -- \
+  --output-public .context/smoke-public \
+  --output-secret .context/invitations \
+  --ids smoke \
+  --names Smoke
+
+npm run invitations:create -- \
+  --output-public .context/sponsor-public \
+  --output-secret .context/invitations \
+  --ids sponsor \
+  --names Sponsor
+```
+
+Expected:
+
+```text
+invites/codex.enc.json
+invites/claude.enc.json
+.context/invitations/codex.secret.json mode 0600
+.context/invitations/claude.secret.json mode 0600
+.context/invitations/smoke.secret.json mode 0600
+.context/invitations/sponsor.secret.json mode 0600
+```
+
+- [x] **Step 5: Verify no secret is tracked**
+
+Run:
+
+```bash
+git status --short
+git grep -n -i 'privateKey\\|inviteCode' -- invites || true
+git check-ignore -q .context/invitations/codex.secret.json
+```
+
+Expected: only encrypted public bundles are eligible for commit; secret files
+are ignored.
+
+- [x] **Step 6: Commit**
+
+```bash
+git add scripts/create-invitations.mjs scripts/check-invitations.mjs test/operator-tools.test.mjs invites
+git commit -m "Issue bounded testnet invitations without publishing wallet secrets" \
+  -m "Constraint: Two stakeholders need independent funded wallets while using one public prompt.
+Rejected: Public faucet during the run | It makes completion dependent on third-party login and rate limits.
+Confidence: high
+Scope-risk: moderate
+Tested: Distinct wallets, authenticated encryption, secret-file permissions, overwrite refusal, and Git exclusion.
+Not-tested: Funding and live consumption occur after platform preflight."
+```
+
+### Task 7: Publish the universal prompt and docs
+
+**Files:**
+- Create: `prompts/run-turnkey-demo.md`
+- Create: `README.md`
+- Create: `DEMO.md`
+- Create: `scripts/check-docs.mjs`
+- Create: `test/docs.test.mjs`
+
+- [x] **Step 1: Write failing documentation contract tests**
+
+Tests assert that all three public documents:
+
+```text
+say Clockchain®
+say single-validator testnet
+say no money moves
+say no AgentDash
+do not say court-grade, trustless, mainnet, or consensus-secure as present capabilities
+reference the official registry address
+use the same demo command and result filenames
+```
+
+- [x] **Step 2: Write the exact coding-agent prompt**
+
+The canonical prompt is stored in `prompts/run-turnkey-demo.md` and embedded
+byte-for-byte in `README.md`. It fixes the repository URL rather than accepting
+one from the environment. A public stakeholder clones `main`; the pre-merge
+acceptance harness supplies `HANDSHAKE_REPO_REF` only as an exact 40-hex commit
+SHA and requires the detached checkout to match. The invitation is opaque to
+the coding agent: only `npm run demo` may open it.
+
+```md
+Run the Clockchain Agent Trust Handshake demo exactly as documented.
+
+Work in a new temporary directory. Do not inspect or modify my current project.
+Do not install or use AgentDash. Do not invent success states.
+
+1. Clone only https://github.com/thetangstr/clockchain-handshake.git.
+2. Use main when HANDSHAKE_REPO_REF is absent; otherwise accept only an exact
+   40-hex commit, check it out detached, and verify git rev-parse HEAD matches.
+3. Read DEMO.md and follow its safety boundary.
+4. Check only that HANDSHAKE_INVITE_FILE exists and is readable; do not open it.
+5. Run npm ci --ignore-scripts, then npm run demo.
+6. Return only the sanitized RESULT.md summary and both evidence paths.
+7. Stop without a success claim if any identity, anchor, or verification fails.
+```
+
+- [x] **Step 3: Write README and DEMO runbook**
+
+`README.md` puts the prompt in one copyable fenced block. `DEMO.md` documents:
+
+```text
+Node 22 prerequisite
+separate invitation delivery
+testnet transactions that will occur
+expected 30-90 second budget
+exact PASS fields
+rate-limit and RPC recovery
+single-validator limitation
+identity registration is not capability validation
+no AgentDash/payment/ZK/Validation Registry writeback
+```
+
+- [x] **Step 4: Implement doc checks**
+
+`scripts/check-docs.mjs` loads the public documents, enforces required and
+forbidden phrases, verifies relative links and referenced files, and exits
+non-zero with exact failures.
+
+- [x] **Step 5: Run documentation verification**
+
+Run:
+
+```bash
+node --test test/docs.test.mjs
+npm run docs:check
+```
+
+Expected: all documentation checks pass.
+
+- [x] **Step 6: Commit**
+
+```bash
+git add README.md DEMO.md prompts scripts/check-docs.mjs test/docs.test.mjs
+git commit -m "Give every coding agent one honest Handshake instruction set" \
+  -m "Constraint: Codex and Claude must execute the same public instructions without AgentDash.
+Confidence: high
+Scope-risk: narrow
+Directive: Keep public claims generated from the verified exercise boundary.
+Tested: Required/forbidden claims, command parity, link integrity, and file references."
+```
+
+### Task 8: Add clean-client acceptance and independent verification
+
+**Files:**
+- Create: `scripts/run-clean-clients.mjs`
+- Create: `scripts/verify-live-results.mjs`
+- Create: `test/acceptance-harness.test.mjs`
+
+- [x] **Step 1: Write failing harness command tests**
+
+Given temporary directories and fake executables, assert:
+
+```text
+Codex and Claude use different working directories
+both receive identical prompt bytes
+each receives only its own HANDSHAKE_INVITE_FILE path
+timeouts terminate the child process group
+stdout/stderr are saved after redaction
+one failed client makes the aggregate verdict fail
+```
+
+- [x] **Step 2: Implement the client harness**
+
+The harness runs sequentially to avoid shared-IP token bursts:
+
+```text
+codex exec --ephemeral --skip-git-repo-check --ignore-user-config \
+  --ignore-rules --dangerously-bypass-approvals-and-sandbox -
+claude -p --no-session-persistence --permission-mode bypassPermissions \
+  --dangerously-skip-permissions --safe-mode
+```
+
+Production acceptance pins those executable names and arguments; command
+injection remains available only through the direct test seam. It uses a
+minimal inherited environment allowlist plus:
+
+```text
+PATH
+HOME
+TMPDIR
+HANDSHAKE_INVITE_FILE
+HANDSHAKE_REPO_REF
+```
+
+The acceptance CLI requires `HANDSHAKE_REPO_REF` to be the exact lowercase
+40-hex SHA of a pushed commit. It never accepts a repository URL or mutable
+branch. The published stakeholder path omits the ref and consumes public
+`main`.
+
+Its canonical manifest records repository and prompt SHA-256 values; exact
+client command identities; CLI versions; sequential start/end times; exit
+semantics; and canonical result paths plus artifact SHA-256 values. It never
+records invitation content.
+
+- [x] **Step 3: Implement independent result verification**
+
+`verify-live-results.mjs` first binds the trusted local manifest to the exact
+expected repository SHA, canonical prompt bytes, fixed client commands and
+version forms, sequential timestamps, result paths, and artifact hashes. For
+each ordered `result.json` and operator invitation, it then:
+
+1. Validates the local result schema and disclaimer.
+2. Requires the owner and display name to match the corresponding invitation.
+3. Verifies the registration and metadata transaction envelopes, calldata,
+   receipts, event, ordering, `ownerOf`, `getAgentWallet`, and `tokenURI`.
+4. Recomputes the receipt hash and calls Clockchain `verify_cross_party` plus
+   read-only `complete_attestation` using a new demo token.
+5. Compares every public identity/receipt field and current pool-health readback.
+6. Scans the complete artifact directories using canaries derived from both
+   operator invitation files.
+7. Produces an aggregate `artifacts/acceptance-verdict.json`.
+
+- [x] **Step 4: Run deterministic harness tests**
+
+Run: `node --test test/acceptance-harness.test.mjs`
+
+Expected: all tests pass without launching real agents.
+
+- [x] **Step 5: Commit**
+
+```bash
+git add scripts/run-clean-clients.mjs scripts/verify-live-results.mjs test/acceptance-harness.test.mjs
+git commit -m "Make client independence part of the Handshake acceptance test" \
+  -m "Constraint: Native subagent success cannot substitute for actual Codex and Claude Code behavior.
+Confidence: high
+Scope-risk: moderate
+Tested: Prompt identity, environment isolation, timeout cleanup, redacted logs, and aggregate failure semantics.
+Not-tested: Live client runs require funded invitations."
+```
+
+### Task 9: Run full deterministic verification
+
+**Files:**
+- Modify only if verification exposes a defect
+
+- [x] **Step 1: Install from the lockfile**
+
+Run: `rm -rf node_modules && npm ci --ignore-scripts`
+
+Expected: clean install exits 0.
+
+- [x] **Step 2: Run all verification**
+
+Run:
+
+```bash
+npm run verify
+git diff --check
+git status --short
+```
+
+Expected: all tests and docs checks pass; only intentional invitation bundles
+or plan tracking changes remain.
+
+- [x] **Step 3: Run a security scan for forbidden material**
+
+Run:
+
+```bash
+git grep -n -i -E 'BEGIN (RSA|EC|OPENSSH) PRIVATE KEY|0x[0-9a-fA-F]{64}|cc_[A-Za-z0-9_-]{20,}' -- ':!package-lock.json' || true
+```
+
+Expected: no real private key or Clockchain token appears. Test fixtures may use
+explicit repeated-byte dummy values only inside test files.
+
+- [x] **Step 4: Commit any verification-only fixes**
+
+Use a Lore commit that states the exact failed invariant and fresh command
+evidence.
+
+- [ ] **Step 5: Audit the complete publishable Git history**
+
+Enumerate every blob reachable from all local and remote refs. Scan for common
+credential formats, secret-like filenames, labeled sensitive assignments, and
+exact values derived from the local operator invitation files without printing
+those values. Classify deliberate test canaries separately. Repeat the audit
+after the final evidence and handoff commits and immediately before changing
+repository visibility.
+
+### Task 10: Execute the live stakeholder acceptance
+
+**Files:**
+- Generate outside Git: `artifacts/codex/*`
+- Generate outside Git: `artifacts/claude/*`
+- Generate outside Git: `artifacts/acceptance-verdict.json`
+
+Prerequisite: complete
+`docs/superpowers/plans/2026-07-22-official-erc8004-resolver.md`.
+
+- [x] **Step 1: Fund invitation wallets**
+
+Use an official Ethereum Sepolia faucet or a testnet-only operator wallet.
+Record funding transaction hashes under `.context/invitations/funding.json`.
+Transfer only enough for `register` and `setAgentURI` plus bounded gas margin.
+
+- [x] **Step 2: Verify invitations are unused and ready**
+
+Run: `npm run invitations:check`
+
+Expected: both invitations report official chain/registry, nonce 0, and
+`ready: true`.
+
+- [x] **Step 3: Run an operator live smoke test**
+
+Use a third non-stakeholder invitation or a disposable operator wallet. Confirm
+official registration, MCP resolution, anchored receipt, and both verification
+paths before consuming stakeholder invitations.
+
+- [ ] **Step 4: Run actual Codex and Claude Code clients**
+
+Run:
+
+```bash
+npm run acceptance:clients -- \
+  --codex-invite .context/invitations/codex.secret.json \
+  --claude-invite .context/invitations/claude.secret.json \
+  --repo-ref <EXACT_PUSHED_40_HEX_SHA>
+```
+
+Expected: both clients exit 0 and create separate PASS artifacts.
+
+- [ ] **Step 5: Independently re-verify both outputs**
+
+Run:
+
+```bash
+npm run results:verify -- \
+  artifacts/codex/result.json \
+  artifacts/claude/result.json \
+  --manifest artifacts/client-acceptance.json \
+  --repo-sha <EXACT_PUSHED_40_HEX_SHA> \
+  --canary-file .context/invitations/codex.secret.json \
+  --canary-file .context/invitations/claude.secret.json
+```
+
+Expected: aggregate verdict `PASS`, distinct identity references, distinct
+Clockchain ledger IDs and block heights, and no secret findings.
+
+- [ ] **Step 6: Commit only public evidence**
+
+Do not commit raw agent logs or stakeholder result files. Add a sanitized
+`docs/demo-evidence/latest.md` containing:
+
+```text
+run date
+prompt SHA-256
+CLI versions
+public identity transaction links
+public Clockchain ledger/block identifiers
+aggregate PASS
+single-validator testnet disclaimer
+```
+
+Commit with a Lore message whose `Tested:` trailer lists the two actual client
+commands and independent verifier.
+
+### Task 11: Publish the stable GitHub instructions
+
+**Files:**
+- No new implementation files
+
+- [ ] **Step 1: Run final verification from a clean checkout**
+
+Clone the branch into a temporary directory and run:
+
+```bash
+npm ci --ignore-scripts
+npm run verify
+```
+
+Expected: all checks pass without local-only files.
+
+- [ ] **Step 2: Push and open the Handshake PR**
+
+```bash
+git push -u origin kailortang-prog/handshake-demo-plan
+gh pr create --repo thetangstr/clockchain-handshake --base main \
+  --head kailortang-prog/handshake-demo-plan \
+  --title "Make the Handshake demo executable from one prompt" \
+  --body-file .context/handshake-pr.md
+```
+
+- [ ] **Step 3: Review checks and the GitHub rendering**
+
+The repository currently has no GitHub Actions workflow or private-repository
+branch protection. Attach the clean-clone verification evidence to the PR,
+confirm any configured GitHub checks are green, and verify the README copy
+block, relative links, invitation downloads, and raw prompt URL directly on the
+PR.
+
+- [ ] **Step 4: Merge, publish, and re-run from public `origin/main`**
+
+After checks pass, squash-merge the PR, audit every reachable Git blob again,
+and change the repository visibility to public. From an unauthenticated fresh
+clone of `main`, run the deterministic verification and a non-writing prompt
+preflight to prove the public copy-paste paths resolve.
+
+- [ ] **Step 5: Record the stable stakeholder handoff**
+
+The final handoff contains:
+
+```text
+GitHub README URL
+raw prompt URL
+separate secure delivery instruction for each invitation file
+expected duration
+testnet disclaimer
+support/retry instruction
+```

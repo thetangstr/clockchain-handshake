@@ -1,0 +1,15 @@
+node_modules/
+.context/
+.omx/
+.env
+.env.*
+!.env.example
+result.json
+RESULT.md
+artifacts/
+coverage/
+*.secret.json
+*.key
+*.token
+.handshake-registration-recovery.json
+.handshake-attestation-started.json

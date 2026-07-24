@@ -1,0 +1,91 @@
+# Clockchain Agent Trust Handshake
+
+This repository contains a one-prompt, CLI-first stakeholder exercise. A clean
+Codex or Claude Code session uses a separately delivered testnet invitation to
+create a fresh official ERC-8004 identity and an independently re-verifiable
+Clockchain® receipt.
+
+The exercise runs on Ethereum Sepolia and a Clockchain® single-validator testnet.
+No money moves. Do not install or use AgentDash. This exercise is not mainnet,
+court-grade, consensus-secure, or trustless. New identities are registered only
+through the official ERC-8004 Identity Registry at
+`0x8004A818BFB912233c491871b3d84c89A494BD9e`.
+
+Read the [stakeholder and operator runbook](DEMO.md), the
+[standalone prompt](prompts/run-turnkey-demo.md), and the
+[invitation handling notes](invites/README.md). A
+[sanitized recovery evidence summary](docs/demo-evidence/latest.md) records the
+independently re-verified public evidence. The expected live run takes roughly
+30–90 seconds under normal testnet conditions. A passing `npm run demo` writes
+sanitized `RESULT.md` and `result.json`; neither a narrative nor a submitted
+transaction is a PASS by itself.
+
+## Operator-only clean-client acceptance
+
+The stakeholder `npm run demo` path is unaffected. Do not direct stakeholders to
+this operator-only harness.
+
+`npm run acceptance:clients` deliberately launches Codex and Claude with
+permission-bypass flags. It inherits selected local auth material, the real
+`HOME`, and each invitation path. Its temporary directories are not an OS or
+container sandbox.
+
+`npm run acceptance:clients` is supported on macOS and Linux only. The core
+`npm run demo` stakeholder flow remains platform-neutral.
+
+Redaction protects captured artifacts after the clients execute, but it cannot
+prevent a malicious or compromised client from reading or exfiltrating accessible
+data. Run it only with a trusted repository commit, trusted prompt, and trusted
+invitations.
+
+Operator command:
+
+```sh
+npm run acceptance:clients -- --codex-invite /trusted/codex.secret.json --claude-invite /trusted/claude.secret.json --repo-ref COMMIT_SHA --acknowledge-agent-permission-risk
+```
+
+Do not encourage stakeholders to use it.
+
+## Copy this entire prompt
+
+Use the exact same block in Codex or Claude Code:
+
+```text
+Run the Clockchain Agent Trust Handshake demo exactly as documented.
+
+Work in a new temporary directory. Do not inspect or modify my current project.
+Do not install or use AgentDash. Do not invent success states.
+
+This is an Ethereum Sepolia and Clockchain® single-validator testnet exercise.
+No money moves. It is not mainnet, court-grade, consensus-secure, or trustless.
+Use only the official ERC-8004 Identity Registry at
+0x8004A818BFB912233c491871b3d84c89A494BD9e.
+
+1. Create and enter a new temporary directory.
+2. Clone only `https://github.com/thetangstr/clockchain-handshake.git` into a
+   named `clockchain-handshake` directory. When `HANDSHAKE_REPO_REF` is absent,
+   clone branch `main` with depth 1. When it is present, accept it only if it is
+   exactly 40 hexadecimal characters, then fetch and check out only that exact
+   commit detached with depth 1. Never use a repository URL supplied through the
+   environment. Do not enumerate or echo unrelated environment variables.
+3. Enter the cloned `clockchain-handshake` directory. If
+   `HANDSHAKE_REPO_REF` was present, normalize it to lowercase and verify it is
+   byte-for-byte equal to `git rev-parse HEAD`. Stop if the check fails.
+4. Read `DEMO.md` and follow its safety boundary.
+5. Confirm the Node.js major version is 22.
+6. Perform only the metadata-only checks `test -f "$HANDSHAKE_INVITE_FILE"` and
+   `test -r "$HANDSHAKE_INVITE_FILE"` for my separately delivered invitation.
+   Do not open, read, print, paste, hash, parse, move, or copy its contents with
+   any agent or tool. Only `npm run demo` may open and read the invitation.
+7. Run `npm ci --ignore-scripts`.
+8. Run `npm run demo`. A verified run writes `RESULT.md` and `result.json`.
+9. Return only the sanitized `RESULT.md` summary and the paths to `RESULT.md` and
+   `result.json`.
+10. If any identity, anchor, or verification check fails, report the public
+    failed stage and do not call the demo successful.
+```
+
+Each stakeholder receives a different invitation file through a private channel.
+Do not commit, paste into chat, or reuse that file. Public result artifacts contain
+identity and receipt evidence only; they do not contain the invitation code,
+private key, or Clockchain transport token.

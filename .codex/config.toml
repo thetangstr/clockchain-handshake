@@ -1,0 +1,30 @@
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+
+[agents.planner]
+description = "Sol planner and orchestrator for requirements, assignments, and integration"
+config_file = "agents/planner.toml"
+
+[agents.verifier]
+description = "Sol verifier responsible for independent evidence and the final verdict"
+config_file = "agents/verifier.toml"
+
+[agents.executor]
+description = "Terra executor for substantive, scoped implementation and tests"
+config_file = "agents/executor.toml"
+
+[agents.explore]
+description = "Luna read-only explorer for repository facts and bounded discovery"
+config_file = "agents/explore.toml"
+
+[agents.lightweight-executor]
+description = "Luna executor for explicit, bounded, low-risk edits"
+config_file = "agents/lightweight-executor.toml"
+
+[agents.worker]
+description = "Terra executor alias for substantive, scoped implementation and tests"
+config_file = "agents/executor.toml"
+
+[agents.explorer]
+description = "Luna explorer alias for read-only repository discovery"
+config_file = "agents/explore.toml"
