@@ -301,19 +301,25 @@ if (mode === "hang") {
   );
   if (
     mode === "lingering-success" ||
-    mode === "lingering-success-inherited"
+    mode === "lingering-success-inherited" ||
+    mode === "escaped-session-inherited"
   ) {
-    spawn(process.execPath, [
+    const descendant = spawn(process.execPath, [
       "-e",
       "process.on('SIGTERM', () => {});" +
         "setTimeout(() => require('node:fs').writeFileSync(" +
         JSON.stringify(marker) + ", 'escaped'), 650);" +
         "setInterval(() => {}, 10000)",
     ], {
-      stdio: mode === "lingering-success-inherited"
-        ? ["ignore", "inherit", "inherit"]
-        : "ignore",
+      detached: mode === "escaped-session-inherited",
+      stdio: mode === "lingering-success"
+        ? "ignore"
+        : ["ignore", "inherit", "inherit"],
     });
+    if (mode === "escaped-session-inherited") {
+      writeFileSync(marker + ".pid", String(descendant.pid));
+      descendant.unref();
+    }
   }
   process.exit(mode === "fail" ? 7 : 0);
 }
@@ -1677,6 +1683,108 @@ test("starts cleanup on leader exit when a descendant inherits output pipes", as
   await assert.rejects(readFile(marker), /ENOENT/);
 });
 
+test("fails closed when an escaped session inherits output pipes after leader exit", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-escaped-pipes-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const marker = join(directory, "escaped-session.txt");
+  const pidFile = `${marker}.pid`;
+  let escapedPid = null;
+  let pending;
+  let deadline;
+
+  try {
+    pending = runCleanClients(
+      harnessOptions({
+        claudeFixture,
+        codexFixture,
+        codexMode: "escaped-session-inherited",
+        directory,
+        executable,
+        marker,
+        terminationGraceMs: 20,
+        timeoutMs: 5_000,
+      }),
+    );
+    const pidDeadline = Date.now() + 1_000;
+    while (escapedPid === null && Date.now() < pidDeadline) {
+      try {
+        const candidate = Number(
+          await readFile(pidFile, "utf8"),
+        );
+        if (Number.isSafeInteger(candidate) && candidate > 0) {
+          escapedPid = candidate;
+        }
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          throw error;
+        }
+      }
+      if (escapedPid === null) {
+        await delay(10);
+      }
+    }
+    assert.notEqual(escapedPid, null);
+
+    const result = await Promise.race([
+      pending,
+      new Promise((_, rejectDeadline) => {
+        deadline = setTimeout(
+          () =>
+            rejectDeadline(
+              new Error("Close-drain deadline was not bounded."),
+            ),
+          1_500,
+        );
+      }),
+    ]);
+    assert.equal(result.status, "FAIL");
+    assert.equal(
+      result.clients.codex.errorCode,
+      "CLIENT_PROCESS_CLOSE_DRAIN_FAILED",
+    );
+    assert.equal(result.clients.codex.timedOut, false);
+    assert.equal(
+      result.clients.codex.outputLimitExceeded,
+      false,
+    );
+    assert.equal(result.clients.codex.resultPaths, null);
+    assert.equal(
+      result.clients.claude.errorCode,
+      "CLIENT_SKIPPED_AFTER_CLEANUP_FAILURE",
+    );
+  } finally {
+    clearTimeout(deadline);
+    if (escapedPid !== null) {
+      try {
+        process.kill(-escapedPid, "SIGKILL");
+      } catch (error) {
+        if (error?.code !== "ESRCH") {
+          throw error;
+        }
+      }
+    }
+    await Promise.race([
+      pending?.catch(() => {}),
+      delay(1_000),
+    ]);
+  }
+  await delay(700);
+  await assert.rejects(readFile(marker), /ENOENT/);
+});
+
 test("waits for confirmed process-group absence before launching the client command", {
   concurrency: false,
 }, async (t) => {
@@ -1706,6 +1814,7 @@ test("waits for confirmed process-group absence before launching the client comm
   let groupPresent = true;
   let spawnCalls = 0;
   let settled = false;
+  const spawnedChildren = [];
   let hardKillObserved;
   const hardKillSeen = new Promise((resolveSeen) => {
     hardKillObserved = resolveSeen;
@@ -1729,17 +1838,32 @@ test("waits for confirmed process-group absence before launching the client comm
   };
   options.spawnImpl = (...args) => {
     spawnCalls += 1;
-    return spawn(...args);
+    const child = spawn(...args);
+    spawnedChildren.push(child);
+    return child;
   };
 
   let pending;
   let earlyAssertion;
+  let hardKillDeadline;
   try {
     pending = runCleanClients(options).then((result) => {
       settled = true;
       return result;
     });
-    await hardKillSeen;
+    await Promise.race([
+      hardKillSeen,
+      new Promise((_, rejectDeadline) => {
+        hardKillDeadline = setTimeout(
+          () =>
+            rejectDeadline(
+              new Error("SIGKILL observation timed out."),
+            ),
+          1_000,
+        );
+      }),
+    ]);
+    clearTimeout(hardKillDeadline);
     await delay(25);
     try {
       assert.equal(spawnCalls, 1);
@@ -1759,8 +1883,23 @@ test("waits for confirmed process-group absence before launching the client comm
       false,
     );
   } finally {
+    clearTimeout(hardKillDeadline);
     groupPresent = false;
-    await pending?.catch(() => {});
+    for (const child of spawnedChildren) {
+      if (child.exitCode === null && child.signalCode === null) {
+        try {
+          originalKill(-child.pid, "SIGKILL");
+        } catch (error) {
+          if (error?.code !== "ESRCH") {
+            throw error;
+          }
+        }
+      }
+    }
+    await Promise.race([
+      pending?.catch(() => {}),
+      delay(1_000),
+    ]);
     process.kill = originalKill;
   }
 });

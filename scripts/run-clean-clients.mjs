@@ -51,6 +51,7 @@ const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1_024 * 1_024;
 const DEFAULT_MAX_PROMPT_BYTES = 256 * 1_024;
 const PROCESS_GROUP_CONFIRMATION_TIMEOUT_MS = 1_000;
 const PROCESS_GROUP_POLL_INTERVAL_MS = 10;
+const PROCESS_CLOSE_DRAIN_TIMEOUT_MS = 250;
 const MAX_DISCOVERY_ENTRIES = 20_000;
 const MAX_DISCOVERY_DEPTH = 16;
 const MAX_EVIDENCE_BYTES = 2 * 1_024 * 1_024;
@@ -470,6 +471,7 @@ async function runProcess({
       });
     } catch {
       resolveProcess({
+        closeDrainFailed: false,
         cleanupFailed: false,
         exitCode: null,
         outputLimitExceeded: false,
@@ -493,13 +495,19 @@ async function runProcess({
     let terminationStarted = false;
     let cleanupCompleted = false;
     let cleanupFailed = false;
+    let closeDrainFailed = false;
+    let closeDrainTimer;
     let exitResult;
     let closeResult;
 
     const finalize = () => {
       if (
         settled ||
-        (!cleanupFailed && closeResult === undefined) ||
+        (
+          !cleanupFailed &&
+          !closeDrainFailed &&
+          closeResult === undefined
+        ) ||
         (terminationStarted && !cleanupCompleted)
       ) {
         return;
@@ -509,6 +517,7 @@ async function runProcess({
         { exitCode: null, signal: null };
       settled = true;
       resolveProcess({
+        closeDrainFailed,
         cleanupFailed,
         exitCode: processResult.exitCode,
         outputLimitExceeded,
@@ -520,6 +529,33 @@ async function runProcess({
       });
     };
 
+    const destroyChildStreams = () => {
+      child.stdin?.destroy();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      child.unref?.();
+    };
+
+    const startCloseDrainDeadline = () => {
+      if (
+        settled ||
+        closeResult !== undefined ||
+        closeDrainTimer !== undefined
+      ) {
+        return;
+      }
+      closeDrainTimer = setTimeout(() => {
+        closeDrainTimer = undefined;
+        if (settled || closeResult !== undefined) {
+          return;
+        }
+        closeDrainFailed = true;
+        cleanupFailed = true;
+        destroyChildStreams();
+        finalize();
+      }, PROCESS_CLOSE_DRAIN_TIMEOUT_MS);
+    };
+
     const finishCleanup = async () => {
       if (processGroupExists(child)) {
         terminateProcessGroup(child, "SIGKILL");
@@ -527,10 +563,12 @@ async function runProcess({
       cleanupFailed = !(await confirmProcessGroupAbsent(child));
       cleanupCompleted = true;
       if (cleanupFailed) {
-        child.stdin?.destroy();
-        child.stdout?.destroy();
-        child.stderr?.destroy();
-        child.unref?.();
+        destroyChildStreams();
+      } else if (
+        exitResult !== undefined &&
+        closeResult === undefined
+      ) {
+        startCloseDrainDeadline();
       }
       finalize();
     };
@@ -594,11 +632,15 @@ async function runProcess({
       if (!terminationStarted && processGroupExists(child)) {
         terminate();
       }
+      if (!terminationStarted) {
+        startCloseDrainDeadline();
+      }
       finalize();
     });
 
     child.once("close", (exitCode, signal) => {
       clearTimeout(timeout);
+      clearTimeout(closeDrainTimer);
       closeResult = { exitCode, signal };
       if (!terminationStarted && processGroupExists(child)) {
         terminate();
@@ -879,6 +921,9 @@ async function writeLog(path, value, canaries) {
 }
 
 function publicFailureCode(processResult) {
+  if (processResult.closeDrainFailed) {
+    return "CLIENT_PROCESS_CLOSE_DRAIN_FAILED";
+  }
   if (processResult.cleanupFailed) {
     return "CLIENT_PROCESS_GROUP_CLEANUP_FAILED";
   }
@@ -970,6 +1015,7 @@ async function runOneClient({
   let processResult = versionResult;
   if (
     !versionResult.spawnFailed &&
+    !versionResult.closeDrainFailed &&
     !versionResult.cleanupFailed &&
     !versionResult.timedOut &&
     !versionResult.outputLimitExceeded &&
@@ -1005,6 +1051,7 @@ async function runOneClient({
   let errorCode = publicFailureCode(processResult);
   if (
     !processResult.spawnFailed &&
+    !processResult.closeDrainFailed &&
     !processResult.cleanupFailed &&
     !processResult.timedOut &&
     !processResult.outputLimitExceeded &&
@@ -1201,8 +1248,10 @@ export async function runCleanClients({
           terminationGraceMs,
           timeoutMs,
         });
-    cleanupFailed ||= clients[name].errorCode ===
-      "CLIENT_PROCESS_GROUP_CLEANUP_FAILED";
+    cleanupFailed ||= [
+      "CLIENT_PROCESS_GROUP_CLEANUP_FAILED",
+      "CLIENT_PROCESS_CLOSE_DRAIN_FAILED",
+    ].includes(clients[name].errorCode);
   }
   const status = CLIENT_NAMES.every(
     (name) => clients[name].status === "PASS",
