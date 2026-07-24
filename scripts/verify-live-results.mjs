@@ -908,10 +908,17 @@ function transactionIndex(value) {
 function assertTransactionEnvelope({
   expectedHash,
   expectedNonce,
+  minimumNonce,
   receipt,
   transaction,
   owner,
 }) {
+  const nonceMatches =
+    expectedNonce === undefined
+      ? Number.isSafeInteger(transaction?.nonce) &&
+        Number.isSafeInteger(minimumNonce) &&
+        transaction.nonce >= minimumNonce
+      : transaction?.nonce === expectedNonce;
   if (
     !isPlainObject(transaction) ||
     !isPlainObject(receipt) ||
@@ -920,7 +927,7 @@ function assertTransactionEnvelope({
     !addressesEqual(transaction.from, owner) ||
     !addressesEqual(transaction.to, REGISTRY_ADDRESS) ||
     transaction.value !== 0n ||
-    transaction.nonce !== expectedNonce ||
+    !nonceMatches ||
     typeof transaction.input !== "string" ||
     typeof transaction.blockNumber !== "bigint" ||
     receipt.status !== "success" ||
@@ -999,7 +1006,7 @@ async function verifyIdentityTransactions(publicClient, result) {
   });
   assertTransactionEnvelope({
     expectedHash: result.identity.metadataTx,
-    expectedNonce: 1,
+    minimumNonce: 1,
     owner: result.identity.owner,
     receipt: metadataReceipt,
     transaction: metadataTransaction,

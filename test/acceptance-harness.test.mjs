@@ -2327,7 +2327,11 @@ function registrationUris(result) {
   };
 }
 
-function transactionEvidence(result, index) {
+function transactionEvidence(
+  result,
+  index,
+  { metadataNonce = 1 } = {},
+) {
   const { initial, final } = registrationUris(result);
   const registerBlock = 10_000n + BigInt(index * 2);
   const metadataBlock = registerBlock + 1n;
@@ -2440,7 +2444,7 @@ function transactionEvidence(result, index) {
       blockNumber: metadataBlock,
       hash: result.identity.metadataTx,
       input: metadataInput,
-      nonce: 1,
+      nonce: metadataNonce,
     }),
     registerReceipt: receipt({
       blockNumber: registerBlock,
@@ -2582,9 +2586,15 @@ async function verificationProvenance(
   };
 }
 
-function fakePublicClient(results) {
+function fakePublicClient(
+  results,
+  { metadataNonces = [] } = {},
+) {
   const calls = [];
-  const transactions = results.map(transactionEvidence);
+  const transactions = results.map((result, index) =>
+    transactionEvidence(result, index, {
+      metadataNonce: metadataNonces[index] ?? 1,
+    }));
   return {
     calls,
     async getChainId() {
@@ -2966,6 +2976,127 @@ test("independently verifies both identities and recomputed receipt hashes befor
   );
 });
 
+test("independently verifies recovered metadata transactions at positive safe nonces", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-verifier-recovered-nonce-"),
+  );
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  const codexDirectory = join(directory, "codex");
+  const claudeDirectory = join(directory, "claude");
+  await writeFixture(codexDirectory, CODEX_RESULT);
+  await writeFixture(claudeDirectory, CLAUDE_RESULT);
+  const publicClient = fakePublicClient(
+    [CODEX_RESULT, CLAUDE_RESULT],
+    { metadataNonces: [2, 7] },
+  );
+  const observations = {
+    completions: [],
+    crossParty: [],
+    factoryTokens: [],
+    tokenSubjects: [],
+  };
+  const clockchain = fakeClockchain(
+    [CODEX_RESULT, CLAUDE_RESULT],
+    observations,
+  );
+
+  const verdict = await verifyLiveResults({
+    ...(await verificationProvenance(directory, {
+      codexDirectory,
+      claudeDirectory,
+    })),
+    clientFactory: clockchain.clientFactory,
+    outputFile: join(directory, "verdict.json"),
+    publicClient,
+    resultDirectories: {
+      codex: codexDirectory,
+      claude: claudeDirectory,
+    },
+    tokenIssuer: clockchain.tokenIssuer,
+  });
+
+  assert.equal(verdict.status, "PASS");
+  assert.equal(verdict.clients.codex.status, "PASS");
+  assert.equal(verdict.clients.claude.status, "PASS");
+  assert.equal(
+    verdict.clients.codex.identityTransactions
+      .transactionOrderMatches,
+    true,
+  );
+  assert.equal(
+    verdict.clients.claude.identityTransactions
+      .transactionOrderMatches,
+    true,
+  );
+});
+
+test("rejects zero, negative, non-safe, and malformed metadata nonces", async (t) => {
+  const cases = [
+    { name: "zero", nonce: 0 },
+    { name: "negative", nonce: -1 },
+    { name: "fractional", nonce: 1.5 },
+    {
+      name: "unsafe integer",
+      nonce: Number.MAX_SAFE_INTEGER + 1,
+    },
+    { name: "string", nonce: "2" },
+    { name: "bigint", nonce: 2n },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async (subtest) => {
+      const directory = await mkdtemp(
+        join(
+          process.env.TMPDIR,
+          "handshake-verifier-invalid-nonce-",
+        ),
+      );
+      subtest.after(() =>
+        rm(directory, { force: true, recursive: true }));
+      const codexDirectory = join(directory, "codex");
+      const claudeDirectory = join(directory, "claude");
+      await writeFixture(codexDirectory, CODEX_RESULT);
+      await writeFixture(claudeDirectory, CLAUDE_RESULT);
+      const publicClient = fakePublicClient(
+        [CODEX_RESULT, CLAUDE_RESULT],
+        { metadataNonces: [scenario.nonce, 1] },
+      );
+      const observations = {
+        completions: [],
+        crossParty: [],
+        factoryTokens: [],
+        tokenSubjects: [],
+      };
+      const clockchain = fakeClockchain(
+        [CODEX_RESULT, CLAUDE_RESULT],
+        observations,
+      );
+
+      const verdict = await verifyLiveResults({
+        ...(await verificationProvenance(directory, {
+          codexDirectory,
+          claudeDirectory,
+        })),
+        clientFactory: clockchain.clientFactory,
+        outputFile: join(directory, "verdict.json"),
+        publicClient,
+        resultDirectories: {
+          codex: codexDirectory,
+          claude: claudeDirectory,
+        },
+        tokenIssuer: clockchain.tokenIssuer,
+      });
+
+      assert.equal(verdict.status, "FAIL");
+      assert.equal(
+        verdict.clients.codex.errorCode,
+        "ERC8004_TRANSACTION_MISMATCH",
+      );
+      assert.equal(verdict.clients.claude.status, "PASS");
+    });
+  }
+});
+
 test("extracts secret canaries from operator files and fails closed without echoing them", async (t) => {
   const directory = await mkdtemp(
     join(process.env.TMPDIR, "handshake-verifier-fail-"),
@@ -3145,6 +3276,12 @@ test("rejects forged ERC-8004 transaction proof even when final owner and URI re
       name: "register calldata",
       mutateTransaction(transaction) {
         transaction.input = "0x12345678";
+      },
+    },
+    {
+      name: "register nonce",
+      mutateTransaction(transaction) {
+        transaction.nonce = 1;
       },
     },
     {
