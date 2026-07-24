@@ -85,6 +85,12 @@ const MAX_ARTIFACT_DEPTH = 8;
 const MAX_CANARY_FILE_BYTES = 128 * 1_024;
 const MAX_MANIFEST_BYTES = 256 * 1_024;
 const MAX_PROMPT_BYTES = 256 * 1_024;
+const VERIFIER_READ_FLAGS =
+  fileSystemConstants.O_RDONLY |
+  (fileSystemConstants.O_NOFOLLOW ?? 0) |
+  (fileSystemConstants.O_NONBLOCK ?? 0);
+export const VERIFIER_READ_FLAGS_FOR_TESTING =
+  VERIFIER_READ_FLAGS;
 const REPOSITORY_SHA_PATTERN = /^[0-9a-f]{40}$/i;
 const CODEX_VERSION_PATTERN =
   /^codex-cli \d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
@@ -277,83 +283,123 @@ function assertArtifactText(text, canaries) {
   }
 }
 
-async function readArtifactFile(path) {
-  let handle;
-  try {
-    handle = await open(
-      path,
-      fileSystemConstants.O_RDONLY |
-        fileSystemConstants.O_NOFOLLOW,
-    );
-    const stat = await handle.stat();
-    if (
-      !stat.isFile() ||
-      stat.size > MAX_ARTIFACT_FILE_BYTES
-    ) {
-      throw new LiveVerificationError(
-        "ARTIFACT_FILE_INVALID",
-      );
-    }
-    const bytes = await handle.readFile();
-    if (
-      bytes.length > MAX_ARTIFACT_FILE_BYTES
-    ) {
-      throw new LiveVerificationError(
-        "ARTIFACT_SCAN_LIMIT",
-      );
-    }
-    return {
-      bytes,
-      size: bytes.length,
-      text: bytes.toString("utf8"),
-    };
-  } catch (error) {
-    if (error instanceof LiveVerificationError) {
-      throw error;
-    }
-    throw new LiveVerificationError(
-      "ARTIFACT_FILE_INVALID",
-    );
-  } finally {
-    await handle?.close();
-  }
+function unchangedDescriptor(before, after) {
+  return (
+    after.isFile() &&
+    before.dev === after.dev &&
+    before.ino === after.ino &&
+    before.mode === after.mode &&
+    before.nlink === after.nlink &&
+    before.uid === after.uid &&
+    before.gid === after.gid &&
+    before.rdev === after.rdev &&
+    before.size === after.size &&
+    before.mtimeNs === after.mtimeNs &&
+    before.ctimeNs === after.ctimeNs
+  );
 }
 
-async function readTrustedFile(path, maximum) {
+async function readStableVerifierFile(path, {
+  afterRead,
+  errorFactory,
+  maximum,
+  minimum,
+}) {
+  let bytes;
+  let failure;
   let handle;
   try {
-    handle = await open(
-      absolutePath(path),
-      fileSystemConstants.O_RDONLY |
-        fileSystemConstants.O_NOFOLLOW,
-    );
-    const stat = await handle.stat();
+    handle = await open(path, VERIFIER_READ_FLAGS);
+    const before = await handle.stat({ bigint: true });
     if (
-      !stat.isFile() ||
-      stat.size < 1 ||
-      stat.size > maximum
+      !before.isFile() ||
+      before.size < BigInt(minimum) ||
+      before.size > BigInt(maximum)
     ) {
-      throw new LiveVerificationConfigurationError();
+      throw new Error("Verifier file boundary rejected.");
     }
-    const bytes = await handle.readFile();
-    if (bytes.length < 1 || bytes.length > maximum) {
-      throw new LiveVerificationConfigurationError();
+    bytes = await handle.readFile();
+    await afterRead?.();
+    const after = await handle.stat({ bigint: true });
+    if (
+      !unchangedDescriptor(before, after) ||
+      BigInt(bytes.length) !== before.size
+    ) {
+      throw new Error("Verifier file boundary rejected.");
     }
-    return bytes;
   } catch (error) {
-    if (error instanceof LiveVerificationConfigurationError) {
-      throw error;
-    }
-    throw new LiveVerificationConfigurationError();
-  } finally {
-    await handle?.close();
+    failure = error;
   }
+  if (handle) {
+    try {
+      await handle.close();
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  if (failure) {
+    throw errorFactory();
+  }
+  return bytes;
+}
+
+async function readArtifactFile(path, afterRead) {
+  const bytes = await readStableVerifierFile(path, {
+    afterRead,
+    errorFactory: () =>
+      new LiveVerificationError("ARTIFACT_FILE_INVALID"),
+    maximum: MAX_ARTIFACT_FILE_BYTES,
+    minimum: 0,
+  });
+  return Object.freeze({
+    bytes,
+    size: bytes.length,
+    text: bytes.toString("utf8"),
+  });
+}
+
+async function readTrustedFile(path, maximum, afterRead) {
+  return readStableVerifierFile(absolutePath(path), {
+    afterRead,
+    errorFactory: () =>
+      new LiveVerificationConfigurationError(),
+    maximum,
+    minimum: 1,
+  });
+}
+
+export async function readVerifierFileForTesting(
+  path,
+  maximum,
+  {
+    afterRead,
+    trusted = false,
+  } = {},
+) {
+  if (
+    !Number.isSafeInteger(maximum) ||
+    maximum < 1 ||
+    typeof trusted !== "boolean" ||
+    (
+      afterRead !== undefined &&
+      typeof afterRead !== "function"
+    )
+  ) {
+    throw new LiveVerificationConfigurationError();
+  }
+  if (trusted) {
+    return readTrustedFile(path, maximum, afterRead);
+  }
+  return (
+    await readArtifactFile(path, afterRead)
+  ).bytes;
 }
 
 async function scanArtifactDirectory(directory, canaries) {
   const rootStat = await lstat(directory);
+  let scanError = null;
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
-    throw new LiveVerificationError(
+    scanError = new LiveVerificationError(
       "ARTIFACT_DIRECTORY_INVALID",
     );
   }
@@ -363,29 +409,71 @@ async function scanArtifactDirectory(directory, canaries) {
   let fileCount = 0;
   let totalBytes = 0;
 
+  const retainScanError = (error) => {
+    scanError ??= error instanceof LiveVerificationError
+      ? error
+      : new LiveVerificationError("ARTIFACT_FILE_INVALID");
+  };
+
   while (queue.length > 0) {
     const current = queue.shift();
-    const entries = await readdir(current.directory, {
-      withFileTypes: true,
+    let entries;
+    try {
+      entries = await readdir(current.directory, {
+        withFileTypes: true,
+      });
+    } catch (error) {
+      retainScanError(error);
+      continue;
+    }
+    entries.sort((left, right) => {
+      const priority = (name) => {
+        if (name === "result.json") {
+          return 0;
+        }
+        if (name === "RESULT.md") {
+          return 1;
+        }
+        return 2;
+      };
+      return (
+        priority(left.name) - priority(right.name) ||
+        left.name.localeCompare(right.name)
+      );
     });
     for (const entry of entries) {
       const path = join(current.directory, entry.name);
       if (entry.isSymbolicLink()) {
-        throw new LiveVerificationError(
-          "ARTIFACT_SYMLINK_REJECTED",
+        retainScanError(
+          new LiveVerificationError(
+            "ARTIFACT_SYMLINK_REJECTED",
+          ),
         );
+        continue;
       }
       if (entry.isDirectory()) {
         if (current.depth >= MAX_ARTIFACT_DEPTH) {
-          throw new LiveVerificationError(
-            "ARTIFACT_SCAN_LIMIT",
+          retainScanError(
+            new LiveVerificationError(
+              "ARTIFACT_SCAN_LIMIT",
+            ),
           );
+          continue;
         }
-        const canonicalChild = await realpath(path);
+        let canonicalChild;
+        try {
+          canonicalChild = await realpath(path);
+        } catch (error) {
+          retainScanError(error);
+          continue;
+        }
         if (!isWithin(canonicalRoot, canonicalChild)) {
-          throw new LiveVerificationError(
-            "ARTIFACT_PATH_ESCAPE",
+          retainScanError(
+            new LiveVerificationError(
+              "ARTIFACT_PATH_ESCAPE",
+            ),
           );
+          continue;
         }
         queue.push({
           directory: canonicalChild,
@@ -394,49 +482,78 @@ async function scanArtifactDirectory(directory, canaries) {
         continue;
       }
       if (!entry.isFile()) {
-        throw new LiveVerificationError(
-          "ARTIFACT_FILE_INVALID",
+        retainScanError(
+          new LiveVerificationError(
+            "ARTIFACT_FILE_INVALID",
+          ),
         );
+        continue;
       }
-      const file = await readArtifactFile(path);
       fileCount += 1;
-      totalBytes += file.size;
-      if (
-        fileCount > MAX_ARTIFACT_FILES ||
-        totalBytes > MAX_ARTIFACT_TOTAL_BYTES
-      ) {
-        throw new LiveVerificationError(
-          "ARTIFACT_SCAN_LIMIT",
+      if (fileCount > MAX_ARTIFACT_FILES) {
+        retainScanError(
+          new LiveVerificationError(
+            "ARTIFACT_SCAN_LIMIT",
+          ),
         );
+        continue;
       }
+      let file;
+      try {
+        file = await readArtifactFile(path);
+      } catch (error) {
+        retainScanError(error);
+        continue;
+      }
+      if (
+        totalBytes + file.size >
+        MAX_ARTIFACT_TOTAL_BYTES
+      ) {
+        retainScanError(
+          new LiveVerificationError(
+            "ARTIFACT_SCAN_LIMIT",
+          ),
+        );
+        continue;
+      }
+      totalBytes += file.size;
       const { text } = file;
-      assertArtifactText(text, canaries);
+      try {
+        assertArtifactText(text, canaries);
+      } catch (error) {
+        retainScanError(error);
+      }
       if (extname(path).toLowerCase() === ".json") {
         try {
           assertSecretFree(JSON.parse(text), canaries);
         } catch (error) {
           if (/Secret material detected/i.test(error?.message)) {
-            throw new LiveVerificationError(
-              "ARTIFACT_SECRET_DETECTED",
+            retainScanError(
+              new LiveVerificationError(
+                "ARTIFACT_SECRET_DETECTED",
+              ),
             );
           }
         }
       }
-      files.set(relative(canonicalRoot, path), text);
+      files.set(relative(canonicalRoot, path), file);
     }
   }
-  return files;
+  return Object.freeze({
+    error: scanError,
+    files,
+  });
 }
 
-async function loadLocalResult(directory, canaries) {
-  const files = await scanArtifactDirectory(
-    directory,
-    canaries,
-  );
+function loadLocalResult(directory, artifactScan, canaries) {
+  if (artifactScan.error) {
+    throw artifactScan.error;
+  }
+  const { files } = artifactScan;
   const jsonPath = join(directory, "result.json");
   const markdownPath = join(directory, "RESULT.md");
-  const jsonText = files.get("result.json");
-  const markdown = files.get("RESULT.md");
+  const jsonText = files.get("result.json")?.text;
+  const markdown = files.get("RESULT.md")?.text;
   if (
     typeof jsonText !== "string" ||
     typeof markdown !== "string"
@@ -505,7 +622,7 @@ function versionMatches(clientName, value) {
   );
 }
 
-async function validateManifestEvidence(
+function validateManifestEvidenceReference(
   evidence,
   expectedPath,
 ) {
@@ -517,7 +634,17 @@ async function validateManifestEvidence(
   ) {
     throw new LiveVerificationConfigurationError();
   }
-  const file = await readArtifactFile(expectedPath);
+}
+
+function validateManifestEvidence(
+  evidence,
+  expectedPath,
+  file,
+) {
+  validateManifestEvidenceReference(evidence, expectedPath);
+  if (!file) {
+    throw new LiveVerificationConfigurationError();
+  }
   const digest = createHash("sha256")
     .update(file.bytes)
     .digest("hex");
@@ -631,11 +758,11 @@ async function validateAcceptanceManifest({
     if (times[name].started > times[name].completed) {
       throw new LiveVerificationConfigurationError();
     }
-    await validateManifestEvidence(
+    validateManifestEvidenceReference(
       client.evidence.json,
       join(directories[name], "result.json"),
     );
-    await validateManifestEvidence(
+    validateManifestEvidenceReference(
       client.evidence.markdown,
       join(directories[name], "RESULT.md"),
     );
@@ -649,6 +776,42 @@ async function validateAcceptanceManifest({
     throw new LiveVerificationConfigurationError();
   }
   return manifest;
+}
+
+export async function loadAcceptanceArtifactForTesting({
+  directory,
+  evidence,
+}) {
+  if (!hasExactKeys(evidence, ["json", "markdown"])) {
+    throw new LiveVerificationConfigurationError();
+  }
+  const activeDirectory = absolutePath(directory);
+  const artifactScan = await scanArtifactDirectory(
+    activeDirectory,
+    [],
+  );
+  if (artifactScan.error) {
+    throw artifactScan.error;
+  }
+  validateManifestEvidence(
+    evidence.json,
+    join(activeDirectory, "result.json"),
+    artifactScan.files.get("result.json"),
+  );
+  validateManifestEvidence(
+    evidence.markdown,
+    join(activeDirectory, "RESULT.md"),
+    artifactScan.files.get("RESULT.md"),
+  );
+  return Object.freeze({
+    parse() {
+      return loadLocalResult(
+        activeDirectory,
+        artifactScan,
+        [],
+      );
+    },
+  });
 }
 
 function addressesEqual(left, right) {
@@ -1157,18 +1320,45 @@ export async function verifyLiveResults({
     ...normalizedCanaries(canaries),
     ...operatorData.canaries,
   ]);
-  await validateAcceptanceManifest({
+  const manifest = await validateAcceptanceManifest({
     directories,
     expectedRepositorySha: activeRepositorySha,
     manifestFile,
   });
+  const artifactScans = {};
+  for (const name of CLIENT_NAMES) {
+    try {
+      artifactScans[name] = await scanArtifactDirectory(
+        directories[name],
+        activeCanaries,
+      );
+    } catch (error) {
+      artifactScans[name] = Object.freeze({
+        error,
+        files: new Map(),
+      });
+    }
+  }
+  for (const name of CLIENT_NAMES) {
+    validateManifestEvidence(
+      manifest.clients[name].evidence.json,
+      join(directories[name], "result.json"),
+      artifactScans[name].files.get("result.json"),
+    );
+    validateManifestEvidence(
+      manifest.clients[name].evidence.markdown,
+      join(directories[name], "RESULT.md"),
+      artifactScans[name].files.get("RESULT.md"),
+    );
+  }
   const localResults = {};
   const clients = {};
 
   for (const name of CLIENT_NAMES) {
     try {
-      const localResult = await loadLocalResult(
+      const localResult = loadLocalResult(
         directories[name],
+        artifactScans[name],
         activeCanaries,
       );
       assertOperatorIdentity(

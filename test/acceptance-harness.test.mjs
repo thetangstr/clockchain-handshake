@@ -8,6 +8,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -42,6 +43,7 @@ import {
   main as verifyResultsMain,
   verifyLiveResults,
 } from "../scripts/verify-live-results.mjs";
+import * as liveResultsVerifier from "../scripts/verify-live-results.mjs";
 import {
   REGISTRY_ADDRESS,
   SINGLE_VALIDATOR_DISCLAIMER,
@@ -170,6 +172,32 @@ function memoryOutput() {
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+async function createPosixFifo(path) {
+  await new Promise((resolveCreation, rejectCreation) => {
+    const child = spawn("mkfifo", [path], {
+      stdio: "ignore",
+    });
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      rejectCreation(new Error("mkfifo timed out."));
+    }, 1_000);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      rejectCreation(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timeout);
+      if (code === 0) {
+        resolveCreation();
+      } else {
+        rejectCreation(
+          new Error(`mkfifo exited with code ${code}.`),
+        );
+      }
+    });
+  });
 }
 
 async function writeFixture(directory, result) {
@@ -2004,6 +2032,183 @@ test("bounded evidence reads own no-follow descriptor flags and reject metadata 
   await assert.rejects(
     readBoundedFileForTesting(symlinkPath, 1_024),
   );
+});
+
+test("verifier parses the exact artifact bytes validated against the manifest", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-verifier-custody-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  const fixture = await writeFixture(directory, CODEX_RESULT);
+  const evidence = {
+    json: {
+      path: fixture.jsonPath,
+      sha256: sha256(await readFile(fixture.jsonPath)),
+    },
+    markdown: {
+      path: fixture.markdownPath,
+      sha256: sha256(await readFile(fixture.markdownPath)),
+    },
+  };
+
+  assert.equal(
+    typeof liveResultsVerifier
+      .loadAcceptanceArtifactForTesting,
+    "function",
+  );
+  const captured =
+    await liveResultsVerifier
+      .loadAcceptanceArtifactForTesting({
+        directory,
+        evidence,
+      });
+  await rename(
+    fixture.jsonPath,
+    `${fixture.jsonPath}.validated`,
+  );
+  await rename(
+    fixture.markdownPath,
+    `${fixture.markdownPath}.validated`,
+  );
+  await writeFixture(directory, CLAUDE_RESULT);
+  const loaded = captured.parse();
+
+  assert.deepEqual(loaded.result, CODEX_RESULT);
+  assert.deepEqual(
+    JSON.parse(await readFile(fixture.jsonPath, "utf8")),
+    CLAUDE_RESULT,
+  );
+});
+
+test("verifier descriptor reads reject post-read metadata mutation for artifact and trusted files", async (t) => {
+  assert.equal(
+    liveResultsVerifier.VERIFIER_READ_FLAGS_FOR_TESTING,
+    fileSystemConstants.O_RDONLY |
+      (fileSystemConstants.O_NOFOLLOW ?? 0) |
+      (fileSystemConstants.O_NONBLOCK ?? 0),
+  );
+  assert.equal(
+    typeof liveResultsVerifier.readVerifierFileForTesting,
+    "function",
+  );
+
+  for (const trusted of [false, true]) {
+    await t.test(
+      trusted ? "trusted file" : "artifact file",
+      async (subtest) => {
+        const directory = await mkdtemp(
+          join(
+            process.env.TMPDIR,
+            "handshake-verifier-metadata-",
+          ),
+        );
+        subtest.after(() =>
+          rm(directory, { force: true, recursive: true }));
+        const path = join(directory, "input.json");
+        await writeFile(path, '{"status":"PASS"}\n', {
+          mode: 0o600,
+        });
+
+        await assert.rejects(
+          liveResultsVerifier.readVerifierFileForTesting(
+            path,
+            1_024,
+            {
+              trusted,
+              afterRead: () => chmod(path, 0o640),
+            },
+          ),
+          (error) =>
+            error?.code === (
+              trusted
+                ? "LIVE_VERIFICATION_CONFIGURATION"
+                : "ARTIFACT_FILE_INVALID"
+            ),
+        );
+      },
+    );
+  }
+});
+
+test("verifier descriptor reads reject symlink, directory, and FIFO replacements without hanging", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  assert.equal(
+    typeof liveResultsVerifier.readVerifierFileForTesting,
+    "function",
+  );
+  const replacements = [
+    {
+      name: "symlink",
+      async create(path) {
+        const target = `${path}.target`;
+        await writeFile(target, "replacement\n");
+        await symlink(target, path);
+      },
+    },
+    {
+      name: "directory",
+      create: (path) => mkdir(path),
+    },
+    {
+      name: "FIFO",
+      create: createPosixFifo,
+    },
+  ];
+
+  for (const replacement of replacements) {
+    for (const trusted of [false, true]) {
+      await t.test(
+        `${replacement.name} ${trusted ? "trusted" : "artifact"}`,
+        async (subtest) => {
+          const directory = await mkdtemp(
+            join(
+              process.env.TMPDIR,
+              "handshake-verifier-replacement-",
+            ),
+          );
+          subtest.after(() =>
+            rm(directory, { force: true, recursive: true }));
+          const path = join(directory, "input.json");
+          await writeFile(path, "original\n");
+          await rename(path, `${path}.original`);
+          await replacement.create(path);
+
+          let timeout;
+          try {
+            await assert.rejects(
+              Promise.race([
+                liveResultsVerifier.readVerifierFileForTesting(
+                  path,
+                  1_024,
+                  { trusted },
+                ),
+                new Promise((_, rejectTimeout) => {
+                  timeout = setTimeout(
+                    () =>
+                      rejectTimeout(
+                        new Error("Verifier file read hung."),
+                      ),
+                    500,
+                  );
+                }),
+              ]),
+              (error) =>
+                error?.message !== "Verifier file read hung." &&
+                error?.code === (
+                  trusted
+                    ? "LIVE_VERIFICATION_CONFIGURATION"
+                    : "ARTIFACT_FILE_INVALID"
+                ),
+            );
+          } finally {
+            clearTimeout(timeout);
+          }
+        },
+      );
+    }
+  }
 });
 
 test("a nonzero client exit fails the aggregate while the other isolated client still runs", async (t) => {
