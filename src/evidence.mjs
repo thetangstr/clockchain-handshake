@@ -572,37 +572,6 @@ async function removeTemporaryFiles(paths, fileSystem) {
   );
 }
 
-async function removePublishedFiles(entries, fileSystem) {
-  let cleanupFailed = false;
-  for (const entry of [...entries].reverse()) {
-    try {
-      const [temporary, final] = await Promise.all([
-        fileSystem.lstat(entry.temporaryPath),
-        fileSystem.lstat(entry.finalPath),
-      ]);
-      if (
-        temporary.dev === final.dev &&
-        temporary.ino === final.ino
-      ) {
-        await fileSystem.rm(entry.finalPath, { force: true });
-      }
-    } catch (error) {
-      if (error?.code !== "ENOENT") {
-        cleanupFailed = true;
-      }
-    }
-  }
-  if (cleanupFailed) {
-    throw new EvidenceError(
-      "Handshake evidence publication rollback failed.",
-      {
-        category: "configuration",
-        code: "HANDSHAKE_EVIDENCE_ROLLBACK",
-      },
-    );
-  }
-}
-
 export async function writeEvidence({
   directory,
   result,
@@ -645,7 +614,6 @@ export async function writeEvidence({
     temporaryJsonPath,
     temporaryMarkdownPath,
   ];
-  const published = [];
 
   try {
     await activeFileSystem.mkdir(directory, { recursive: true });
@@ -693,18 +661,10 @@ export async function writeEvidence({
       temporaryJsonPath,
       jsonPath,
     );
-    published.push({
-      temporaryPath: temporaryJsonPath,
-      finalPath: jsonPath,
-    });
     await activeFileSystem.link(
       temporaryMarkdownPath,
       markdownPath,
     );
-    published.push({
-      temporaryPath: temporaryMarkdownPath,
-      finalPath: markdownPath,
-    });
 
     const finalJson = await activeFileSystem.readFile(
       jsonPath,
@@ -729,9 +689,6 @@ export async function writeEvidence({
 
     return { jsonPath, markdownPath };
   } catch (error) {
-    if (published.length > 0) {
-      await removePublishedFiles(published, activeFileSystem);
-    }
     if (error instanceof EvidenceError) {
       throw error;
     }

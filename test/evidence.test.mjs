@@ -441,15 +441,17 @@ test("refuses an existing canonical pair without replacing or restoring it", asy
   );
 });
 
-test("removes the first new final when the second exclusive publication fails", async (t) => {
+test("leaves the first new final when the second exclusive publication fails", async (t) => {
   const directory = await temporaryDirectory(t);
+  const jsonPath = join(directory, "result.json");
+  const result = validResult();
   let publicationLinks = 0;
 
   await assert.rejects(
     () =>
       writeEvidence({
         directory,
-        result: validResult(),
+        result,
         canaries: [],
         fileSystem: {
           async link(source, destination) {
@@ -465,12 +467,69 @@ test("removes the first new final when the second exclusive publication fails", 
   );
 
   assert.equal(publicationLinks, 2);
-  assert.deepEqual(await readdir(directory), []);
+  assert.deepEqual(
+    JSON.parse(await readFile(jsonPath, "utf8")),
+    result,
+  );
+  assert.deepEqual(await readdir(directory), ["result.json"]);
 });
 
-test("removes newly published finals when final read-back fails without a prior pair", async (t) => {
+test("never removes a canonical final replaced after rollback inspection", async (t) => {
   const directory = await temporaryDirectory(t);
   const jsonPath = join(directory, "result.json");
+  const foreignBytes = Buffer.from("foreign-final-bytes\n");
+  let publicationLinks = 0;
+  let replacementInstalled = false;
+  let canonicalRemoveCalls = 0;
+
+  await assert.rejects(
+    () =>
+      writeEvidence({
+        directory,
+        result: validResult(),
+        canaries: [],
+        fileSystem: {
+          async link(source, destination) {
+            publicationLinks += 1;
+            if (publicationLinks === 2) {
+              throw new Error("injected publication failure");
+            }
+            return link(source, destination);
+          },
+          async rm(path, options) {
+            if (
+              !replacementInstalled &&
+              (
+                path === jsonPath ||
+                path.includes(".result.")
+              )
+            ) {
+              replacementInstalled = true;
+              if (path === jsonPath) {
+                canonicalRemoveCalls += 1;
+              }
+              await rm(jsonPath, { force: true });
+              await writeFile(jsonPath, foreignBytes);
+            }
+            return rm(path, options);
+          },
+        },
+      }),
+    /evidence/i,
+  );
+
+  assert.equal(publicationLinks, 2);
+  assert.equal(replacementInstalled, true);
+  assert.equal(canonicalRemoveCalls, 0);
+  assert.deepEqual(await readFile(jsonPath), foreignBytes);
+  assert.deepEqual(await readdir(directory), ["result.json"]);
+});
+
+test("leaves newly published finals when final read-back fails without a prior pair", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const jsonPath = join(directory, "result.json");
+  const markdownPath = join(directory, "RESULT.md");
+  const result = validResult();
   let publicationLinks = 0;
   let rejectedFinalRead = false;
 
@@ -478,7 +537,7 @@ test("removes newly published finals when final read-back fails without a prior 
     () =>
       writeEvidence({
         directory,
-        result: validResult(),
+        result,
         canaries: [],
         fileSystem: {
           async readFile(path, options) {
@@ -496,7 +555,7 @@ test("removes newly published finals when final read-back fails without a prior 
             const value = await link(source, destination);
             if (
               destination === jsonPath ||
-              destination === join(directory, "RESULT.md")
+              destination === markdownPath
             ) {
               publicationLinks += 1;
             }
@@ -508,5 +567,16 @@ test("removes newly published finals when final read-back fails without a prior 
   );
 
   assert.equal(rejectedFinalRead, true);
-  assert.deepEqual(await readdir(directory), []);
+  assert.deepEqual(
+    JSON.parse(await readFile(jsonPath, "utf8")),
+    result,
+  );
+  assert.equal(
+    await readFile(markdownPath, "utf8"),
+    renderResultMarkdown(result),
+  );
+  assert.deepEqual(
+    (await readdir(directory)).sort(),
+    ["RESULT.md", "result.json"],
+  );
 });
