@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants as fileSystemConstants } from "node:fs";
 import {
@@ -35,6 +36,7 @@ import {
   readBoundedFileForTesting,
   runCleanClients,
 } from "../scripts/run-clean-clients.mjs";
+import * as cleanClientsHarness from "../scripts/run-clean-clients.mjs";
 import {
   expectedReceiptHash,
   main as verifyResultsMain,
@@ -297,14 +299,21 @@ if (mode === "hang") {
   process.stderr.write(
     "diagnostic 0x" + "9".repeat(64) + "\\n",
   );
-  if (mode === "lingering-success") {
+  if (
+    mode === "lingering-success" ||
+    mode === "lingering-success-inherited"
+  ) {
     spawn(process.execPath, [
       "-e",
       "process.on('SIGTERM', () => {});" +
         "setTimeout(() => require('node:fs').writeFileSync(" +
         JSON.stringify(marker) + ", 'escaped'), 650);" +
         "setInterval(() => {}, 10000)",
-    ], { stdio: "ignore" });
+    ], {
+      stdio: mode === "lingering-success-inherited"
+        ? ["ignore", "inherit", "inherit"]
+        : "ignore",
+    });
   }
   process.exit(mode === "fail" ? 7 : 0);
 }
@@ -1328,6 +1337,90 @@ test("requires an exact programmatic risk acknowledgement before invitation read
   );
 });
 
+test("supports the operator acceptance harness only on macOS and Linux", () => {
+  assert.equal(
+    typeof cleanClientsHarness
+      .assertAcceptanceHarnessPlatformForTesting,
+    "function",
+  );
+  assert.doesNotThrow(() =>
+    cleanClientsHarness
+      .assertAcceptanceHarnessPlatformForTesting("darwin"));
+  assert.doesNotThrow(() =>
+    cleanClientsHarness
+      .assertAcceptanceHarnessPlatformForTesting("linux"));
+  assert.throws(
+    () =>
+      cleanClientsHarness
+        .assertAcceptanceHarnessPlatformForTesting("win32"),
+    (error) =>
+      error?.name === "UnsupportedAcceptancePlatformError" &&
+      error?.code === "HARNESS_UNSUPPORTED_PLATFORM",
+  );
+});
+
+test("rejects an unsupported runtime platform before invitations, spawning, or artifacts", {
+  concurrency: false,
+}, async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-platform-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const options = harnessOptions({
+    claudeFixture,
+    codexFixture,
+    directory,
+    executable,
+  });
+  let invitationReads = 0;
+  let spawnCalls = 0;
+  options.readInvitation = async () => {
+    invitationReads += 1;
+    throw new Error("must not read");
+  };
+  options.spawnImpl = () => {
+    spawnCalls += 1;
+    throw new Error("must not spawn");
+  };
+  const originalPlatform = process.platform;
+  Object.defineProperty(process, "platform", {
+    configurable: true,
+    value: "win32",
+  });
+
+  try {
+    await assert.rejects(
+      runCleanClients(options),
+      (error) =>
+        error?.name === "UnsupportedAcceptancePlatformError" &&
+        error?.code === "HARNESS_UNSUPPORTED_PLATFORM",
+    );
+  } finally {
+    Object.defineProperty(process, "platform", {
+      configurable: true,
+      value: originalPlatform,
+    });
+  }
+
+  assert.equal(invitationReads, 0);
+  assert.equal(spawnCalls, 0);
+  await assert.rejects(
+    readFile(options.outputRoot),
+    /ENOENT/,
+  );
+});
+
 test("rejects a mutable repository ref before reading invitations or launching clients", async (t) => {
   const directory = await mkdtemp(
     join(process.env.TMPDIR, "handshake-mutable-ref-"),
@@ -1544,6 +1637,204 @@ test("reaps lingering descendants after a successful leader exit without reporti
   assert.equal(result.clients.codex.timedOut, false);
   assert.equal(result.clients.codex.outputLimitExceeded, false);
   await assert.rejects(readFile(marker), /ENOENT/);
+});
+
+test("starts cleanup on leader exit when a descendant inherits output pipes", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-descendant-pipes-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const marker = join(directory, "escaped-inherited-descendant.txt");
+
+  const result = await runCleanClients(
+    harnessOptions({
+      claudeFixture,
+      codexFixture,
+      codexMode: "lingering-success-inherited",
+      directory,
+      executable,
+      marker,
+      terminationGraceMs: 20,
+      timeoutMs: 250,
+    }),
+  );
+  await delay(700);
+
+  assert.equal(result.status, "PASS");
+  assert.equal(result.clients.codex.timedOut, false);
+  assert.equal(result.clients.codex.outputLimitExceeded, false);
+  await assert.rejects(readFile(marker), /ENOENT/);
+});
+
+test("waits for confirmed process-group absence before launching the client command", {
+  concurrency: false,
+}, async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-cleanup-confirmed-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const options = harnessOptions({
+    claudeFixture,
+    codexFixture,
+    directory,
+    executable,
+    terminationGraceMs: 1,
+  });
+  const originalKill = process.kill;
+  let groupPresent = true;
+  let spawnCalls = 0;
+  let settled = false;
+  let hardKillObserved;
+  const hardKillSeen = new Promise((resolveSeen) => {
+    hardKillObserved = resolveSeen;
+  });
+  process.kill = (pid, signal) => {
+    if (pid < 0) {
+      if (signal === 0) {
+        if (groupPresent) {
+          return true;
+        }
+        const error = new Error("group absent");
+        error.code = "ESRCH";
+        throw error;
+      }
+      if (signal === "SIGKILL") {
+        hardKillObserved();
+      }
+      return true;
+    }
+    return originalKill(pid, signal);
+  };
+  options.spawnImpl = (...args) => {
+    spawnCalls += 1;
+    return spawn(...args);
+  };
+
+  let pending;
+  let earlyAssertion;
+  try {
+    pending = runCleanClients(options).then((result) => {
+      settled = true;
+      return result;
+    });
+    await hardKillSeen;
+    await delay(25);
+    try {
+      assert.equal(spawnCalls, 1);
+      assert.equal(settled, false);
+    } catch (error) {
+      earlyAssertion = error;
+    }
+    groupPresent = false;
+    const result = await pending;
+    if (earlyAssertion) {
+      throw earlyAssertion;
+    }
+    assert.equal(result.status, "PASS");
+    assert.equal(result.clients.codex.timedOut, false);
+    assert.equal(
+      result.clients.codex.outputLimitExceeded,
+      false,
+    );
+  } finally {
+    groupPresent = false;
+    await pending?.catch(() => {});
+    process.kill = originalKill;
+  }
+});
+
+test("fails closed and skips the second client when process-group disappearance cannot be confirmed", {
+  concurrency: false,
+}, async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-cleanup-unconfirmed-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const options = harnessOptions({
+    claudeFixture,
+    codexFixture,
+    directory,
+    executable,
+    terminationGraceMs: 1,
+  });
+  const originalKill = process.kill;
+  let spawnCalls = 0;
+  process.kill = (pid, signal) => {
+    if (pid < 0) {
+      return true;
+    }
+    return originalKill(pid, signal);
+  };
+  options.spawnImpl = (...args) => {
+    spawnCalls += 1;
+    return spawn(...args);
+  };
+
+  try {
+    const result = await runCleanClients(options);
+    assert.equal(result.status, "FAIL");
+    assert.equal(spawnCalls, 1);
+    assert.equal(
+      result.clients.codex.errorCode,
+      "CLIENT_PROCESS_GROUP_CLEANUP_FAILED",
+    );
+    assert.equal(result.clients.codex.timedOut, false);
+    assert.equal(
+      result.clients.codex.outputLimitExceeded,
+      false,
+    );
+    assert.equal(result.clients.codex.resultPaths, null);
+    assert.equal(
+      result.clients.claude.errorCode,
+      "CLIENT_SKIPPED_AFTER_CLEANUP_FAILURE",
+    );
+    await assert.rejects(
+      readFile(
+        join(
+          directory,
+          "artifacts",
+          "codex",
+          "result.json",
+        ),
+      ),
+      /ENOENT/,
+    );
+  } finally {
+    process.kill = originalKill;
+  }
 });
 
 test("bounded evidence reads own no-follow descriptor flags and reject metadata changes", async (t) => {

@@ -134,6 +134,10 @@ test("operator-only clean-client acceptance is prominently disclosed", async (t)
       );
       assert.match(
         contents,
+        /`npm run acceptance:clients` is supported on macOS and Linux only/i,
+      );
+      assert.match(
+        contents,
         /selected local (?:auth|authentication) material[^.]*real\s+`HOME`[^.]*invitation path/i,
       );
       assert.match(contents, /not an OS or\s+container sandbox/i);

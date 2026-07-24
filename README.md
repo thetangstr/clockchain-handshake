@@ -30,6 +30,9 @@ permission-bypass flags. It inherits selected local auth material, the real
 `HOME`, and each invitation path. Its temporary directories are not an OS or
 container sandbox.
 
+`npm run acceptance:clients` is supported on macOS and Linux only. The core
+`npm run demo` stakeholder flow remains platform-neutral.
+
 Redaction protects captured artifacts after the clients execute, but it cannot
 prevent a malicious or compromised client from reading or exfiltrating accessible
 data. Run it only with a trusted repository commit, trusted prompt, and trusted

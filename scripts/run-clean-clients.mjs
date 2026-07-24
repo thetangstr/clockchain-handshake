@@ -49,6 +49,8 @@ const DEFAULT_TIMEOUT_MS = 15 * 60 * 1_000;
 const DEFAULT_TERMINATION_GRACE_MS = 2_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1_024 * 1_024;
 const DEFAULT_MAX_PROMPT_BYTES = 256 * 1_024;
+const PROCESS_GROUP_CONFIRMATION_TIMEOUT_MS = 1_000;
+const PROCESS_GROUP_POLL_INTERVAL_MS = 10;
 const MAX_DISCOVERY_ENTRIES = 20_000;
 const MAX_DISCOVERY_DEPTH = 16;
 const MAX_EVIDENCE_BYTES = 2 * 1_024 * 1_024;
@@ -140,6 +142,27 @@ class MissingRiskAcknowledgementError
     super();
     this.name = "MissingRiskAcknowledgementError";
   }
+}
+
+class UnsupportedAcceptancePlatformError
+  extends HarnessConfigurationError {
+  constructor() {
+    super();
+    this.name = "UnsupportedAcceptancePlatformError";
+    this.code = "HARNESS_UNSUPPORTED_PLATFORM";
+  }
+}
+
+function assertAcceptanceHarnessPlatform(platform) {
+  if (platform !== "darwin" && platform !== "linux") {
+    throw new UnsupportedAcceptancePlatformError();
+  }
+}
+
+export function assertAcceptanceHarnessPlatformForTesting(
+  platform,
+) {
+  assertAcceptanceHarnessPlatform(platform);
 }
 
 function isPlainObject(value) {
@@ -403,6 +426,27 @@ function processGroupExists(child) {
   }
 }
 
+function waitForCleanupPoll(milliseconds) {
+  return new Promise((resolvePoll) => {
+    setTimeout(resolvePoll, milliseconds);
+  });
+}
+
+async function confirmProcessGroupAbsent(child) {
+  const deadline =
+    Date.now() + PROCESS_GROUP_CONFIRMATION_TIMEOUT_MS;
+  while (processGroupExists(child)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      return false;
+    }
+    await waitForCleanupPoll(
+      Math.min(PROCESS_GROUP_POLL_INTERVAL_MS, remaining),
+    );
+  }
+  return true;
+}
+
 async function runProcess({
   args,
   cwd,
@@ -426,6 +470,7 @@ async function runProcess({
       });
     } catch {
       resolveProcess({
+        cleanupFailed: false,
         exitCode: null,
         outputLimitExceeded: false,
         signal: null,
@@ -446,22 +491,28 @@ async function runProcess({
     let outputLimitExceeded = false;
     let spawnFailed = false;
     let terminationStarted = false;
-    let hardKillCompleted = false;
+    let cleanupCompleted = false;
+    let cleanupFailed = false;
+    let exitResult;
     let closeResult;
 
     const finalize = () => {
       if (
         settled ||
-        closeResult === undefined ||
-        (terminationStarted && !hardKillCompleted)
+        (!cleanupFailed && closeResult === undefined) ||
+        (terminationStarted && !cleanupCompleted)
       ) {
         return;
       }
+      const processResult = closeResult ??
+        exitResult ??
+        { exitCode: null, signal: null };
       settled = true;
       resolveProcess({
-        exitCode: closeResult.exitCode,
+        cleanupFailed,
+        exitCode: processResult.exitCode,
         outputLimitExceeded,
-        signal: closeResult.signal,
+        signal: processResult.signal,
         spawnFailed,
         stderr: Buffer.concat(stderr),
         stdout: Buffer.concat(stdout),
@@ -469,21 +520,34 @@ async function runProcess({
       });
     };
 
-    const terminate = (reason) => {
+    const finishCleanup = async () => {
+      if (processGroupExists(child)) {
+        terminateProcessGroup(child, "SIGKILL");
+      }
+      cleanupFailed = !(await confirmProcessGroupAbsent(child));
+      cleanupCompleted = true;
+      if (cleanupFailed) {
+        child.stdin?.destroy();
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        child.unref?.();
+      }
+      finalize();
+    };
+
+    const terminate = (reason = null) => {
       if (settled || terminationStarted) {
         return;
       }
       terminationStarted = true;
       if (reason === "timeout") {
         timedOut = true;
-      } else {
+      } else if (reason === "output") {
         outputLimitExceeded = true;
       }
       terminateProcessGroup(child, "SIGTERM");
       setTimeout(() => {
-        terminateProcessGroup(child, "SIGKILL");
-        hardKillCompleted = true;
-        finalize();
+        void finishCleanup();
       }, terminationGraceMs);
     };
 
@@ -524,18 +588,20 @@ async function runProcess({
     }, timeoutMs);
     timeout.unref?.();
 
+    child.once("exit", (exitCode, signal) => {
+      clearTimeout(timeout);
+      exitResult = { exitCode, signal };
+      if (!terminationStarted && processGroupExists(child)) {
+        terminate();
+      }
+      finalize();
+    });
+
     child.once("close", (exitCode, signal) => {
       clearTimeout(timeout);
       closeResult = { exitCode, signal };
       if (!terminationStarted && processGroupExists(child)) {
-        terminationStarted = true;
-        terminateProcessGroup(child, "SIGTERM");
-        setTimeout(() => {
-          terminateProcessGroup(child, "SIGKILL");
-          hardKillCompleted = true;
-          finalize();
-        }, terminationGraceMs);
-        return;
+        terminate();
       }
       finalize();
     });
@@ -813,6 +879,9 @@ async function writeLog(path, value, canaries) {
 }
 
 function publicFailureCode(processResult) {
+  if (processResult.cleanupFailed) {
+    return "CLIENT_PROCESS_GROUP_CLEANUP_FAILED";
+  }
   if (processResult.spawnFailed) {
     return "CLIENT_SPAWN_FAILED";
   }
@@ -901,6 +970,7 @@ async function runOneClient({
   let processResult = versionResult;
   if (
     !versionResult.spawnFailed &&
+    !versionResult.cleanupFailed &&
     !versionResult.timedOut &&
     !versionResult.outputLimitExceeded &&
     versionResult.exitCode === 0 &&
@@ -935,6 +1005,7 @@ async function runOneClient({
   let errorCode = publicFailureCode(processResult);
   if (
     !processResult.spawnFailed &&
+    !processResult.cleanupFailed &&
     !processResult.timedOut &&
     !processResult.outputLimitExceeded &&
     processResult.exitCode === 0
@@ -973,6 +1044,30 @@ async function runOneClient({
     resultPaths,
     stdoutLog,
     stderrLog,
+  };
+}
+
+function skippedClient(command, now) {
+  const timestamp = now().toISOString();
+  return {
+    status: "FAIL",
+    command: {
+      executable: command.executable,
+      args: [...command.args],
+    },
+    cliVersion: null,
+    startedAt: timestamp,
+    completedAt: timestamp,
+    exitCode: null,
+    signal: null,
+    timedOut: false,
+    outputLimitExceeded: false,
+    errorCode: "CLIENT_SKIPPED_AFTER_CLEANUP_FAILURE",
+    evidence: null,
+    workDirectory: null,
+    resultPaths: null,
+    stdoutLog: null,
+    stderrLog: null,
   };
 }
 
@@ -1018,6 +1113,7 @@ export async function runCleanClients({
   terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 } = {}) {
+  assertAcceptanceHarnessPlatform(process.platform);
   if (operatorRiskAcknowledged !== true) {
     throw new HarnessConfigurationError();
   }
@@ -1085,23 +1181,28 @@ export async function runCleanClients({
 
   const startedAt = now().toISOString();
   const clients = {};
+  let cleanupFailed = false;
   for (const name of CLIENT_NAMES) {
-    clients[name] = await runOneClient({
-      artifactDirectory: artifactDirectories[name],
-      baseEnvironment,
-      baseTemporaryDirectory: activeTemporaryDirectory,
-      clientName: name,
-      command: activeCommands[name],
-      derivedInvitationCanaries: derivedCanaries[name],
-      invitationFile: activeInvitations[name],
-      maxOutputBytes,
-      now,
-      prompt,
-      repositoryRef: activeRepositoryRef,
-      spawnImpl,
-      terminationGraceMs,
-      timeoutMs,
-    });
+    clients[name] = cleanupFailed
+      ? skippedClient(activeCommands[name], now)
+      : await runOneClient({
+          artifactDirectory: artifactDirectories[name],
+          baseEnvironment,
+          baseTemporaryDirectory: activeTemporaryDirectory,
+          clientName: name,
+          command: activeCommands[name],
+          derivedInvitationCanaries: derivedCanaries[name],
+          invitationFile: activeInvitations[name],
+          maxOutputBytes,
+          now,
+          prompt,
+          repositoryRef: activeRepositoryRef,
+          spawnImpl,
+          terminationGraceMs,
+          timeoutMs,
+        });
+    cleanupFailed ||= clients[name].errorCode ===
+      "CLIENT_PROCESS_GROUP_CLEANUP_FAILED";
   }
   const status = CLIENT_NAMES.every(
     (name) => clients[name].status === "PASS",
