@@ -138,6 +138,24 @@ test("computes the deployed canonical receipt event hash", () => {
   );
 });
 
+test("hashes a nested own enumerable __proto__ key", () => {
+  const cleanEvent = validReceiptEvent();
+  const hostileEvent = validReceiptEvent();
+  Object.defineProperty(
+    hostileEvent.inputs.authorization,
+    "__proto__",
+    {
+      enumerable: true,
+      value: "own-data",
+    },
+  );
+
+  assert.notEqual(
+    computeReceiptEventHash(hostileEvent),
+    computeReceiptEventHash(cleanEvent),
+  );
+});
+
 test("rejects non-plain or non-JSON-safe receipt events without echoing values", () => {
   const secret = "receipt-event-secret-canary";
   const accessorInputs = {};

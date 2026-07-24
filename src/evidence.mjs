@@ -224,7 +224,7 @@ function canonicalizeReceiptEventValue(
       }
       entries.push([key, descriptor.value]);
     }
-    const result = {};
+    const result = Object.create(null);
     for (const [key, entryValue] of entries.sort(
       ([left], [right]) =>
         left === right ? 0 : left < right ? -1 : 1,
