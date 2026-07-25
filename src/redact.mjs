@@ -14,6 +14,75 @@ const CLOCKCHAIN_TOKEN =
   /\bcc_[A-Za-z0-9_-][A-Za-z0-9._-]{19,}(?![A-Za-z0-9._-])/g;
 const CLOCKCHAIN_TOKEN_DETECT =
   /\bcc_[A-Za-z0-9_-][A-Za-z0-9._-]{19,}(?![A-Za-z0-9._-])/;
+// An email address is classified as secret material. What is established
+// in-tree: the names clientId and walletId appear nowhere in src, bin or
+// scripts, and src/run.mjs asserts only agentId, owner and agentURI on a
+// resolveAgent response before discarding it, so nothing here reads such a
+// field on purpose today. What is NOT established in-tree: that the hosted
+// Clockchain read API returns those fields as literal email addresses. That
+// is an external observation from live responses seen outside this
+// repository, recorded here as the reason for the rule and not as a verified
+// property of this codebase.
+//
+// The rule still earns its place from an in-tree path: assertResolvedIdentity
+// returns the provider's whole response object, and a failed stage can carry
+// that object into a diagnostic, so any address the provider chooses to
+// include reaches redact() without a dedicated consumer existing. Landing the
+// pattern before the bilateral protocol adds a deliberate consumer is
+// cheaper than retrofitting it after.
+const EMAIL_ADDRESS =
+  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,63}\b/g;
+const EMAIL_ADDRESS_DETECT =
+  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,63}\b/;
+const SECRET_ASSIGNMENT_LABEL =
+  "(?:private.?key|secret|token|(?:invitation|invite).?code|ciphertext)";
+// What gates a match is the 16-character floor on the [A-Za-z0-9+/_-] run: a
+// shorter value never triggers, which is what keeps ordinary agent prose
+// ("token: minted successfully") from failing a healthy run. The trailing
+// dot-separated groups only EXTEND an already-triggered match, so that JWT
+// payload and signature segments cannot survive redaction of the header.
+// Because the class contains "/", "_" and "-", a filesystem path after a
+// secret label still matches ("private key: /Users/o/.handshake/wallet.json"
+// triggers on "Users" only once the run reaches 16 characters). That is
+// narrower than an unbounded value class and fails closed, so it is accepted.
+const HIGH_ENTROPY_SECRET_VALUE =
+  "[A-Za-z0-9+/_-]{16,}(?:\\.[A-Za-z0-9+/_-]{10,})*={0,2}";
+const HIGH_ENTROPY_SECRET_ASSIGNMENT_SOURCE =
+  `(${SECRET_ASSIGNMENT_LABEL}\\s*["']?\\s*[:=]\\s*["']?)` +
+  `(${HIGH_ENTROPY_SECRET_VALUE})`;
+// The broad companion, for schema-generated documents only. result.json and
+// RESULT.md are rendered from an exact-key allowlist, so a secret assignment
+// of ANY length is illegitimate there and an unbounded value class costs no
+// false positives. Free-form prose would trip this constantly, which is why
+// the high-entropy rule above stays the one that applies everywhere. An
+// already-redacted placeholder is exempt so a correctly sanitized document
+// still passes.
+const BROAD_SECRET_VALUE =
+  "(?!\"?\\[REDACTED\\]\"?)[^\\s,;}]+";
+const BROAD_SECRET_ASSIGNMENT_SOURCE =
+  `(${SECRET_ASSIGNMENT_LABEL}\\s*["']?\\s*[:=]\\s*)` +
+  `(${BROAD_SECRET_VALUE})`;
+
+export class SecretMaterialDetectedError extends Error {
+  constructor() {
+    super("Secret material detected in value.");
+    this.name = "SecretMaterialDetectedError";
+    this.code = "SECRET_MATERIAL_DETECTED";
+  }
+}
+
+export function highEntropySecretAssignmentPattern(
+  flags = "i",
+) {
+  return new RegExp(
+    HIGH_ENTROPY_SECRET_ASSIGNMENT_SOURCE,
+    flags,
+  );
+}
+
+export function broadSecretAssignmentPattern(flags = "i") {
+  return new RegExp(BROAD_SECRET_ASSIGNMENT_SOURCE, flags);
+}
 
 function normalizeCanaries(canaries) {
   if (
@@ -54,6 +123,7 @@ function redactString(value, canaries) {
     BEARER_TOKEN,
     (_match, prefix) => `${prefix}${REDACTED}`,
   );
+  redacted = redacted.replace(EMAIL_ADDRESS, REDACTED);
   return redacted.replace(CLOCKCHAIN_TOKEN, REDACTED);
 }
 
@@ -135,6 +205,7 @@ function stringContainsSecret(value, canaries) {
     canaries.some((canary) => value.includes(canary)) ||
     LABELED_PRIVATE_KEY_DETECT.test(value) ||
     BEARER_TOKEN_DETECT.test(value) ||
+    EMAIL_ADDRESS_DETECT.test(value) ||
     CLOCKCHAIN_TOKEN_DETECT.test(value)
   );
 }
@@ -207,6 +278,6 @@ export function redact(value, canaries = []) {
 
 export function assertSecretFree(value, canaries = []) {
   if (containsSecret(value, normalizeCanaries(canaries), new WeakSet())) {
-    throw new Error("Secret material detected in value.");
+    throw new SecretMaterialDetectedError();
   }
 }

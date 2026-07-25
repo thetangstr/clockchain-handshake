@@ -1,6 +1,7 @@
 import {
   decodeFunctionData,
   encodeFunctionData,
+  keccak256,
   parseEventLogs,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -14,17 +15,22 @@ import {
   CONSERVATIVE_METADATA_GAS_RESERVE,
   RECEIPT_CONFIRMATIONS,
   RECEIPT_TIMEOUT_MILLISECONDS,
+  REGISTER_NONCE,
   RegistrationConfigurationError,
   RegistrationNetworkError,
   addGasHeadroom,
   addressesEqual,
   createRecovery,
   createRegistrationClients,
+  createRegistrationIntent,
   estimateFeeQuote,
   identityReferenceValue,
+  intentTransactionFields,
+  intentTransactionType,
   invokeCheckpoint,
   isRevertedReceipt,
   isSuccessfulReceipt,
+  isTransactionHash,
   normalizeAgentId,
   normalizePendingNonce,
   registryNamespaceValue,
@@ -34,6 +40,7 @@ import {
   validateReceipt,
   validateReceiptEvidence,
   validateRecovery,
+  validateRegistrationIntent,
   validateTransactionHash,
   withMetadataTransaction,
   withoutMetadataTransaction,
@@ -441,6 +448,72 @@ export class PartialRegistrationError extends Error {
   }
 }
 
+function attachRegisterTransaction(error, registerTx) {
+  if (
+    !(error instanceof Error) ||
+    !isTransactionHash(registerTx) ||
+    Object.hasOwn(error, "registerTx") ||
+    !Object.isExtensible(error)
+  ) {
+    return error;
+  }
+
+  try {
+    Object.defineProperty(error, "registerTx", {
+      value: registerTx,
+      enumerable: true,
+      writable: false,
+      configurable: false,
+    });
+  } catch {
+    // The typed failure matters more than the transaction annotation.
+  }
+
+  return error;
+}
+
+function encodeRegisterCalldata(initialURI) {
+  return encodeFunctionData({
+    abi: ERC8004_ABI,
+    functionName: "register",
+    args: [initialURI],
+  });
+}
+
+async function recoverIntendedRegisterHash(account, intent) {
+  let serialized;
+
+  try {
+    serialized = await account.signTransaction({
+      chainId: CHAIN_ID,
+      data: intent.registerCalldata,
+      gas: BigInt(intent.registerGas),
+      nonce: intent.registerNonce,
+      to: REGISTRY_ADDRESS,
+      type: intentTransactionType(intent),
+      value: 0n,
+      ...intentTransactionFields(intent),
+    });
+  } catch {
+    throw new RegistrationConfigurationError(
+      "Registration intent transaction could not be reconstructed.",
+    );
+  }
+
+  let hash;
+
+  try {
+    hash = keccak256(serialized);
+  } catch {
+    throw new RegistrationConfigurationError(
+      "Registration intent transaction could not be reconstructed.",
+    );
+  }
+
+  validateTransactionHash(hash, "Registration");
+  return hash;
+}
+
 function createVerifiedAccount(privateKey, expectedAddress) {
   let account;
 
@@ -749,10 +822,111 @@ export async function finalizeIdentityRegistration({
   }
 }
 
+async function completeRegistrationFromIntent({
+  account,
+  displayName,
+  expectedAddress,
+  initialURI,
+  intent,
+  onCheckpoint,
+  privateKey,
+  publicClient,
+  rpcUrl,
+  walletClient,
+}) {
+  if (
+    intent.registerCalldata.toLowerCase() !==
+    encodeRegisterCalldata(initialURI).toLowerCase()
+  ) {
+    throw new RegistrationConfigurationError(
+      "Registration intent calldata does not match the registration document.",
+    );
+  }
+
+  const registerTx = await recoverIntendedRegisterHash(account, intent);
+  let recovery;
+
+  try {
+    const transaction = await runStage(
+      () => publicClient.getTransaction({ hash: registerTx }),
+      "Registration transaction lookup failed.",
+    );
+    const input = validateTransactionEnvelope(transaction, {
+      expectedFrom: account.address,
+      expectedHash: registerTx,
+      expectedNonce: REGISTER_NONCE,
+      stage: "Registration",
+    });
+    validateExactTransactionCall({
+      args: [initialURI],
+      functionName: "register",
+      input,
+      stage: "Registration",
+    });
+
+    const registerReceipt = await runStage(
+      () =>
+        publicClient.waitForTransactionReceipt({
+          hash: registerTx,
+          confirmations: RECEIPT_CONFIRMATIONS,
+          timeout: RECEIPT_TIMEOUT_MILLISECONDS,
+        }),
+      "Registration receipt wait failed.",
+    );
+    const registerBlock = validateReceipt(
+      registerReceipt,
+      registerTx,
+      "Registration",
+    );
+
+    let agentId;
+
+    try {
+      agentId = parseRegisteredAgentId(registerReceipt, {
+        expectedOwner: account.address,
+        expectedAgentURI: initialURI,
+      });
+    } catch {
+      throw new Error("Registration event verification failed.");
+    }
+
+    recovery = createRecovery({
+      address: account.address,
+      agentId,
+      displayName,
+      registerBlock,
+      registerTx,
+    });
+  } catch (error) {
+    throw attachRegisterTransaction(error, registerTx);
+  }
+
+  try {
+    await invokeCheckpoint(onCheckpoint, recovery);
+    return await finalizeIdentityRegistration({
+      privateKey,
+      expectedAddress,
+      displayName,
+      recovery,
+      rpcUrl,
+      publicClient,
+      walletClient,
+      onCheckpoint,
+    });
+  } catch (error) {
+    if (error instanceof PartialRegistrationError) {
+      throw error;
+    }
+
+    throw new PartialRegistrationError(recovery, error);
+  }
+}
+
 export async function registerIdentity({
   privateKey,
   expectedAddress,
   displayName,
+  intent,
   rpcUrl = RPC_URL,
   publicClient,
   walletClient,
@@ -760,6 +934,13 @@ export async function registerIdentity({
 }) {
   validateCheckpointCallback(onCheckpoint);
   const account = createVerifiedAccount(privateKey, expectedAddress);
+  const priorIntent =
+    intent === undefined || intent === null
+      ? null
+      : validateRegistrationIntent(intent, {
+          expectedAddress: account.address,
+          displayName,
+        });
   let activePublicClient;
   let activeWalletClient;
 
@@ -781,20 +962,6 @@ export async function registerIdentity({
 
   await verifyOfficialRegistry(activePublicClient);
 
-  const nonce = await runStage(
-    () =>
-      activePublicClient.getTransactionCount({
-        address: account.address,
-        blockTag: "pending",
-      }),
-    "Pending wallet nonce verification failed.",
-  );
-  if (nonce !== 0 && nonce !== 0n) {
-    throw new RegistrationConfigurationError(
-      "Pending wallet nonce must be zero.",
-    );
-  }
-
   let initialDocument;
   let initialURI;
 
@@ -808,6 +975,35 @@ export async function registerIdentity({
     throw new RegistrationConfigurationError(
       "Initial registration metadata is invalid.",
     );
+  }
+
+  const nonce = await runStage(
+    () =>
+      activePublicClient.getTransactionCount({
+        address: account.address,
+        blockTag: "pending",
+      }),
+    "Pending wallet nonce verification failed.",
+  );
+  if (nonce !== 0 && nonce !== 0n) {
+    if (priorIntent === null) {
+      throw new RegistrationConfigurationError(
+        "Pending wallet nonce must be zero.",
+      );
+    }
+
+    return await completeRegistrationFromIntent({
+      account,
+      displayName,
+      expectedAddress,
+      initialURI,
+      intent: priorIntent,
+      onCheckpoint,
+      privateKey,
+      publicClient: activePublicClient,
+      rpcUrl,
+      walletClient: activeWalletClient,
+    });
   }
 
   const registerFees = await estimateFeeQuote(
@@ -856,6 +1052,30 @@ export async function registerIdentity({
     );
   }
 
+  let registerIntent;
+
+  try {
+    registerIntent = createRegistrationIntent({
+      address: account.address,
+      displayName,
+      registerCalldata: encodeRegisterCalldata(initialURI),
+      registerGas,
+      transactionFields: registerFees.transactionFields,
+    });
+  } catch {
+    throw new RegistrationConfigurationError(
+      "Registration intent record is invalid.",
+    );
+  }
+
+  try {
+    await invokeCheckpoint(onCheckpoint, registerIntent);
+  } catch {
+    throw new RegistrationConfigurationError(
+      "Registration intent record could not be recorded before broadcast.",
+    );
+  }
+
   const registerTx = await runStage(
     () =>
       activeWalletClient.writeContract({
@@ -866,46 +1086,52 @@ export async function registerIdentity({
         account,
         chainId: CHAIN_ID,
         gas: registerGas,
-        nonce: 0,
+        nonce: REGISTER_NONCE,
         ...registerFees.transactionFields,
       }),
     "Registration transaction submission failed.",
   );
   validateTransactionHash(registerTx, "Registration");
 
-  const registerReceipt = await runStage(
-    () =>
-      activePublicClient.waitForTransactionReceipt({
-        hash: registerTx,
-        confirmations: RECEIPT_CONFIRMATIONS,
-        timeout: RECEIPT_TIMEOUT_MILLISECONDS,
-      }),
-    "Registration receipt wait failed.",
-  );
-  const registerBlock = validateReceipt(
-    registerReceipt,
-    registerTx,
-    "Registration",
-  );
-
-  let agentId;
+  let recovery;
 
   try {
-    agentId = parseRegisteredAgentId(registerReceipt, {
-      expectedOwner: account.address,
-      expectedAgentURI: initialURI,
-    });
-  } catch {
-    throw new Error("Registration event verification failed.");
-  }
+    const registerReceipt = await runStage(
+      () =>
+        activePublicClient.waitForTransactionReceipt({
+          hash: registerTx,
+          confirmations: RECEIPT_CONFIRMATIONS,
+          timeout: RECEIPT_TIMEOUT_MILLISECONDS,
+        }),
+      "Registration receipt wait failed.",
+    );
+    const registerBlock = validateReceipt(
+      registerReceipt,
+      registerTx,
+      "Registration",
+    );
 
-  const recovery = createRecovery({
-    address: account.address,
-    agentId,
-    displayName,
-    registerBlock,
-    registerTx,
-  });
+    let agentId;
+
+    try {
+      agentId = parseRegisteredAgentId(registerReceipt, {
+        expectedOwner: account.address,
+        expectedAgentURI: initialURI,
+      });
+    } catch {
+      throw new Error("Registration event verification failed.");
+    }
+
+    recovery = createRecovery({
+      address: account.address,
+      agentId,
+      displayName,
+      registerBlock,
+      registerTx,
+    });
+  } catch (error) {
+    throw attachRegisterTransaction(error, registerTx);
+  }
 
   try {
     await invokeCheckpoint(onCheckpoint, recovery);

@@ -24,6 +24,10 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createPublicClient, http } from "viem";
+import { sepolia } from "viem/chains";
+
+import { RPC_URL } from "../src/constants.mjs";
 import {
   renderResultMarkdown,
   validatePassResult,
@@ -31,6 +35,7 @@ import {
 import { readSecretInvitation } from "../src/invitation.mjs";
 import {
   assertSecretFree,
+  highEntropySecretAssignmentPattern,
   redact,
 } from "../src/redact.mjs";
 
@@ -60,6 +65,9 @@ const OPERATOR_RISK_ACKNOWLEDGEMENT_FLAG =
 const OPERATOR_RISK_WARNING =
   `Clean-client acceptance is operator-only: it disables client permission safeguards, inherits selected local credentials, HOME, and invitation access, and is not an OS or container sandbox. Re-run only with ${OPERATOR_RISK_ACKNOWLEDGEMENT_FLAG}.\n`;
 const COMMIT_REF_PATTERN = /^[0-9a-f]{40}$/i;
+const OWNER_NONCE_RETRY_COUNT = 2;
+const OWNER_NONCE_TIMEOUT_MS = 15_000;
+const OWNER_ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/i;
 const PRIVATE_KEY_SHAPE = /0x[0-9a-f]{64}(?![0-9a-f])/i;
 const PRIVATE_KEY_SHAPE_GLOBAL =
   /0x[0-9a-f]{64}(?![0-9a-f])/gi;
@@ -151,6 +159,36 @@ class UnsupportedAcceptancePlatformError
     super();
     this.name = "UnsupportedAcceptancePlatformError";
     this.code = "HARNESS_UNSUPPORTED_PLATFORM";
+  }
+}
+
+class ExistingArtifactDirectoryError
+  extends HarnessConfigurationError {
+  constructor(directory) {
+    super();
+    this.name = "ExistingArtifactDirectoryError";
+    this.code = "HARNESS_ARTIFACT_DIRECTORY_EXISTS";
+    this.directory = directory;
+  }
+}
+
+class ConsumedInvitationWalletError
+  extends HarnessConfigurationError {
+  constructor(clientName) {
+    super();
+    this.name = "ConsumedInvitationWalletError";
+    this.code = "HARNESS_INVITATION_WALLET_CONSUMED";
+    this.clientName = clientName;
+  }
+}
+
+class UnreadableInvitationWalletError
+  extends HarnessConfigurationError {
+  constructor(clientName) {
+    super();
+    this.name = "UnreadableInvitationWalletError";
+    this.code = "HARNESS_INVITATION_WALLET_UNREADABLE";
+    this.clientName = clientName;
   }
 }
 
@@ -315,6 +353,74 @@ function invitationCanaries(invitation) {
   return [code, ciphertext];
 }
 
+function invitationOwnerAddress(invitation) {
+  const address = invitation?.bundle?.address;
+  if (
+    typeof address !== "string" ||
+    !OWNER_ADDRESS_PATTERN.test(address)
+  ) {
+    throw new HarnessConfigurationError();
+  }
+  return address;
+}
+
+// assertUnusedInvitationWallets is fail-closed: any throw refuses the run. A
+// transient RPC hiccup or rate limit must therefore be retried here rather
+// than blocking an otherwise healthy demo.
+export function ownerNonceTransport(rpcUrl = RPC_URL) {
+  return http(rpcUrl, {
+    retryCount: OWNER_NONCE_RETRY_COUNT,
+    timeout: OWNER_NONCE_TIMEOUT_MS,
+  });
+}
+
+export function defaultOwnerNonceReader({
+  createClient = createPublicClient,
+  transport = ownerNonceTransport(),
+} = {}) {
+  const client = createClient({
+    chain: sepolia,
+    transport,
+  });
+  return (address) =>
+    client.getTransactionCount({
+      address,
+      blockTag: "pending",
+    });
+}
+
+async function assertArtifactDirectoryAbsent(directory) {
+  try {
+    await lstat(directory);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  throw new ExistingArtifactDirectoryError(directory);
+}
+
+async function assertUnusedInvitationWallets(
+  owners,
+  readOwnerNonce,
+) {
+  for (const name of CLIENT_NAMES) {
+    let nonce;
+    try {
+      nonce = await readOwnerNonce(owners[name]);
+    } catch {
+      throw new UnreadableInvitationWalletError(name);
+    }
+    if (!Number.isSafeInteger(nonce) || nonce < 0) {
+      throw new UnreadableInvitationWalletError(name);
+    }
+    if (nonce !== 0) {
+      throw new ConsumedInvitationWalletError(name);
+    }
+  }
+}
+
 function secretEnvironmentCanaries(
   environment,
   clientName,
@@ -352,6 +458,10 @@ function sanitizeLog(value, canaries) {
   );
   clean = clean.replace(
     /(\b(?:invitation|invite)[\s_-]?code\b\s*(?:(?:is)\s+|[:=]\s*)?)([^\s,;]+)/gi,
+    "$1[REDACTED]",
+  );
+  clean = clean.replace(
+    highEntropySecretAssignmentPattern("gi"),
     "$1[REDACTED]",
   );
   try {
@@ -1149,12 +1259,18 @@ export async function runCleanClients({
     environmentValue(baseEnvironment, "TMPDIR") ?? tmpdir(),
   commands,
   invitations,
+  // Test seam for the output-root and artifact-directory creates only, so the
+  // pre-flight probe ordering and the EEXIST race can both be exercised
+  // without a second live process. Per-client work directories keep using
+  // mkdir directly.
+  makeDirectory = mkdir,
   maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES,
   now = () => new Date(),
   operatorRiskAcknowledged,
   outputRoot = DEFAULT_OUTPUT_ROOT,
   promptFile = DEFAULT_PROMPT_FILE,
   readInvitation = readSecretInvitation,
+  readOwnerNonce = defaultOwnerNonceReader(),
   repositoryRef,
   spawnImpl = spawn,
   terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS,
@@ -1166,8 +1282,10 @@ export async function runCleanClients({
   }
   if (
     !isPlainObject(invitations) ||
+    typeof makeDirectory !== "function" ||
     typeof now !== "function" ||
     typeof readInvitation !== "function" ||
+    typeof readOwnerNonce !== "function" ||
     typeof spawnImpl !== "function"
   ) {
     throw new HarnessConfigurationError();
@@ -1210,19 +1328,43 @@ export async function runCleanClients({
     .update(prompt)
     .digest("hex");
   const derivedCanaries = {};
+  const invitationOwners = {};
   for (const name of CLIENT_NAMES) {
-    derivedCanaries[name] = invitationCanaries(
-      await readInvitation(activeInvitations[name]),
+    const invitation = await readInvitation(
+      activeInvitations[name],
+    );
+    derivedCanaries[name] = invitationCanaries(invitation);
+    invitationOwners[name] =
+      invitationOwnerAddress(invitation);
+  }
+  await assertUnusedInvitationWallets(
+    invitationOwners,
+    readOwnerNonce,
+  );
+  // Probe every target before creating anything at all, so a refused run
+  // leaves neither a directory this tool made for an earlier client nor the
+  // output root itself. The EEXIST branch below stays authoritative against a
+  // directory that appears between the probe and the create.
+  for (const name of CLIENT_NAMES) {
+    await assertArtifactDirectoryAbsent(
+      join(activeOutputRoot, name),
     );
   }
-  await mkdir(activeOutputRoot, {
+  await makeDirectory(activeOutputRoot, {
     mode: 0o700,
     recursive: true,
   });
   const artifactDirectories = {};
   for (const name of CLIENT_NAMES) {
     const directory = join(activeOutputRoot, name);
-    await mkdir(directory, { mode: 0o700 });
+    try {
+      await makeDirectory(directory, { mode: 0o700 });
+    } catch (error) {
+      if (error?.code === "EEXIST") {
+        throw new ExistingArtifactDirectoryError(directory);
+      }
+      throw error;
+    }
     artifactDirectories[name] = directory;
   }
 
@@ -1360,6 +1502,31 @@ function parseArguments(argv, environment) {
   return values;
 }
 
+function failureMessage(error) {
+  if (error instanceof MissingRiskAcknowledgementError) {
+    return OPERATOR_RISK_WARNING;
+  }
+  if (
+    error?.code === "HARNESS_ARTIFACT_DIRECTORY_EXISTS" &&
+    typeof error.directory === "string"
+  ) {
+    return `Clean-client acceptance refused to reuse an existing artifact directory: ${error.directory}. Move or delete it, then re-run.\n`;
+  }
+  if (
+    error?.code === "HARNESS_INVITATION_WALLET_CONSUMED" &&
+    CLIENT_NAMES.includes(error.clientName)
+  ) {
+    return `Clean-client acceptance refused to launch ${error.clientName}: its invitation wallet has already sent a transaction. Issue a fresh invitation, then re-run.\n`;
+  }
+  if (
+    error?.code === "HARNESS_INVITATION_WALLET_UNREADABLE" &&
+    CLIENT_NAMES.includes(error.clientName)
+  ) {
+    return `Clean-client acceptance could not confirm that the ${error.clientName} invitation wallet is unused. Re-run once the Sepolia endpoint answers.\n`;
+  }
+  return "Clean-client acceptance configuration failed.\n";
+}
+
 export async function main({
   argv = process.argv.slice(2),
   environment = process.env,
@@ -1385,11 +1552,7 @@ export async function main({
     );
     return result.status === "PASS" ? 0 : 1;
   } catch (error) {
-    stderr.write(
-      error instanceof MissingRiskAcknowledgementError
-        ? OPERATOR_RISK_WARNING
-        : "Clean-client acceptance configuration failed.\n",
-    );
+    stderr.write(failureMessage(error));
     return 2;
   }
 }

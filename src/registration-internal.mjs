@@ -13,6 +13,9 @@ import {
 
 export const RECOVERY_SCHEMA =
   "clockchain.handshake-registration-recovery/v1";
+export const INTENT_SCHEMA =
+  "clockchain.handshake-registration-intent/v1";
+export const REGISTER_NONCE = 0;
 export const RECEIPT_TIMEOUT_MILLISECONDS = 120_000;
 export const RECEIPT_CONFIRMATIONS = 2;
 export const CONSERVATIVE_METADATA_GAS_RESERVE = 250_000n;
@@ -59,6 +62,23 @@ const METADATA_RECOVERY_KEYS = [
   "metadataTx",
   "metadataNonce",
 ];
+const BASE_INTENT_KEYS = [
+  "schema",
+  "chainId",
+  "registryAddress",
+  "registryNamespace",
+  "address",
+  "displayName",
+  "registerNonce",
+  "registerCalldata",
+  "registerGas",
+];
+const DYNAMIC_FEE_INTENT_KEYS = [
+  ...BASE_INTENT_KEYS,
+  "maxFeePerGas",
+  "maxPriorityFeePerGas",
+];
+const LEGACY_FEE_INTENT_KEYS = [...BASE_INTENT_KEYS, "gasPrice"];
 
 export function normalizeAgentId(
   agentId,
@@ -426,6 +446,121 @@ export function withoutMetadataTransaction(recovery) {
     ...registrationRecovery
   } = recovery;
   return validateRecovery(registrationRecovery);
+}
+
+function isCalldata(value) {
+  return (
+    typeof value === "string" &&
+    /^0x(?:[0-9a-fA-F]{2})+$/.test(value)
+  );
+}
+
+function isPositiveCanonicalDecimal(value) {
+  return isCanonicalDecimal(value) && value !== "0";
+}
+
+export function validateRegistrationIntent(
+  intent,
+  { expectedAddress, displayName } = {},
+) {
+  const hasLegacyFee =
+    isPlainObject(intent) && Object.hasOwn(intent, "gasPrice");
+  const expectedKeys = hasLegacyFee
+    ? LEGACY_FEE_INTENT_KEYS
+    : DYNAMIC_FEE_INTENT_KEYS;
+
+  try {
+    if (
+      !hasExactKeys(intent, expectedKeys) ||
+      intent.schema !== INTENT_SCHEMA ||
+      intent.chainId !== CHAIN_ID ||
+      intent.registryAddress !== REGISTRY_ADDRESS ||
+      intent.registryNamespace !== registryNamespaceValue() ||
+      intent.registerNonce !== REGISTER_NONCE ||
+      !isCalldata(intent.registerCalldata) ||
+      !isPositiveCanonicalDecimal(intent.registerGas) ||
+      !addressesEqual(intent.address, intent.address)
+    ) {
+      throw new Error();
+    }
+
+    validateDisplayName(intent.displayName);
+
+    if (hasLegacyFee) {
+      if (!isPositiveCanonicalDecimal(intent.gasPrice)) {
+        throw new Error();
+      }
+    } else if (
+      !isPositiveCanonicalDecimal(intent.maxFeePerGas) ||
+      !isCanonicalDecimal(intent.maxPriorityFeePerGas) ||
+      BigInt(intent.maxPriorityFeePerGas) >
+        BigInt(intent.maxFeePerGas)
+    ) {
+      throw new Error();
+    }
+
+    if (
+      expectedAddress !== undefined &&
+      !addressesEqual(intent.address, expectedAddress)
+    ) {
+      throw new Error();
+    }
+
+    if (
+      displayName !== undefined &&
+      intent.displayName !== displayName
+    ) {
+      throw new Error();
+    }
+
+    return { ...intent };
+  } catch {
+    throw new Error("Registration intent record is invalid.");
+  }
+}
+
+export function createRegistrationIntent({
+  address,
+  displayName,
+  registerCalldata,
+  registerGas,
+  transactionFields,
+}) {
+  const feeFields =
+    typeof transactionFields?.gasPrice === "bigint"
+      ? { gasPrice: transactionFields.gasPrice.toString(10) }
+      : {
+          maxFeePerGas:
+            transactionFields?.maxFeePerGas?.toString(10),
+          maxPriorityFeePerGas:
+            transactionFields?.maxPriorityFeePerGas?.toString(10),
+        };
+
+  return validateRegistrationIntent({
+    schema: INTENT_SCHEMA,
+    chainId: CHAIN_ID,
+    registryAddress: REGISTRY_ADDRESS,
+    registryNamespace: registryNamespaceValue(),
+    address,
+    displayName,
+    registerNonce: REGISTER_NONCE,
+    registerCalldata,
+    registerGas: registerGas.toString(10),
+    ...feeFields,
+  });
+}
+
+export function intentTransactionFields(intent) {
+  return Object.hasOwn(intent, "gasPrice")
+    ? { gasPrice: BigInt(intent.gasPrice) }
+    : {
+        maxFeePerGas: BigInt(intent.maxFeePerGas),
+        maxPriorityFeePerGas: BigInt(intent.maxPriorityFeePerGas),
+      };
+}
+
+export function intentTransactionType(intent) {
+  return Object.hasOwn(intent, "gasPrice") ? "legacy" : "eip1559";
 }
 
 export function validateCheckpointCallback(onCheckpoint) {

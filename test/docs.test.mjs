@@ -14,9 +14,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { FAILURE_EXIT_CODES } from "../bin/handshake-demo.mjs";
 import {
   checkDocumentation,
   extractReadmePrompt,
+  main as checkDocumentationMain,
 } from "../scripts/check-docs.mjs";
 import { assertSecretFree } from "../src/redact.mjs";
 
@@ -48,6 +50,21 @@ const PUBLISHED_TRANSACTIONS = Object.freeze([
   "0x6981f9250589fc550a68e6ee2b0146323066c64332c3542e4bbb6d9f9f47c676",
   "0xbb9435c8f9d46f0f57e0aab6208610f2b4c37177b33d27319f1b0311db16b160",
 ]);
+
+function memoryOutput() {
+  let value = "";
+  return {
+    stream: {
+      write(chunk) {
+        value += String(chunk);
+        return true;
+      },
+    },
+    text() {
+      return value;
+    },
+  };
+}
 
 async function temporaryDocumentationFixture(t) {
   const directory = await mkdtemp(
@@ -163,6 +180,26 @@ test("operator-only clean-client acceptance is prominently disclosed", async (t)
       );
     });
   }
+});
+
+test("README documents the Sepolia nonce preflight the operator harness now requires", async () => {
+  const readme = await readFile(
+    join(ROOT_DIRECTORY, "README.md"),
+    "utf8",
+  );
+
+  assert.match(
+    readme,
+    /reads each invitation owner's\s+nonce from Ethereum Sepolia/i,
+  );
+  assert.match(
+    readme,
+    /`npm run acceptance:clients` therefore requires a\s+reachable Ethereum Sepolia endpoint at preflight/i,
+  );
+  assert.match(
+    readme,
+    /fails closed[^.]*endpoint does not answer[^.]*already been consumed/i,
+  );
 });
 
 test("README exposes exactly the prompt bytes consumed by clean clients", async () => {
@@ -1017,5 +1054,514 @@ test("rejects a reference-style link whose target escapes through a symlink", as
     ).includes(
       'DEMO.md: broken relative link "linked/outside.md".',
     ),
+  );
+});
+
+test("documents every public failure code with its default exit", async () => {
+  const contents = await readFile(
+    join(ROOT_DIRECTORY, "DEMO.md"),
+    "utf8",
+  );
+
+  for (const [code, exitCode] of Object.entries(
+    FAILURE_EXIT_CODES,
+  )) {
+    assert.match(
+      contents,
+      new RegExp(
+        `^\\| \`${code}\` \\|[^|\\r\\n]+\\| ${exitCode} \\|[^|\\r\\n]+\\|$`,
+        "m",
+      ),
+    );
+  }
+});
+
+test("rejects failure code reference drift with exact diagnostics", async (t) => {
+  const cases = [
+    {
+      label: "missing row",
+      transform: (contents) =>
+        contents.replace(
+          /^\| `HANDSHAKE_TIMESTAMP_FAILED` \|[^\r\n]*\r?\n/m,
+          "",
+        ),
+      failure:
+        'DEMO.md: missing failure code "HANDSHAKE_TIMESTAMP_FAILED" from the failure code reference.',
+    },
+    {
+      label: "wrong exit",
+      transform: (contents) =>
+        contents.replace(
+          /^(\| `HANDSHAKE_TIMESTAMP_FAILED` \|[^|\r\n]+\|) 3 \|/m,
+          "$1 4 |",
+        ),
+      failure:
+        'DEMO.md: failure code "HANDSHAKE_TIMESTAMP_FAILED" documents exit 4 instead of 3.',
+    },
+    {
+      label: "unknown code",
+      transform: (contents) =>
+        `${contents}\n| \`HANDSHAKE_INVENTED\` | invented | 4 | none |\n`,
+      failure:
+        'DEMO.md: documents unknown failure code "HANDSHAKE_INVENTED".',
+    },
+    {
+      label: "duplicated row",
+      transform: (contents) =>
+        `${contents}\n| \`HANDSHAKE_TIMESTAMP_FAILED\` | duplicate | 3 | none |\n`,
+      failure:
+        'DEMO.md: documents failure code "HANDSHAKE_TIMESTAMP_FAILED" more than once.',
+    },
+  ];
+
+  for (const { label, transform, failure } of cases) {
+    await t.test(label, async (subtest) => {
+      const directory =
+        await temporaryDocumentationFixture(subtest);
+      const demoPath = join(directory, "DEMO.md");
+      const contents = await readFile(demoPath, "utf8");
+      const replacement = transform(contents);
+      assert.notEqual(replacement, contents);
+      await writeFile(demoPath, replacement);
+
+      assert.deepEqual(
+        (
+          await checkDocumentation({
+            rootDirectory: directory,
+          })
+        ).filter((entry) =>
+          entry.includes("failure code"),
+        ),
+        [failure],
+      );
+    });
+  }
+});
+
+test("discloses the degraded validator pool the receipt write opts into", async () => {
+  const contents = await readFile(
+    join(ROOT_DIRECTORY, "DEMO.md"),
+    "utf8",
+  );
+
+  assert.match(contents, /`allow_degraded: true`/);
+  assert.match(contents, /refuse a degraded[^.]*by default/i);
+  assert.match(contents, /zero node participation/i);
+  assert.match(contents, /degradedAtSubmission/);
+  assert.match(
+    contents,
+    /immutable block[^.]*re-verified independently/i,
+  );
+  assert.match(
+    contents,
+    /does not mean[^.]*multi-validator/i,
+  );
+  assert.deepEqual(
+    await checkDocumentation({
+      rootDirectory: ROOT_DIRECTORY,
+    }),
+    [],
+  );
+});
+
+// The former "an unmodified documentation fixture reports no failures" pin was
+// deleted: it passed under every mutation, including SUPPORTING_DOCUMENTS = [].
+// Its only assertion is strictly subsumed by the fixture tests that assert
+// deepEqual(failures, [oneExpectedFailure]) after a single mutation, which
+// cannot hold unless the unmodified fixture is otherwise clean.
+
+test("routes README readers to the operator failure code reference", async (t) => {
+  const readme = await readFile(
+    join(ROOT_DIRECTORY, "README.md"),
+    "utf8",
+  );
+  assert.match(
+    readme,
+    /\[[^\]]*failure code[^\]]*]\(DEMO\.md#failure-codes\)/i,
+  );
+
+  const directory = await temporaryDocumentationFixture(t);
+  const readmePath = join(directory, "README.md");
+  const fixture = await readFile(readmePath, "utf8");
+  const withoutReference = fixture.replaceAll(
+    "DEMO.md#failure-codes",
+    "DEMO.md",
+  );
+  assert.notEqual(withoutReference, fixture);
+  await writeFile(readmePath, withoutReference);
+
+  assert.ok(
+    (
+      await checkDocumentation({
+        rootDirectory: directory,
+      })
+    ).includes(
+      'README.md: missing required relative link "DEMO.md#failure-codes".',
+    ),
+  );
+});
+
+test("rejects a required link whose target heading disappears", async (t) => {
+  const directory = await temporaryDocumentationFixture(t);
+  const demoPath = join(directory, "DEMO.md");
+  const demo = await readFile(demoPath, "utf8");
+  const renamed = demo.replace(
+    /^## Failure codes$/m,
+    "## Failure code table",
+  );
+  assert.notEqual(renamed, demo);
+  await writeFile(demoPath, renamed);
+
+  assert.ok(
+    (
+      await checkDocumentation({
+        rootDirectory: directory,
+      })
+    ).includes(
+      'README.md: required relative link "DEMO.md#failure-codes" targets a missing heading.',
+    ),
+  );
+});
+
+test("gates the stakeholder invitation notes", async (t) => {
+  const cases = [
+    {
+      label: "court-grade",
+      claim: "These bundles are court-grade.",
+      failure:
+        'invites/README.md: mentions forbidden capability "court-grade" as a present claim.',
+    },
+    {
+      label: "trustless",
+      claim: "These bundles are trustless.",
+      failure:
+        'invites/README.md: mentions forbidden capability "trustless" as a present claim.',
+    },
+    {
+      label: "mainnet-ready",
+      claim: "These bundles are mainnet-ready.",
+      failure:
+        'invites/README.md: mentions forbidden capability "mainnet" as a present claim.',
+    },
+    {
+      label: "bare mainnet",
+      claim: "These bundles are mainnet.",
+      failure:
+        'invites/README.md: mentions forbidden capability "mainnet" as a present claim.',
+    },
+    {
+      label: "permissionless",
+      claim: "These bundles are permissionless.",
+      failure:
+        'invites/README.md: mentions forbidden capability "permissionless" as a present claim.',
+    },
+    {
+      label: "consensus-secure",
+      claim: "These bundles are consensus-secure.",
+      failure:
+        'invites/README.md: mentions forbidden capability "consensus-secure" as a present claim.',
+    },
+    {
+      label: "money movement",
+      claim: "Real money moves in this exercise.",
+      failure:
+        "invites/README.md: claims scenario money moves.",
+    },
+    {
+      label: "verb-first money movement",
+      claim: "This exercise moves real money.",
+      failure:
+        "invites/README.md: claims scenario money moves.",
+    },
+    {
+      label: "non-official registry",
+      claim:
+        "Bundles target registry 0x1111111111111111111111111111111111111111.",
+      failure:
+        'invites/README.md: references non-official registry address "0x1111111111111111111111111111111111111111".',
+    },
+  ];
+
+  for (const { label, claim, failure } of cases) {
+    await t.test(label, async (subtest) => {
+      const directory =
+        await temporaryDocumentationFixture(subtest);
+      const notesPath = join(
+        directory,
+        "invites/README.md",
+      );
+      await writeFile(
+        notesPath,
+        `${await readFile(notesPath, "utf8")}\n${claim}\n`,
+      );
+
+      assert.deepEqual(
+        await checkDocumentation({
+          rootDirectory: directory,
+        }),
+        [failure],
+      );
+    });
+  }
+});
+
+test("accepts explicitly limited invitation-note language", async (t) => {
+  const limitations = `
+These bundles are not court-grade, are not trustless, and no money moves.
+They are not mainnet-ready, and they are not consensus-secure.
+They are neither mainnet nor permissionless.
+Money is not involved. Money movement is out of scope.
+The official registry is 0x8004A818BFB912233c491871b3d84c89A494BD9e.
+`;
+
+  await t.test("reports no failures", async (subtest) => {
+    const directory =
+      await temporaryDocumentationFixture(subtest);
+    const notesPath = join(directory, "invites/README.md");
+    await writeFile(
+      notesPath,
+      `${await readFile(notesPath, "utf8")}${limitations}`,
+    );
+
+    assert.deepEqual(
+      await checkDocumentation({
+        rootDirectory: directory,
+      }),
+      [],
+    );
+  });
+
+  await t.test(
+    "still gates an unlimited claim beside them",
+    async (subtest) => {
+      const directory =
+        await temporaryDocumentationFixture(subtest);
+      const notesPath = join(directory, "invites/README.md");
+      await writeFile(
+        notesPath,
+        `${await readFile(notesPath, "utf8")}${limitations}These bundles are trustless.\n`,
+      );
+
+      assert.deepEqual(
+        await checkDocumentation({
+          rootDirectory: directory,
+        }),
+        [
+          'invites/README.md: mentions forbidden capability "trustless" as a present claim.',
+        ],
+      );
+    },
+  );
+});
+
+test("keeps every forbidden claim failing under the widened negation vocabulary", async (t) => {
+  const supportingCases = [
+    {
+      label: "court-grade",
+      claim: "These bundles are court-grade.",
+      failure:
+        'invites/README.md: mentions forbidden capability "court-grade" as a present claim.',
+    },
+    {
+      label: "trustless",
+      claim: "These bundles are trustless.",
+      failure:
+        'invites/README.md: mentions forbidden capability "trustless" as a present claim.',
+    },
+    {
+      label: "mainnet",
+      claim: "These bundles are mainnet.",
+      failure:
+        'invites/README.md: mentions forbidden capability "mainnet" as a present claim.',
+    },
+    {
+      label: "mainnet-ready",
+      claim: "These bundles are mainnet-ready.",
+      failure:
+        'invites/README.md: mentions forbidden capability "mainnet" as a present claim.',
+    },
+    {
+      label: "consensus-secure",
+      claim: "These bundles are consensus-secure.",
+      failure:
+        'invites/README.md: mentions forbidden capability "consensus-secure" as a present claim.',
+    },
+    {
+      label: "permissionless",
+      claim: "These bundles are permissionless.",
+      failure:
+        'invites/README.md: mentions forbidden capability "permissionless" as a present claim.',
+    },
+    {
+      label: "money moves",
+      claim: "Real money moves in this exercise.",
+      failure:
+        "invites/README.md: claims scenario money moves.",
+    },
+    {
+      label: "moves money",
+      claim: "This exercise moves real money.",
+      failure:
+        "invites/README.md: claims scenario money moves.",
+    },
+    {
+      label: "non-official registry",
+      claim:
+        "Bundles target registry 0x1111111111111111111111111111111111111111.",
+      failure:
+        'invites/README.md: references non-official registry address "0x1111111111111111111111111111111111111111".',
+    },
+    {
+      label: "compound clause beside a neither/nor limitation",
+      claim:
+        "These bundles are neither slow nor expensive but they are trustless.",
+      failure:
+        'invites/README.md: mentions forbidden capability "trustless" as a present claim.',
+    },
+    {
+      label: "money movement beside a neither/nor limitation",
+      claim:
+        "These bundles are neither slow nor expensive and real money moves.",
+      failure:
+        "invites/README.md: claims scenario money moves.",
+    },
+    {
+      label: "limitation trailing the claim it does not negate",
+      claim: "These bundles are trustless — no caveats.",
+      failure:
+        'invites/README.md: mentions forbidden capability "trustless" as a present claim.',
+    },
+  ];
+
+  for (const { label, claim, failure } of supportingCases) {
+    await t.test(`invites/README.md ${label}`, async (subtest) => {
+      const directory =
+        await temporaryDocumentationFixture(subtest);
+      const notesPath = join(directory, "invites/README.md");
+      await writeFile(
+        notesPath,
+        `${await readFile(notesPath, "utf8")}\nThey are neither slow nor expensive.\n${claim}\n`,
+      );
+
+      assert.deepEqual(
+        await checkDocumentation({
+          rootDirectory: directory,
+        }),
+        [failure],
+      );
+    });
+  }
+
+  const publicCases = [
+    {
+      label: "production-ready",
+      claim: "Clockchain is production-ready.",
+      failure:
+        'DEMO.md: mentions forbidden capability "production-ready" as a present claim.',
+    },
+    {
+      label: "multi-validator",
+      claim: "Clockchain is multi-validator.",
+      failure:
+        'DEMO.md: mentions forbidden capability "multi-validator" as a present claim.',
+    },
+  ];
+
+  for (const { label, claim, failure } of publicCases) {
+    await t.test(`DEMO.md ${label}`, async (subtest) => {
+      const directory =
+        await temporaryDocumentationFixture(subtest);
+      const demoPath = join(directory, "DEMO.md");
+      await writeFile(
+        demoPath,
+        `${await readFile(demoPath, "utf8")}\nClockchain is neither slow nor expensive.\n${claim}\n`,
+      );
+
+      assert.deepEqual(
+        await checkDocumentation({
+          rootDirectory: directory,
+        }),
+        [failure],
+      );
+    });
+  }
+});
+
+test("requires the invitation notes to keep their disposable-wallet disclosure", async (t) => {
+  const disclosure = `These wallets are disposable testnet identities. They hold no mainnet assets,
+move no scenario money, and must not be reused outside this exercise.`;
+  const cases = [
+    {
+      label: "disposable testnet identities",
+      remove: "These wallets are disposable testnet identities. ",
+    },
+    {
+      label: "no mainnet assets",
+      remove: "They hold no mainnet assets,\n",
+    },
+    {
+      label: "no scenario money",
+      remove: "move no scenario money, ",
+    },
+  ];
+
+  for (const { label, remove } of cases) {
+    await t.test(label, async (subtest) => {
+      const directory =
+        await temporaryDocumentationFixture(subtest);
+      const notesPath = join(directory, "invites/README.md");
+      const notes = await readFile(notesPath, "utf8");
+      assert.ok(notes.includes(disclosure), notes);
+      const stripped = notes.replace(remove, "");
+      assert.notEqual(stripped, notes);
+      await writeFile(notesPath, stripped);
+
+      assert.deepEqual(
+        await checkDocumentation({
+          rootDirectory: directory,
+        }),
+        [
+          `invites/README.md: missing required disclosure "${label}".`,
+        ],
+      );
+    });
+  }
+
+  await t.test("whole paragraph removed", async (subtest) => {
+    const directory =
+      await temporaryDocumentationFixture(subtest);
+    const notesPath = join(directory, "invites/README.md");
+    const notes = await readFile(notesPath, "utf8");
+    const stripped = notes.replace(disclosure, "");
+    assert.notEqual(stripped, notes);
+    await writeFile(notesPath, stripped);
+
+    assert.deepEqual(
+      await checkDocumentation({
+        rootDirectory: directory,
+      }),
+      cases.map(
+        ({ label }) =>
+          `invites/README.md: missing required disclosure "${label}".`,
+      ).sort(),
+    );
+  });
+});
+
+test("reports the true gated document count", async () => {
+  const stdout = memoryOutput();
+  const stderr = memoryOutput();
+
+  const exitCode = await checkDocumentationMain({
+    rootDirectory: ROOT_DIRECTORY,
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+  });
+
+  assert.equal(stderr.text(), "");
+  assert.equal(exitCode, 0);
+  assert.equal(
+    stdout.text(),
+    "Documentation checks passed (4 gated documents).\n",
   );
 });

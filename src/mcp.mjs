@@ -4,14 +4,51 @@ import {
 } from "./constants.mjs";
 import { redact } from "./redact.mjs";
 
+// Live probing of the hosted Clockchain MCP endpoint observed `rate_limited`
+// after roughly 4 concurrent or 6-9 sequential calls inside 30 seconds, with
+// server-supplied `retry_after_seconds` values up to 31. Every wait bound below
+// is derived from that observed 31s ceiling, not from a guessed default.
+// The observed throttle answers immediately, either with HTTP 429 or with an
+// in-body `rate_limited` object; it does not hold the connection open for the
+// window. The request budget therefore stays at its baseline and the throttle
+// is absorbed by the waits below, not by a longer request timeout.
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
-const DEFAULT_MAX_ATTEMPTS = 3;
-const MAX_CONFIGURED_ATTEMPTS = 5;
+// One attempt more than the baseline 3: with an honoured retry_after, four
+// attempts cover one observed ~30s window without looping unbounded.
+const DEFAULT_MAX_ATTEMPTS = 4;
+const MAX_CONFIGURED_ATTEMPTS = 6;
 const MAX_CONFIGURED_TIMEOUT_MS = 120_000;
 const MAX_CONFIGURED_RESPONSE_BYTES = 4_194_304;
 const MAX_REQUEST_BYTES = 262_144;
-const MAX_RETRY_AFTER_MS = 30_000;
+// Twice the observed 31s ceiling. The previous 30_000 cap silently truncated a
+// server-supplied 31s wait and retried straight back into the same throttle.
+const MAX_RETRY_AFTER_MS = 62_000;
+// Backoff spaces retries after a transport error or a 5xx blip only. A throttle
+// never reaches it: it waits the server's retry_after, or the rate-limit floor
+// below when no usable hint arrives. This ceiling is reachable — at
+// MAX_CONFIGURED_ATTEMPTS the sequence is [100, 200, 400, 800, 1_000] — so it
+// stays a real bound rather than a decorative one.
+const MAX_BACKOFF_DELAY_MS = 1_000;
+// One maximal observed wait. This binds before the attempt cap at defaults, so
+// one call may sit out at most one observed throttle window and a longer
+// throttle fails closed for the caller to decide about. The worst case for a
+// default read call is therefore 4 x 10s of request time plus 62s of waiting,
+// i.e. 102s.
+const MAX_TOTAL_RETRY_WAIT_MS = 62_000;
+// Applied when a throttle arrives without a usable retry_after hint: the
+// observed limiter needs several seconds of quiet before it clears, so the
+// sub-second backoff would retry straight back into the same throttle.
+const RATE_LIMIT_FLOOR_WAIT_MS = 5_000;
+// One receipt completion polls `complete_attestation` once per attempt, and
+// each poll is bounded by the 102s above. Without an elapsed-time deadline the
+// worst case multiplies into tens of minutes against a demo whose documented
+// budget is 30-90 seconds. 120s covers two observed throttle windows plus the
+// nominal polling. This is both the default and the hard ceiling: a caller may
+// lower it but never raise it, so the worst case for one completion stays at
+// 120s plus the single poll already in flight when the deadline is crossed,
+// i.e. 120_000 + 1_500 + 102_000 = 223_500ms.
+const MAX_COMPLETION_DEADLINE_MS = 120_000;
 const MAX_TOKEN_LENGTH = 8_192;
 const MAX_SUBJECT_LENGTH = 128;
 const MAX_IDENTIFIER_LENGTH = 256;
@@ -21,12 +58,57 @@ const JSON_RPC_VERSION = "2.0";
 const CANONICAL_SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const CONTROL_CHARACTER_PATTERN =
   /[\u0000-\u001f\u007f-\u009f]/;
+// Only read-only tools may be replayed automatically. A retried write can
+// double-write irreversible ledger state, so this set must stay read-only.
 const READ_RETRY_TOOLS = new Set([
   "resolve_agent",
   "get_timestamp",
   "complete_attestation",
   "verify_receipt",
   "verify_cross_party",
+]);
+// Tools that create irreversible ledger or identity state. Nothing here may
+// ever be added to READ_RETRY_TOOLS.
+const WRITE_TOOLS = new Set([
+  "attest_action",
+  "log_action",
+  "mint_identity",
+  "revoke_identity",
+  "delegate_authority",
+  "create_schedule",
+  "tsa_issue",
+  "tsa_attest",
+  "tsa_settle",
+  "tsa_checkpoint",
+]);
+const RATE_LIMITED_ERROR_CODE = "rate_limited";
+// RFC 9110 section 5.6.7 requires a recipient to accept all three HTTP-date
+// shapes, so all three are matched explicitly: IMF-fixdate, the obsolete
+// RFC 850 form, and asctime. Matching explicitly rather than deferring to
+// Date.parse keeps the Clockchain ISO-8601 and `24-07-2026_19:27:50:981`
+// stamps out, since Date.parse would silently invent a wait from them.
+// Capture order is day, month, year, hours, minutes, seconds.
+const IMF_FIXDATE_PATTERN =
+  /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), (0[1-9]|[12]\d|3[01]) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{4}) ([01]\d|2[0-3]):([0-5]\d):([0-5]\d) GMT$/;
+const RFC_850_DATE_PATTERN =
+  /^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (0[1-9]|[12]\d|3[01])-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-(\d{4}|\d{2}) ([01]\d|2[0-3]):([0-5]\d):([0-5]\d) GMT$/;
+// asctime carries no zone; RFC 9110 fixes it at UTC. Capture order is month,
+// day, hours, minutes, seconds, year.
+const ASCTIME_DATE_PATTERN =
+  /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ( [1-9]|[12]\d|3[01]) ([01]\d|2[0-3]):([0-5]\d):([0-5]\d) (\d{4})$/;
+const MONTH_INDEX = new Map([
+  ["Jan", 0],
+  ["Feb", 1],
+  ["Mar", 2],
+  ["Apr", 3],
+  ["May", 4],
+  ["Jun", 5],
+  ["Jul", 6],
+  ["Aug", 7],
+  ["Sep", 8],
+  ["Oct", 9],
+  ["Nov", 10],
+  ["Dec", 11],
 ]);
 const POLLABLE_RECEIPT_STATUSES = new Set([
   "pending",
@@ -73,9 +155,36 @@ export class McpProtocolError extends McpError {
   }
 }
 
+export class McpRateLimitedError extends McpNetworkError {
+  constructor(message, options = {}) {
+    const {
+      code = "MCP_RATE_LIMIT",
+      retryAfterMs = null,
+    } = options;
+    super(message, code);
+    this.retryAfterMs =
+      Number.isSafeInteger(retryAfterMs) && retryAfterMs >= 0
+        ? Math.min(retryAfterMs, MAX_RETRY_AFTER_MS)
+        : null;
+  }
+}
+
 export class McpVerificationError extends McpError {
   constructor(message, code = "MCP_VERIFICATION") {
     super(message, { category: "verification", code });
+  }
+}
+
+export const READ_RETRY_TOOL_NAMES = Object.freeze([
+  ...READ_RETRY_TOOLS,
+]);
+export const WRITE_TOOL_NAMES = Object.freeze([...WRITE_TOOLS]);
+
+for (const name of WRITE_TOOLS) {
+  if (READ_RETRY_TOOLS.has(name)) {
+    throw new McpConfigurationError(
+      "Clockchain read-only retry set must never include a write tool.",
+    );
   }
 }
 
@@ -114,6 +223,15 @@ function cloneSafeError(error, token) {
     return new McpConfigurationError(
       sanitizeMessage(error.message, canaries),
       error.code,
+    );
+  }
+  if (error instanceof McpRateLimitedError) {
+    return new McpRateLimitedError(
+      sanitizeMessage(error.message, canaries),
+      {
+        code: error.code,
+        retryAfterMs: error.retryAfterMs,
+      },
     );
   }
   if (error instanceof McpNetworkError) {
@@ -563,6 +681,87 @@ function assertToolPayload(value) {
   return value;
 }
 
+function clampWaitMs(milliseconds) {
+  return Math.min(Math.max(0, milliseconds), MAX_RETRY_AFTER_MS);
+}
+
+function retryAfterSecondsToMs(value) {
+  if (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0
+  ) {
+    return clampWaitMs(Math.ceil(value * 1_000));
+  }
+  if (
+    typeof value === "string" &&
+    /^\d+(?:\.\d+)?$/.test(value)
+  ) {
+    return clampWaitMs(Math.ceil(Number(value) * 1_000));
+  }
+  return null;
+}
+
+// `retry_after_seconds` is the key observed live; `retry_after` is accepted as
+// the other plausible spelling. Both are optional and preferred in that order,
+// and any other shape yields no hint, so the transport falls back to the
+// rate-limit floor rather than inventing a wait from an unknown field.
+function throttleHintMs(payload) {
+  if (Object.hasOwn(payload, "retry_after_seconds")) {
+    return retryAfterSecondsToMs(payload.retry_after_seconds);
+  }
+  if (Object.hasOwn(payload, "retry_after")) {
+    return retryAfterSecondsToMs(payload.retry_after);
+  }
+  return null;
+}
+
+// The hosted service also throttles inside an HTTP 200 tool result whose body
+// is {"error":"rate_limited","retry_after_seconds":N}. Returning that body as a
+// normal payload is a fail-open: a caller polling for a counterparty record
+// would read it as "the peer never published".
+//
+// Considered and deliberately not handled: a throttle raised at the JSON-RPC
+// layer, i.e. an envelope whose `error` member names `rate_limited`.
+// `assertJsonRpcEnvelope` rejects any error envelope as McpProtocolError before
+// this runs. That is fail-closed but discards the retry_after hint and is not
+// retried. No live response has been observed in that shape, so no speculative
+// parser is added here — a future reader must not assume the path is covered.
+function assertNotRateLimited(payload) {
+  if (
+    !isPlainObject(payload) ||
+    payload.error !== RATE_LIMITED_ERROR_CODE
+  ) {
+    return payload;
+  }
+  throw new McpRateLimitedError(
+    "Clockchain MCP rate limit was exceeded.",
+    {
+      code: "MCP_RATE_LIMITED_BODY",
+      retryAfterMs: throttleHintMs(payload),
+    },
+  );
+}
+
+function toolResultPreview(result) {
+  if (Object.hasOwn(result, "structuredContent")) {
+    return result.structuredContent;
+  }
+  const text =
+    Array.isArray(result.content) &&
+    isPlainObject(result.content[0])
+      ? result.content[0].text
+      : undefined;
+  if (typeof text !== "string") {
+    return undefined;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
 export function parseToolResult(jsonRpc) {
   const envelope = assertJsonRpcEnvelope(jsonRpc);
   const { result } = envelope;
@@ -574,6 +773,7 @@ export function parseToolResult(jsonRpc) {
     );
   }
   if (result.isError === true) {
+    assertNotRateLimited(toolResultPreview(result));
     throw new McpProtocolError(
       "Clockchain MCP tool reported an error.",
       "MCP_TOOL_ERROR",
@@ -581,7 +781,9 @@ export function parseToolResult(jsonRpc) {
   }
 
   if (Object.hasOwn(result, "structuredContent")) {
-    return assertToolPayload(result.structuredContent);
+    return assertNotRateLimited(
+      assertToolPayload(result.structuredContent),
+    );
   }
 
   const content = result.content;
@@ -606,7 +808,7 @@ export function parseToolResult(jsonRpc) {
       "MCP_MALFORMED_TOOL_RESULT",
     );
   }
-  return assertToolPayload(value);
+  return assertNotRateLimited(assertToolPayload(value));
 }
 
 function isSuccessfulStatus(status) {
@@ -686,9 +888,13 @@ export async function mintDemoToken(options = {}) {
     );
   }
   if (response.status === 429) {
-    throw new McpNetworkError(
+    throw new McpRateLimitedError(
       "Clockchain token rate limit was exceeded.",
-      "MCP_RATE_LIMIT",
+      {
+        retryAfterMs: parseRetryAfter(
+          responseHeader(response.headers, "retry-after"),
+        ),
+      },
     );
   }
   if (response.status >= 500) {
@@ -999,27 +1205,73 @@ function requestIdValue(value) {
   );
 }
 
-function parseRetryAfter(value, now = Date.now()) {
-  if (typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value)) {
-    return Math.min(
-      Math.ceil(Number(value) * 1_000),
-      MAX_RETRY_AFTER_MS,
-    );
+// RFC 9110 section 5.6.7: a two-digit year that would land more than 50 years
+// in the future denotes the most recent past year with the same two digits.
+function expandHttpDateYear(text, now) {
+  if (text.length === 4) {
+    return Number(text);
   }
-  if (typeof value === "string") {
-    const timestamp = Date.parse(value);
-    if (Number.isFinite(timestamp)) {
-      return Math.min(
-        Math.max(0, timestamp - now),
-        MAX_RETRY_AFTER_MS,
-      );
-    }
-  }
-  return null;
+  const currentYear = new Date(now).getUTCFullYear();
+  const candidate =
+    Math.floor(currentYear / 100) * 100 + Number(text);
+  return candidate - currentYear > 50 ? candidate - 100 : candidate;
 }
 
+// Converts an HTTP-date through Date.UTC rather than Date.parse, because
+// Date.parse reads an asctime stamp in the host's local zone.
+function httpDateToMs(value, now) {
+  const fixdate =
+    IMF_FIXDATE_PATTERN.exec(value) ??
+    RFC_850_DATE_PATTERN.exec(value);
+  const asctime = fixdate
+    ? null
+    : ASCTIME_DATE_PATTERN.exec(value);
+  if (fixdate === null && asctime === null) {
+    return null;
+  }
+
+  const [day, month, year, hours, minutes, seconds] = fixdate
+    ? fixdate.slice(1)
+    : [
+        asctime[2],
+        asctime[1],
+        asctime[6],
+        asctime[3],
+        asctime[4],
+        asctime[5],
+      ];
+  return Date.UTC(
+    expandHttpDateYear(year, now),
+    MONTH_INDEX.get(month),
+    Number(day),
+    Number(hours),
+    Number(minutes),
+    Number(seconds),
+  );
+}
+
+// Retry-After is either delay-seconds or one of the three RFC 9110 HTTP-date
+// shapes. Every other shape is rejected so an unrecognized stamp falls back to
+// the rate-limit floor instead of letting a lenient Date.parse invent a wait.
+function parseRetryAfter(value, now = Date.now()) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  if (/^\d+(?:\.\d+)?$/.test(value)) {
+    return retryAfterSecondsToMs(value);
+  }
+
+  const timestamp = httpDateToMs(value, now);
+  if (timestamp === null || !Number.isFinite(timestamp)) {
+    return null;
+  }
+  return clampWaitMs(timestamp - now);
+}
+
+// Only spaces retries after a transport error or a 5xx blip; throttles use
+// retry_after or RATE_LIMIT_FLOOR_WAIT_MS instead.
 function backoffDelay(attempt) {
-  return Math.min(100 * 2 ** attempt, 1_000);
+  return Math.min(100 * 2 ** attempt, MAX_BACKOFF_DELAY_MS);
 }
 
 async function waitForRetry(sleeper, milliseconds) {
@@ -1037,6 +1289,16 @@ function defaultSleeper(milliseconds) {
   return new Promise((resolve) => {
     setTimeout(resolve, milliseconds);
   });
+}
+
+function clockReading(now) {
+  const reading = now();
+  if (typeof reading !== "number" || !Number.isFinite(reading)) {
+    throw new McpConfigurationError(
+      "Clockchain elapsed-time clock is invalid.",
+    );
+  }
+  return reading;
 }
 
 export function createMcpClient(options = {}) {
@@ -1150,7 +1412,24 @@ export function createMcpClient(options = {}) {
       );
     }
 
+    // The two sets are proven disjoint at module load, so membership in
+    // READ_RETRY_TOOLS is already proof that `toolName` is not a write.
     const mayRetry = READ_RETRY_TOOLS.has(toolName);
+    let totalWaitMs = 0;
+
+    async function waitBeforeRetry(attempt, retryAfterMs, fallbackMs) {
+      if (!mayRetry || attempt + 1 >= maxAttempts) {
+        return false;
+      }
+
+      const delay = retryAfterMs ?? fallbackMs;
+      if (totalWaitMs + delay > MAX_TOTAL_RETRY_WAIT_MS) {
+        return false;
+      }
+      totalWaitMs += delay;
+      await waitForRetry(sleeper, delay);
+      return true;
+    }
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       let response;
@@ -1178,10 +1457,12 @@ export function createMcpClient(options = {}) {
       } catch (error) {
         if (
           error instanceof McpNetworkError &&
-          mayRetry &&
-          attempt + 1 < maxAttempts
+          (await waitBeforeRetry(
+            attempt,
+            null,
+            backoffDelay(attempt),
+          ))
         ) {
-          await waitForRetry(sleeper, backoffDelay(attempt));
           continue;
         }
         throw cloneSafeError(error, safeToken);
@@ -1198,25 +1479,32 @@ export function createMcpClient(options = {}) {
       }
 
       if (response.status === 429) {
-        if (mayRetry && attempt + 1 < maxAttempts) {
-          const retryAfter = parseRetryAfter(
-            responseHeader(response.headers, "retry-after"),
-          );
-          await waitForRetry(
-            sleeper,
-            retryAfter ?? backoffDelay(attempt),
-          );
+        const retryAfterMs = parseRetryAfter(
+          responseHeader(response.headers, "retry-after"),
+        );
+        if (
+          await waitBeforeRetry(
+            attempt,
+            retryAfterMs,
+            RATE_LIMIT_FLOOR_WAIT_MS,
+          )
+        ) {
           continue;
         }
-        throw new McpNetworkError(
+        throw new McpRateLimitedError(
           "Clockchain MCP rate limit was exceeded.",
-          "MCP_RATE_LIMIT",
+          { retryAfterMs },
         );
       }
 
       if (response.status >= 500) {
-        if (mayRetry && attempt + 1 < maxAttempts) {
-          await waitForRetry(sleeper, backoffDelay(attempt));
+        if (
+          await waitBeforeRetry(
+            attempt,
+            null,
+            backoffDelay(attempt),
+          )
+        ) {
           continue;
         }
         throw new McpNetworkError(
@@ -1237,6 +1525,16 @@ export function createMcpClient(options = {}) {
           parseSseJsonRpc(text, { expectedId: id }),
         );
       } catch (error) {
+        if (
+          error instanceof McpRateLimitedError &&
+          (await waitBeforeRetry(
+            attempt,
+            error.retryAfterMs,
+            RATE_LIMIT_FLOOR_WAIT_MS,
+          ))
+        ) {
+          continue;
+        }
         throw cloneSafeError(error, safeToken);
       }
     }
@@ -1568,7 +1866,13 @@ export async function completeReceipt(
   if (
     !hasOnlyKeys(
       options,
-      new Set(["attempts", "intervalMs", "sleeper"]),
+      new Set([
+        "attempts",
+        "deadlineMs",
+        "intervalMs",
+        "now",
+        "sleeper",
+      ]),
     )
   ) {
     throw new McpConfigurationError(
@@ -1577,7 +1881,9 @@ export async function completeReceipt(
   }
   const {
     attempts = 8,
+    deadlineMs = MAX_COMPLETION_DEADLINE_MS,
     intervalMs = 1_500,
+    now = Date.now,
     sleeper = defaultSleeper,
   } = options;
 
@@ -1593,6 +1899,11 @@ export async function completeReceipt(
     maximum: 100,
   });
   configurationInteger(
+    deadlineMs,
+    "Clockchain completion deadline",
+    { maximum: MAX_COMPLETION_DEADLINE_MS },
+  );
+  configurationInteger(
     intervalMs,
     "Clockchain completion interval",
     {
@@ -1600,6 +1911,11 @@ export async function completeReceipt(
       minimum: 0,
     },
   );
+  if (typeof now !== "function") {
+    throw new McpConfigurationError(
+      "Clockchain completion clock is invalid.",
+    );
+  }
   if (typeof sleeper !== "function") {
     throw new McpConfigurationError(
       "Clockchain completion sleeper is invalid.",
@@ -1630,8 +1946,19 @@ export async function completeReceipt(
   }
   assertCompletionReadyReceipt(receipt);
 
+  const started = clockReading(now);
   let current = receipt;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    // The attempt cap alone does not bound wall-clock time: each poll is a
+    // whole transport call, itself bounded by MAX_TOTAL_RETRY_WAIT_MS of
+    // throttle waiting. The deadline is what keeps one completion inside the
+    // demo's documented budget.
+    if (clockReading(now) - started > deadlineMs) {
+      throw new McpVerificationError(
+        "Clockchain receipt completion exceeded its elapsed-time budget.",
+        "MCP_RECEIPT_DEADLINE",
+      );
+    }
     await sleeper(intervalMs);
     current = await client.completeAttestation(current);
 

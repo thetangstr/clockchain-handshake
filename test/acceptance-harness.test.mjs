@@ -33,7 +33,9 @@ import {
   BOUNDED_READ_FLAGS_FOR_TESTING,
   DEFAULT_CLIENT_COMMANDS,
   buildClientEnvironment,
+  defaultOwnerNonceReader,
   main as runClientsMain,
+  ownerNonceTransport,
   readBoundedFileForTesting,
   runCleanClients,
 } from "../scripts/run-clean-clients.mjs";
@@ -51,6 +53,9 @@ import {
 import {
   renderResultMarkdown,
 } from "../src/evidence.mjs";
+import {
+  highEntropySecretAssignmentPattern,
+} from "../src/redact.mjs";
 
 const PROMPT = Buffer.from(
   "Run this exact Handshake prompt.\nSecond line stays byte-identical.\n",
@@ -77,26 +82,35 @@ const LEDGER_A = "11111111-1111-4111-8111-111111111111";
 const LEDGER_B = "22222222-2222-4222-8222-222222222222";
 const RUN_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const RUN_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const LEAKED_HIGH_ENTROPY_TOKEN =
+  "aGlnaEVudHJvcHlDbGllbnRUb2tlblZhbHVl";
+const LEAKED_JWT =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" +
+  ".eyJzdWIiOiJoYW5kc2hha2UtZGVtbyIsImlhdCI6MTcwMDAwMDB9" +
+  ".c2lnbmF0dXJlU2VnbWVudFRoYXRNdXN0Tm90U3Vydml2ZQ";
 const CODEX_AUTH_CANARY = "openai-auth-canary-value";
 const CLAUDE_AUTH_CANARY = "anthropic-auth-canary-value";
 
 function passResult({
   agentId,
   blockHeight,
+  completedAt = "2026-07-23T08:00:01.234Z",
+  consensusTime = "2026-07-23T08:00:01.000Z",
   displayName,
   ledgerId,
   metadataTx,
   owner,
   registerTx,
   runId,
+  startedAt = "2026-07-23T08:00:00.000Z",
 }) {
   return {
     schema: "clockchain.handshake-result/v1",
     status: "PASS",
     runId,
-    startedAt: "2026-07-23T08:00:00.000Z",
-    completedAt: "2026-07-23T08:00:01.234Z",
-    elapsedMs: 1234,
+    startedAt,
+    completedAt,
+    elapsedMs: Date.parse(completedAt) - Date.parse(startedAt),
     scenario: {
       action: "trust_handshake",
       amount: {
@@ -118,7 +132,7 @@ function passResult({
     clockchain: {
       ledgerId,
       blockHeight,
-      consensusTime: "2026-07-23T08:00:01.000Z",
+      consensusTime,
       receiptStatus: "anchored",
       receiptVerified: true,
       crossPartyVerified: true,
@@ -134,6 +148,15 @@ function passResult({
   };
 }
 
+function replayed(result, { completedAt, startedAt }) {
+  const replay = structuredClone(result);
+  replay.startedAt = startedAt;
+  replay.completedAt = completedAt;
+  replay.elapsedMs =
+    Date.parse(completedAt) - Date.parse(startedAt);
+  return replay;
+}
+
 const CODEX_RESULT = passResult({
   agentId: "101",
   blockHeight: "9001",
@@ -147,12 +170,15 @@ const CODEX_RESULT = passResult({
 const CLAUDE_RESULT = passResult({
   agentId: "102",
   blockHeight: "9002",
+  completedAt: "2026-07-23T08:00:03.334Z",
+  consensusTime: "2026-07-23T08:00:03.000Z",
   displayName: "Iris",
   ledgerId: LEDGER_B,
   metadataTx: METADATA_TX_B,
   owner: OWNER_B,
   registerTx: REGISTER_TX_B,
   runId: RUN_B,
+  startedAt: "2026-07-23T08:00:02.100Z",
 });
 
 function memoryOutput() {
@@ -321,6 +347,8 @@ if (mode === "hang") {
       " openai=" + (process.env.OPENAI_API_KEY ?? "") +
       " anthropic=" + (process.env.ANTHROPIC_API_KEY ?? "") +
       " Bearer cc_abcdefghijklmnopqrstuvwxyz123456 " +
+      ${JSON.stringify(` token: ${LEAKED_HIGH_ENTROPY_TOKEN} `)} +
+      ${JSON.stringify(` token: ${LEAKED_JWT} `)} +
       leakedCode + " " +
       JSON.stringify({ code: leakedCiphertext }) + "\\n",
   );
@@ -454,6 +482,7 @@ function harnessOptions({
         return {
           code: CODEX_INVITE_CODE,
           bundle: {
+            address: OWNER_A,
             crypto: { ciphertext: CODEX_CIPHERTEXT },
           },
         };
@@ -462,12 +491,14 @@ function harnessOptions({
         return {
           code: CLAUDE_INVITE_CODE,
           bundle: {
+            address: OWNER_B,
             crypto: { ciphertext: CLAUDE_CIPHERTEXT },
           },
         };
       }
       throw new Error("unexpected invitation path");
     },
+    readOwnerNonce: async () => 0,
     repositoryRef: REPOSITORY_REF,
     terminationGraceMs,
     timeoutMs,
@@ -502,6 +533,68 @@ test("defines the exact native Codex and Claude clean-client commands", () => {
       versionArgs: ["--version"],
     },
   });
+});
+
+// Scope of this test, stated precisely: it constrains dependency DIRECTION
+// only. The verifier is not, and is not required to be, dependency-light --
+// it imports createPublicClient, decodeFunctionData, encodeFunctionData and
+// http from viem directly for its own chain checks. What it must never do is
+// import the harness it verifies, or grow a private copy of a shared secret
+// pattern that could drift from the one the harness sanitizes with.
+test("keeps the independent verifier free of a dependency on the harness", async () => {
+  const verifierSource = await readFile(
+    new URL("../scripts/verify-live-results.mjs", import.meta.url),
+    "utf8",
+  );
+
+  assert.equal(
+    verifierSource.includes("run-clean-clients.mjs"),
+    false,
+    "the verifier must not import the tool it verifies",
+  );
+  assert.match(
+    verifierSource,
+    /highEntropySecretAssignmentPattern[\s\S]*?from "\.\.\/src\/redact\.mjs"/,
+  );
+  assert.match(
+    verifierSource,
+    /broadSecretAssignmentPattern[\s\S]*?from "\.\.\/src\/redact\.mjs"/,
+  );
+});
+
+test("shares one high-entropy secret-assignment pattern with the verifier", () => {
+  for (const prose of [
+    "Minted a Clockchain token: mcp.clockchain.network",
+    "Clockchain token = minted successfully",
+    "Result: no secret: material was printed",
+    "- Authorization: 100 USD",
+    "invite code: none",
+  ]) {
+    assert.equal(
+      highEntropySecretAssignmentPattern().test(prose),
+      false,
+      prose,
+    );
+  }
+  for (const leak of [
+    `invitation_code: "${LEAKED_HIGH_ENTROPY_TOKEN}"`,
+    `private_key=0x${"a".repeat(64)}`,
+    "ciphertext: 3f9a2b7c1d4e5f60718293a4b5c6d7e8",
+    `{"token":"${LEAKED_HIGH_ENTROPY_TOKEN}"}`,
+  ]) {
+    assert.equal(
+      highEntropySecretAssignmentPattern().test(leak),
+      true,
+      leak,
+    );
+  }
+  assert.equal(
+    `token: "${LEAKED_HIGH_ENTROPY_TOKEN}"`.replace(
+      highEntropySecretAssignmentPattern("gi"),
+      "$1[REDACTED]",
+    ),
+    'token: "[REDACTED]"',
+  );
 });
 
 test("requires and normalizes an immutable repository commit", () => {
@@ -1025,6 +1118,17 @@ test("runs clean clients sequentially with identical prompts and isolated minima
     assert.equal(stdout.includes(CLAUDE_INVITE_CODE), false);
     assert.equal(stdout.includes(CODEX_CIPHERTEXT), false);
     assert.equal(stdout.includes(CLAUDE_CIPHERTEXT), false);
+    assert.equal(
+      stdout.includes(LEAKED_HIGH_ENTROPY_TOKEN),
+      false,
+    );
+    for (const segment of LEAKED_JWT.split(".")) {
+      assert.equal(stdout.includes(segment), false, segment);
+    }
+    assert.doesNotMatch(
+      stdout,
+      highEntropySecretAssignmentPattern(),
+    );
     assert.equal(stderr.includes(`0x${"9".repeat(64)}`), false);
     assert.match(`${stdout}${stderr}`, /\[REDACTED\]/);
   }
@@ -1559,6 +1663,478 @@ test("rejects a shared invitation path before launching either client", async (t
   await assert.rejects(
     readFile(join(options.outputRoot, "codex", "stdout.log")),
     /ENOENT/,
+  );
+});
+
+test("refuses to launch a client whose invitation wallet is not provably unused", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-consumed-wallet-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const cases = [
+    {
+      label: "already-used codex wallet",
+      code: "HARNESS_INVITATION_WALLET_CONSUMED",
+      readOwnerNonce: async (address) =>
+        (address === OWNER_A ? 1 : 0),
+    },
+    {
+      label: "already-used claude wallet",
+      code: "HARNESS_INVITATION_WALLET_CONSUMED",
+      readOwnerNonce: async (address) =>
+        (address === OWNER_B ? 3 : 0),
+    },
+    {
+      label: "unreadable nonce",
+      code: "HARNESS_INVITATION_WALLET_UNREADABLE",
+      readOwnerNonce: async () => {
+        throw new Error("rpc unavailable");
+      },
+    },
+    {
+      label: "non-integer nonce",
+      code: "HARNESS_INVITATION_WALLET_UNREADABLE",
+      readOwnerNonce: async () => "0",
+    },
+  ];
+
+  for (const [index, testCase] of cases.entries()) {
+    await t.test(testCase.label, async () => {
+      let spawnCalls = 0;
+      const options = harnessOptions({
+        claudeFixture,
+        codexFixture,
+        directory,
+        executable,
+      });
+      options.outputRoot = join(
+        directory,
+        `artifacts-${index}`,
+      );
+      options.readOwnerNonce = testCase.readOwnerNonce;
+      options.spawnImpl = () => {
+        spawnCalls += 1;
+        throw new Error("must not spawn");
+      };
+
+      await assert.rejects(
+        runCleanClients(options),
+        (error) => error?.code === testCase.code,
+      );
+      assert.equal(spawnCalls, 0);
+      await assert.rejects(
+        readFile(join(options.outputRoot, "codex", "stdout.log")),
+        /ENOENT/,
+      );
+    });
+  }
+});
+
+test("reads invitation-wallet nonces through the default nonce reader", async () => {
+  const created = [];
+  const makeReader = (getTransactionCount) =>
+    defaultOwnerNonceReader({
+      createClient: (config) => {
+        created.push(config);
+        return { getTransactionCount };
+      },
+      transport: "transport-sentinel",
+    });
+  const requests = [];
+
+  const read = makeReader(async (request) => {
+    requests.push(request);
+    return 0;
+  });
+
+  assert.equal(await read(OWNER_A), 0);
+  assert.deepEqual(requests, [
+    { address: OWNER_A, blockTag: "pending" },
+  ]);
+  assert.equal(created[0].chain.id, 11155111);
+  assert.equal(created[0].transport, "transport-sentinel");
+  await assert.rejects(
+    makeReader(async () => {
+      throw new Error("rpc unavailable");
+    })(OWNER_A),
+    /rpc unavailable/,
+  );
+  assert.equal(
+    await makeReader(async () => "0")(OWNER_A),
+    "0",
+  );
+});
+
+test("configures the nonce transport with the retry budget and timeout it claims", () => {
+  const { config } = ownerNonceTransport("http://127.0.0.1:9/")({});
+
+  assert.equal(config.retryCount, 2);
+  assert.equal(config.timeout, 15_000);
+});
+
+test("survives two consecutive transient RPC failures while reading an invitation-wallet nonce", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  let attempts = 0;
+  globalThis.fetch = async (_url, init) => {
+    attempts += 1;
+    // Two failures exhaust the full budget: a retryCount of 1 leaves the
+    // third attempt unmade and the read rejects.
+    if (attempts < 3) {
+      throw new TypeError("fetch failed");
+    }
+    const { id } = JSON.parse(init.body);
+    return new Response(
+      JSON.stringify({ id, jsonrpc: "2.0", result: "0x0" }),
+      {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      },
+    );
+  };
+
+  const read = defaultOwnerNonceReader({
+    transport: ownerNonceTransport("http://127.0.0.1:9/"),
+  });
+
+  assert.equal(await read(OWNER_A), 0);
+  assert.equal(attempts, 3);
+});
+
+test("refuses to reuse an existing artifact directory and names it", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-existing-artifacts-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const options = harnessOptions({
+    claudeFixture,
+    codexFixture,
+    directory,
+    executable,
+  });
+  const existingDirectory = join(
+    options.outputRoot,
+    "codex",
+  );
+  await mkdir(existingDirectory, { recursive: true });
+  const preserved = join(existingDirectory, "result.json");
+  await writeFile(preserved, "previous-run-evidence\n", {
+    mode: 0o600,
+  });
+  let spawnCalls = 0;
+  options.spawnImpl = () => {
+    spawnCalls += 1;
+    throw new Error("must not spawn");
+  };
+
+  await assert.rejects(
+    runCleanClients(options),
+    (error) =>
+      error?.code === "HARNESS_ARTIFACT_DIRECTORY_EXISTS" &&
+      error?.directory === existingDirectory,
+  );
+  assert.equal(spawnCalls, 0);
+  assert.equal(
+    await readFile(preserved, "utf8"),
+    "previous-run-evidence\n",
+  );
+});
+
+test("creates no artifact directory when a later client's directory exists", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-partial-artifacts-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const options = harnessOptions({
+    claudeFixture,
+    codexFixture,
+    directory,
+    executable,
+  });
+  const existingDirectory = join(
+    options.outputRoot,
+    "claude",
+  );
+  await mkdir(existingDirectory, { recursive: true });
+  let spawnCalls = 0;
+  options.spawnImpl = () => {
+    spawnCalls += 1;
+    throw new Error("must not spawn");
+  };
+
+  await assert.rejects(
+    runCleanClients(options),
+    (error) =>
+      error?.code === "HARNESS_ARTIFACT_DIRECTORY_EXISTS" &&
+      error?.directory === existingDirectory,
+  );
+  assert.equal(spawnCalls, 0);
+  await assert.rejects(
+    readdir(join(options.outputRoot, "codex")),
+    /ENOENT/,
+  );
+});
+
+test("refuses a non-callable directory-creation seam before touching disk", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-bad-seam-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+
+  for (const seam of [null, "mkdir", {}]) {
+    const options = harnessOptions({
+      claudeFixture,
+      codexFixture,
+      directory,
+      executable,
+    });
+    options.makeDirectory = seam;
+    let invitationReads = 0;
+    options.readInvitation = async () => {
+      invitationReads += 1;
+      throw new Error("must not read");
+    };
+
+    await assert.rejects(
+      runCleanClients(options),
+      (error) =>
+        error?.name === "HarnessConfigurationError" &&
+        error?.code === "HARNESS_CONFIGURATION",
+    );
+    assert.equal(invitationReads, 0);
+  }
+  await assert.rejects(
+    readdir(join(directory, "artifacts")),
+    /ENOENT/,
+  );
+});
+
+test("probes every artifact directory before creating anything", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-probe-order-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const options = harnessOptions({
+    claudeFixture,
+    codexFixture,
+    directory,
+    executable,
+  });
+  const existingDirectory = join(
+    options.outputRoot,
+    "claude",
+  );
+  await mkdir(existingDirectory, { recursive: true });
+  const madeDirectories = [];
+  options.makeDirectory = async (path, settings) => {
+    madeDirectories.push(path);
+    return mkdir(path, settings);
+  };
+  let spawnCalls = 0;
+  options.spawnImpl = () => {
+    spawnCalls += 1;
+    throw new Error("must not spawn");
+  };
+
+  await assert.rejects(
+    runCleanClients(options),
+    (error) =>
+      error?.code === "HARNESS_ARTIFACT_DIRECTORY_EXISTS" &&
+      error?.directory === existingDirectory,
+  );
+  assert.equal(spawnCalls, 0);
+  assert.deepEqual(
+    madeDirectories,
+    [],
+    `REPRO refused run created: ${madeDirectories.join(", ")}`,
+  );
+});
+
+test("refuses a run when an artifact directory appears after the probe", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-artifact-toctou-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const options = harnessOptions({
+    claudeFixture,
+    codexFixture,
+    directory,
+    executable,
+  });
+  const racedDirectory = join(options.outputRoot, "codex");
+  // Stands in for a concurrent harness that wins the race between the
+  // pre-flight probe and this run's create.
+  options.makeDirectory = async (path, settings) => {
+    if (path === racedDirectory) {
+      await mkdir(path, settings);
+    }
+    return mkdir(path, settings);
+  };
+  let spawnCalls = 0;
+  options.spawnImpl = () => {
+    spawnCalls += 1;
+    throw new Error("must not spawn");
+  };
+
+  await assert.rejects(
+    runCleanClients(options),
+    (error) =>
+      error?.code === "HARNESS_ARTIFACT_DIRECTORY_EXISTS" &&
+      error?.directory === racedDirectory,
+  );
+  assert.equal(spawnCalls, 0);
+});
+
+test("client CLI reports the artifact directory it refused to reuse", async () => {
+  const stdout = memoryOutput();
+  const stderr = memoryOutput();
+  const existingDirectory = "/tmp/handshake-artifacts/codex";
+  const exitCode = await runClientsMain({
+    argv: [
+      "--codex-invite",
+      CODEX_INVITE,
+      "--claude-invite",
+      CLAUDE_INVITE,
+      "--repo-ref",
+      REPOSITORY_REF,
+      "--acknowledge-agent-permission-risk",
+    ],
+    environment: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+    },
+    async run() {
+      const error = new Error(
+        "Clean-client acceptance configuration is invalid.",
+      );
+      error.name = "ExistingArtifactDirectoryError";
+      error.code = "HARNESS_ARTIFACT_DIRECTORY_EXISTS";
+      error.directory = existingDirectory;
+      throw error;
+    },
+    stderr: stderr.stream,
+    stdout: stdout.stream,
+  });
+
+  assert.equal(exitCode, 2);
+  assert.equal(stdout.text(), "");
+  assert.match(
+    stderr.text(),
+    new RegExp(existingDirectory),
+  );
+  assert.doesNotMatch(stderr.text(), /configuration failed/i);
+});
+
+test("reads both invitation owner nonces before the first client launch", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-fresh-wallets-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  await writePrompt(directory);
+  const executable = await writeFakeClient(directory);
+  const codexFixture = await writeFixture(
+    join(directory, "fixtures", "codex"),
+    CODEX_RESULT,
+  );
+  const claudeFixture = await writeFixture(
+    join(directory, "fixtures", "claude"),
+    CLAUDE_RESULT,
+  );
+  const events = [];
+  const options = harnessOptions({
+    claudeFixture,
+    codexFixture,
+    directory,
+    executable,
+  });
+  options.readOwnerNonce = async (address) => {
+    events.push(`nonce:${address}`);
+    return 0;
+  };
+  options.spawnImpl = () => {
+    events.push("spawn");
+    throw new Error("no client is launched in this test");
+  };
+
+  const result = await runCleanClients(options);
+
+  assert.equal(result.status, "FAIL");
+  assert.deepEqual(events.slice(0, 2), [
+    `nonce:${OWNER_A}`,
+    `nonce:${OWNER_B}`,
+  ]);
+  assert.equal(
+    events.slice(2).every((event) => event === "spawn"),
+    true,
   );
 });
 
@@ -2865,6 +3441,128 @@ test("binds each result owner and display name to its ordered operator invitatio
   assert.equal(verdict.clients.claude.status, "PASS");
 });
 
+test("rejects a replayed result pair backdated outside its manifest run window", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-stale-window-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  const codexDirectory = join(directory, "codex");
+  const claudeDirectory = join(directory, "claude");
+  const staleCodex = replayed(CODEX_RESULT, {
+    startedAt: "2019-01-01T00:00:00.000Z",
+    completedAt: "2019-01-01T00:00:01.234Z",
+  });
+  const staleClaude = replayed(CLAUDE_RESULT, {
+    startedAt: "2019-01-01T00:00:02.000Z",
+    completedAt: "2019-01-01T00:00:03.234Z",
+  });
+  await writeFixture(codexDirectory, staleCodex);
+  await writeFixture(claudeDirectory, staleClaude);
+  const publicClient = fakePublicClient([
+    staleCodex,
+    staleClaude,
+  ]);
+  const observations = {
+    completions: [],
+    crossParty: [],
+    factoryTokens: [],
+    tokenSubjects: [],
+  };
+  const clockchain = fakeClockchain(
+    [staleCodex, staleClaude],
+    observations,
+  );
+
+  const verdict = await verifyLiveResults({
+    ...(await verificationProvenance(directory, {
+      codexDirectory,
+      claudeDirectory,
+      results: [staleCodex, staleClaude],
+    })),
+    clientFactory: clockchain.clientFactory,
+    outputFile: join(directory, "verdict.json"),
+    publicClient,
+    resultDirectories: {
+      codex: codexDirectory,
+      claude: claudeDirectory,
+    },
+    tokenIssuer: clockchain.tokenIssuer,
+  });
+
+  assert.equal(
+    verdict.status,
+    "FAIL",
+    `REPRO stale verdict: ${verdict.status} ${
+      JSON.stringify(verdict.aggregate)
+    }`,
+  );
+  assert.equal(
+    verdict.clients.codex.errorCode,
+    "RESULT_OUTSIDE_RUN_WINDOW",
+  );
+  assert.equal(
+    verdict.clients.claude.errorCode,
+    "RESULT_OUTSIDE_RUN_WINDOW",
+  );
+  assert.equal(publicClient.calls.length, 0);
+  assert.equal(observations.tokenSubjects.length, 0);
+});
+
+test("accepts results whose run window exactly matches the recorded client window", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-window-edges-"),
+  );
+  t.after(() =>
+    rm(directory, { force: true, recursive: true }));
+  const codexDirectory = join(directory, "codex");
+  const claudeDirectory = join(directory, "claude");
+  const edgeCodex = replayed(CODEX_RESULT, {
+    startedAt: "2026-07-23T08:00:00.000Z",
+    completedAt: "2026-07-23T08:00:02.000Z",
+  });
+  const edgeClaude = replayed(CLAUDE_RESULT, {
+    startedAt: "2026-07-23T08:00:02.001Z",
+    completedAt: "2026-07-23T08:00:04.000Z",
+  });
+  await writeFixture(codexDirectory, edgeCodex);
+  await writeFixture(claudeDirectory, edgeClaude);
+  const publicClient = fakePublicClient([
+    edgeCodex,
+    edgeClaude,
+  ]);
+  const observations = {
+    completions: [],
+    crossParty: [],
+    factoryTokens: [],
+    tokenSubjects: [],
+  };
+  const clockchain = fakeClockchain(
+    [edgeCodex, edgeClaude],
+    observations,
+  );
+
+  const verdict = await verifyLiveResults({
+    ...(await verificationProvenance(directory, {
+      codexDirectory,
+      claudeDirectory,
+      results: [edgeCodex, edgeClaude],
+    })),
+    clientFactory: clockchain.clientFactory,
+    outputFile: join(directory, "verdict.json"),
+    publicClient,
+    resultDirectories: {
+      codex: codexDirectory,
+      claude: claudeDirectory,
+    },
+    tokenIssuer: clockchain.tokenIssuer,
+  });
+
+  assert.equal(verdict.status, "PASS");
+  assert.equal(verdict.clients.codex.status, "PASS");
+  assert.equal(verdict.clients.claude.status, "PASS");
+});
+
 test("independently verifies both identities and recomputed receipt hashes before writing PASS", async (t) => {
   const directory = await mkdtemp(
     join(process.env.TMPDIR, "handshake-verifier-"),
@@ -3150,6 +3848,459 @@ test("extracts secret canaries from operator files and fails closed without echo
   assert.equal(serialized.includes("cc_verifier_token"), false);
 });
 
+test("keeps ordinary agent prose out of the artifact secret heuristic", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-benign-prose-"),
+  );
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  const codexDirectory = join(directory, "codex");
+  const claudeDirectory = join(directory, "claude");
+  await writeFixture(codexDirectory, CODEX_RESULT);
+  await writeFixture(claudeDirectory, CLAUDE_RESULT);
+  await writeFile(
+    join(codexDirectory, "stdout.log"),
+    [
+      "Minted a Clockchain token: mcp.clockchain.network",
+      "Clockchain token = minted successfully",
+      "Result: no secret: material was printed",
+      // Every line below matches the broad assignment pattern that the
+      // canonical schema artifacts are held to. Free-form prose must stay
+      // outside that rule or a healthy run fails on narration alone.
+      "invite code: none",
+      "token: see docs.handshake.example for details",
+      "private key: never written to disk",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  const publicClient = fakePublicClient([
+    CODEX_RESULT,
+    CLAUDE_RESULT,
+  ]);
+  const observations = {
+    completions: [],
+    crossParty: [],
+    factoryTokens: [],
+    tokenSubjects: [],
+  };
+  const clockchain = fakeClockchain(
+    [CODEX_RESULT, CLAUDE_RESULT],
+    observations,
+  );
+
+  const verdict = await verifyLiveResults({
+    ...(await verificationProvenance(directory, {
+      codexDirectory,
+      claudeDirectory,
+    })),
+    clientFactory: clockchain.clientFactory,
+    outputFile: join(directory, "verdict.json"),
+    publicClient,
+    resultDirectories: {
+      codex: codexDirectory,
+      claude: claudeDirectory,
+    },
+    tokenIssuer: clockchain.tokenIssuer,
+  });
+
+  assert.equal(
+    verdict.status,
+    "PASS",
+    `REPRO benign prose verdict: ${
+      verdict.clients.codex.errorCode ?? "none"
+    }`,
+  );
+  assert.equal(verdict.clients.codex.status, "PASS");
+  assert.equal(verdict.clients.claude.status, "PASS");
+});
+
+test("applies the artifact secret heuristic to every artifact file", async (t) => {
+  for (const artifactName of ["stdout.log", "stderr.log", "notes.txt"]) {
+    await t.test(artifactName, async (subtest) => {
+      const directory = await mkdtemp(
+        join(process.env.TMPDIR, "handshake-noncanonical-leak-"),
+      );
+      subtest.after(() =>
+        rm(directory, { force: true, recursive: true }));
+      const codexDirectory = join(directory, "codex");
+      const claudeDirectory = join(directory, "claude");
+      await writeFixture(codexDirectory, CODEX_RESULT);
+      await writeFixture(claudeDirectory, CLAUDE_RESULT);
+      await writeFile(
+        join(codexDirectory, artifactName),
+        `secret: ${LEAKED_HIGH_ENTROPY_TOKEN}\n`,
+        { mode: 0o600 },
+      );
+      const publicClient = fakePublicClient([
+        CODEX_RESULT,
+        CLAUDE_RESULT,
+      ]);
+      const observations = {
+        completions: [],
+        crossParty: [],
+        factoryTokens: [],
+        tokenSubjects: [],
+      };
+      const clockchain = fakeClockchain(
+        [CODEX_RESULT, CLAUDE_RESULT],
+        observations,
+      );
+      const outputFile = join(directory, "verdict.json");
+
+      const verdict = await verifyLiveResults({
+        ...(await verificationProvenance(directory, {
+          codexDirectory,
+          claudeDirectory,
+        })),
+        clientFactory: clockchain.clientFactory,
+        outputFile,
+        publicClient,
+        resultDirectories: {
+          codex: codexDirectory,
+          claude: claudeDirectory,
+        },
+        tokenIssuer: clockchain.tokenIssuer,
+      });
+
+      assert.equal(
+        verdict.clients.codex.errorCode,
+        "ARTIFACT_SECRET_ASSIGNMENT_SUSPECTED",
+        `REPRO non-canonical heuristic: ${
+          verdict.clients.codex.errorCode ?? "none"
+        }`,
+      );
+      assert.equal(verdict.status, "FAIL");
+      assert.equal(verdict.clients.claude.status, "PASS");
+      const serialized = await readFile(outputFile, "utf8");
+      assert.equal(
+        serialized.includes(LEAKED_HIGH_ENTROPY_TOKEN),
+        false,
+      );
+    });
+  }
+});
+
+test("fails a canonical schema artifact that assigns a short secret", async (t) => {
+  await t.test("result.json", async (subtest) => {
+    const directory = await mkdtemp(
+      join(process.env.TMPDIR, "handshake-canonical-json-leak-"),
+    );
+    subtest.after(() =>
+      rm(directory, { force: true, recursive: true }));
+    const codexDirectory = join(directory, "codex");
+    const claudeDirectory = join(directory, "claude");
+    // Schema-valid in every respect: the short secret rides inside the one
+    // free-form string the exact-key allowlist admits, so nothing else in the
+    // verifier rejects this run.
+    const leakedResult = {
+      ...CODEX_RESULT,
+      identity: {
+        ...CODEX_RESULT.identity,
+        displayName: "Billy token: abc123",
+      },
+    };
+    await writeFixture(codexDirectory, leakedResult);
+    await writeFixture(claudeDirectory, CLAUDE_RESULT);
+    const publicClient = fakePublicClient([
+      leakedResult,
+      CLAUDE_RESULT,
+    ]);
+    const observations = {
+      completions: [],
+      crossParty: [],
+      factoryTokens: [],
+      tokenSubjects: [],
+    };
+    const clockchain = fakeClockchain(
+      [leakedResult, CLAUDE_RESULT],
+      observations,
+    );
+
+    const verdict = await verifyLiveResults({
+      ...(await verificationProvenance(directory, {
+        claudeDirectory,
+        codexDirectory,
+        results: [leakedResult, CLAUDE_RESULT],
+      })),
+      clientFactory: clockchain.clientFactory,
+      outputFile: join(directory, "verdict.json"),
+      publicClient,
+      resultDirectories: {
+        codex: codexDirectory,
+        claude: claudeDirectory,
+      },
+      tokenIssuer: clockchain.tokenIssuer,
+    });
+
+    assert.equal(
+      verdict.clients.codex.errorCode,
+      "CANONICAL_ARTIFACT_SECRET_ASSIGNMENT_SUSPECTED",
+      `REPRO short canonical secret: ${
+        verdict.clients.codex.errorCode ?? "none"
+      }`,
+    );
+    assert.equal(verdict.status, "FAIL");
+    assert.equal(verdict.clients.claude.status, "PASS");
+  });
+
+  await t.test("RESULT.md", async (subtest) => {
+    const directory = await mkdtemp(
+      join(process.env.TMPDIR, "handshake-canonical-md-leak-"),
+    );
+    subtest.after(() =>
+      rm(directory, { force: true, recursive: true }));
+    const codexDirectory = join(directory, "codex");
+    const claudeDirectory = join(directory, "claude");
+    const codexFixture = await writeFixture(
+      codexDirectory,
+      CODEX_RESULT,
+    );
+    await writeFixture(claudeDirectory, CLAUDE_RESULT);
+    await writeFile(
+      codexFixture.markdownPath,
+      `${renderResultMarkdown(CODEX_RESULT)}\n- token: abc123\n`,
+      { mode: 0o600 },
+    );
+    const publicClient = fakePublicClient([
+      CODEX_RESULT,
+      CLAUDE_RESULT,
+    ]);
+    const observations = {
+      completions: [],
+      crossParty: [],
+      factoryTokens: [],
+      tokenSubjects: [],
+    };
+    const clockchain = fakeClockchain(
+      [CODEX_RESULT, CLAUDE_RESULT],
+      observations,
+    );
+
+    const verdict = await verifyLiveResults({
+      ...(await verificationProvenance(directory, {
+        claudeDirectory,
+        codexDirectory,
+      })),
+      clientFactory: clockchain.clientFactory,
+      outputFile: join(directory, "verdict.json"),
+      publicClient,
+      resultDirectories: {
+        codex: codexDirectory,
+        claude: claudeDirectory,
+      },
+      tokenIssuer: clockchain.tokenIssuer,
+    });
+
+    assert.equal(
+      verdict.clients.codex.errorCode,
+      "CANONICAL_ARTIFACT_SECRET_ASSIGNMENT_SUSPECTED",
+      `REPRO short canonical secret: ${
+        verdict.clients.codex.errorCode ?? "none"
+      }`,
+    );
+    assert.equal(verdict.status, "FAIL");
+    assert.equal(verdict.clients.claude.status, "PASS");
+  });
+});
+
+test("fails a non-canonical JSON artifact whose secret only appears after parsing", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-parsed-json-leak-"),
+  );
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  const codexDirectory = join(directory, "codex");
+  const claudeDirectory = join(directory, "claude");
+  await writeFixture(codexDirectory, CODEX_RESULT);
+  await writeFixture(claudeDirectory, CLAUDE_RESULT);
+  // Invisible to every raw-text rule: no canary, no labelled private key, no
+  // bearer token, no address, and the value is far under the high-entropy
+  // floor. Only assertSecretFree over the parsed object sees the key.
+  const planted = '{"secret":"abc"}\n';
+  assert.equal(
+    highEntropySecretAssignmentPattern().test(planted),
+    false,
+  );
+  await writeFile(
+    join(codexDirectory, "notes.json"),
+    planted,
+    { mode: 0o600 },
+  );
+  const publicClient = fakePublicClient([
+    CODEX_RESULT,
+    CLAUDE_RESULT,
+  ]);
+  const observations = {
+    completions: [],
+    crossParty: [],
+    factoryTokens: [],
+    tokenSubjects: [],
+  };
+  const clockchain = fakeClockchain(
+    [CODEX_RESULT, CLAUDE_RESULT],
+    observations,
+  );
+
+  const verdict = await verifyLiveResults({
+    ...(await verificationProvenance(directory, {
+      claudeDirectory,
+      codexDirectory,
+    })),
+    clientFactory: clockchain.clientFactory,
+    outputFile: join(directory, "verdict.json"),
+    publicClient,
+    resultDirectories: {
+      codex: codexDirectory,
+      claude: claudeDirectory,
+    },
+    tokenIssuer: clockchain.tokenIssuer,
+  });
+
+  assert.equal(
+    verdict.clients.codex.errorCode,
+    "ARTIFACT_SECRET_DETECTED",
+    `REPRO parsed-only secret: ${
+      verdict.clients.codex.errorCode ?? "none"
+    }`,
+  );
+  assert.equal(verdict.status, "FAIL");
+  assert.equal(verdict.clients.claude.status, "PASS");
+});
+
+test("separates an artifact heuristic hit from a proven secret leak", async (t) => {
+  const directory = await mkdtemp(
+    join(process.env.TMPDIR, "handshake-heuristic-code-"),
+  );
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  const codexDirectory = join(directory, "codex");
+  const claudeDirectory = join(directory, "claude");
+  const codexFixture = await writeFixture(
+    codexDirectory,
+    CODEX_RESULT,
+  );
+  await writeFixture(claudeDirectory, CLAUDE_RESULT);
+  await writeFile(
+    codexFixture.markdownPath,
+    `${renderResultMarkdown(CODEX_RESULT)}\n- token: ` +
+      "TG9uZ0hpZ2hFbnRyb3B5U2VjcmV0VmFsdWU=\n",
+    { mode: 0o600 },
+  );
+  const publicClient = fakePublicClient([
+    CODEX_RESULT,
+    CLAUDE_RESULT,
+  ]);
+  const observations = {
+    completions: [],
+    crossParty: [],
+    factoryTokens: [],
+    tokenSubjects: [],
+  };
+  const clockchain = fakeClockchain(
+    [CODEX_RESULT, CLAUDE_RESULT],
+    observations,
+  );
+
+  const verdict = await verifyLiveResults({
+    ...(await verificationProvenance(directory, {
+      codexDirectory,
+      claudeDirectory,
+    })),
+    clientFactory: clockchain.clientFactory,
+    outputFile: join(directory, "verdict.json"),
+    publicClient,
+    resultDirectories: {
+      codex: codexDirectory,
+      claude: claudeDirectory,
+    },
+    tokenIssuer: clockchain.tokenIssuer,
+  });
+
+  assert.equal(verdict.status, "FAIL");
+  assert.equal(
+    verdict.clients.codex.errorCode,
+    "ARTIFACT_SECRET_ASSIGNMENT_SUSPECTED",
+  );
+  assert.equal(verdict.clients.claude.status, "PASS");
+});
+
+test("still fails a run that leaks a real credential in any artifact file", async (t) => {
+  const cases = [
+    {
+      label: "operator invitation code",
+      text: `restored invitation ${CODEX_INVITE_CODE}\n`,
+    },
+    {
+      label: "labelled private key",
+      text: `private_key: 0x${"a".repeat(64)}\n`,
+    },
+    {
+      label: "bearer token",
+      text:
+        "Authorization: Bearer cc_abcdefghijklmnopqrstuvwxyz123456\n",
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.label, async (subtest) => {
+      const directory = await mkdtemp(
+        join(process.env.TMPDIR, "handshake-real-leak-"),
+      );
+      subtest.after(() =>
+        rm(directory, { force: true, recursive: true }));
+      const codexDirectory = join(directory, "codex");
+      const claudeDirectory = join(directory, "claude");
+      await writeFixture(codexDirectory, CODEX_RESULT);
+      await writeFixture(claudeDirectory, CLAUDE_RESULT);
+      await writeFile(
+        join(codexDirectory, "stdout.log"),
+        testCase.text,
+        { mode: 0o600 },
+      );
+      const publicClient = fakePublicClient([
+        CODEX_RESULT,
+        CLAUDE_RESULT,
+      ]);
+      const observations = {
+        completions: [],
+        crossParty: [],
+        factoryTokens: [],
+        tokenSubjects: [],
+      };
+      const clockchain = fakeClockchain(
+        [CODEX_RESULT, CLAUDE_RESULT],
+        observations,
+      );
+      const outputFile = join(directory, "verdict.json");
+
+      const verdict = await verifyLiveResults({
+        ...(await verificationProvenance(directory, {
+          codexDirectory,
+          claudeDirectory,
+        })),
+        clientFactory: clockchain.clientFactory,
+        outputFile,
+        publicClient,
+        resultDirectories: {
+          codex: codexDirectory,
+          claude: claudeDirectory,
+        },
+        tokenIssuer: clockchain.tokenIssuer,
+      });
+
+      assert.equal(verdict.status, "FAIL");
+      assert.equal(
+        verdict.clients.codex.errorCode,
+        "ARTIFACT_SECRET_DETECTED",
+      );
+      assert.equal(verdict.clients.claude.status, "PASS");
+      const serialized = await readFile(outputFile, "utf8");
+      assert.equal(
+        serialized.includes(testCase.text.trim()),
+        false,
+      );
+    });
+  }
+});
+
 test("fails a client whose live ERC-8004 owner differs from its evidence", async (t) => {
   const directory = await mkdtemp(
     join(process.env.TMPDIR, "handshake-owner-mismatch-"),
@@ -3218,8 +4369,8 @@ test("rejects two otherwise verified runs that reuse one ERC-8004 identity", asy
   const claudeDirectory = join(directory, "claude");
   const duplicateIdentity = structuredClone(CODEX_RESULT);
   duplicateIdentity.runId = RUN_B;
-  duplicateIdentity.startedAt = "2026-07-23T08:01:00.000Z";
-  duplicateIdentity.completedAt = "2026-07-23T08:01:01.234Z";
+  duplicateIdentity.startedAt = "2026-07-23T08:00:02.500Z";
+  duplicateIdentity.completedAt = "2026-07-23T08:00:03.734Z";
   duplicateIdentity.clockchain = structuredClone(
     CLAUDE_RESULT.clockchain,
   );

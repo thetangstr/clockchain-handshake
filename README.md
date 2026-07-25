@@ -18,7 +18,9 @@ Read the [stakeholder and operator runbook](DEMO.md), the
 independently re-verified public evidence. The expected live run takes roughly
 30–90 seconds under normal testnet conditions. A passing `npm run demo` writes
 sanitized `RESULT.md` and `result.json`; neither a narrative nor a submitted
-transaction is a PASS by itself.
+transaction is a PASS by itself. When a run stops instead, the
+[failure code reference](DEMO.md#failure-codes) lists every public failure code,
+the exit it produces, and the next action for the operator.
 
 ## Operator-only clean-client acceptance
 
@@ -32,6 +34,12 @@ container sandbox.
 
 `npm run acceptance:clients` is supported on macOS and Linux only. The core
 `npm run demo` stakeholder flow remains platform-neutral.
+
+Before it launches either client, the harness reads each invitation owner's
+nonce from Ethereum Sepolia. `npm run acceptance:clients` therefore requires a
+reachable Ethereum Sepolia endpoint at preflight, and it fails closed: it
+refuses to start when that endpoint does not answer or when a wallet has
+already been consumed by an earlier transaction.
 
 Redaction protects captured artifacts after the clients execute, but it cannot
 prevent a malicious or compromised client from reading or exfiltrating accessible

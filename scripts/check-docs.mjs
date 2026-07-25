@@ -16,10 +16,15 @@ import {
   pathToFileURL,
 } from "node:url";
 
+import { FAILURE_EXIT_CODES } from "../bin/handshake-demo.mjs";
+
 const PUBLIC_DOCUMENTS = Object.freeze([
   "README.md",
   "DEMO.md",
   "prompts/run-turnkey-demo.md",
+]);
+const SUPPORTING_DOCUMENTS = Object.freeze([
+  "invites/README.md",
 ]);
 const REQUIRED_REPOSITORY_FILES = Object.freeze([
   "package.json",
@@ -29,6 +34,7 @@ const REQUIRED_REPOSITORY_FILES = Object.freeze([
 const REQUIRED_LINKS = Object.freeze({
   "README.md": Object.freeze([
     "DEMO.md",
+    "DEMO.md#failure-codes",
     "prompts/run-turnkey-demo.md",
     "invites/README.md",
   ]),
@@ -38,6 +44,9 @@ const REQUIRED_LINKS = Object.freeze({
     "invites/README.md",
   ]),
 });
+const FAILURE_CODE_DOCUMENT = "DEMO.md";
+const FAILURE_CODE_ROW_PATTERN =
+  /^\|[ \t]*`(HANDSHAKE_[A-Z0-9_]+)`[ \t]*\|[^|\r\n]*\|[ \t]*(\d{1,3})[ \t]*\|[^|\r\n]*\|[ \t]*$/gm;
 const OFFICIAL_REGISTRY =
   "0x8004A818BFB912233c491871b3d84c89A494BD9e";
 const OFFICIAL_REPOSITORY =
@@ -53,10 +62,39 @@ const CONTEXTUAL_PRESENT_CAPABILITIES = Object.freeze([
   "production-ready",
   "multi-validator",
 ]);
+// Supporting documents are held to exactly the public ban list. An earlier
+// narrower list was justified by a claim that bare "mainnet" would trip the
+// honest "hold no mainnet assets" line; that justification was false, because
+// the negation vocabulary already protects it. Keep these at parity.
+const SUPPORTING_PRESENT_CAPABILITIES =
+  FORBIDDEN_PRESENT_CAPABILITIES;
+// A bare \bmoney\b match rejected honest disclaimers such as "Money is not
+// involved." and "Money movement is out of scope." while its diagnostic
+// claimed the document asserted movement. Require an asserted movement.
+const MONEY_MOVEMENT_PATTERN =
+  /\bmoney\b(?:[ \t]+\w+){0,2}?[ \t]+(?:moves?|moved|moving|flows?|flowed|flowing|transfers?|transferred|changes[ \t]+hands|changed[ \t]+hands)\b|\b(?:moves?|moved|moving|transfers?|transferred|sends?|sent|sending)\b(?:[ \t]+\w+){0,2}?[ \t]+money\b/gi;
+const SUPPORTING_REQUIRED_DISCLOSURES = Object.freeze([
+  Object.freeze({
+    label: "disposable testnet identities",
+    pattern: /\bdisposable testnet identities\b/i,
+  }),
+  Object.freeze({
+    label: "no mainnet assets",
+    pattern: /\bno mainnet assets\b/i,
+  }),
+  Object.freeze({
+    label: "no scenario money",
+    pattern: /\bno scenario money\b/i,
+  }),
+]);
 const CLAIM_BOUNDARY_PATTERN =
   /[.!?;,:]+|\b(?:but|yet|however|although|though|while|whereas|and|because|since)\b/gi;
+// "neither"/"nor" are limitation words: "neither X nor Y" negates both sides,
+// and both sides live in one claim segment because neither word is a claim
+// boundary. Widening this vocabulary is only safe because every existing
+// forbidden claim is re-proved to still fail in test/docs.test.mjs.
 const EXPLICIT_LIMITATION_PATTERN =
-  /\b(?:no|never|cannot|can't|isn't|aren't|wasn't|weren't|doesn't|don't|didn't|won't|wouldn't|couldn't|shouldn't|mustn't|not(?!\s+only))\b|\b(?:is|are|was|were|does|do|did|will|would|can|could|should|must|has|have|had)\s+not(?!\s+only)\b/i;
+  /\b(?:no|nor|neither|never|cannot|can't|isn't|aren't|wasn't|weren't|doesn't|don't|didn't|won't|wouldn't|couldn't|shouldn't|mustn't|not(?!\s+only))\b|\b(?:is|are|was|were|does|do|did|will|would|can|could|should|must|has|have|had)\s+not(?!\s+only)\b/i;
 const TOKEN_BOUNDARY_PATTERN =
   /[\s`"'()[\]{}<>,;!?/]/;
 const TOKEN_EXTENSION_PATTERN =
@@ -233,35 +271,128 @@ function canonicalSafetyRemainder(relativePath, contents) {
   return { failures, remainder };
 }
 
-function contextualPresentClaimFailures(
-  relativePath,
-  contents,
-) {
-  const failures = [];
-  const segments = contents
+function claimSegments(contents) {
+  return contents
     .replace(/\r?\n/g, " ")
     .split(CLAIM_BOUNDARY_PATTERN);
+}
 
-  for (const capability of CONTEXTUAL_PRESENT_CAPABILITIES) {
-    const escaped = capability.replace(
-      /[.*+?^${}()|[\]\\]/g,
-      "\\$&",
-    );
-    const pattern = new RegExp(`\\b${escaped}\\b`, "gi");
-    const unsafe = segments.some((segment) =>
-      [...segment.matchAll(pattern)].some(
-        (match) =>
-          !EXPLICIT_LIMITATION_PATTERN.test(
-            segment.slice(0, match.index),
-          ),
-      ),
-    );
-    if (unsafe) {
+function claimedWithoutLimitation(segments, pattern) {
+  return segments.some((segment) =>
+    [...segment.matchAll(pattern)].some(
+      (match) =>
+        !EXPLICIT_LIMITATION_PATTERN.test(
+          segment.slice(0, match.index),
+        ),
+    ),
+  );
+}
+
+// A movement verb can precede the noun ("moves no scenario money"), so the
+// limitation can sit inside the matched span rather than before it.
+function claimsMoneyMovement(segments) {
+  return segments.some((segment) =>
+    [...segment.matchAll(MONEY_MOVEMENT_PATTERN)].some(
+      (match) =>
+        !EXPLICIT_LIMITATION_PATTERN.test(
+          segment.slice(0, match.index),
+        ) &&
+        !EXPLICIT_LIMITATION_PATTERN.test(match[0]),
+    ),
+  );
+}
+
+function capabilityPattern(capability) {
+  const escaped = capability.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&",
+  );
+  return new RegExp(`\\b${escaped}\\b`, "gi");
+}
+
+function presentCapabilityFailures(
+  relativePath,
+  segments,
+  capabilities,
+) {
+  const failures = [];
+  for (const capability of capabilities) {
+    if (
+      claimedWithoutLimitation(
+        segments,
+        capabilityPattern(capability),
+      )
+    ) {
       failures.push(
         `${relativePath}: mentions forbidden capability "${capability}" as a present claim.`,
       );
     }
   }
+  return failures;
+}
+
+function contextualPresentClaimFailures(
+  relativePath,
+  contents,
+) {
+  return presentCapabilityFailures(
+    relativePath,
+    claimSegments(contents),
+    CONTEXTUAL_PRESENT_CAPABILITIES,
+  );
+}
+
+function nonofficialRegistryFailures(
+  relativePath,
+  contents,
+) {
+  const failures = [];
+  for (const match of contents.matchAll(
+    /\b0x[0-9a-fA-F]{40}\b/g,
+  )) {
+    if (
+      match[0].toLowerCase() !==
+      OFFICIAL_REGISTRY.toLowerCase()
+    ) {
+      failures.push(
+        `${relativePath}: references non-official registry address "${match[0]}".`,
+      );
+    }
+  }
+  return failures;
+}
+
+function supportingDocumentFailures(
+  relativePath,
+  contents,
+) {
+  const segments = claimSegments(contents);
+  const failures = presentCapabilityFailures(
+    relativePath,
+    segments,
+    SUPPORTING_PRESENT_CAPABILITIES,
+  );
+
+  if (claimsMoneyMovement(segments)) {
+    failures.push(
+      `${relativePath}: claims scenario money moves.`,
+    );
+  }
+
+  for (const {
+    label,
+    pattern,
+  } of SUPPORTING_REQUIRED_DISCLOSURES) {
+    if (!pattern.test(contents)) {
+      failures.push(
+        `${relativePath}: missing required disclosure "${label}".`,
+      );
+    }
+  }
+
+  failures.push(
+    ...nonofficialRegistryFailures(relativePath, contents),
+  );
 
   return failures;
 }
@@ -293,18 +424,9 @@ function structuredSafetyFailures(relativePath, contents) {
     );
   }
 
-  for (const match of remainder.matchAll(
-    /\b0x[0-9a-fA-F]{40}\b/g,
-  )) {
-    if (
-      match[0].toLowerCase() !==
-      OFFICIAL_REGISTRY.toLowerCase()
-    ) {
-      failures.push(
-        `${relativePath}: references non-official registry address "${match[0]}".`,
-      );
-    }
-  }
+  failures.push(
+    ...nonofficialRegistryFailures(relativePath, remainder),
+  );
 
   failures.push(
     ...contextualPresentClaimFailures(
@@ -446,6 +568,54 @@ function noncanonicalCommandFailures(
   return failures;
 }
 
+function failureCodeFailures(relativePath, contents) {
+  if (relativePath !== FAILURE_CODE_DOCUMENT) {
+    return [];
+  }
+
+  const failures = [];
+  const documented = new Map();
+  for (const match of contents.matchAll(
+    FAILURE_CODE_ROW_PATTERN,
+  )) {
+    const code = match[1];
+    if (documented.has(code)) {
+      failures.push(
+        `${relativePath}: documents failure code "${code}" more than once.`,
+      );
+      continue;
+    }
+    documented.set(code, Number(match[2]));
+  }
+
+  for (const [code, exitCode] of Object.entries(
+    FAILURE_EXIT_CODES,
+  )) {
+    if (!documented.has(code)) {
+      failures.push(
+        `${relativePath}: missing failure code "${code}" from the failure code reference.`,
+      );
+      continue;
+    }
+    const documentedExit = documented.get(code);
+    if (documentedExit !== exitCode) {
+      failures.push(
+        `${relativePath}: failure code "${code}" documents exit ${documentedExit} instead of ${exitCode}.`,
+      );
+    }
+  }
+
+  for (const code of documented.keys()) {
+    if (!Object.hasOwn(FAILURE_EXIT_CODES, code)) {
+      failures.push(
+        `${relativePath}: documents unknown failure code "${code}".`,
+      );
+    }
+  }
+
+  return failures;
+}
+
 function markdownLinks(contents) {
   return [
     ...[...contents.matchAll(MARKDOWN_LINK_PATTERN)].map(
@@ -528,6 +698,81 @@ async function linkFailures({
     }
   }
   return failures;
+}
+
+function headingAnchors(contents) {
+  const anchors = new Set();
+  let fenceCharacter = null;
+
+  for (const { body } of markdownLines(contents)) {
+    const { content } = markdownContainerLine(body);
+    const fence = content.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      if (fenceCharacter === null) {
+        fenceCharacter = fence[1][0];
+      } else if (fence[1][0] === fenceCharacter) {
+        fenceCharacter = null;
+      }
+      continue;
+    }
+    if (fenceCharacter !== null) {
+      continue;
+    }
+
+    const heading = content.match(
+      /^ {0,3}#{1,6}[ \t]+([^\r\n]+?)[ \t]*#*[ \t]*$/,
+    );
+    if (!heading) {
+      continue;
+    }
+    const anchor = heading[1]
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N} \t-]/gu, "")
+      .trim()
+      .replace(/[ \t]+/g, "-");
+    if (anchor.length > 0) {
+      anchors.add(anchor);
+    }
+  }
+
+  return anchors;
+}
+
+async function requiredLinkFragmentFailures({
+  rootDirectory,
+  relativePath,
+  link,
+}) {
+  const fragment = link.slice(link.indexOf("#") + 1);
+  if (!link.includes("#") || fragment.length === 0) {
+    return [];
+  }
+
+  const target = localLinkTarget(
+    rootDirectory,
+    relativePath,
+    link,
+  );
+  const path =
+    typeof target === "string"
+      ? await canonicalRegularFile(rootDirectory, target)
+      : null;
+  if (path === null) {
+    return [];
+  }
+
+  let contents;
+  try {
+    contents = await readFile(path, "utf8");
+  } catch {
+    return [];
+  }
+
+  return headingAnchors(contents).has(fragment.toLowerCase())
+    ? []
+    : [
+        `${relativePath}: required relative link "${link}" targets a missing heading.`,
+      ];
 }
 
 function markdownLines(contents) {
@@ -717,6 +962,28 @@ export async function checkDocumentation({
     }
   }
 
+  for (const relativePath of SUPPORTING_DOCUMENTS) {
+    const path = await canonicalRegularFile(
+      root,
+      resolve(root, relativePath),
+    );
+    try {
+      if (path === null) {
+        throw new Error("not a regular file");
+      }
+      failures.push(
+        ...supportingDocumentFailures(
+          relativePath,
+          await readFile(path, "utf8"),
+        ),
+      );
+    } catch {
+      failures.push(
+        `${relativePath}: required referenced file is missing or not a regular file.`,
+      );
+    }
+  }
+
   for (const relativePath of REQUIRED_REPOSITORY_FILES) {
     if (
       !(await canonicalRegularFile(
@@ -749,6 +1016,7 @@ export async function checkDocumentation({
       ...structuredSafetyFailures(relativePath, contents),
       ...noncanonicalTokenFailures(relativePath, contents),
       ...noncanonicalCommandFailures(relativePath, contents),
+      ...failureCodeFailures(relativePath, contents),
       ...(await linkFailures({
         rootDirectory: root,
         relativePath,
@@ -761,7 +1029,15 @@ export async function checkDocumentation({
         failures.push(
           `${relativePath}: missing required relative link "${requiredLink}".`,
         );
+        continue;
       }
+      failures.push(
+        ...(await requiredLinkFragmentFailures({
+          rootDirectory: root,
+          relativePath,
+          link: requiredLink,
+        })),
+      );
     }
   }
 
@@ -802,7 +1078,9 @@ export async function main({
     return 1;
   }
   stdout.write(
-    `Documentation checks passed (${PUBLIC_DOCUMENTS.length} public documents).\n`,
+    `Documentation checks passed (${
+      PUBLIC_DOCUMENTS.length + SUPPORTING_DOCUMENTS.length
+    } gated documents).\n`,
   );
   return 0;
 }
