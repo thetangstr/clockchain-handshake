@@ -781,8 +781,12 @@ lowercase SHA-256 of the canonical receipt without its `signature` field.
 `certificateSha256` is the lowercase SHA-256 of the leaf certificate DER, and
 `signatureAlgorithm` is exactly one of `ed25519`, `ecdsa-sha256`, or
 `rsa-pss-sha256`. Bootstrap rejects any missing, extra, nested, noncanonical,
-wrong-scope, wrong-certificate, or unverified receipt field before calling
-`consumeCapability`.
+wrong-scope, wrong-certificate, or unverified receipt field inside the
+`receiptFactory`, before `consumeCapability` may accept the consumption record.
+It must not pre-sign outside `consumeCapability`: a matching retry, including
+after restart, returns the persisted randomized signature without invoking the
+factory. The service exact-parses and verifies the persisted receipt again
+before every bootstrap response.
 
 `repositoryPublicKeyResolver({keyId, repositoryPath, repositorySha})` is
 mandatory. Operator events derive `repositoryPath` only through
@@ -797,6 +801,23 @@ The TLS-signed bootstrap receipt and the later operator-signed
 capability consumption by the pinned relay; the second acknowledges enrollment
 in the operator workflow. Tests reject either object when supplied in place of
 the other.
+
+Artifact upload uses exact service input `{artifactType, body,
+expectedDigest}`. HTTPS `PUT /v1/artifacts/:sha256` requires
+`content-type: application/octet-stream` and exactly one
+`x-clockchain-artifact-type` header; the path digest is the expected digest and
+the route accepts no query. The client cannot supply secret canaries. The relay
+infers an artifact's expected type from a closed event-kind mapping and repeats
+type and authority validation before accepting a reference. Task 4 enables
+references only for types whose exact repository validator and authority check
+already exist; every other artifact-bearing event remains fail-closed until its
+producer task lands both.
+
+Task 4 also keeps `VERIFICATION_PASSED` fail-closed. The exact
+`appendEvent({body})` surface has no trusted verifier-publication input, so an
+operator-signed assertion or caller-supplied boolean cannot satisfy
+`verifierPublicationVerified`. Coordinator integration must add and test an
+exact trusted publication-validation seam before enabling that event.
 
 - [ ] **Step 4: Write failing HTTPS parser and startup tests**
 

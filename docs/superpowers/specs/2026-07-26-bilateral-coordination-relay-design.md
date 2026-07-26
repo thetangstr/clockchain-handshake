@@ -606,6 +606,14 @@ authority. An artifact type without an exact repository-owned validator is
 rejected; a future producer task must land that validator before the type can
 become usable.
 
+Artifact upload carries its closed type in exactly one
+`x-clockchain-artifact-type` HTTPS header with an
+`application/octet-stream` body. The content-addressed path supplies the
+expected digest. Clients cannot supply secret canaries or arbitrary validation
+options. The relay derives the expected type for a referenced digest only from
+the signed event kind; it never trusts an upload-time type assertion as
+lifecycle authority.
+
 The bootstrap consumption receipt stored with capability state is internal
 durable relay data, not a public artifact upload. Its exact TLS signature and
 certificate binding are validated by the relay bootstrap service before the
