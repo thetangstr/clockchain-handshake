@@ -24,6 +24,9 @@ import {
 import {
   validateRelayArtifact,
 } from "./artifact.mjs";
+import {
+  parseCoordinationEnrollment,
+} from "./enrollment.mjs";
 
 export const COORDINATION_OWNER_LOCK_LIMITATION =
   "Node.js 22 provides no kernel advisory file lock; simultaneous removal of both hard-linked owner lease paths is outside this store's exclusion guarantee.";
@@ -123,6 +126,7 @@ const STORE_METHODS = Object.freeze([
   "consumeCapability",
   "getArtifact",
   "putArtifact",
+  "readEnrollment",
   "readEvents",
   "readReleaseView",
   "registerCapability",
@@ -1121,21 +1125,33 @@ function capabilityRegistration(value) {
 function capabilityConsumption(value) {
   const data = readExactData(value, [
     "capabilityDigest",
+    "enrollmentBase64",
     "enrollmentDigest",
     "receiptBase64",
     "receiptDigest",
   ]);
   if (
+    typeof data.enrollmentBase64 !== "string" ||
+    !BASE64_PATTERN.test(data.enrollmentBase64) ||
     typeof data.receiptBase64 !== "string" ||
     !BASE64_PATTERN.test(data.receiptBase64)
   ) {
     fail();
   }
+  const enrollmentBytes = Buffer.from(
+    data.enrollmentBase64,
+    "base64",
+  );
   const receiptBytes = Buffer.from(
     data.receiptBase64,
     "base64",
   );
   if (
+    enrollmentBytes.length === 0 ||
+    enrollmentBytes.length > 65_536 ||
+    enrollmentBytes.toString("base64") !==
+      data.enrollmentBase64 ||
+    sha256(enrollmentBytes) !== data.enrollmentDigest ||
     receiptBytes.length === 0 ||
     receiptBytes.length > MAX_RECEIPT_BYTES ||
     receiptBytes.toString("base64") !==
@@ -1148,6 +1164,7 @@ function capabilityConsumption(value) {
     capabilityDigest: assertSha256(
       data.capabilityDigest,
     ),
+    enrollmentBytes,
     enrollmentDigest: assertSha256(
       data.enrollmentDigest,
     ),
@@ -1245,6 +1262,9 @@ function applyCapabilityConsumption(
       capability?.consumption !== null &&
       capability?.consumption.enrollmentDigest ===
         consumption.enrollmentDigest &&
+      capability.consumption.enrollmentBytes.equals(
+        consumption.enrollmentBytes,
+      ) &&
       capability.consumption.receiptDigest ===
         consumption.receiptDigest &&
       capability.consumption.receiptBytes.equals(
@@ -1347,6 +1367,17 @@ function validatePayload(payload, state, repositorySha) {
     if (capability === undefined) {
       fail();
     }
+    validatedEnrollmentBytes(
+      consumption.enrollmentBytes,
+      {
+        enrollmentDigest:
+          consumption.enrollmentDigest,
+        expectedCapabilityDigest:
+          consumption.capabilityDigest,
+        registration: capability.registration,
+        repositorySha,
+      },
+    );
     opaqueReceiptBytes(consumption.receiptBytes, {
       enrollmentDigest:
         consumption.enrollmentDigest,
@@ -2348,9 +2379,53 @@ function opaqueReceiptBytes(
   return bytes;
 }
 
+function boundedEnrollmentBytes(value) {
+  if (
+    !Buffer.isBuffer(value) ||
+    value.length === 0 ||
+    value.length > 65_536
+  ) {
+    fail();
+  }
+  return Buffer.from(value);
+}
+
+function validatedEnrollmentBytes(
+  value,
+  {
+    enrollmentDigest,
+    expectedCapabilityDigest,
+    registration,
+    repositorySha,
+  },
+) {
+  const bytes = boundedEnrollmentBytes(value);
+  let enrollment;
+  try {
+    enrollment = parseCoordinationEnrollment(bytes);
+  } catch {
+    fail();
+  }
+  if (
+    sha256(bytes) !== enrollmentDigest ||
+    enrollment.capabilityDigest !==
+      expectedCapabilityDigest ||
+    enrollment.releaseId !== registration.releaseId ||
+    enrollment.repositorySha !== repositorySha ||
+    enrollment.role !== registration.role ||
+    enrollment.sessionId !== registration.sessionId
+  ) {
+    fail();
+  }
+  return bytes;
+}
+
 function consumptionResult(consumption) {
   return Object.freeze({
     capabilityDigest: consumption.capabilityDigest,
+    enrollmentBytes: Buffer.from(
+      consumption.enrollmentBytes,
+    ),
     enrollmentDigest: consumption.enrollmentDigest,
     receiptBytes: Buffer.from(consumption.receiptBytes),
   });
@@ -2981,16 +3056,18 @@ export async function openCoordinationStore(input) {
           scoped
             ? [
                 "capability",
+                "enrollmentBytes",
                 "enrollmentDigest",
-                "receiptBytes",
+                "receiptFactory",
                 "releaseId",
                 "role",
                 "sessionId",
               ]
             : [
                 "capability",
+                "enrollmentBytes",
                 "enrollmentDigest",
-                "receiptBytes",
+                "receiptFactory",
               ],
         );
         const rawCapability = capabilityBytes(
@@ -3014,8 +3091,64 @@ export async function openCoordinationStore(input) {
         const enrollmentDigest = assertSha256(
           data.enrollmentDigest,
         );
+        const enrollmentBytes =
+          boundedEnrollmentBytes(
+            data.enrollmentBytes,
+          );
+        if (capability.consumption !== null) {
+          if (
+            capability.consumption.enrollmentDigest !==
+              enrollmentDigest ||
+            !capability.consumption.enrollmentBytes.equals(
+              enrollmentBytes,
+            )
+          ) {
+            fail("CAPABILITY_REPLAY");
+          }
+          return consumptionResult(
+            capability.consumption,
+          );
+        }
+        validatedEnrollmentBytes(
+          enrollmentBytes,
+          {
+            enrollmentDigest,
+            expectedCapabilityDigest: digest,
+            registration:
+              capability.registration,
+            repositorySha,
+          },
+        );
+        if (
+          numericDecimal(
+            capability.registration.expiresAtMs,
+          ) <= BigInt(now())
+        ) {
+          fail("CAPABILITY_EXPIRED");
+        }
+        if (typeof data.receiptFactory !== "function") {
+          fail();
+        }
+        const factoryContext = Object.freeze({
+          capabilityDigest: digest,
+          enrollmentDigest,
+          releaseId:
+            capability.registration.releaseId,
+          repositorySha,
+          role: capability.registration.role,
+          sessionId:
+            capability.registration.sessionId,
+        });
+        let candidateReceipt;
+        try {
+          candidateReceipt = await data.receiptFactory(
+            factoryContext,
+          );
+        } catch {
+          fail();
+        }
         const receiptBytes = opaqueReceiptBytes(
-          data.receiptBytes,
+          candidateReceipt,
           {
             enrollmentDigest,
             expectedCapabilityDigest: digest,
@@ -3025,29 +3158,10 @@ export async function openCoordinationStore(input) {
             repositorySha,
           },
         );
-        if (capability.consumption !== null) {
-          if (
-            capability.consumption.enrollmentDigest !==
-              enrollmentDigest ||
-            !capability.consumption.receiptBytes.equals(
-              receiptBytes,
-            )
-          ) {
-            fail("CAPABILITY_REPLAY");
-          }
-          return consumptionResult(
-            capability.consumption,
-          );
-        }
-        if (
-          numericDecimal(
-            capability.registration.expiresAtMs,
-          ) <= BigInt(now())
-        ) {
-          fail("CAPABILITY_EXPIRED");
-        }
         const consumption = capabilityConsumption({
           capabilityDigest: digest,
+          enrollmentBase64:
+            enrollmentBytes.toString("base64"),
           enrollmentDigest,
           receiptBase64: receiptBytes.toString("base64"),
           receiptDigest: sha256(receiptBytes),
@@ -3057,6 +3171,10 @@ export async function openCoordinationStore(input) {
             "CAPABILITY_CONSUMED",
             {
               capabilityDigest: consumption.capabilityDigest,
+              enrollmentBase64:
+                consumption.enrollmentBytes.toString(
+                  "base64",
+                ),
               enrollmentDigest: consumption.enrollmentDigest,
               receiptBase64:
                 consumption.receiptBytes.toString("base64"),
@@ -3065,6 +3183,40 @@ export async function openCoordinationStore(input) {
           ),
         );
         return consumptionResult(accepted);
+      });
+    }
+
+    async function readEnrollment(value) {
+      return serialize(async () => {
+        assertOpen();
+        await assertDirectory(root);
+        const data = readExactData(value, [
+          "role",
+          "sessionId",
+        ]);
+        const role = assertRole(data.role);
+        const sessionId = assertSessionId(
+          data.sessionId,
+        );
+        const capabilityDigest =
+          state.capabilityScopes.get(
+            `${sessionId}\n${role}`,
+          );
+        const consumption =
+          capabilityDigest === undefined
+            ? null
+            : state.capabilities.get(
+                capabilityDigest,
+              )?.consumption;
+        if (consumption === null || consumption === undefined) {
+          fail("COORDINATION_ENROLLMENT_NOT_FOUND");
+        }
+        return Object.freeze({
+          bytes: Buffer.from(
+            consumption.enrollmentBytes,
+          ),
+          digest: consumption.enrollmentDigest,
+        });
       });
     }
 
@@ -3280,6 +3432,7 @@ export async function openCoordinationStore(input) {
       consumeCapability,
       getArtifact,
       putArtifact,
+      readEnrollment,
       readEvents,
       readReleaseView,
       registerCapability,

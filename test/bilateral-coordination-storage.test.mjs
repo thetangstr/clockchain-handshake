@@ -23,12 +23,23 @@ import { test } from "node:test";
 import {
   createHash,
   generateKeyPairSync,
+  sign,
 } from "node:crypto";
 
 import {
   COORDINATION_ENVELOPE_SCHEMA,
   createCoordinationEnvelope,
 } from "../src/bilateral/coordination/envelope.mjs";
+import {
+  COORDINATION_ENROLLMENT_SCHEMA,
+  COORDINATION_ENROLLMENT_SIGNATURE_DOMAIN,
+  INVITATION_PROOF_DOMAIN,
+  MAX_COORDINATION_ENROLLMENT_BYTES,
+  coordinationEnrollmentSignaturePreimage,
+  invitationProofPreimage,
+  parseCoordinationEnrollment,
+  verifyCoordinationEnrollment,
+} from "../src/bilateral/coordination/enrollment.mjs";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import {
   createSignedEnvelope,
@@ -63,6 +74,66 @@ const PUBLIC_KEY = keyPair.publicKey
   .export({ format: "der", type: "spki" })
   .subarray(-32)
   .toString("base64");
+const preflightKeyPair = generateKeyPairSync("ed25519");
+const PREFLIGHT_PUBLIC_KEY = preflightKeyPair.publicKey
+  .export({ format: "der", type: "spki" })
+  .subarray(-32)
+  .toString("base64");
+
+function enrollmentValue(overrides = {}) {
+  const unsigned = {
+    capabilityDigest: sha256(
+      overrides.capability ?? RAW_CAPABILITY,
+    ),
+    coordinationKey: {
+      algorithm: "ed25519",
+      keyId: "payer-coordination",
+      publicKey: PUBLIC_KEY,
+    },
+    invitations: {
+      rehearsal: {
+        address: `0x${"1".repeat(40)}`,
+        algorithm: "eip191",
+        signature: `0x${"1".repeat(130)}`,
+      },
+      stakeholder: {
+        address: `0x${"2".repeat(40)}`,
+        algorithm: "eip191",
+        signature: `0x${"2".repeat(130)}`,
+      },
+    },
+    paymentMoved: false,
+    preflightKey: {
+      algorithm: "ed25519",
+      keyId: "payer-preflight",
+      publicKey: PREFLIGHT_PUBLIC_KEY,
+    },
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    role: "payer",
+    schema: COORDINATION_ENROLLMENT_SCHEMA,
+    sessionId: SESSION_ID,
+    ...overrides,
+  };
+  delete unsigned.capability;
+  delete unsigned.privateKeyPem;
+  const privateKeyPem =
+    overrides.privateKeyPem ?? PRIVATE_KEY_PEM;
+  return {
+    ...unsigned,
+    signature: sign(
+      null,
+      coordinationEnrollmentSignaturePreimage(
+        unsigned,
+      ),
+      privateKeyPem,
+    ).toString("base64"),
+  };
+}
+
+function enrollmentBytes(overrides = {}) {
+  return canonicalBytes(enrollmentValue(overrides));
+}
 
 function signedDescriptorBytes({
   keyId = "storage-test-operator",
@@ -121,11 +192,48 @@ function stableBytes(value) {
   );
 }
 
+function decodeJournal(bytes) {
+  const records = [];
+  let offset = 0;
+  while (offset < bytes.length) {
+    const length = bytes.readUInt32BE(offset);
+    offset += 4;
+    records.push(
+      JSON.parse(
+        bytes
+          .subarray(offset, offset + length)
+          .toString("utf8"),
+      ),
+    );
+    offset += length;
+  }
+  return records;
+}
+
+function encodeJournal(records) {
+  return Buffer.concat(
+    records.map((record) => {
+      const bytes = stableBytes(record);
+      const header = Buffer.alloc(4);
+      header.writeUInt32BE(bytes.length);
+      return Buffer.concat([header, bytes]);
+    }),
+  );
+}
+
+function withRecordDigest(record) {
+  const { recordDigest: _recordDigest, ...body } = record;
+  return {
+    ...body,
+    recordDigest: sha256(stableBytes(body)),
+  };
+}
+
 function receiptValue({
   capability = RAW_CAPABILITY,
   capabilityDigest = sha256(capability),
   certificateSha256 = "d".repeat(64),
-  enrollmentDigest = "a".repeat(64),
+  enrollmentDigest,
   paymentMoved = false,
   releaseId = RELEASE_ID,
   repositorySha = REPOSITORY_SHA,
@@ -137,10 +245,21 @@ function receiptValue({
   ).toString("base64"),
   signatureAlgorithm = "ed25519",
 } = {}) {
+  const boundEnrollmentDigest =
+    enrollmentDigest ??
+    sha256(
+      enrollmentBytes({
+        capability,
+        releaseId,
+        repositorySha,
+        role,
+        sessionId,
+      }),
+    );
   return {
     capabilityDigest,
     certificateSha256,
-    enrollmentDigest,
+    enrollmentDigest: boundEnrollmentDigest,
     paymentMoved,
     releaseId,
     repositorySha,
@@ -157,6 +276,29 @@ function receiptBytes(overrides = {}) {
 }
 
 const RECEIPT_BYTES = receiptBytes();
+
+function consumeInput({
+  capability = RAW_CAPABILITY,
+  enrollment = enrollmentBytes({ capability }),
+  enrollmentDigest = sha256(enrollment),
+  receiptFactory = async (context) =>
+    receiptBytes(context),
+  scoped = false,
+} = {}) {
+  return {
+    capability,
+    enrollmentBytes: enrollment,
+    enrollmentDigest,
+    receiptFactory,
+    ...(scoped
+      ? {
+          releaseId: RELEASE_ID,
+          role: "payer",
+          sessionId: SESSION_ID,
+        }
+      : {}),
+  };
+}
 
 async function privateRoot(t) {
   const root = await mkdtemp(
@@ -221,7 +363,8 @@ async function assertReceiptRejected(
   value,
   {
     capability = RAW_CAPABILITY,
-    enrollmentDigest = "a".repeat(64),
+    enrollment = enrollmentBytes({ capability }),
+    enrollmentDigest = sha256(enrollment),
     label,
     secretCanary,
   } = {},
@@ -229,8 +372,9 @@ async function assertReceiptRejected(
   await assert.rejects(
     store.consumeCapability({
       capability,
+      enrollmentBytes: enrollment,
       enrollmentDigest,
-      receiptBytes: stableBytes(value),
+      receiptFactory: async () => stableBytes(value),
     }),
     (error) => {
       assert.equal(
@@ -282,6 +426,260 @@ function handleFacade(handle, overrides = {}) {
   };
 }
 
+test("pins exact enrollment schemas, domains, and canonical proof preimages", () => {
+  assert.equal(
+    COORDINATION_ENROLLMENT_SCHEMA,
+    "clockchain.bilateral-coordination-enrollment/v1",
+  );
+  assert.equal(
+    COORDINATION_ENROLLMENT_SIGNATURE_DOMAIN,
+    "clockchain.bilateral-coordination-enrollment-signature/v1\n",
+  );
+  assert.equal(
+    INVITATION_PROOF_DOMAIN,
+    "clockchain.bilateral-invitation-proof/v1\n",
+  );
+  assert.equal(MAX_COORDINATION_ENROLLMENT_BYTES, 65_536);
+
+  const enrollment = enrollmentValue();
+  const challenge = {
+    address: enrollment.invitations.rehearsal.address,
+    capabilityDigest: enrollment.capabilityDigest,
+    releaseId: enrollment.releaseId,
+    repositorySha: enrollment.repositorySha,
+    role: enrollment.role,
+    run: "rehearsal",
+    sessionId: enrollment.sessionId,
+  };
+  assert.deepEqual(
+    invitationProofPreimage(challenge),
+    Buffer.concat([
+      Buffer.from(INVITATION_PROOF_DOMAIN, "ascii"),
+      Buffer.from(
+        sha256(canonicalBytes(challenge)),
+        "ascii",
+      ),
+    ]),
+  );
+  const { signature: _signature, ...unsigned } =
+    enrollment;
+  assert.deepEqual(
+    coordinationEnrollmentSignaturePreimage(unsigned),
+    Buffer.concat([
+      Buffer.from(
+        COORDINATION_ENROLLMENT_SIGNATURE_DOMAIN,
+        "ascii",
+      ),
+      Buffer.from(
+        sha256(canonicalBytes(unsigned)),
+        "ascii",
+      ),
+    ]),
+  );
+});
+
+test("verifies, detaches, and freezes an exact canonical coordination enrollment", () => {
+  const source = enrollmentValue();
+  const verified = verifyCoordinationEnrollment(source);
+  const parsed = parseCoordinationEnrollment(
+    canonicalBytes(source),
+  );
+  assert.deepEqual(verified, parsed);
+  assert.notEqual(verified, source);
+  assert.notEqual(
+    verified.coordinationKey,
+    source.coordinationKey,
+  );
+  assert.equal(Object.isFrozen(verified), true);
+  assert.equal(
+    Object.isFrozen(verified.invitations.rehearsal),
+    true,
+  );
+  source.coordinationKey.publicKey =
+    PREFLIGHT_PUBLIC_KEY;
+  assert.equal(verified.coordinationKey.publicKey, PUBLIC_KEY);
+});
+
+test("rejects missing, extra, nested, malformed, and self-conflicting enrollment fields", () => {
+  const exact = enrollmentValue();
+  for (const key of Object.keys(exact)) {
+    const candidate = structuredClone(exact);
+    delete candidate[key];
+    assert.throws(
+      () => verifyCoordinationEnrollment(candidate),
+      { code: "COORDINATION_ENROLLMENT_INVALID" },
+      `missing ${key}`,
+    );
+  }
+  for (const candidate of [
+    { ...exact, extra: "forbidden" },
+    {
+      ...exact,
+      rawCapability: RAW_CAPABILITY.toString("base64"),
+    },
+    {
+      ...exact,
+      coordinationKey: {
+        ...exact.coordinationKey,
+        nested: {},
+      },
+    },
+    { ...exact, paymentMoved: true },
+    {
+      ...exact,
+      schema:
+        "clockchain.bilateral-coordination-enrollment/v2",
+    },
+    {
+      ...exact,
+      coordinationKey: exact.preflightKey,
+    },
+    {
+      ...exact,
+      preflightKey: exact.coordinationKey,
+    },
+    {
+      ...exact,
+      invitations: {
+        ...exact.invitations,
+        stakeholder: exact.invitations.rehearsal,
+      },
+    },
+    {
+      ...exact,
+      invitations: {
+        ...exact.invitations,
+        rehearsal: {
+          ...exact.invitations.rehearsal,
+          address: exact.invitations.rehearsal.address
+            .toUpperCase(),
+        },
+      },
+    },
+    {
+      ...exact,
+      invitations: {
+        ...exact.invitations,
+        rehearsal: {
+          ...exact.invitations.rehearsal,
+          signature: `0x${"A".repeat(130)}`,
+        },
+      },
+    },
+  ]) {
+    assert.throws(
+      () => verifyCoordinationEnrollment(candidate),
+      { code: "COORDINATION_ENROLLMENT_INVALID" },
+    );
+  }
+});
+
+test("rejects wrong enrollment signatures, signing keys, domains, and noncanonical bytes generically", () => {
+  const wrongKeyPair = generateKeyPairSync("ed25519");
+  const wrongPublicKey = wrongKeyPair.publicKey
+    .export({ format: "der", type: "spki" })
+    .subarray(-32)
+    .toString("base64");
+  const exact = enrollmentValue();
+  const cases = [
+    { ...exact, signature: "A".repeat(86) + "==" },
+    {
+      ...exact,
+      coordinationKey: {
+        ...exact.coordinationKey,
+        publicKey: wrongPublicKey,
+      },
+    },
+    enrollmentValue({
+      privateKeyPem: wrongKeyPair.privateKey.export({
+        format: "pem",
+        type: "pkcs8",
+      }),
+    }),
+  ];
+  const { signature: _signature, ...unsigned } = exact;
+  cases.push({
+    ...exact,
+    signature: sign(
+      null,
+      Buffer.concat([
+        Buffer.from("wrong-domain\n", "ascii"),
+        Buffer.from(
+          sha256(canonicalBytes(unsigned)),
+          "ascii",
+        ),
+      ]),
+      PRIVATE_KEY_PEM,
+    ).toString("base64"),
+  });
+  for (const candidate of cases) {
+    assert.throws(
+      () => verifyCoordinationEnrollment(candidate),
+      {
+        code: "COORDINATION_ENROLLMENT_INVALID",
+        message:
+          "Coordination enrollment validation failed.",
+      },
+    );
+  }
+  const noncanonical = Buffer.from(
+    `${JSON.stringify(exact)}\n`,
+    "utf8",
+  );
+  assert.throws(
+    () => parseCoordinationEnrollment(noncanonical),
+    { code: "COORDINATION_ENROLLMENT_INVALID" },
+  );
+  assert.throws(
+    () =>
+      parseCoordinationEnrollment(
+        Buffer.alloc(
+          MAX_COORDINATION_ENROLLMENT_BYTES + 1,
+          0x61,
+        ),
+      ),
+    { code: "COORDINATION_ENROLLMENT_INVALID" },
+  );
+});
+
+test("converts hostile enrollment getters and proxies into fixed secret-free errors", () => {
+  for (const hostile of [
+    Object.defineProperty(enrollmentValue(), "role", {
+      enumerable: true,
+      get() {
+        throw new Error("ENROLLMENT_SECRET_CANARY");
+      },
+    }),
+    new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error("ENROLLMENT_PROXY_SECRET_CANARY");
+        },
+      },
+    ),
+  ]) {
+    let error;
+    try {
+      verifyCoordinationEnrollment(hostile);
+    } catch (caught) {
+      error = caught;
+    }
+    assert.equal(
+      error?.code,
+      "COORDINATION_ENROLLMENT_INVALID",
+    );
+    assert.equal(
+      error?.message,
+      "Coordination enrollment validation failed.",
+    );
+    assert.doesNotMatch(
+      `${error?.message}\n${error?.stack}`,
+      /ENROLLMENT_(?:SECRET|PROXY_SECRET)_CANARY/,
+    );
+  }
+});
+
 test("pins the closed artifact policy and storage bounds", () => {
   assert.equal(MAX_RELAY_ARTIFACT_BYTES, 1_048_576);
   assert.equal(MAX_RELAY_PACKAGE_BYTES, 3_145_728);
@@ -325,7 +723,7 @@ test("pins the closed artifact policy and storage bounds", () => {
   );
 });
 
-test("accepts only a repository-exact signed descriptor and fails unsupported artifact schemas closed", () => {
+test("accepts only exact coordination enrollments and signed descriptors while other schemas fail closed", () => {
   const bytes = signedDescriptorBytes();
   assert.deepEqual(
     validateRelayArtifact({
@@ -366,16 +764,38 @@ test("accepts only a repository-exact signed descriptor and fails unsupported ar
     );
   }
 
+  const exactEnrollment = enrollmentBytes();
+  assert.deepEqual(
+    validateRelayArtifact({
+      artifactType: "coordination-enrollment",
+      bytes: exactEnrollment,
+      expectedDigest: sha256(exactEnrollment),
+      secretCanaries: [],
+    }),
+    {
+      artifactType: "coordination-enrollment",
+      byteLength: String(exactEnrollment.length),
+      digest: sha256(exactEnrollment),
+    },
+  );
+  const malformedEnrollment = enrollmentValue();
+  malformedEnrollment.signature =
+    `${malformedEnrollment.signature.slice(0, -4)}AAAA`;
+  const malformedEnrollmentBytes = canonicalBytes(
+    malformedEnrollment,
+  );
+  assert.throws(
+    () =>
+      validateRelayArtifact({
+        artifactType: "coordination-enrollment",
+        bytes: malformedEnrollmentBytes,
+        expectedDigest: sha256(malformedEnrollmentBytes),
+        secretCanaries: [],
+      }),
+    { code: "RELAY_ARTIFACT_INVALID" },
+  );
+
   for (const [artifactType, candidate] of [
-    [
-      "coordination-enrollment",
-      {
-        paymentMoved: false,
-        schema:
-          "clockchain.bilateral-coordination-enrollment/v1",
-        signature: "A".repeat(88),
-      },
-    ],
     [
       "coordination-receipt",
       {
@@ -1139,23 +1559,290 @@ test("recovers only an exact pinned owner record whose PID is definitively dead"
 test("consumes a scoped capability once and returns an identical retry", async (t) => {
   const { store } = await storeFixture(t);
   await register(store);
-  const input = {
-    capability: RAW_CAPABILITY,
-    enrollmentDigest: "a".repeat(64),
-    receiptBytes: RECEIPT_BYTES,
-    releaseId: RELEASE_ID,
-    role: "payer",
-    sessionId: SESSION_ID,
-  };
+  const input = consumeInput({ scoped: true });
   const first = await store.consumeCapability(input);
   const retry = await store.consumeCapability(input);
   assert.deepEqual(retry, first);
   assert.deepEqual(first.receiptBytes, RECEIPT_BYTES);
+  assert.deepEqual(
+    first.enrollmentBytes,
+    enrollmentBytes(),
+  );
   assert.equal(first.capabilityDigest, sha256(RAW_CAPABILITY));
-  assert.equal(first.enrollmentDigest, "a".repeat(64));
+  assert.equal(
+    first.enrollmentDigest,
+    sha256(enrollmentBytes()),
+  );
   assert.equal(
     Object.hasOwn(first, "capability"),
     false,
+  );
+});
+
+test("atomically persists enrollment and invokes a randomized receipt factory once across retries and restart", async (t) => {
+  const root = await privateRoot(t);
+  const store = await openCoordinationStore({
+    now: () => NOW_MS,
+    repositorySha: REPOSITORY_SHA,
+    root,
+  });
+  await register(store);
+  const enrollment = enrollmentBytes();
+  const enrollmentDigest = sha256(enrollment);
+  let factoryCalls = 0;
+  const receiptFactory = async (context) => {
+    factoryCalls += 1;
+    assert.deepEqual(Object.keys(context), [
+      "capabilityDigest",
+      "enrollmentDigest",
+      "releaseId",
+      "repositorySha",
+      "role",
+      "sessionId",
+    ]);
+    assert.equal(Object.isFrozen(context), true);
+    assert.equal(
+      Object.hasOwn(context, "capability"),
+      false,
+    );
+    assert.equal(
+      Object.hasOwn(context, "enrollmentBytes"),
+      false,
+    );
+    assert.equal(
+      context.capabilityDigest,
+      sha256(RAW_CAPABILITY),
+    );
+    return receiptBytes({
+      ...context,
+      signature: Buffer.from(
+        `randomized-${factoryCalls}`,
+      ).toString("base64"),
+    });
+  };
+  const input = consumeInput({
+    enrollment,
+    enrollmentDigest,
+    receiptFactory,
+    scoped: true,
+  });
+  const [first, concurrentRetry] = await Promise.all([
+    store.consumeCapability(input),
+    store.consumeCapability(input),
+  ]);
+  assert.equal(factoryCalls, 1);
+  assert.deepEqual(concurrentRetry, first);
+  assert.deepEqual(first.enrollmentBytes, enrollment);
+  assert.equal(first.enrollmentDigest, enrollmentDigest);
+  const conflictingEnrollment = enrollmentBytes({
+    invitations: {
+      rehearsal: {
+        address: `0x${"3".repeat(40)}`,
+        algorithm: "eip191",
+        signature: `0x${"3".repeat(130)}`,
+      },
+      stakeholder: {
+        address: `0x${"4".repeat(40)}`,
+        algorithm: "eip191",
+        signature: `0x${"4".repeat(130)}`,
+      },
+    },
+  });
+  await assert.rejects(
+    store.consumeCapability(
+      consumeInput({
+        enrollment: conflictingEnrollment,
+        receiptFactory,
+      }),
+    ),
+    { code: "CAPABILITY_REPLAY" },
+  );
+  assert.equal(factoryCalls, 1);
+  assert.deepEqual(
+    await store.readEnrollment({
+      role: "payer",
+      sessionId: SESSION_ID,
+    }),
+    {
+      bytes: enrollment,
+      digest: enrollmentDigest,
+    },
+  );
+  await store.close();
+
+  const restarted = await openCoordinationStore({
+    now: () => NOW_MS + 120_000,
+    repositorySha: REPOSITORY_SHA,
+    root,
+  });
+  t.after(() => restarted.close().catch(() => {}));
+  const afterRestart = await restarted.consumeCapability({
+    ...input,
+    receiptFactory: async () => {
+      factoryCalls += 1;
+      throw new Error("must not be called");
+    },
+  });
+  assert.equal(factoryCalls, 1);
+  assert.deepEqual(afterRestart, first);
+  const read = await restarted.readEnrollment({
+    role: "payer",
+    sessionId: SESSION_ID,
+  });
+  assert.equal(Object.isFrozen(read), true);
+  read.bytes.fill(0);
+  assert.deepEqual(
+    (
+      await restarted.readEnrollment({
+        role: "payer",
+        sessionId: SESSION_ID,
+      })
+    ).bytes,
+    enrollment,
+  );
+});
+
+test("fails factory exceptions and hostile returns generically without consuming the capability", async (t) => {
+  const { store } = await storeFixture(t);
+  await register(store);
+  const secretCanary = "FACTORY_EXCEPTION_SECRET_CANARY";
+  await assert.rejects(
+    store.consumeCapability(
+      consumeInput({
+        receiptFactory: async () => {
+          throw new Error(secretCanary);
+        },
+      }),
+    ),
+    (error) => {
+      assert.equal(
+        error.code,
+        "COORDINATION_STORAGE_INVALID",
+      );
+      assert.equal(
+        error.message,
+        "Coordination storage operation failed safely.",
+      );
+      assert.doesNotMatch(
+        `${error.message}\n${error.stack}`,
+        new RegExp(secretCanary),
+      );
+      return true;
+    },
+  );
+  const hostileCanary = "FACTORY_RETURN_SECRET_CANARY";
+  await assert.rejects(
+    store.consumeCapability(
+      consumeInput({
+        receiptFactory: async () =>
+          new Proxy(Buffer.from("opaque"), {
+            get(target, property, receiver) {
+              if (property === "length") {
+                throw new Error(hostileCanary);
+              }
+              return Reflect.get(
+                target,
+                property,
+                receiver,
+              );
+            },
+          }),
+      }),
+    ),
+    (error) => {
+      assert.equal(
+        error.code,
+        "COORDINATION_STORAGE_INVALID",
+      );
+      assert.equal(
+        error.message,
+        "Coordination storage operation failed safely.",
+      );
+      assert.doesNotMatch(
+        `${error.message}\n${error.stack}`,
+        new RegExp(hostileCanary),
+      );
+      return true;
+    },
+  );
+  const consumed = await store.consumeCapability(
+    consumeInput(),
+  );
+  assert.deepEqual(consumed.receiptBytes, RECEIPT_BYTES);
+});
+
+test("rejects conflicting, expired, wrong-scope, and invalid enrollment before receipt creation", async (t) => {
+  const { store } = await storeFixture(t);
+  let factoryCalls = 0;
+  const receiptFactory = async (context) => {
+    factoryCalls += 1;
+    return receiptBytes(context);
+  };
+  await register(store, {
+    capabilityDigest: sha256(Buffer.alloc(32, 0x33)),
+    expiresAtMs: String(NOW_MS),
+    sessionId:
+      "7f953393-86d0-4f99-9d6a-102f525fbecd",
+  });
+  await assert.rejects(
+    store.consumeCapability(
+      consumeInput({
+        capability: Buffer.alloc(32, 0x33),
+        enrollment: enrollmentBytes({
+          capability: Buffer.alloc(32, 0x33),
+          sessionId:
+            "7f953393-86d0-4f99-9d6a-102f525fbecd",
+        }),
+        receiptFactory,
+      }),
+    ),
+    { code: "CAPABILITY_EXPIRED" },
+  );
+  await register(store);
+  const exact = enrollmentBytes();
+  await assert.rejects(
+    store.consumeCapability(
+      consumeInput({
+        enrollment: exact,
+        enrollmentDigest: "e".repeat(64),
+        receiptFactory,
+      }),
+    ),
+    { code: "COORDINATION_STORAGE_INVALID" },
+  );
+  const wrongScope = enrollmentBytes({
+    releaseId: "release-b",
+  });
+  await assert.rejects(
+    store.consumeCapability(
+      consumeInput({
+        enrollment: wrongScope,
+        receiptFactory,
+      }),
+    ),
+    { code: "COORDINATION_STORAGE_INVALID" },
+  );
+  const invalid = Buffer.from(exact);
+  invalid[invalid.length - 2] ^= 1;
+  await assert.rejects(
+    store.consumeCapability(
+      consumeInput({
+        enrollment: invalid,
+        receiptFactory,
+      }),
+    ),
+    { code: "COORDINATION_STORAGE_INVALID" },
+  );
+  assert.equal(factoryCalls, 0);
+  await assert.rejects(
+    store.readEnrollment({
+      role: "payer",
+      sessionId: SESSION_ID,
+    }),
+    {
+      code: "COORDINATION_ENROLLMENT_NOT_FOUND",
+      message: "Coordination storage operation failed safely.",
+    },
   );
 });
 
@@ -1309,9 +1996,8 @@ test("accepts the closed receipt signature algorithms and signature size boundar
       signatureAlgorithm,
     });
     const consumed = await store.consumeCapability({
-      capability: RAW_CAPABILITY,
-      enrollmentDigest: "a".repeat(64),
-      receiptBytes: bytes,
+      ...consumeInput(),
+      receiptFactory: async () => bytes,
     });
     assert.deepEqual(consumed.receiptBytes, bytes);
   }
@@ -1326,46 +2012,86 @@ test("fails closed on capability expiry, cross-role use, and conflicting replay"
       "7f953393-86d0-4f99-9d6a-102f525fbecd",
   });
   await assert.rejects(
-    store.consumeCapability({
-      capability: Buffer.alloc(32, 0x33),
-      enrollmentDigest: "a".repeat(64),
-      receiptBytes: receiptBytes({
+    store.consumeCapability(
+      consumeInput({
         capability: Buffer.alloc(32, 0x33),
-        sessionId:
-          "7f953393-86d0-4f99-9d6a-102f525fbecd",
+        enrollment: enrollmentBytes({
+          capability: Buffer.alloc(32, 0x33),
+          sessionId:
+            "7f953393-86d0-4f99-9d6a-102f525fbecd",
+        }),
       }),
-    }),
+    ),
     { code: "CAPABILITY_EXPIRED" },
   );
 
   await register(store);
   await assert.rejects(
     store.consumeCapability({
-      capability: RAW_CAPABILITY,
-      enrollmentDigest: "a".repeat(64),
-      receiptBytes: RECEIPT_BYTES,
-      releaseId: RELEASE_ID,
+      ...consumeInput({ scoped: true }),
       role: "payee",
-      sessionId: SESSION_ID,
     }),
     { code: "CAPABILITY_SCOPE" },
   );
 
-  await store.consumeCapability({
-    capability: RAW_CAPABILITY,
-    enrollmentDigest: "a".repeat(64),
-    receiptBytes: RECEIPT_BYTES,
+  await store.consumeCapability(consumeInput());
+  const conflictingEnrollment = enrollmentBytes({
+    invitations: {
+      rehearsal: {
+        address: `0x${"5".repeat(40)}`,
+        algorithm: "eip191",
+        signature: `0x${"5".repeat(130)}`,
+      },
+      stakeholder: {
+        address: `0x${"6".repeat(40)}`,
+        algorithm: "eip191",
+        signature: `0x${"6".repeat(130)}`,
+      },
+    },
   });
   await assert.rejects(
-    store.consumeCapability({
-      capability: RAW_CAPABILITY,
-      enrollmentDigest: "d".repeat(64),
-      receiptBytes: receiptBytes({
-        enrollmentDigest: "d".repeat(64),
+    store.consumeCapability(
+      consumeInput({
+        enrollment: conflictingEnrollment,
       }),
-    }),
+    ),
     { code: "CAPABILITY_REPLAY" },
   );
+});
+
+test("classifies byte-different consumed enrollment as replay before trusting its claimed digest", async (t) => {
+  const { store } = await storeFixture(t);
+  await register(store);
+  await store.consumeCapability(consumeInput());
+  const conflictingEnrollment = enrollmentBytes({
+    invitations: {
+      rehearsal: {
+        address: `0x${"7".repeat(40)}`,
+        algorithm: "eip191",
+        signature: `0x${"7".repeat(130)}`,
+      },
+      stakeholder: {
+        address: `0x${"8".repeat(40)}`,
+        algorithm: "eip191",
+        signature: `0x${"8".repeat(130)}`,
+      },
+    },
+  });
+  let factoryCalls = 0;
+  await assert.rejects(
+    store.consumeCapability(
+      consumeInput({
+        enrollment: conflictingEnrollment,
+        enrollmentDigest: "e".repeat(64),
+        receiptFactory: async (context) => {
+          factoryCalls += 1;
+          return receiptBytes(context);
+        },
+      }),
+    ),
+    { code: "CAPABILITY_REPLAY" },
+  );
+  assert.equal(factoryCalls, 0);
 });
 
 test("rejects unbounded capability expiry decimals and hostile accessor inputs with fixed errors", async (t) => {
@@ -1436,8 +2162,12 @@ test("rejects every supported raw capability representation in a receipt without
     ["JSON byte array", [...capability]],
   ];
   for (const [label, representation] of cases) {
-    const receiptBytes = stableBytes({
-      ...receiptValue({ capability }),
+    const enrollment = enrollmentBytes({ capability });
+    const candidateReceipt = stableBytes({
+      ...receiptValue({
+        capability,
+        enrollmentDigest: sha256(enrollment),
+      }),
       note: representation,
     });
     const leaked = Array.isArray(representation)
@@ -1446,8 +2176,9 @@ test("rejects every supported raw capability representation in a receipt without
     await assert.rejects(
       store.consumeCapability({
         capability,
-        enrollmentDigest: "a".repeat(64),
-        receiptBytes,
+        enrollmentBytes: enrollment,
+        enrollmentDigest: sha256(enrollment),
+        receiptFactory: async () => candidateReceipt,
       }),
       (error) => {
         assert.equal(
@@ -1509,15 +2240,14 @@ test("rejects private material and token or authorization content from capabilit
     ],
   ];
   for (const [label, hostile] of cases) {
-    const receiptBytes = stableBytes({
+    const candidateReceipt = stableBytes({
       ...receiptValue(),
       ...hostile,
     });
     await assert.rejects(
       store.consumeCapability({
-        capability: RAW_CAPABILITY,
-        enrollmentDigest: "a".repeat(64),
-        receiptBytes,
+        ...consumeInput(),
+        receiptFactory: async () => candidateReceipt,
       }),
       (error) => {
         assert.equal(
@@ -1546,21 +2276,28 @@ test("rejects private material and token or authorization content from capabilit
 test("serializes concurrent capability consumption", async (t) => {
   const { store } = await storeFixture(t);
   await register(store);
+  const exact = enrollmentBytes();
+  const conflicting = enrollmentBytes({
+    invitations: {
+      rehearsal: {
+        address: `0x${"7".repeat(40)}`,
+        algorithm: "eip191",
+        signature: `0x${"7".repeat(130)}`,
+      },
+      stakeholder: {
+        address: `0x${"8".repeat(40)}`,
+        algorithm: "eip191",
+        signature: `0x${"8".repeat(130)}`,
+      },
+    },
+  });
   const results = await Promise.allSettled([
-    store.consumeCapability({
-      capability: RAW_CAPABILITY,
-      enrollmentDigest: "a".repeat(64),
-      receiptBytes: receiptBytes({
-        enrollmentDigest: "a".repeat(64),
-      }),
-    }),
-    store.consumeCapability({
-      capability: RAW_CAPABILITY,
-      enrollmentDigest: "b".repeat(64),
-      receiptBytes: receiptBytes({
-        enrollmentDigest: "b".repeat(64),
-      }),
-    }),
+    store.consumeCapability(
+      consumeInput({ enrollment: exact }),
+    ),
+    store.consumeCapability(
+      consumeInput({ enrollment: conflicting }),
+    ),
   ]);
   assert.equal(
     results.filter(({ status }) => status === "fulfilled").length,
@@ -1588,11 +2325,8 @@ test("rejects conflicting capability registration and preserves consumption acro
     register(store, { role: "payee" }),
     { code: "CAPABILITY_REPLAY" },
   );
-  const consumed = await store.consumeCapability({
-    capability: RAW_CAPABILITY,
-    enrollmentDigest: "a".repeat(64),
-    receiptBytes: RECEIPT_BYTES,
-  });
+  const input = consumeInput();
+  const consumed = await store.consumeCapability(input);
   await store.close();
 
   const restarted = await openCoordinationStore({
@@ -1602,11 +2336,7 @@ test("rejects conflicting capability registration and preserves consumption acro
   });
   t.after(() => restarted.close().catch(() => {}));
   assert.deepEqual(
-    await restarted.consumeCapability({
-      capability: RAW_CAPABILITY,
-      enrollmentDigest: "a".repeat(64),
-      receiptBytes: RECEIPT_BYTES,
-    }),
+    await restarted.consumeCapability(input),
     consumed,
   );
 });
@@ -1830,6 +2560,88 @@ test("rejects torn and noncanonical journal records on restart", async (t) => {
   }
 });
 
+test("revalidates enrollment signatures, scope, and receipts from rehashed journal records", async (t) => {
+  const exactEnrollment = enrollmentBytes();
+  const invalidSignature = enrollmentValue();
+  invalidSignature.signature =
+    `${invalidSignature.signature.slice(0, -4)}AAAA`;
+  for (const candidate of [
+    {
+      enrollment: canonicalBytes(invalidSignature),
+      label: "enrollment signature",
+    },
+    {
+      enrollment: enrollmentBytes({
+        releaseId: "release-b",
+      }),
+      label: "enrollment scope",
+    },
+    {
+      enrollment: exactEnrollment,
+      invalidReceipt: true,
+      label: "receipt",
+    },
+  ]) {
+    const root = await privateRoot(t);
+    const store = await openCoordinationStore({
+      now: () => NOW_MS,
+      repositorySha: REPOSITORY_SHA,
+      root,
+    });
+    await register(store);
+    await store.consumeCapability(consumeInput());
+    await store.close();
+
+    const journalPath = join(root, "journal.log");
+    const records = decodeJournal(
+      await readFile(journalPath),
+    );
+    assert.equal(records.length, 2, candidate.label);
+    const enrollmentDigest = sha256(
+      candidate.enrollment,
+    );
+    const receipt = candidate.invalidReceipt
+      ? stableBytes({
+          ...receiptValue({ enrollmentDigest }),
+          paymentMoved: true,
+        })
+      : receiptBytes({ enrollmentDigest });
+    const consumed = records[1];
+    records[1] = withRecordDigest({
+      ...consumed,
+      payload: {
+        ...consumed.payload,
+        value: {
+          ...consumed.payload.value,
+          enrollmentBase64:
+            candidate.enrollment.toString("base64"),
+          enrollmentDigest,
+          receiptBase64: receipt.toString("base64"),
+          receiptDigest: sha256(receipt),
+        },
+      },
+    });
+    await writeFile(
+      journalPath,
+      encodeJournal(records),
+      { mode: 0o600 },
+    );
+    await assert.rejects(
+      openCoordinationStore({
+        now: () => NOW_MS,
+        repositorySha: REPOSITORY_SHA,
+        root,
+      }),
+      {
+        code: "COORDINATION_STORAGE_INVALID",
+        message:
+          "Coordination storage operation failed safely.",
+      },
+      candidate.label,
+    );
+  }
+});
+
 test("discards snapshot disagreement and rebuilds from the authoritative journal", async (t) => {
   const root = await privateRoot(t);
   const store = await openCoordinationStore({
@@ -2028,6 +2840,7 @@ test("rejects symlinked store files and root replacement", async (t) => {
 for (const operation of [
   "register",
   "consume",
+  "enrollment",
   "append",
   "read",
   "put",
@@ -2057,8 +2870,14 @@ for (const operation of [
     });
     t.after(() => store.close().catch(() => {}));
     const artifactBytes = signedDescriptorBytes();
-    if (operation === "consume") {
+    if (
+      operation === "consume" ||
+      operation === "enrollment"
+    ) {
       await register(store);
+    }
+    if (operation === "enrollment") {
+      await store.consumeCapability(consumeInput());
     }
     if (operation === "get") {
       await store.putArtifact({
@@ -2072,10 +2891,11 @@ for (const operation of [
     const action = {
       append: () => store.appendEvent(event()),
       consume: () =>
-        store.consumeCapability({
-          capability: RAW_CAPABILITY,
-          enrollmentDigest: "a".repeat(64),
-          receiptBytes: RECEIPT_BYTES,
+        store.consumeCapability(consumeInput()),
+      enrollment: () =>
+        store.readEnrollment({
+          role: "payer",
+          sessionId: SESSION_ID,
         }),
       get: () => store.getArtifact(sha256(artifactBytes)),
       put: () =>
@@ -2351,6 +3171,13 @@ test("close is idempotent and all methods fail after close", async (t) => {
   await assert.rejects(
     store.readEvents({
       after: null,
+      sessionId: SESSION_ID,
+    }),
+    { code: "COORDINATION_STORAGE_CLOSED" },
+  );
+  await assert.rejects(
+    store.readEnrollment({
+      role: "payer",
       sessionId: SESSION_ID,
     }),
     { code: "COORDINATION_STORAGE_CLOSED" },

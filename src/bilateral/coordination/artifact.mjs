@@ -13,6 +13,9 @@ import {
 import {
   verifyDescriptorEnvelope,
 } from "../descriptor.mjs";
+import {
+  parseCoordinationEnrollment,
+} from "./enrollment.mjs";
 
 export const MAX_RELAY_ARTIFACT_BYTES = 1_048_576;
 export const MAX_RELAY_PACKAGE_BYTES = 3_145_728;
@@ -333,6 +336,19 @@ function validateSignedDescriptor(bytes, parsed, canaries) {
   }
 }
 
+function validateCoordinationEnrollment(
+  bytes,
+  parsed,
+  canaries,
+) {
+  assertSafeBytes(bytes, parsed, canaries);
+  try {
+    parseCoordinationEnrollment(bytes);
+  } catch {
+    invalid();
+  }
+}
+
 export function validateRelayArtifact(input) {
   try {
     const data = readExactData(input, INPUT_KEYS);
@@ -353,13 +369,24 @@ export function validateRelayArtifact(input) {
       bytes,
     );
     const parsed = parseCanonicalJson(bytes);
-    if (data.artifactType !== "signed-descriptor") {
+    if (
+      data.artifactType === "coordination-enrollment"
+    ) {
+      validateCoordinationEnrollment(
+        bytes,
+        parsed,
+        canaries,
+      );
+    } else if (
+      data.artifactType === "signed-descriptor"
+    ) {
+      validateSignedDescriptor(bytes, parsed, canaries);
+    } else {
       // The allowlist reserves protocol artifact names and limits.
       // Publication remains disabled until a repository-owned exact
       // schema and trust validator is available for that type.
       invalid();
     }
-    validateSignedDescriptor(bytes, parsed, canaries);
     return Object.freeze({
       artifactType: data.artifactType,
       byteLength: String(bytes.length),
