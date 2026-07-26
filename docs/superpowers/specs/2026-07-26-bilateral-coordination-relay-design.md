@@ -352,12 +352,34 @@ On first contact, the supervisor locally creates:
 It sends one bounded bootstrap request containing:
 
 - the raw one-time capability;
-- the coordination public key;
-- the preflight public key;
-- the four public invitation fields for its two assigned invitations;
-- proof-of-possession signatures from both invitation keys over the enrollment
-  digest; and
-- a coordination-key signature over the complete request.
+- one exact secret-free enrollment object containing the coordination public
+  key, preflight public key, and both assigned public invitations;
+- proof-of-possession signatures from both invitation keys over their exact
+  enrollment challenges; and
+- a coordination-key signature over the complete secret-free enrollment.
+
+The bootstrap wrapper has exact keys `capability` and `enrollment`. The
+capability is lowercase 64-hex and must hash to the enrollment's
+`capabilityDigest`.
+
+The enrollment schema is
+`clockchain.bilateral-coordination-enrollment/v1` with exact top-level keys
+`capabilityDigest`, `coordinationKey`, `invitations`, `paymentMoved`,
+`preflightKey`, `releaseId`, `repositorySha`, `role`, `schema`, `sessionId`,
+and `signature`. Coordination and preflight keys have exact keys `algorithm`,
+`keyId`, and `publicKey`; both algorithms are `ed25519`, both public keys are
+canonical raw 32-byte Base64, and the two keys differ. `invitations` has exact
+keys `rehearsal` and `stakeholder`; each value has exact keys `address`,
+`algorithm`, and `signature`, uses `eip191`, and the two lowercase addresses
+differ.
+
+Each invitation proof signs the ASCII domain
+`clockchain.bilateral-invitation-proof/v1\n` followed by the lowercase SHA-256
+of canonical exact keys `address`, `capabilityDigest`, `releaseId`,
+`repositorySha`, `role`, `run`, and `sessionId`. The enrollment signature uses
+the coordination key over the ASCII domain
+`clockchain.bilateral-coordination-enrollment-signature/v1\n` followed by the
+lowercase SHA-256 of the canonical enrollment without `signature`.
 
 The relay verifies the capability digest, role, session, expiry, exact request
 shape, invitation address recovery, and coordination signature. It consumes the
@@ -379,6 +401,15 @@ receipt, allowing an ambiguous HTTP response to recover without another user
 start. Any different request under that capability is terminal replay. The
 supervisor removes the raw capability from its active state only after it has
 durably stored and verified the receipt.
+
+Capability consumption stores the exact canonical enrollment bytes and receipt
+in the same authoritative journal record. On restart, the relay retrieves the
+enrolled coordination/preflight keys and invitation proofs from that durable
+record; it never re-enrolls a key from the first event it happens to receive.
+Storage invokes the TLS receipt factory only for an unused capability after the
+enrollment passes validation. A matching retry returns the already persisted
+receipt without invoking or re-signing through the factory, which preserves
+byte identity for randomized ECDSA and RSA-PSS signatures.
 
 ### 5.4 Funding as approval, not authentication
 
@@ -424,6 +455,13 @@ smaller existing protocol limit, which remains authoritative.
 Protocol decisions do not use an envelope's local creation time. Relay receipt
 time and optional advisory timestamps may be logged for operations but are not
 authorization evidence.
+
+Operator authority is resolved from
+`docs/operator-keys/<keyId>.pub` at the exact frozen repository SHA. The relay
+uses a repository public-key resolver with the same closed path derivation as
+descriptor verification; it never trusts the public key embedded in an
+operator envelope. Role authority comes only from the durable bootstrap
+enrollment for that session and role.
 
 ### 6.2 Sequence and replay rules
 

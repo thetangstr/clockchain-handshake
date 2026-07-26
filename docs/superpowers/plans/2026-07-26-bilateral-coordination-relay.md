@@ -458,6 +458,7 @@ Not-tested: Persistence transactions and network delivery
 **Files:**
 
 - Create: `src/bilateral/coordination/artifact.mjs`
+- Create: `src/bilateral/coordination/enrollment.mjs`
 - Create: `src/bilateral/coordination/storage.mjs`
 - Create: `test/bilateral-coordination-storage.test.mjs`
 
@@ -481,20 +482,23 @@ await store.registerCapability({
 
 const first = await store.consumeCapability({
   capability: rawCapability,
+  enrollmentBytes,
   enrollmentDigest,
-  receiptBytes,
+  receiptFactory,
 });
 const retry = await store.consumeCapability({
   capability: rawCapability,
+  enrollmentBytes,
   enrollmentDigest,
-  receiptBytes,
+  receiptFactory,
 });
 assert.deepEqual(retry, first);
 await assert.rejects(
   store.consumeCapability({
     capability: rawCapability,
+    enrollmentBytes: conflictingEnrollmentBytes,
     enrollmentDigest: "d".repeat(64),
-    receiptBytes,
+    receiptFactory,
   }),
   { code: "CAPABILITY_REPLAY" },
 );
@@ -503,6 +507,10 @@ await store.appendEvent(payerEvent0);
 assert.deepEqual(await store.readEvents({ after: null, sessionId }), [
   payerEvent0,
 ]);
+assert.deepEqual(
+  await store.readEnrollment({ role: "payer", sessionId }),
+  { bytes: enrollmentBytes, digest: enrollmentDigest },
+);
 ```
 
 Add hostile tests for non-`0700` roots, symlink roots/files, reused nonempty
@@ -591,6 +599,21 @@ Their closed canonical schema has exact keys `capabilityDigest`,
 `repositorySha`, `role`, `schema`, `sessionId`, `signature`, and
 `signatureAlgorithm`; no free-form or nested receipt field is permitted.
 
+Add `src/bilateral/coordination/enrollment.mjs`. The exact enrollment schema and
+signature/proof domains are those pinned in design section 5.3. The module
+performs closed synchronous structure/canonical-encoding checks and verifies the
+self-contained Ed25519 coordination signature. Task 4 additionally performs
+asynchronous EIP-191 address recovery before storage. `consumeCapability`
+atomically persists `enrollmentBytes`, its recomputed digest, and the receipt.
+It accepts an async `receiptFactory(context)` rather than caller-created receipt
+bytes. The factory receives only frozen public digests/scope, runs only for an
+unused capability after enrollment validation, and returns the exact receipt
+bytes. A byte-identical retry, including after restart, returns the persisted
+receipt without invoking or re-signing through the factory. Conflicting
+enrollment bytes fail before the factory runs. Replay repeats the same exact
+enrollment and receipt validation. `readEnrollment({role, sessionId})` returns
+frozen `{bytes, digest}` and is the only durable role-key source after restart.
+
 - [ ] **Step 4: Implement pinned durable storage**
 
 `openCoordinationStore` must:
@@ -615,6 +638,7 @@ The returned exact interface is:
   consumeCapability,
   getArtifact,
   putArtifact,
+  readEnrollment,
   readEvents,
   readReleaseView,
   registerCapability,
@@ -708,6 +732,7 @@ export function createRelayService({
   frozenRepositorySha,
   now = Date.now,
   receiptSigner,
+  repositoryPublicKeyResolver,
   store,
 }) {
   return Object.freeze({
@@ -724,6 +749,7 @@ export function createRelayService({
 `bootstrap` validates:
 
 - one raw 256-bit capability;
+- an exact `{capability, enrollment}` canonical wrapper;
 - exact session/release/role/SHA binding;
 - coordination and preflight Ed25519 public keys;
 - exactly two role-owned public invitations (`rehearsal`, `stakeholder`);
@@ -731,9 +757,19 @@ export function createRelayService({
 - coordination signature over the full canonical request; and
 - `paymentMoved:false`.
 
+It imports the exact enrollment validator from
+`src/bilateral/coordination/enrollment.mjs`, verifies both EIP-191 invitation
+proofs against the exact challenge domains, and rejects duplicate
+coordination/preflight keys or invitation addresses across the two role
+enrollments. It passes the exact canonical enrollment bytes to
+`consumeCapability`; it never rebuilds role authority from a later event.
+
 It atomically binds the capability to the request digest and one signed receipt.
-`receiptSigner` signs a fixed relay-receipt domain plus the canonical receipt
-digest with the HTTPS server private key. The receipt carries the leaf
+`receiptSigner` is an exact object containing `certificateSha256`,
+`signatureAlgorithm`, `sign(preimage)`, and `verify(preimage, signature)`.
+The service requires `verify` to accept the just-created signature before
+storage. The signer signs a fixed relay-receipt domain plus the canonical
+receipt digest with the HTTPS server private key. The receipt carries the leaf
 certificate fingerprint and signature algorithm, and the supervisor verifies
 it with the public key from the already pinned leaf certificate. The service
 never receives the operator private key and the receipt is never accepted as an
@@ -747,6 +783,14 @@ lowercase SHA-256 of the canonical receipt without its `signature` field.
 `rsa-pss-sha256`. Bootstrap rejects any missing, extra, nested, noncanonical,
 wrong-scope, wrong-certificate, or unverified receipt field before calling
 `consumeCapability`.
+
+`repositoryPublicKeyResolver({keyId, repositoryPath, repositorySha})` is
+mandatory. Operator events derive `repositoryPath` only through
+`operatorPublicKeyPath(keyId)` and verify against `git show
+<frozenSha>:<repositoryPath>` (or an exact injected test resolver). Role events
+verify against `store.readEnrollment`; an envelope's embedded key never creates
+authority. Session-view replay reconstructs lifecycle state from the durable
+event log using those same authority sources.
 
 The TLS-signed bootstrap receipt and the later operator-signed
 `ENROLLMENT_RECEIPT` event are separate objects. The first proves idempotent
