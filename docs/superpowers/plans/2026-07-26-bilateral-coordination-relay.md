@@ -578,6 +578,15 @@ completion-marker bytes and per-file digests for packages, runs
 `assertSecretFree` over the complete artifact with all active canaries, and
 returns frozen `{artifactType, byteLength: String(bytes.length), digest}`.
 
+This storage-layer validation proves closed canonical content and
+cryptographic integrity, not signer authority inferred from an embedded public
+key. Types without an exact repository-owned validator fail closed. Task 4's
+relay service and the later supervisor/coordinator integration must bind the
+artifact signer to the repository-pinned operator key or enrolled role key
+before an artifact digest can be referenced by an accepted event or advance
+lifecycle state. Capability receipt bytes are internal durable state; Task 4
+validates their exact TLS signature and certificate binding before storage.
+
 - [ ] **Step 4: Implement pinned durable storage**
 
 `openCoordinationStore` must:

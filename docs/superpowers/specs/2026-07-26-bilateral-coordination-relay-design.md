@@ -557,6 +557,22 @@ Every artifact:
 7. is reread and rehashed before acknowledgement; and
 8. is referenced from an event by exact digest.
 
+Artifact validation has two fail-closed layers. The content-addressed storage
+layer proves the closed schema, canonical bytes, completion markers, digest,
+secret absence, and cryptographic validity of any self-contained signature. It
+does not infer that an embedded signing key is an authorized operator or role
+key. Before an artifact digest may be referenced by an accepted coordination
+event or advance lifecycle state, the relay service repeats the type-specific
+validation with the expected repository-pinned operator or enrolled role
+authority. An artifact type without an exact repository-owned validator is
+rejected; a future producer task must land that validator before the type can
+become usable.
+
+The bootstrap consumption receipt stored with capability state is internal
+durable relay data, not a public artifact upload. Its exact TLS signature and
+certificate binding are validated by the relay bootstrap service before the
+storage transaction is acknowledged.
+
 Multi-file packages must have a verified completion marker before upload. The
 receiver repeats marker and digest verification after download.
 
