@@ -159,8 +159,9 @@ Five key classes remain distinct:
 
 1. the committed operator Ed25519 key signs descriptors and operator
    coordination commands;
-2. the HTTPS server key authenticates the transport and is never reused as an
-   operator signing key;
+2. the HTTPS server key authenticates the transport and signs only
+   relay-origin enrollment receipts; it is never reused as an operator signing
+   key or treated as protocol authority;
 3. each role machine generates one Ed25519 coordination key for the release;
 4. each role machine generates one Ed25519 preflight participant key; and
 5. each invitation contains its own Ethereum role-signing key.
@@ -361,7 +362,16 @@ It sends one bounded bootstrap request containing:
 The relay verifies the capability digest, role, session, expiry, exact request
 shape, invitation address recovery, and coordination signature. It consumes the
 capability atomically while binding it to the enrollment request digest and the
-signed enrollment receipt.
+signed enrollment receipt. The receipt signature uses the already pinned HTTPS
+server key over a fixed relay-receipt domain and the canonical receipt digest.
+The supervisor verifies it against the public key in the pinned leaf
+certificate. This proves which pinned relay consumed the capability; it does
+not grant the relay operator-command or protocol authority.
+
+The TLS-signed bootstrap receipt is distinct from the later operator-signed
+`enrollment receipt` coordination event. The former lets a supervisor recover
+ambiguous capability consumption; the latter is the operator coordinator's
+phase acknowledgment. Neither is Clockchain protocol evidence.
 
 A consumed capability cannot authorize a different request. Repeating the same
 capability with the byte-identical enrollment request returns the already stored
