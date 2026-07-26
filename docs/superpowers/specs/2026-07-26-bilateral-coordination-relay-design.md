@@ -458,7 +458,7 @@ Role-to-operator events include:
 - recovery required; and
 - terminal failure.
 
-Operator-to-role events include:
+Operator-originated coordination events include:
 
 - enrollment receipt;
 - wait for funding;
@@ -469,10 +469,26 @@ Operator-to-role events include:
 - register stakeholder;
 - stakeholder descriptor ready;
 - start stakeholder;
-- exact recovery authorization; and
+- exact recovery authorization;
+- verification passed;
+- verification failed;
+- complete release; and
 - terminal abort.
 
 The relay rejects unknown kinds and kinds emitted by the wrong role.
+
+Role authority is checked against the immutable coordination public key accepted
+during authenticated enrollment. Signature verification must never use the
+public key carried by the same envelope as its own authority expectation. The
+envelope key is evidence to compare with the enrolled key, not a source of
+trust.
+
+After the stakeholder verifier has exited successfully and published its valid
+marker-complete verdict, the operator may emit one release-scoped
+`COMPLETE_RELEASE` event. This event records only that the coordinator has
+finished the non-authorizing release workflow. It cannot substitute for
+`VERIFICATION_PASSED`, carry an authorization verdict, or move a release
+directly from `STAKEHOLDER_RUNNING` to `COMPLETE`.
 
 ### 6.4 Session state machine
 
@@ -501,6 +517,11 @@ of `ABORTED`.
 `REHEARSAL_VERIFIED` and `STAKEHOLDER_VERIFIED` mean that a fresh verifier
 process exited successfully and published a valid marker-complete verdict. They
 are coordinator states, not authorizing output.
+
+`COMPLETE` is derived only after the operator's `COMPLETE_RELEASE` event is
+accepted from `STAKEHOLDER_VERIFIED`. A premature, duplicated, wrongly scoped,
+or wrongly signed completion event aborts or fails closed under the same event
+validation rules.
 
 ## 7. Artifact transport
 
@@ -698,6 +719,16 @@ command with the same:
 - repository SHA;
 - arguments; and
 - output directory.
+
+The role's `RECOVERY_REQUIRED` event and the operator's
+`EXACT_RECOVERY_AUTHORIZATION` event must reference the same non-null
+`artifactDigest` for that exact secret-free recovery-command manifest. The
+coordinator state records recovery requests and authorizations separately for
+each role and run. An authorization is valid only when its digest uniquely
+matches one outstanding request; missing digests, changed digests, cross-role
+substitution, digest collision between roles, or reuse of a prior authorization
+fails closed. Downstream execution requires the authorized digest for that exact
+role and run, never a run-wide recovery boolean.
 
 The existing discovery-first and checkpoint validation rules decide whether the
 write can be adopted. If uniqueness cannot be proven, the run aborts.

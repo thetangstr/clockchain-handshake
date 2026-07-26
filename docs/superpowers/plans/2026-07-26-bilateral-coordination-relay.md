@@ -393,6 +393,7 @@ export const COORDINATION_EVENT_AUTHORITIES = Object.freeze({
   ROLE_STARTED: "role",
   TERMINAL_FAILURE: "any",
   TOKEN_READY: "role",
+  COMPLETE_RELEASE: "operator",
   ENROLLMENT_RECEIPT: "operator",
   EXACT_RECOVERY_AUTHORIZATION: "operator",
   PREFLIGHT_PLAN_READY: "operator",
@@ -411,11 +412,21 @@ export const COORDINATION_EVENT_AUTHORITIES = Object.freeze({
 
 `initialReleaseView` returns a deep-frozen exact-key view with separate payer and
 payee readiness for each prerequisite. `reduceReleaseEvent` validates event
-authority and context, marks exactly one prerequisite, derives the next state
-from all required facts, and permanently maps either terminal event to
-`ABORTED`. `VERIFICATION_PASSED` advances only when the matching run has both
-role packages and the coordinator-supplied verifier-publication check is true;
-the relay never derives that fact itself.
+authority against a caller-supplied trusted public key resolved from immutable
+enrollment state; it never treats the envelope's own public key as its authority
+expectation. The reducer validates context, marks exactly one prerequisite,
+derives the next state from all required facts, and permanently maps either
+terminal event to `ABORTED`. `VERIFICATION_PASSED` advances only when the
+matching run has both role packages and the coordinator-supplied
+verifier-publication check is true; the relay never derives that fact itself.
+Stakeholder verification derives `STAKEHOLDER_VERIFIED`. One operator-signed,
+release-scoped `COMPLETE_RELEASE` event accepted only from that state derives
+`COMPLETE`; premature and duplicate completion fail closed. Recovery facts are
+per-role and per-run exact artifact digests: `RECOVERY_REQUIRED` and
+`EXACT_RECOVERY_AUTHORIZATION` require the same non-null digest for the exact
+secret-free recovery-command manifest, and authorization must match one unique
+outstanding role request. A run-wide recovery boolean, cross-role substitution,
+digest mismatch, collision, or reuse fails closed.
 
 - [ ] **Step 4: Run focused tests**
 
