@@ -233,7 +233,9 @@ The coordinator is a separate process that:
 
 The coordinator persists enough public state to resume observation after a
 crash. It does not cache private role material or treat a relay event as proof
-that a protocol command succeeded.
+that a protocol command succeeded. Its dedicated Clockchain token and
+independent Sepolia RPC credential remain operator-local and are never uploaded
+to the relay.
 
 ### 4.3 Billy and Iris supervisors
 
@@ -308,17 +310,20 @@ mode-`0600` launch manifests. Each contains:
 - the exact `repositorySha`;
 - the operator key ID;
 - the assigned role;
-- a fresh unpredictable coordination session ID;
+- the same fresh unpredictable coordination session ID;
 - the HTTPS relay URL;
 - the expected TLS certificate SHA-256 fingerprint;
 - one 256-bit role-scoped bootstrap capability; and
 - the release identifier.
 
-The raw capability appears only in the matching private launch manifest. The
-relay stores its SHA-256 digest, role, session, expiry, and unused/used state.
+The manifests carry distinct capabilities and distinct assigned roles. A
+capability expires 60 minutes after issuance if it has not been consumed. The
+raw capability appears only in the matching private launch manifest. The relay
+stores its SHA-256 digest, role, session, expiry, and unused/used state.
 
 Providing the matching launch manifest is part of the user's single "start this
-agent session" action. It is not a later artifact-transfer step.
+agent session" action. The launch path is installed or attached as part of that
+start and is not a later artifact-transfer step.
 
 ### 5.2 TLS pinning
 
@@ -355,11 +360,15 @@ It sends one bounded bootstrap request containing:
 
 The relay verifies the capability digest, role, session, expiry, exact request
 shape, invitation address recovery, and coordination signature. It consumes the
-capability atomically before returning a signed enrollment receipt.
+capability atomically while binding it to the enrollment request digest and the
+signed enrollment receipt.
 
-A capability is never reusable. Failure after ambiguous consumption requires a
-new operator-created launch manifest; the relay never guesses whether the
-capability remains valid.
+A consumed capability cannot authorize a different request. Repeating the same
+capability with the byte-identical enrollment request returns the already stored
+receipt, allowing an ambiguous HTTP response to recover without another user
+start. Any different request under that capability is terminal replay. The
+supervisor removes the raw capability from its active state only after it has
+durably stored and verified the receipt.
 
 ### 5.4 Funding as approval, not authentication
 
@@ -390,6 +399,17 @@ with exact keys:
 - `sessionId`;
 - `signature`: algorithm, public-key identifier, and canonical signature; and
 - `subjectRun`: `release`, `rehearsal`, or `stakeholder`.
+
+`eventDigest` is
+`SHA-256(canonicalBytes(eventWithoutEventDigestOrSignature))`. The signature
+preimage is a fixed coordination domain string followed by that digest. This
+avoids a circular signature definition and binds every other envelope field,
+including `artifactDigest` and `previousEventDigest`.
+
+The canonical envelope is limited to 64 KiB including the signature. Bootstrap
+requests have the same limit. A single stored artifact is limited to 1 MiB and
+a marker-complete multi-file package is limited to 3 MiB. A type may impose a
+smaller existing protocol limit, which remains authoritative.
 
 Protocol decisions do not use an envelope's local creation time. Relay receipt
 time and optional advisory timestamps may be logged for operations but are not
@@ -480,6 +500,7 @@ The relay accepts only explicitly allowlisted, secret-free public artifacts:
 
 - invitation public bundles;
 - coordination enrollment and receipt;
+- token-commitment artifacts;
 - preflight public-key artifacts;
 - signed preflight plan;
 - marker-complete participant reports;
@@ -561,12 +582,19 @@ One preflight covers:
 - the frozen repository SHA;
 - the Billy and Iris supervisor coordination identities;
 - the Billy and Iris preflight participant public keys;
-- the exact Billy and Iris Clockchain tokens;
+- SHA-256 commitments to the exact Billy and Iris Clockchain token bytes;
 - the two physical-machine attestation; and
 - both runs in the same release.
 
-The role machines generate participant private keys. The operator creates a
-signed plan containing only their public keys. Each role performs exactly one
+After token minting, each supervisor reads its bounded private token, computes a
+SHA-256 commitment, and signs that commitment with its coordination key. The
+operator-signed plan pins both token commitments and both participant public
+keys without receiving either token or private key. Each participant report
+repeats its signed token commitment. Before preflight and before each role run,
+the supervisor rereads the token and requires the same commitment.
+
+The role machines generate participant private keys. The operator creates the
+signed plan from public enrollment artifacts. Each role performs exactly one
 throwaway write. The operator aggregates both marker-complete participant
 reports.
 
@@ -712,12 +740,16 @@ remain source- and runtime-tested to exclude the authorizing literal.
 The required deterministic test starts:
 
 1. one persistent localhost fake Clockchain service;
-2. one Billy child process;
-3. one Iris child process; and
-4. one fresh aggregate-verifier child process.
+2. one HTTPS relay child process with a test-only certificate;
+3. one operator-coordinator child process;
+4. one Billy child process;
+5. one Iris child process; and
+6. one fresh aggregate-verifier child process launched by the coordinator.
 
-The role processes execute concurrently. The verifier starts only after both
-marker-complete packages exist.
+The role processes execute concurrently through the relay. The verifier starts
+only after both marker-complete packages exist. The parent harness observes
+processes and artifacts but does not invoke role or verdict functions in its own
+memory.
 
 ### 11.2 Production-path fidelity
 
