@@ -313,7 +313,8 @@ mode-`0600` launch manifests. Each contains:
 - the assigned role;
 - the same fresh unpredictable coordination session ID;
 - the HTTPS relay URL;
-- the expected TLS certificate SHA-256 fingerprint;
+- the exact bounded PEM-encoded relay leaf certificate;
+- the expected lowercase 64-hex SHA-256 of that leaf certificate's DER bytes;
 - one 256-bit role-scoped bootstrap capability; and
 - the release identifier.
 
@@ -330,16 +331,18 @@ start and is not a later artifact-transfer step.
 
 The supervisor:
 
-1. requires an `https:` relay URL;
-2. verifies the normal certificate chain or an explicitly pinned operator CA;
-3. compares the connected leaf certificate fingerprint to the launch manifest
-   in constant time;
+1. requires a canonical `https:` IP-literal relay URL with an explicit port;
+2. uses the manifest's exact leaf certificate as the explicit trust anchor and
+   retains normal IP-hostname and certificate validation;
+3. compares the connected leaf certificate DER SHA-256 to the manifest's
+   lowercase 64-hex fingerprint in constant time;
 4. rejects redirects, alternate hostnames, proxy-derived endpoints, and
    protocol downgrade; and
 5. applies fixed connect, header, body, and total request deadlines.
 
 Tests may inject a transport object. Production may not disable certificate
-validation.
+validation, replace hostname checking, or supply arbitrary request headers.
+Rotating the relay certificate requires a new release and new launch manifests.
 
 ### 5.3 Capability exchange
 
@@ -390,6 +393,11 @@ The supervisor verifies it against the public key in the pinned leaf
 certificate. This proves which pinned relay consumed the capability; it does
 not grant the relay operator-command or protocol authority.
 
+The relay and role client share one canonical receipt parser, signature
+preimage, and verifier. The client verifies the receipt against the public key
+from the exact leaf certificate in its launch manifest and supports only the
+relay's pinned Ed25519, ECDSA-SHA-256, and RSA-PSS-SHA-256 algorithms.
+
 The TLS-signed bootstrap receipt is distinct from the later operator-signed
 `enrollment receipt` coordination event. The former lets a supervisor recover
 ambiguous capability consumption; the latter is the operator coordinator's
@@ -401,6 +409,11 @@ receipt, allowing an ambiguous HTTP response to recover without another user
 start. Any different request under that capability is terminal replay. The
 supervisor removes the raw capability from its active state only after it has
 durably stored and verified the receipt.
+
+The relay remains authoritative for expiry. An unused capability is invalid at
+its expiry boundary, while a capability consumed before expiry may return its
+byte-identical persisted receipt to an exact retry after expiry. A client-side
+freshness check must not prevent that ambiguity recovery.
 
 Capability consumption stores the exact canonical enrollment bytes and receipt
 in the same authoritative journal record. On restart, the relay retrieves the

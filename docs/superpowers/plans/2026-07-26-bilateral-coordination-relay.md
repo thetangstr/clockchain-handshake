@@ -902,13 +902,14 @@ Pin this schema:
 
 ```js
 const { manifest, capabilityDigest } = createLaunchManifest({
-  expectedTlsFingerprint: "ab:cd:…",
+  expectedTlsFingerprint: "ab".repeat(32),
   operatorKeyId: "clockchain-demo-2026",
   releaseId: "release-a",
-  relayUrl: "https://relay.example.test:8443",
+  relayUrl: "https://192.0.2.10:8443",
   repositorySha: "f".repeat(40),
   role: "payer",
   sessionId,
+  tlsCertificatePem,
   nowMs: 1_785_120_000_000,
   randomBytes: fixedRandomBytes,
 });
@@ -944,10 +945,13 @@ const response = await transport.request({
 });
 ```
 
-Reject wrong fingerprint, `http:`, redirects, hostname changes, proxy
-environment influence, alternate certificate, oversized response, slow
-connect/header/body/total deadlines, unknown response content type, and a
-production option that disables certificate verification.
+Reject wrong fingerprint, `http:`, DNS or implicit-port authorities, redirects,
+hostname changes, proxy environment influence, alternate certificate,
+oversized response, slow connect/header/body/total deadlines, unknown response
+content type, and every production option that disables or replaces certificate
+or hostname verification. The manifest carries the exact bounded leaf
+certificate PEM; production uses it as the explicit trust anchor and also pins
+the lowercase unseparated SHA-256 of its DER bytes.
 
 - [ ] **Step 3: Run RED**
 
@@ -970,18 +974,29 @@ Expected: missing manifest/client modules.
 `writeLaunchManifest(path, manifest, dependencies)`.
 
 The manifest contains exact schema/protocol/repository/operator-key/role/session
-/relay/fingerprint/capability/release/issued/expiry fields. The client exports:
+/relay/leaf-certificate/fingerprint/capability/release/issued/expiry fields.
+Parsing validates the exact one-hour lifetime but does not apply a local
+freshness gate: the relay must allow an exact consumed-before-expiry retry to
+recover its persisted receipt after expiry. The client exports:
 Each role receives a distinct 256-bit one-time capability, both manifests carry
 the same coordination session ID, and an unused capability expires exactly
 60 minutes after issuance.
 
 ```text
 createPinnedHttpsTransport(options)
-  -> { request({body, method, path}) }
+  -> {
+    request({artifactType?, body, method, path, signal?}),
+    verifyReceipt(receiptBytes, expected)
+  }
 
 createCoordinationClient({
-  coordinationPrivateKeyPem,
+  coordinationIdentity: {
+    privateKeyPem,
+    publicKey,
+    keyId
+  },
   manifest,
+  senderState?,
   transport
 })
   -> {
@@ -994,10 +1009,25 @@ createCoordinationClient({
   }
 ```
 
-`createCoordinationClient` owns the sender sequence and previous digest, signs
-envelopes, retries only identical bytes, revalidates the returned chain, and
-provides exact methods `bootstrap`, `appendEvent`, `putArtifact`, `getArtifact`,
-`readEvents`, and `readSessionView`.
+`createCoordinationClient` owns the sender sequence and previous digest,
+serializes appends, signs and canonicalizes once, retries only byte-identical
+method/path/artifact-type/body tuples after ambiguous transport failures, and
+advances state only after the relay returns the exact canonical envelope.
+Transport performs one attempt and accepts no arbitrary headers. A restarted
+client receives an already authenticated own-sender state from the supervisor.
+Task 5 returns raw bounded event history without claiming it is authoritative;
+Task 7 authenticates the global chain against the frozen operator key and
+durable enrolled role keys before deriving restart state or executing a
+command.
+
+Bootstrap verifies the canonical receipt with the public key in the pinned leaf
+certificate through one receipt parser/verifier shared with the relay.
+`getArtifact` requires the expected artifact type and digest, hashes and
+validates downloaded bytes locally, and `putArtifact` verifies the exact
+artifact acknowledgment. Ordinary connect/header/body deadlines are five
+seconds; long-poll header time is `waitMs + 5000` bounded to 35 seconds; total
+request time is 45 seconds, greater than the relay's 40-second total. Every
+exit clears timers, listeners, and sockets.
 
 - [ ] **Step 5: Run client tests**
 
