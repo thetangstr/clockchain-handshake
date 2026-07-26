@@ -586,6 +586,10 @@ artifact signer to the repository-pinned operator key or enrolled role key
 before an artifact digest can be referenced by an accepted event or advance
 lifecycle state. Capability receipt bytes are internal durable state; Task 4
 validates their exact TLS signature and certificate binding before storage.
+Their closed canonical schema has exact keys `capabilityDigest`,
+`certificateSha256`, `enrollmentDigest`, `paymentMoved`, `releaseId`,
+`repositorySha`, `role`, `schema`, `sessionId`, `signature`, and
+`signatureAlgorithm`; no free-form or nested receipt field is permitted.
 
 - [ ] **Step 4: Implement pinned durable storage**
 
@@ -734,6 +738,15 @@ certificate fingerprint and signature algorithm, and the supervisor verifies
 it with the public key from the already pinned leaf certificate. The service
 never receives the operator private key and the receipt is never accepted as an
 operator command or protocol fact.
+
+The exact signature domain is
+`clockchain.bilateral-coordination-receipt-signature/v1\n`. The digest is the
+lowercase SHA-256 of the canonical receipt without its `signature` field.
+`certificateSha256` is the lowercase SHA-256 of the leaf certificate DER, and
+`signatureAlgorithm` is exactly one of `ed25519`, `ecdsa-sha256`, or
+`rsa-pss-sha256`. Bootstrap rejects any missing, extra, nested, noncanonical,
+wrong-scope, wrong-certificate, or unverified receipt field before calling
+`consumeCapability`.
 
 The TLS-signed bootstrap receipt and the later operator-signed
 `ENROLLMENT_RECEIPT` event are separate objects. The first proves idempotent

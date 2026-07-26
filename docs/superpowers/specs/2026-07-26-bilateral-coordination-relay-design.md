@@ -573,6 +573,18 @@ durable relay data, not a public artifact upload. Its exact TLS signature and
 certificate binding are validated by the relay bootstrap service before the
 storage transaction is acknowledged.
 
+The durable receipt has no free-form or nested fields. Its exact canonical keys
+are `capabilityDigest`, `certificateSha256`, `enrollmentDigest`,
+`paymentMoved`, `releaseId`, `repositorySha`, `role`, `schema`, `sessionId`,
+`signature`, and `signatureAlgorithm`. The schema is
+`clockchain.bilateral-coordination-receipt/v1`; all digest fields are lowercase
+SHA-256, `paymentMoved` is exactly `false`, the release/role/session/repository
+fields repeat the consumed capability scope, the signature is canonical
+Base64, and `signatureAlgorithm` is one of `ed25519`, `ecdsa-sha256`, or
+`rsa-pss-sha256`. The signature preimage is the ASCII domain
+`clockchain.bilateral-coordination-receipt-signature/v1\n` followed by the
+lowercase SHA-256 of the canonical receipt without its `signature` field.
+
 Multi-file packages must have a verified completion marker before upload. The
 receiver repeats marker and digest verification after download.
 
