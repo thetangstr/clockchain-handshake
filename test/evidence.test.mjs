@@ -143,6 +143,66 @@ test("computes the deployed canonical receipt event hash", () => {
   );
 });
 
+// Design section 4.5 regression pin. This exact digest protects the only
+// live clockchain.handshake-result/v1 evidence that exists; it was
+// reproduced on the untouched tree before the canonicalizer extraction
+// and must never change for v1. Do not update this constant.
+test("pins the v1 minimal receipt event digest byte-for-byte", () => {
+  assert.equal(
+    computeReceiptEventHash({
+      agentId: "8677",
+      action: "trust_handshake",
+      inputs: {},
+      outputs: {},
+    }),
+    "c37387429ff4f787fecb2a5c5a64a277696ee6d768fcb2d5564e7e2268e6dd02",
+  );
+});
+
+// Second regression pin: a non-trivial fixture exercising nested objects,
+// dense arrays, hostile keys (own enumerable __proto__, constructor,
+// integer-like string keys), an untrimmed key, an empty string, and a
+// finite number — everything the v1 domain accepts today. The hash was
+// derived from the pre-extraction implementation and frozen. Do not
+// update this constant.
+test("pins the v1 hostile nested receipt event digest byte-for-byte", () => {
+  const inputs = Object.create(null);
+  inputs.zeta = "last-inserted-first";
+  inputs["10"] = ["a", { b: "c", a: ["d", true, null] }];
+  inputs["2"] = "integer-like-two";
+  inputs.alpha = {
+    nested: {
+      deep: [
+        {
+          constructor: "own-constructor",
+          "  spaced key ": "kept",
+        },
+        false,
+      ],
+    },
+  };
+  Object.defineProperty(inputs, "__proto__", {
+    enumerable: true,
+    value: "own-proto-data",
+  });
+  const event = {
+    agentId: "8677",
+    action: "trust_handshake",
+    inputs,
+    outputs: {
+      list: [[], {}, ["x", ["y", { 0: "zero-key" }]]],
+      flag: true,
+      emptyText: "",
+      finiteNumber: 1234.5,
+    },
+  };
+
+  assert.equal(
+    computeReceiptEventHash(event),
+    "0161069338e4f4a14e599306c9525d64e4893d605980a805b985978fdf553563",
+  );
+});
+
 test("hashes a nested own enumerable __proto__ key", () => {
   const cleanEvent = validReceiptEvent();
   const hostileEvent = validReceiptEvent();

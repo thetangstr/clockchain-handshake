@@ -66,6 +66,12 @@ const READ_RETRY_TOOLS = new Set([
   "complete_attestation",
   "verify_receipt",
   "verify_cross_party",
+  // The three bilateral-protocol reads. They poll for a counterparty
+  // transition, so they must be replayable through a throttle window.
+  // `log_action`, the write they pair with, must never join them.
+  "search_actions",
+  "get_block",
+  "generate_audit_trail",
 ]);
 // Tools that create irreversible ledger or identity state. Nothing here may
 // ever be added to READ_RETRY_TOOLS.
@@ -123,6 +129,33 @@ const ATTEST_ACTION_KEYS = new Set([
   "wait_ms",
   "idempotency_key",
   "allow_degraded",
+]);
+// Bilateral reference ids: lowercase, digits, `:` the sole separator, at most
+// 120 bytes (design section 4.7). The gateway demonstrably normalizes at
+// least one sibling field server-side, and exact-match search tolerates zero
+// mutation, so the charset is asserted before every write and every search.
+// This mirrors REFID_PATTERN in src/bilateral/refid.mjs, restated here so the
+// transport stays free of protocol-module imports.
+const REFERENCE_ID_PATTERN = /^[0-9a-z:]{1,120}$/;
+const SHA256_HASH_TYPE = "SHA-256";
+const LOG_ACTION_KEYS = new Set([
+  "asset_reference_id",
+  "asset_hash",
+  "hash_type",
+  "version_number",
+  "idempotency_key",
+  "wait",
+  "wait_ms",
+  "allow_degraded",
+]);
+// Spec-banned log_action parameters (design section 4.8): `content` makes the
+// server hash a serialization we do not control, `did` mutates the reference
+// id server-side in an undocumented way, and `additional_info` is
+// punctuation-stripped and absent from the on-chain projection.
+const LOG_ACTION_FORBIDDEN_KEYS = Object.freeze([
+  "content",
+  "did",
+  "additional_info",
 ]);
 
 export class McpError extends Error {
@@ -1111,6 +1144,124 @@ function normalizeAttestArguments(args) {
   return normalized;
 }
 
+function referenceIdArgument(value) {
+  if (
+    typeof value !== "string" ||
+    !REFERENCE_ID_PATTERN.test(value)
+  ) {
+    throw new McpConfigurationError(
+      "Clockchain asset reference id is invalid.",
+    );
+  }
+  return value;
+}
+
+function normalizeLogActionArguments(args) {
+  for (const key of LOG_ACTION_FORBIDDEN_KEYS) {
+    if (Object.hasOwn(args, key)) {
+      throw new McpConfigurationError(
+        `log_action must never send ${key}.`,
+        "MCP_FORBIDDEN_LOG_ACTION_FIELD",
+      );
+    }
+  }
+  exactArguments(args, LOG_ACTION_KEYS, "log_action arguments");
+  if (
+    typeof args.asset_hash !== "string" ||
+    !CANONICAL_SHA256_PATTERN.test(args.asset_hash)
+  ) {
+    throw new McpConfigurationError(
+      "Clockchain asset hash is invalid.",
+    );
+  }
+  const normalized = {
+    asset_reference_id: referenceIdArgument(
+      args.asset_reference_id,
+    ),
+    asset_hash: args.asset_hash,
+  };
+
+  if (Object.hasOwn(args, "hash_type")) {
+    if (args.hash_type !== SHA256_HASH_TYPE) {
+      throw new McpConfigurationError(
+        "Clockchain hash type is invalid.",
+      );
+    }
+    normalized.hash_type = args.hash_type;
+  }
+  if (Object.hasOwn(args, "version_number")) {
+    normalized.version_number = configurationInteger(
+      args.version_number,
+      "Clockchain version number",
+    );
+  }
+  if (Object.hasOwn(args, "idempotency_key")) {
+    normalized.idempotency_key = nonemptyString(
+      args.idempotency_key,
+      "Clockchain idempotency_key",
+      MAX_IDEMPOTENCY_KEY_LENGTH,
+    );
+  }
+  if (Object.hasOwn(args, "wait")) {
+    if (typeof args.wait !== "boolean") {
+      throw new McpConfigurationError(
+        "Clockchain wait option is invalid.",
+      );
+    }
+    normalized.wait = args.wait;
+  }
+  if (Object.hasOwn(args, "wait_ms")) {
+    normalized.wait_ms = configurationInteger(
+      args.wait_ms,
+      "Clockchain wait interval",
+      { maximum: MAX_CONFIGURED_TIMEOUT_MS, minimum: 0 },
+    );
+  }
+  if (Object.hasOwn(args, "allow_degraded")) {
+    if (typeof args.allow_degraded !== "boolean") {
+      throw new McpConfigurationError(
+        "Clockchain degraded-mode option is invalid.",
+      );
+    }
+    normalized.allow_degraded = args.allow_degraded;
+  }
+  return normalized;
+}
+
+function normalizeReferenceIdArguments(name, args) {
+  exactArguments(
+    args,
+    new Set(["asset_reference_id"]),
+    `${name} arguments`,
+  );
+  return {
+    asset_reference_id: referenceIdArgument(
+      args.asset_reference_id,
+    ),
+  };
+}
+
+function normalizeGetBlockArguments(args) {
+  exactArguments(
+    args,
+    new Set(["height"]),
+    "get_block arguments",
+  );
+  if (args.height === "latest") {
+    return { height: "latest" };
+  }
+  // Heights travel as canonical decimal strings: every endpoint except
+  // get_block's own response already uses strings, and a string cannot lose
+  // precision on the wire.
+  const height = canonicalDecimalText(args.height);
+  if (height === null) {
+    throw new McpConfigurationError(
+      "Clockchain block height is invalid.",
+    );
+  }
+  return { height };
+}
+
 function normalizeCrossPartyArguments(args) {
   const keys = new Set(["ledger_id", "block_height", "hash"]);
   exactArguments(args, keys, "verify_cross_party arguments");
@@ -1174,6 +1325,13 @@ function normalizeKnownToolArguments(name, args) {
       return {};
     case "attest_action":
       return normalizeAttestArguments(args);
+    case "log_action":
+      return normalizeLogActionArguments(args);
+    case "search_actions":
+    case "generate_audit_trail":
+      return normalizeReferenceIdArguments(name, args);
+    case "get_block":
+      return normalizeGetBlockArguments(args);
     case "complete_attestation":
     case "verify_receipt":
       exactArguments(
@@ -1299,6 +1457,140 @@ function clockReading(now) {
     );
   }
   return reading;
+}
+
+function protocolText(value) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_IDENTIFIER_LENGTH &&
+    value.trim() === value &&
+    !CONTROL_CHARACTER_PATTERN.test(value)
+  );
+}
+
+// log_action's response shape is unverified upstream and the bilateral design
+// derives no protocol state from a write response: the mandatory read-back is
+// the source of truth. Only the ledger id and an optional block height are
+// validated and returned; everything else is dropped untrusted.
+function assertLogActionResult(payload) {
+  if (
+    !isPlainObject(payload) ||
+    !protocolText(payload.ledgerId)
+  ) {
+    throw new McpProtocolError(
+      "Clockchain log_action result is invalid.",
+      "MCP_INVALID_LOG_RESULT",
+    );
+  }
+  const rawHeight = Object.hasOwn(payload, "blockHeight")
+    ? payload.blockHeight
+    : null;
+  if (rawHeight === null) {
+    return { ledgerId: payload.ledgerId, blockHeight: null };
+  }
+  const blockHeight = canonicalDecimalText(rawHeight);
+  if (blockHeight === null) {
+    throw new McpProtocolError(
+      "Clockchain log_action result is invalid.",
+      "MCP_INVALID_LOG_RESULT",
+    );
+  }
+  return { ledgerId: payload.ledgerId, blockHeight };
+}
+
+// The Array contract is the bilateral protocol's safety: search_actions is
+// the only read that misses cleanly, so a non-array reply means the service
+// answered with something other than a search result, and treating it as
+// "absent" would fail open. Length 0 is the one clean miss. Only the five
+// fields the verification recipe reads survive; hostile extra keys —
+// including the operator's email in `clientId` — are dropped untrusted.
+// Returned assetReferenceId values are NOT held to the write-side charset:
+// legacy attest-generated ids contain underscores, and byte-equality against
+// the derived key belongs to src/bilateral/refid.mjs, not the transport.
+function assertSearchActionsResult(payload) {
+  if (!Array.isArray(payload)) {
+    throw new McpProtocolError(
+      "Clockchain search_actions result must be an array.",
+      "MCP_SEARCH_NOT_ARRAY",
+    );
+  }
+  return payload.map((record) => {
+    const blockHeight = isPlainObject(record)
+      ? canonicalDecimalText(record.blockHeight)
+      : null;
+    if (
+      blockHeight === null ||
+      !protocolText(record.ledgerId) ||
+      !protocolText(record.assetReferenceId) ||
+      typeof record.assetHash !== "string" ||
+      !CANONICAL_SHA256_PATTERN.test(record.assetHash) ||
+      record.hashType !== SHA256_HASH_TYPE
+    ) {
+      throw new McpProtocolError(
+        "Clockchain search_actions record is invalid.",
+        "MCP_INVALID_SEARCH_RECORD",
+      );
+    }
+    return {
+      ledgerId: record.ledgerId,
+      assetReferenceId: record.assetReferenceId,
+      assetHash: record.assetHash,
+      blockHeight,
+      hashType: record.hashType,
+    };
+  });
+}
+
+// blockTime is returned VERBATIM: src/bilateral/blocktime.mjs owns parsing,
+// and parsing here would re-create the Date.parse hazards the design bans.
+// blockHeight is a NUMBER in this one endpoint and a STRING everywhere else,
+// so it is normalized to the canonical decimal text used across the repo.
+function assertBlockResult(payload) {
+  const blockHeight = isPlainObject(payload)
+    ? canonicalDecimalText(payload.blockHeight)
+    : null;
+  if (
+    blockHeight === null ||
+    !protocolText(payload.proposerAddress) ||
+    !protocolText(payload.blockTime)
+  ) {
+    throw new McpProtocolError(
+      "Clockchain get_block result is invalid.",
+      "MCP_INVALID_BLOCK_RESULT",
+    );
+  }
+  return {
+    blockHeight,
+    proposerAddress: payload.proposerAddress,
+    blockTime: payload.blockTime,
+  };
+}
+
+// The aggregate verifier gates duplicates on `count` alone (design section
+// 6.5), so only that surface is validated and returned. A count that
+// disagrees with the events it summarizes is hostile or broken either way
+// and fails closed rather than letting the caller pick a side.
+function assertAuditTrailResult(payload) {
+  const count = isPlainObject(payload)
+    ? canonicalDecimalText(payload.count)
+    : null;
+  if (
+    count === null ||
+    !protocolText(payload.assetReferenceId) ||
+    !Array.isArray(payload.events) ||
+    !payload.events.every(isPlainObject) ||
+    count !== String(payload.events.length)
+  ) {
+    throw new McpProtocolError(
+      "Clockchain generate_audit_trail result is invalid.",
+      "MCP_INVALID_AUDIT_TRAIL",
+    );
+  }
+  return {
+    assetReferenceId: payload.assetReferenceId,
+    count,
+  };
 }
 
 export function createMcpClient(options = {}) {
@@ -1552,6 +1844,18 @@ export function createMcpClient(options = {}) {
     getTimestamp: async () => call("get_timestamp", {}),
     attestAction: async (args) =>
       call("attest_action", args),
+    logAction: async (args) =>
+      assertLogActionResult(await call("log_action", args)),
+    searchActions: async (args) =>
+      assertSearchActionsResult(
+        await call("search_actions", args),
+      ),
+    getBlock: async (args) =>
+      assertBlockResult(await call("get_block", args)),
+    generateAuditTrail: async (args) =>
+      assertAuditTrailResult(
+        await call("generate_audit_trail", args),
+      ),
     completeAttestation: async (receipt) =>
       call("complete_attestation", { receipt }),
     verifyReceipt: async (receipt) =>

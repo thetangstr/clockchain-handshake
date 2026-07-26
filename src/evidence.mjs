@@ -11,6 +11,10 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
+  canonicalizeReceiptEventValue,
+  isPlainObject,
+} from "./canonical.mjs";
+import {
   CHAIN_ID,
   REGISTRY_ADDRESS,
   RESULT_SCHEMA,
@@ -134,110 +138,10 @@ export class EvidenceConfigurationError extends EvidenceError {
   }
 }
 
-function isPlainObject(value) {
-  if (value === null || typeof value !== "object") {
-    return false;
-  }
-
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function canonicalizeReceiptEventValue(
-  value,
-  ancestors = new Set(),
-) {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) {
-    return value;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new EvidenceValidationError();
-    }
-    return value;
-  }
-  if (typeof value !== "object" || ancestors.has(value)) {
-    throw new EvidenceValidationError();
-  }
-
-  ancestors.add(value);
-  try {
-    if (Array.isArray(value)) {
-      const keys = Reflect.ownKeys(value);
-      if (
-        keys.length !== value.length + 1 ||
-        keys.some(
-          (key) =>
-            key !== "length" &&
-            (typeof key !== "string" ||
-              !/^(?:0|[1-9][0-9]*)$/.test(key) ||
-              Number(key) >= value.length),
-        )
-      ) {
-        throw new EvidenceValidationError();
-      }
-      const result = [];
-      for (let index = 0; index < value.length; index += 1) {
-        const descriptor = Object.getOwnPropertyDescriptor(
-          value,
-          String(index),
-        );
-        if (
-          !descriptor ||
-          !descriptor.enumerable ||
-          !Object.hasOwn(descriptor, "value")
-        ) {
-          throw new EvidenceValidationError();
-        }
-        result.push(
-          canonicalizeReceiptEventValue(
-            descriptor.value,
-            ancestors,
-          ),
-        );
-      }
-      return result;
-    }
-
-    if (!isPlainObject(value)) {
-      throw new EvidenceValidationError();
-    }
-    const entries = [];
-    for (const key of Reflect.ownKeys(value)) {
-      const descriptor = Object.getOwnPropertyDescriptor(
-        value,
-        key,
-      );
-      if (
-        typeof key !== "string" ||
-        !descriptor ||
-        !descriptor.enumerable ||
-        !Object.hasOwn(descriptor, "value")
-      ) {
-        throw new EvidenceValidationError();
-      }
-      entries.push([key, descriptor.value]);
-    }
-    const result = Object.create(null);
-    for (const [key, entryValue] of entries.sort(
-      ([left], [right]) =>
-        left === right ? 0 : left < right ? -1 : 1,
-    )) {
-      result[key] = canonicalizeReceiptEventValue(
-        entryValue,
-        ancestors,
-      );
-    }
-    return result;
-  } finally {
-    ancestors.delete(value);
-  }
-}
-
+// The canonicalization core lives in src/canonical.mjs (design section
+// 4.5). Its byte behavior for clockchain.handshake-result/v1 is frozen
+// by digest pins in test/evidence.test.mjs; any error it throws is
+// converted to EvidenceValidationError below.
 export function computeReceiptEventHash(event) {
   try {
     const canonicalEvent =
