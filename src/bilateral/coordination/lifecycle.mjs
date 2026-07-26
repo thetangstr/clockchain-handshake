@@ -58,6 +58,7 @@ const INITIAL_KEYS = Object.freeze([
 ]);
 const VIEW_KEYS = Object.freeze([
   "facts",
+  "paymentMoved",
   "releaseId",
   "repositorySha",
   "sessionId",
@@ -545,6 +546,7 @@ function makeView({
 }) {
   return deepFreeze({
     facts,
+    paymentMoved: false,
     releaseId,
     repositorySha,
     sessionId,
@@ -555,6 +557,10 @@ function makeView({
 function readView(value) {
   const data = readExactData(value, VIEW_KEYS);
   const facts = readFacts(data.get("facts"));
+  const paymentMoved = data.get("paymentMoved");
+  if (paymentMoved !== false) {
+    invalid();
+  }
   const releaseId = assertReleaseId(data.get("releaseId"));
   const repositorySha = assertRepositorySha(
     data.get("repositorySha"),
@@ -572,6 +578,7 @@ function readView(value) {
   }
   return {
     facts,
+    paymentMoved,
     releaseId,
     repositorySha,
     sessionId,

@@ -24,6 +24,7 @@ const INITIAL_KEYS = Object.freeze([
 ]);
 const VIEW_KEYS = Object.freeze([
   "facts",
+  "paymentMoved",
   "releaseId",
   "repositorySha",
   "sessionId",
@@ -117,7 +118,7 @@ function initial(overrides = {}) {
 }
 
 function apply(view, kind, role, subjectRun, options) {
-  return reduceReleaseEvent(
+  const next = reduceReleaseEvent(
     view,
     event(kind, role, subjectRun),
     options === undefined
@@ -127,6 +128,8 @@ function apply(view, kind, role, subjectRun, options) {
           ...options,
         },
   );
+  assert.equal(next.paymentMoved, false);
+  return next;
 }
 
 function toAddressesReady() {
@@ -397,6 +400,7 @@ test("initialReleaseView has an exact deep-frozen detached shape", () => {
 
   assert.deepEqual(Object.keys(input), INITIAL_KEYS);
   assert.deepEqual(Object.keys(view), VIEW_KEYS);
+  assert.equal(view.paymentMoved, false);
   assert.deepEqual(Object.keys(view.facts), FACT_KEYS);
   assert.deepEqual(
     Object.keys(view.facts.enrollmentConfirmed),
@@ -741,6 +745,7 @@ test("reduces the complete valid release sequence through COMPLETE", () => {
     "release",
   );
   assert.equal(view.state, "COMPLETE");
+  assert.equal(view.paymentMoved, false);
   assert.equal(view.facts.releaseCompleted, true);
   assert.equal(
     view.facts.verificationPassed.stakeholder,
@@ -1119,6 +1124,7 @@ test("failure and abort events permanently map the release to ABORTED", () => {
       subjectRun,
     );
     assert.equal(aborted.state, "ABORTED");
+    assert.equal(aborted.paymentMoved, false);
   }
 
   const aborted = apply(
@@ -1190,6 +1196,7 @@ test("only an exact operator completion event can move STAKEHOLDER_VERIFIED to C
     "release",
   );
   assert.equal(complete.state, "COMPLETE");
+  assert.equal(complete.paymentMoved, false);
   assert.equal(complete.facts.releaseCompleted, true);
   assertLifecycleError(() =>
     apply(
@@ -1597,6 +1604,55 @@ test("rejects malformed views and hostile accessor/prototype events", () => {
   );
 });
 
+test("rejects hostile paymentMoved views before reading event authority", () => {
+  const base = initial();
+  const missing = structuredClone(base);
+  delete missing.paymentMoved;
+  const moved = structuredClone(base);
+  moved.paymentMoved = true;
+  const nullMoved = structuredClone(base);
+  nullMoved.paymentMoved = null;
+  const stringMoved = structuredClone(base);
+  stringMoved.paymentMoved = "false";
+  const extra = structuredClone(base);
+  extra.extra = false;
+  const accessor = structuredClone(base);
+  let paymentGetterCalls = 0;
+  Object.defineProperty(accessor, "paymentMoved", {
+    enumerable: true,
+    get() {
+      paymentGetterCalls += 1;
+      return false;
+    },
+  });
+
+  for (const currentView of [
+    missing,
+    moved,
+    nullMoved,
+    stringMoved,
+    extra,
+    accessor,
+  ]) {
+    let eventTouches = 0;
+    const untouchedEvent = new Proxy({}, {
+      getPrototypeOf() {
+        eventTouches += 1;
+        throw new Error("event authority must be unreachable");
+      },
+      ownKeys() {
+        eventTouches += 1;
+        throw new Error("event authority must be unreachable");
+      },
+    });
+    assertLifecycleError(() =>
+      reduceReleaseEvent(currentView, untouchedEvent, {}),
+    );
+    assert.equal(eventTouches, 0);
+  }
+  assert.equal(paymentGetterCalls, 0);
+});
+
 test("reducer returns a fresh frozen view without retaining caller objects", () => {
   const view = initial();
   const payerEnrollment = structuredClone(
@@ -1616,6 +1672,7 @@ test("reducer returns a fresh frozen view without retaining caller objects", () 
     true,
   );
   assert.equal(view.facts.enrollmentConfirmed.payer, false);
+  assert.equal(next.paymentMoved, false);
   assert.notEqual(next, view);
   assert.notEqual(next.facts, view.facts);
   assertDeepFrozen(next);
