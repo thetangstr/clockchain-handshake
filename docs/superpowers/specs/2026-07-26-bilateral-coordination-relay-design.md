@@ -612,7 +612,11 @@ Artifact upload carries its closed type in exactly one
 expected digest. Clients cannot supply secret canaries or arbitrary validation
 options. The relay derives the expected type for a referenced digest only from
 the signed event kind; it never trusts an upload-time type assertion as
-lifecycle authority.
+lifecycle authority. A readiness event for an artifact type whose exact
+validator has not landed is rejected even when it supplies
+`artifactDigest:null`; omission cannot substitute for evidence. For each run,
+descriptor readiness pins one non-null descriptor digest and both role
+acceptances must repeat that exact digest.
 
 The bootstrap consumption receipt stored with capability state is internal
 durable relay data, not a public artifact upload. Its exact TLS signature and

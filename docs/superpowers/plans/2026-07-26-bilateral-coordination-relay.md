@@ -811,7 +811,12 @@ infers an artifact's expected type from a closed event-kind mapping and repeats
 type and authority validation before accepting a reference. Task 4 enables
 references only for types whose exact repository validator and authority check
 already exist; every other artifact-bearing event remains fail-closed until its
-producer task lands both.
+producer task lands both. A package-readiness kind without its validator is
+unavailable entirely; `artifactDigest:null` is not a control-form bypass.
+Descriptor-ready and descriptor-accepted events always carry a non-null
+digest, both roles must accept the exact digest published for that run, and the
+signed descriptor must bind the frozen repository plus one run-specific
+protocol session.
 
 Task 4 also keeps `VERIFICATION_PASSED` fail-closed. The exact
 `appendEvent({body})` surface has no trusted verifier-publication input, so an
