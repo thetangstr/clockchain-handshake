@@ -153,6 +153,7 @@ const FILE_SYSTEM_KEYS = new Set([
 const WRITE_OPTION_KEYS = new Set([
   "canaries",
   "directory",
+  "directoryPin",
   "fileSystem",
   "result",
 ]);
@@ -1018,6 +1019,11 @@ function validateWriteOptions(options) {
   const directory = readDataOption(options, "directory");
   const result = readDataOption(options, "result");
   const canaries = readDataOption(options, "canaries", []);
+  const directoryPin = readDataOption(
+    options,
+    "directoryPin",
+    undefined,
+  );
   const fileSystem = readDataOption(options, "fileSystem", {});
   if (
     typeof directory !== "string" ||
@@ -1027,10 +1033,26 @@ function validateWriteOptions(options) {
   ) {
     throw new BilateralEvidenceConfigurationError();
   }
+  if (directoryPin !== undefined) {
+    if (
+      directoryPin === null ||
+      typeof directoryPin !== "object" ||
+      types.isProxy(directoryPin) ||
+      readDataOption(directoryPin, "directory") !== directory ||
+      typeof readDataOption(
+        directoryPin,
+        "assertCurrent",
+      ) !== "function" ||
+      typeof readDataOption(directoryPin, "sync") !== "function"
+    ) {
+      throw new BilateralEvidenceConfigurationError();
+    }
+  }
   return {
     activeFileSystem: mergeFileSystem(fileSystem),
     canaries: validateCanaries(canaries),
     directory,
+    directoryPin,
     result,
   };
 }
@@ -1109,10 +1131,28 @@ function mergeFileSystem(fileSystem) {
   return Object.freeze(active);
 }
 
-async function assertAbsent(fileSystem, paths) {
+async function pinnedOperation(directoryPin, operation) {
+  if (directoryPin !== undefined) {
+    await directoryPin.assertCurrent();
+  }
+  const result = await operation();
+  if (directoryPin !== undefined) {
+    await directoryPin.assertCurrent();
+  }
+  return result;
+}
+
+async function assertAbsent(
+  fileSystem,
+  paths,
+  directoryPin,
+) {
   for (const path of paths) {
     try {
-      await fileSystem.lstat(path);
+      await pinnedOperation(
+        directoryPin,
+        () => fileSystem.lstat(path),
+      );
     } catch (error) {
       if (error?.code === "ENOENT") {
         continue;
@@ -1123,9 +1163,16 @@ async function assertAbsent(fileSystem, paths) {
   }
 }
 
-async function lstatForCleanup(fileSystem, path) {
+async function lstatForCleanup(
+  fileSystem,
+  path,
+  directoryPin,
+) {
   try {
-    return await fileSystem.lstat(path);
+    return await pinnedOperation(
+      directoryPin,
+      () => fileSystem.lstat(path),
+    );
   } catch (error) {
     if (error?.code === "ENOENT") {
       return null;
@@ -1134,12 +1181,27 @@ async function lstatForCleanup(fileSystem, path) {
   }
 }
 
-async function cleanupTemporaryFiles(fileSystem, paths) {
+async function cleanupTemporaryFiles(
+  fileSystem,
+  paths,
+  directoryPin,
+) {
   let failed = false;
   for (const path of paths) {
     try {
-      await fileSystem.rm(path, { force: true });
-      if ((await lstatForCleanup(fileSystem, path)) !== null) {
+      await pinnedOperation(
+        directoryPin,
+        () => fileSystem.rm(path, { force: true }),
+      );
+      if (
+        (
+          await lstatForCleanup(
+            fileSystem,
+            path,
+            directoryPin,
+          )
+        ) !== null
+      ) {
         failed = true;
       }
     } catch {
@@ -1154,6 +1216,7 @@ export async function writePartyResult(options) {
     activeFileSystem,
     canaries,
     directory,
+    directoryPin,
     result,
   } = validateWriteOptions(options);
 
@@ -1204,52 +1267,82 @@ export async function writePartyResult(options) {
   let finalPublicationAttempted = false;
 
   try {
-    await activeFileSystem.mkdir(directory, { recursive: true });
+    if (directoryPin === undefined) {
+      await activeFileSystem.mkdir(directory, {
+        recursive: true,
+      });
+    } else {
+      await directoryPin.assertCurrent();
+    }
     await assertAbsent(
       activeFileSystem,
       [jsonPath, markdownPath, markerPath],
+      directoryPin,
     );
-    await activeFileSystem.writeFile(temporaryJsonPath, json, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
-    await activeFileSystem.writeFile(
-      temporaryMarkdownPath,
-      markdown,
-      {
-        encoding: "utf8",
-        flag: "wx",
-        mode: 0o600,
-      },
+    await pinnedOperation(
+      directoryPin,
+      () =>
+        activeFileSystem.writeFile(temporaryJsonPath, json, {
+          encoding: "utf8",
+          flag: "wx",
+          mode: 0o600,
+        }),
+    );
+    await pinnedOperation(
+      directoryPin,
+      () =>
+        activeFileSystem.writeFile(
+          temporaryMarkdownPath,
+          markdown,
+          {
+            encoding: "utf8",
+            flag: "wx",
+            mode: 0o600,
+          },
+        ),
     );
 
     if (
-      await activeFileSystem.readFile(
-        temporaryJsonPath,
-        "utf8",
+      await pinnedOperation(
+        directoryPin,
+        () =>
+          activeFileSystem.readFile(
+            temporaryJsonPath,
+            "utf8",
+          ),
       ) !== json ||
-      await activeFileSystem.readFile(
-        temporaryMarkdownPath,
-        "utf8",
+      await pinnedOperation(
+        directoryPin,
+        () =>
+          activeFileSystem.readFile(
+            temporaryMarkdownPath,
+            "utf8",
+          ),
       ) !== markdown
     ) {
       throw new Error("temporary evidence mismatch");
     }
     finalPublicationAttempted = true;
-    await activeFileSystem.link(temporaryJsonPath, jsonPath);
-    await activeFileSystem.link(
-      temporaryMarkdownPath,
-      markdownPath,
+    await pinnedOperation(
+      directoryPin,
+      () => activeFileSystem.link(temporaryJsonPath, jsonPath),
+    );
+    await pinnedOperation(
+      directoryPin,
+      () =>
+        activeFileSystem.link(
+          temporaryMarkdownPath,
+          markdownPath,
+        ),
     );
 
-    const finalJson = await activeFileSystem.readFile(
-      jsonPath,
-      "utf8",
+    const finalJson = await pinnedOperation(
+      directoryPin,
+      () => activeFileSystem.readFile(jsonPath, "utf8"),
     );
-    const finalMarkdown = await activeFileSystem.readFile(
-      markdownPath,
-      "utf8",
+    const finalMarkdown = await pinnedOperation(
+      directoryPin,
+      () => activeFileSystem.readFile(markdownPath, "utf8"),
     );
     const rereadSnapshot = validatedPartyResultSnapshot(
       JSON.parse(finalJson),
@@ -1263,6 +1356,9 @@ export async function writePartyResult(options) {
     ) {
       throw new Error("final evidence mismatch");
     }
+    if (directoryPin !== undefined) {
+      await directoryPin.sync();
+    }
 
     const marker = completionMarkerBytes(
       finalJson,
@@ -1272,21 +1368,30 @@ export async function writePartyResult(options) {
       await cleanupTemporaryFiles(
         activeFileSystem,
         temporaryPaths,
+        directoryPin,
       )
     ) {
       throw new BilateralEvidenceAmbiguousPublicationError();
     }
 
-    await activeFileSystem.writeFile(markerPath, marker, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
+    await pinnedOperation(
+      directoryPin,
+      () =>
+        activeFileSystem.writeFile(markerPath, marker, {
+          encoding: "utf8",
+          flag: "wx",
+          mode: 0o600,
+        }),
+    );
+    if (directoryPin !== undefined) {
+      await directoryPin.sync();
+    }
     return { jsonPath, markdownPath, markerPath };
   } catch (error) {
     await cleanupTemporaryFiles(
       activeFileSystem,
       temporaryPaths,
+      directoryPin,
     );
     if (
       finalPublicationAttempted ||

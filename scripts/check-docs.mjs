@@ -23,6 +23,11 @@ const PUBLIC_DOCUMENTS = Object.freeze([
   "DEMO.md",
   "prompts/run-turnkey-demo.md",
 ]);
+const BILATERAL_PUBLIC_DOCUMENTS = Object.freeze([
+  "prompts/run-billy-bilateral-demo.md",
+  "prompts/run-iris-bilateral-demo.md",
+  "docs/runbooks/bilateral-demo-day.md",
+]);
 const SUPPORTING_DOCUMENTS = Object.freeze([
   "invites/README.md",
 ]);
@@ -36,12 +41,26 @@ const REQUIRED_LINKS = Object.freeze({
     "DEMO.md",
     "DEMO.md#failure-codes",
     "prompts/run-turnkey-demo.md",
+    "prompts/run-billy-bilateral-demo.md",
+    "prompts/run-iris-bilateral-demo.md",
+    "docs/runbooks/bilateral-demo-day.md",
     "invites/README.md",
   ]),
   "DEMO.md": Object.freeze([
     "README.md",
     "prompts/run-turnkey-demo.md",
     "invites/README.md",
+  ]),
+  "prompts/run-billy-bilateral-demo.md": Object.freeze([
+    "../docs/runbooks/bilateral-demo-day.md",
+  ]),
+  "prompts/run-iris-bilateral-demo.md": Object.freeze([
+    "../docs/runbooks/bilateral-demo-day.md",
+  ]),
+  "docs/runbooks/bilateral-demo-day.md": Object.freeze([
+    "../../README.md",
+    "../../prompts/run-billy-bilateral-demo.md",
+    "../../prompts/run-iris-bilateral-demo.md",
   ]),
 });
 const FAILURE_CODE_DOCUMENT = "DEMO.md";
@@ -120,6 +139,10 @@ No money moves. It is not mainnet, court-grade, consensus-secure, or trustless.`
 const README_SAFETY_SECTION = `The exercise runs on Ethereum Sepolia and a Clockchain® single-validator testnet.
 No money moves. Do not install or use AgentDash. This exercise is not mainnet,
 court-grade, consensus-secure, or trustless.`;
+const BILATERAL_SAFETY_SECTION = `This is an Ethereum Sepolia and Clockchain® single-validator testnet exercise.
+No money moves. Do not install or use AgentDash. Do not invent success states.
+It is not mainnet, court-grade, consensus-secure, trustless, production-ready,
+or multi-validator. Every protocol and verdict artifact preserves paymentMoved: false.`;
 const CANONICAL_SAFETY_SECTIONS = Object.freeze({
   "README.md": Object.freeze([
     Object.freeze({
@@ -141,6 +164,24 @@ const CANONICAL_SAFETY_SECTIONS = Object.freeze({
     Object.freeze({
       label: "prompt safety summary",
       text: PROMPT_SAFETY_SECTION,
+    }),
+  ]),
+  "prompts/run-billy-bilateral-demo.md": Object.freeze([
+    Object.freeze({
+      label: "bilateral safety summary",
+      text: BILATERAL_SAFETY_SECTION,
+    }),
+  ]),
+  "prompts/run-iris-bilateral-demo.md": Object.freeze([
+    Object.freeze({
+      label: "bilateral safety summary",
+      text: BILATERAL_SAFETY_SECTION,
+    }),
+  ]),
+  "docs/runbooks/bilateral-demo-day.md": Object.freeze([
+    Object.freeze({
+      label: "bilateral safety summary",
+      text: BILATERAL_SAFETY_SECTION,
     }),
   ]),
 });
@@ -203,6 +244,279 @@ const CANONICAL_DOCUMENT_TOKENS = Object.freeze(
     (requirement) => requirement.token !== undefined,
   ),
 );
+const BILATERAL_COMMON_REQUIREMENTS = Object.freeze([
+  Object.freeze({
+    label: "immutable repository SHA",
+    pattern: /\bimmutable repository SHA\b/i,
+  }),
+  Object.freeze({
+    label: "runner/operator boundary",
+    pattern:
+      /\brunner local (?:state|success) is not operator authorization\b/i,
+  }),
+  Object.freeze({
+    label: "honest reconstruction claim",
+    pattern:
+      /\bFor\s+a\s+session\s+that\s+the\s+fresh\s+aggregate\s+verifier\s+marks\s+`AUTHORIZED`,\s+the\s+verified\s+evidence\s+establishes\s+that\s+Iris\s+reconstructed\s+Billy's\s+canonical\s+proposal[^.]*anchored\s+digest[^.]*\./i,
+  }),
+  Object.freeze({
+    label: "honest reconstruction claim: no downloaded message bytes",
+    pattern:
+      /\bThe protocol does not download message bytes from Clockchain\./i,
+  }),
+]);
+const BILLY_ROLE_COMMAND = `node bin/handshake-propose.mjs \\
+  --descriptor "$BILATERAL_DESCRIPTOR_FILE" \\
+  --invitation "$BILLY_INVITATION_FILE" \\
+  --clockchain-token-file "$BILLY_CLOCKCHAIN_TOKEN_FILE" \\
+  --output "$BILLY_RESULT_DIR" \\
+  --i-understand-this-writes-to-clockchain`;
+const IRIS_ROLE_COMMAND = `node bin/handshake-accept.mjs \\
+  --descriptor "$BILATERAL_DESCRIPTOR_FILE" \\
+  --invitation "$IRIS_INVITATION_FILE" \\
+  --clockchain-token-file "$IRIS_CLOCKCHAIN_TOKEN_FILE" \\
+  --output "$IRIS_RESULT_DIR" \\
+  --i-understand-this-writes-to-clockchain`;
+const INVITATION_CREATION_COMMAND = `node scripts/create-invitations.mjs \\
+  --output-public "$INVITATION_PUBLIC_DIR" \\
+  --output-secret "$INVITATION_SECRET_DIR" \\
+  --ids "billy-rehearsal,iris-rehearsal,billy-stakeholder,iris-stakeholder" \\
+  --names "Billy Rehearsal,Iris Rehearsal,Billy Stakeholder,Iris Stakeholder"`;
+const BILLY_TOKEN_COMMAND = `node scripts/mint-bilateral-token.mjs \\
+  --role payer \\
+  --output "$BILLY_CLOCKCHAIN_TOKEN_FILE" \\
+  --repository-sha "$BILATERAL_REPOSITORY_SHA"`;
+const IRIS_TOKEN_COMMAND = `node scripts/mint-bilateral-token.mjs \\
+  --role payee \\
+  --output "$IRIS_CLOCKCHAIN_TOKEN_FILE" \\
+  --repository-sha "$BILATERAL_REPOSITORY_SHA"`;
+const OPERATOR_TOKEN_COMMAND = `node scripts/mint-bilateral-token.mjs \\
+  --role operator \\
+  --output "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \\
+  --repository-sha "$BILATERAL_REPOSITORY_SHA"`;
+const BILLY_REGISTRATION_COMMAND = `node scripts/register-bilateral-identity.mjs \\
+  --invitation "$BILLY_INVITATION_FILE" \\
+  --output "$BILLY_REGISTRATION_DIR" \\
+  --repository-sha "$BILATERAL_REPOSITORY_SHA" \\
+  --i-understand-this-writes-to-sepolia`;
+const IRIS_REGISTRATION_COMMAND = `node scripts/register-bilateral-identity.mjs \\
+  --invitation "$IRIS_INVITATION_FILE" \\
+  --output "$IRIS_REGISTRATION_DIR" \\
+  --repository-sha "$BILATERAL_REPOSITORY_SHA" \\
+  --i-understand-this-writes-to-sepolia`;
+const PREFLIGHT_PREPARE_COMMAND = `node scripts/probe-bilateral-rendezvous.mjs prepare \\
+  --operator-private-key "$OPERATOR_PRIVATE_KEY_FILE" \\
+  --operator-key-id "$OPERATOR_KEY_ID" \\
+  --repository-sha "$BILATERAL_REPOSITORY_SHA" \\
+  --output "$PREFLIGHT_PREP_DIR"`;
+const BILLY_PREFLIGHT_COMMAND = `node scripts/probe-bilateral-rendezvous.mjs participant \\
+  --role payer \\
+  --plan "$PREFLIGHT_PLAN_FILE" \\
+  --token-file "$BILLY_CLOCKCHAIN_TOKEN_FILE" \\
+  --participant-private-key "$BILLY_PREFLIGHT_PRIVATE_KEY_FILE" \\
+  --output "$BILLY_PREFLIGHT_RESULT_DIR"`;
+const IRIS_PREFLIGHT_COMMAND = `node scripts/probe-bilateral-rendezvous.mjs participant \\
+  --role payee \\
+  --plan "$PREFLIGHT_PLAN_FILE" \\
+  --token-file "$IRIS_CLOCKCHAIN_TOKEN_FILE" \\
+  --participant-private-key "$IRIS_PREFLIGHT_PRIVATE_KEY_FILE" \\
+  --output "$IRIS_PREFLIGHT_RESULT_DIR"`;
+const PREFLIGHT_AGGREGATE_COMMAND = `node scripts/probe-bilateral-rendezvous.mjs aggregate \\
+  --plan "$PREFLIGHT_PLAN_FILE" \\
+  --payer-report-dir "$BILLY_PREFLIGHT_RESULT_DIR" \\
+  --payee-report-dir "$IRIS_PREFLIGHT_RESULT_DIR" \\
+  --operator-private-key "$OPERATOR_PRIVATE_KEY_FILE" \\
+  --output "$PREFLIGHT_AGGREGATE_DIR" \\
+  --attest-separate-credentials \\
+  --attest-separate-machines`;
+const PROMPT_HASH_COMMAND =
+  `node scripts/hash-bilateral-prompts.mjs --repository-sha "$BILATERAL_REPOSITORY_SHA"`;
+const OPERATOR_KEYGEN_COMMAND =
+  `node scripts/create-session.mjs keygen --key-id "$OPERATOR_KEY_ID"`;
+const SESSION_CREATE_COMMAND = `node scripts/create-session.mjs create \\
+  --amounts "USD:100" \\
+  --key-id "$OPERATOR_KEY_ID" \\
+  --output "$BILATERAL_DESCRIPTOR_FILE" \\
+  --payee-address "$IRIS_ADDRESS" \\
+  --payee-agent-id "$IRIS_AGENT_ID" \\
+  --payee-name "$IRIS_DISPLAY_NAME" \\
+  --payer-address "$BILLY_ADDRESS" \\
+  --payer-agent-id "$BILLY_AGENT_ID" \\
+  --payer-name "$BILLY_DISPLAY_NAME" \\
+  --prompt-sha256 "$BILATERAL_PROMPT_SHA256" \\
+  --repository-sha "$BILATERAL_REPOSITORY_SHA"`;
+const WATCHER_COMMAND = `node scripts/watch-bilateral-session.mjs \\
+  --descriptor-file "$BILATERAL_DESCRIPTOR_FILE" \\
+  --token-file "$OPERATOR_CLOCKCHAIN_TOKEN_FILE"`;
+const VERIFIER_COMMAND = `node scripts/verify-bilateral-results.mjs \\
+  --clockchain-token-file "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \\
+  --descriptor "$BILATERAL_DESCRIPTOR_FILE" \\
+  --output "$VERDICT_OUTPUT_DIR" \\
+  --payee-results "$IRIS_TRANSFERRED_RESULT_DIR" \\
+  --payer-results "$BILLY_TRANSFERRED_RESULT_DIR" \\
+  --rpc-url "$SEPOLIA_RPC_URL"`;
+
+function bilateralContractFailures(relativePath, contents) {
+  const failures = [];
+  for (const { label, pattern } of BILATERAL_COMMON_REQUIREMENTS) {
+    if (!pattern.test(contents)) {
+      failures.push(
+        `${relativePath}: missing bilateral ${label}.`,
+      );
+    }
+  }
+  const pathRequirements = {
+    "prompts/run-billy-bilateral-demo.md": [
+      ["Billy payer machine role", /\bBilly machine[^.]*payer\b/i],
+      [
+        "Billy command",
+        /\bnode bin\/handshake-propose\.mjs\b/,
+      ],
+      ["Billy local state", /\bACKNOWLEDGED\b/],
+      [
+        "single-session machine preparation",
+        /\bpreflight\b[\s\S]*\bregistration\b[\s\S]*\bsynchronized start\b/i,
+      ],
+    ],
+    "prompts/run-iris-bilateral-demo.md": [
+      ["Iris payee machine role", /\bIris machine[^.]*payee\b/i],
+      [
+        "Iris command",
+        /\bnode bin\/handshake-accept\.mjs\b/,
+      ],
+      ["Iris local state", /\bACCEPTED\b/],
+      [
+        "single-session machine preparation",
+        /\bpreflight\b[\s\S]*\bregistration\b[\s\S]*\bsynchronized start\b/i,
+      ],
+    ],
+    "docs/runbooks/bilateral-demo-day.md": [
+      ["Phase -1", /\bPhase -1\b/i],
+      ["four funded addresses", /\bfour funded addresses\b/i],
+      ["user/operator-only actions", /\buser\/operator-only\b/i],
+      [
+        "funding band",
+        /\b0\.005\b[^.\n]*\b0\.02\b[^.\n]*Sepolia ETH/i,
+      ],
+      [
+        "registration before descriptor",
+        /\bregistration\b[^.]*\bbefore\b[^.]*\bdescriptor\b/i,
+      ],
+      [
+        "token reuse",
+        /\bsame\b[^.]*\bClockchain token\b[^.]*\bpreflight\b[^.]*\btimed role\b/i,
+      ],
+      ["synchronized start", /\bsynchronized start\b/i],
+      [
+        "watcher command",
+        /\bnode scripts\/watch-bilateral-session\.mjs\b/,
+      ],
+      [
+        "verifier command",
+        /\bnode scripts\/verify-bilateral-results\.mjs\b/,
+      ],
+      [
+        "verdict completion marker",
+        /\.bilateral-verdict\.complete\.json/,
+      ],
+      ["recovery rules", /\bRecovery rules\b/i],
+      ["abort conditions", /\bAbort conditions\b/i],
+    ],
+  };
+  for (const [label, pattern] of pathRequirements[relativePath] ?? []) {
+    if (!pattern.test(contents)) {
+      failures.push(
+        `${relativePath}: missing bilateral ${label}.`,
+      );
+    }
+  }
+  const requiredRoleCommands = {
+    "prompts/run-billy-bilateral-demo.md": [
+      ["exact token mint CLI", BILLY_TOKEN_COMMAND],
+      [
+        "exact distributed preflight CLI",
+        BILLY_PREFLIGHT_COMMAND,
+      ],
+      [
+        "exact registration CLI",
+        BILLY_REGISTRATION_COMMAND,
+      ],
+      ["exact role CLI", BILLY_ROLE_COMMAND],
+    ],
+    "prompts/run-iris-bilateral-demo.md": [
+      ["exact token mint CLI", IRIS_TOKEN_COMMAND],
+      [
+        "exact distributed preflight CLI",
+        IRIS_PREFLIGHT_COMMAND,
+      ],
+      [
+        "exact registration CLI",
+        IRIS_REGISTRATION_COMMAND,
+      ],
+      ["exact role CLI", IRIS_ROLE_COMMAND],
+    ],
+    "docs/runbooks/bilateral-demo-day.md": [
+      [
+        "exact invitation creation CLI",
+        INVITATION_CREATION_COMMAND,
+      ],
+      ["exact operator keygen CLI", OPERATOR_KEYGEN_COMMAND],
+      ["exact token mint CLI", BILLY_TOKEN_COMMAND],
+      ["exact token mint CLI", IRIS_TOKEN_COMMAND],
+      ["exact token mint CLI", OPERATOR_TOKEN_COMMAND],
+      [
+        "exact distributed preflight CLI",
+        PREFLIGHT_PREPARE_COMMAND,
+      ],
+      [
+        "exact distributed preflight CLI",
+        BILLY_PREFLIGHT_COMMAND,
+      ],
+      [
+        "exact distributed preflight CLI",
+        IRIS_PREFLIGHT_COMMAND,
+      ],
+      [
+        "exact distributed preflight CLI",
+        PREFLIGHT_AGGREGATE_COMMAND,
+      ],
+      [
+        "exact registration CLI",
+        BILLY_REGISTRATION_COMMAND,
+      ],
+      [
+        "exact registration CLI",
+        IRIS_REGISTRATION_COMMAND,
+      ],
+      ["exact prompt hash CLI", PROMPT_HASH_COMMAND],
+      ["exact descriptor creation CLI", SESSION_CREATE_COMMAND],
+      ["exact watcher CLI", WATCHER_COMMAND],
+      ["exact role CLI", BILLY_ROLE_COMMAND],
+      ["exact role CLI", IRIS_ROLE_COMMAND],
+      ["exact verifier CLI", VERIFIER_COMMAND],
+    ],
+  };
+  for (
+    const [label, command] of
+      requiredRoleCommands[relativePath] ?? []
+  ) {
+    if (!contents.includes(command)) {
+      failures.push(
+        `${relativePath}: missing ${label}.`,
+      );
+    }
+  }
+  if (
+    /--private-key-file|--payer-token-file|--payee-token-file/.test(
+      contents,
+    )
+  ) {
+    failures.push(
+      `${relativePath}: contains obsolete bilateral CLI flag.`,
+    );
+  }
+  return failures;
+}
 
 function isPlainRoot(rootDirectory) {
   return (
@@ -945,7 +1259,10 @@ export async function checkDocumentation({
   const failures = [];
   const documents = new Map();
 
-  for (const relativePath of PUBLIC_DOCUMENTS) {
+  for (const relativePath of [
+    ...PUBLIC_DOCUMENTS,
+    ...BILATERAL_PUBLIC_DOCUMENTS,
+  ]) {
     const path = await canonicalRegularFile(
       root,
       resolve(root, relativePath),
@@ -998,24 +1315,35 @@ export async function checkDocumentation({
   }
 
   for (const [relativePath, contents] of documents) {
-    for (const requirement of REQUIRED_DOCUMENT_PATTERNS) {
-      const present =
-        requirement.token === undefined
-          ? requirement.pattern.test(contents)
-          : hasCanonicalToken(
-              contents,
-              requirement.token,
-            );
-      if (!present) {
-        failures.push(
-          `${relativePath}: missing required phrase "${requirement.label}".`,
-        );
+    if (PUBLIC_DOCUMENTS.includes(relativePath)) {
+      for (const requirement of REQUIRED_DOCUMENT_PATTERNS) {
+        const present =
+          requirement.token === undefined
+            ? requirement.pattern.test(contents)
+            : hasCanonicalToken(
+                contents,
+                requirement.token,
+              );
+        if (!present) {
+          failures.push(
+            `${relativePath}: missing required phrase "${requirement.label}".`,
+          );
+        }
       }
+    }
+    if (BILATERAL_PUBLIC_DOCUMENTS.includes(relativePath)) {
+      failures.push(
+        ...bilateralContractFailures(relativePath, contents),
+      );
     }
     failures.push(
       ...structuredSafetyFailures(relativePath, contents),
-      ...noncanonicalTokenFailures(relativePath, contents),
-      ...noncanonicalCommandFailures(relativePath, contents),
+      ...(PUBLIC_DOCUMENTS.includes(relativePath)
+        ? noncanonicalTokenFailures(relativePath, contents)
+        : []),
+      ...(PUBLIC_DOCUMENTS.includes(relativePath)
+        ? noncanonicalCommandFailures(relativePath, contents)
+        : []),
       ...failureCodeFailures(relativePath, contents),
       ...(await linkFailures({
         rootDirectory: root,
@@ -1079,7 +1407,9 @@ export async function main({
   }
   stdout.write(
     `Documentation checks passed (${
-      PUBLIC_DOCUMENTS.length + SUPPORTING_DOCUMENTS.length
+      PUBLIC_DOCUMENTS.length +
+      BILATERAL_PUBLIC_DOCUMENTS.length +
+      SUPPORTING_DOCUMENTS.length
     } gated documents).\n`,
   );
   return 0;

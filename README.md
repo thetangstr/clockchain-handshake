@@ -22,6 +22,29 @@ transaction is a PASS by itself. When a run stops instead, the
 [failure code reference](DEMO.md#failure-codes) lists every public failure code,
 the exit it produces, and the next action for the operator.
 
+## Bilateral payment-authorization demo
+
+The operator-led bilateral flow uses separate Billy payer and Iris payee
+machines. Start with the
+[bilateral demo-day runbook](docs/runbooks/bilateral-demo-day.md), then deliver
+the machine-specific [Billy prompt](prompts/run-billy-bilateral-demo.md) and
+[Iris prompt](prompts/run-iris-bilateral-demo.md) from one reviewed immutable
+repository SHA.
+
+Billy anchors an exact USD 100 proposal, Iris anchors an acceptance bound to
+that proposal, and Billy anchors the final acknowledgment. For a session that
+the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence
+establishes that Iris reconstructed Billy's canonical proposal from the signed
+amount options and anchored digest. The protocol does not download message
+bytes from Clockchain. Every transition and verdict preserves
+`paymentMoved: false`.
+
+Runner local state is not operator authorization. Neither role runner nor the
+read-only watcher may emit `AUTHORIZED`; only the operator's fresh aggregate
+verifier may do so after independently refetching and validating all three
+Clockchain anchors. Missing, duplicate, reordered, expired, malformed, or
+mismatched evidence fails closed.
+
 ## Operator-only clean-client acceptance
 
 The stakeholder `npm run demo` path is unaffected. Do not direct stakeholders to

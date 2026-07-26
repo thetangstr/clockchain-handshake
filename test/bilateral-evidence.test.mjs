@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   link,
+  lstat,
   mkdir,
   mkdtemp,
+  open as nodeOpen,
   readFile,
   readdir,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -43,6 +46,10 @@ import {
   validatePartyResult,
   writePartyResult,
 } from "../src/bilateral/evidence.mjs";
+import {
+  closePinnedOutputDirectory,
+  pinOutputDirectory,
+} from "../src/bilateral/runner.mjs";
 
 const SESSION_DIGEST = "cd".repeat(32);
 const REPOSITORY_SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -1382,6 +1389,38 @@ test("writes and cross-checks deterministic JSON and Markdown artifacts", async 
       "party-result.json",
     ],
   );
+});
+
+test("evidence publication cannot escape a pinned output directory", async (t) => {
+  const root = await temporaryDirectory(t);
+  const directory = join(root, "output");
+  const moved = join(root, "moved-output");
+  const replacement = join(root, "replacement");
+  await mkdir(directory, { mode: 0o700 });
+  await mkdir(replacement, { mode: 0o700 });
+  const pin = await pinOutputDirectory({
+    directory,
+    fileSystem: {
+      lstat,
+      open: nodeOpen,
+    },
+  });
+  await rename(directory, moved);
+  await rename(replacement, directory);
+  try {
+    await assert.rejects(
+      writePartyResult({
+        canaries: [],
+        directory,
+        directoryPin: pin,
+        result: buildFixture(),
+      }),
+      BilateralEvidenceConfigurationError,
+    );
+    assert.deepEqual(await readdir(directory), []);
+  } finally {
+    await closePinnedOutputDirectory(pin);
+  }
 });
 
 test("validates and redacts before persistence", async (t) => {

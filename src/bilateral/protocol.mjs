@@ -460,13 +460,11 @@ function blockSnapshot(block) {
 }
 
 function identitySnapshot(identity) {
-  const snapshot = dataFields(identity, ["owner", "status"]);
+  const snapshot = dataFields(identity, ["owner"]);
   if (
     snapshot === null ||
     typeof snapshot.owner !== "string" ||
-    !ADDRESS_PATTERN.test(snapshot.owner) ||
-    typeof snapshot.status !== "string" ||
-    snapshot.status.length > MAX_TEXT_LENGTH
+    !ADDRESS_PATTERN.test(snapshot.owner)
   ) {
     throw terminal("FAILED");
   }
@@ -643,7 +641,6 @@ export async function verifyTransition(input) {
     throw terminal("FAILED");
   }
   if (
-    identity.status !== "active" ||
     identity.owner.toLowerCase() !==
       author.address.toLowerCase()
   ) {

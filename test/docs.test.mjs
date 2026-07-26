@@ -30,6 +30,11 @@ const PUBLIC_DOCUMENTS = Object.freeze([
   "DEMO.md",
   "prompts/run-turnkey-demo.md",
 ]);
+const BILATERAL_PUBLIC_DOCUMENTS = Object.freeze([
+  "prompts/run-billy-bilateral-demo.md",
+  "prompts/run-iris-bilateral-demo.md",
+  "docs/runbooks/bilateral-demo-day.md",
+]);
 const SUPPORT_FILES = Object.freeze([
   "package.json",
   "bin/handshake-demo.mjs",
@@ -74,6 +79,7 @@ async function temporaryDocumentationFixture(t) {
 
   for (const relativePath of [
     ...PUBLIC_DOCUMENTS,
+    ...BILATERAL_PUBLIC_DOCUMENTS,
     ...SUPPORT_FILES,
   ]) {
     const destination = join(directory, relativePath);
@@ -130,6 +136,242 @@ test("public documentation satisfies the turnkey exercise contract", async () =>
     assert.match(contents, /RESULT\.md/);
     assert.match(contents, /result\.json/);
   }
+});
+
+test("bilateral prompts and runbook are first-class gated public documents", async () => {
+  assert.deepEqual(
+    await checkDocumentation({
+      rootDirectory: ROOT_DIRECTORY,
+    }),
+    [],
+  );
+
+  const documents = new Map(
+    await Promise.all(
+      BILATERAL_PUBLIC_DOCUMENTS.map(async (relativePath) => [
+        relativePath,
+        await readFile(
+          join(ROOT_DIRECTORY, relativePath),
+          "utf8",
+        ),
+      ]),
+    ),
+  );
+  for (const [relativePath, contents] of documents) {
+    assert.match(contents, /Clockchain®/);
+    assert.match(contents, /single-validator testnet/i);
+    assert.match(contents, /\bNo money moves\b/);
+    assert.match(contents, /Do not install or use AgentDash/);
+    assert.match(contents, /immutable repository SHA/i);
+    assert.match(contents, /do not invent success/i);
+    assert.match(contents, /paymentMoved: false/);
+    assert.match(
+      contents,
+      /runner local (?:state|success)[^.]*not operator authorization/i,
+      relativePath,
+    );
+    assert.match(
+      contents,
+      /For\s+a\s+session\s+that\s+the\s+fresh\s+aggregate\s+verifier\s+marks\s+`AUTHORIZED`,\s+the\s+verified\s+evidence\s+establishes\s+that\s+Iris\s+reconstructed\s+Billy's\s+canonical\s+proposal[^.]*anchored\s+digest/i,
+      relativePath,
+    );
+    assert.match(
+      contents,
+      /protocol does not download message bytes from Clockchain/i,
+      relativePath,
+    );
+  }
+
+  const billy = documents.get(
+    "prompts/run-billy-bilateral-demo.md",
+  );
+  const iris = documents.get(
+    "prompts/run-iris-bilateral-demo.md",
+  );
+  const runbook = documents.get(
+    "docs/runbooks/bilateral-demo-day.md",
+  );
+  assert.match(billy, /Billy machine[^.]*payer/i);
+  assert.match(billy, /node bin\/handshake-propose\.mjs/);
+  assert.match(billy, /ACKNOWLEDGED/);
+  assert.match(iris, /Iris machine[^.]*payee/i);
+  assert.match(iris, /node bin\/handshake-accept\.mjs/);
+  assert.match(iris, /ACCEPTED/);
+  for (const prompt of [billy, iris]) {
+    assert.match(
+      prompt,
+      /--descriptor "\$BILATERAL_DESCRIPTOR_FILE" \\\n  --invitation "\$(?:BILLY|IRIS)_INVITATION_FILE" \\\n  --clockchain-token-file "\$(?:BILLY|IRIS)_CLOCKCHAIN_TOKEN_FILE" \\\n  --output "\$(?:BILLY|IRIS)_RESULT_DIR" \\\n  --i-understand-this-writes-to-clockchain/,
+    );
+    assert.doesNotMatch(
+      prompt,
+      /--private-key(?:-file)?(?:[ =]|$)|_(?:BILLY|IRIS)_PRIVATE_KEY_FILE|--acknowledge-agent-permission-risk/,
+    );
+  }
+
+  for (const required of [
+    /Phase -1/i,
+    /four funded addresses/i,
+    /separate private channel/i,
+    /user\/operator-only/i,
+    /0\.005[^.\n]*0\.02[^.\n]*Sepolia ETH/i,
+    /node scripts\/create-invitations\.mjs/,
+    /node scripts\/mint-bilateral-token\.mjs/,
+    /node scripts\/register-bilateral-identity\.mjs/,
+    /node scripts\/hash-bilateral-prompts\.mjs/,
+    /node scripts\/create-session\.mjs keygen/,
+    /node scripts\/create-session\.mjs create/,
+    /probe-bilateral-rendezvous\.mjs prepare/,
+    /probe-bilateral-rendezvous\.mjs participant/,
+    /probe-bilateral-rendezvous\.mjs aggregate/,
+    /registration[^.]*before[^.]*descriptor/i,
+    /same[^.]*Clockchain token[^.]*preflight[^.]*timed role/i,
+    /synchronized start/i,
+    /node scripts\/watch-bilateral-session\.mjs/,
+    /party-result\.json/,
+    /PARTY-RESULT\.md/,
+    /\.party-result\.complete\.json/,
+    /artifact transfer/i,
+    /fresh process/i,
+    /node scripts\/verify-bilateral-results\.mjs/,
+    /\.bilateral-verdict\.complete\.json/,
+    /recovery rules/i,
+    /abort conditions/i,
+  ]) {
+    assert.match(runbook, required);
+  }
+});
+
+test("documentation checker rejects bilateral safety-contract drift", async (t) => {
+  const directory = await temporaryDocumentationFixture(t);
+  const path = join(
+    directory,
+    "prompts/run-iris-bilateral-demo.md",
+  );
+  const contents = await readFile(path, "utf8");
+  await writeFile(
+    path,
+    contents.replace(
+      "The protocol does not download message bytes from Clockchain.",
+      "Iris obtained the proposal.",
+    ),
+  );
+
+  assert.ok(
+    (
+      await checkDocumentation({
+        rootDirectory: directory,
+      })
+    ).some(
+      (failure) =>
+        failure.includes("run-iris-bilateral-demo.md") &&
+        failure.includes("honest reconstruction claim"),
+    ),
+  );
+});
+
+test("documentation checker rejects bilateral role CLI drift", async (t) => {
+  const directory = await temporaryDocumentationFixture(t);
+  const path = join(
+    directory,
+    "prompts/run-billy-bilateral-demo.md",
+  );
+  const contents = await readFile(path, "utf8");
+  await writeFile(
+    path,
+    contents.replace(
+      "--clockchain-token-file",
+      "--token",
+    ),
+  );
+
+  assert.ok(
+    (
+      await checkDocumentation({
+        rootDirectory: directory,
+      })
+    ).some(
+      (failure) =>
+        failure.includes("run-billy-bilateral-demo.md") &&
+        failure.includes("exact role CLI"),
+    ),
+  );
+});
+
+test("documentation checker rejects distributed preparation and token-reuse drift", async (t) => {
+  const mutations = [
+    [
+      "probe-bilateral-rendezvous.mjs prepare",
+      "probe-bilateral-rendezvous.mjs",
+      "exact distributed preflight CLI",
+    ],
+    [
+      "--role payer",
+      "--role operator",
+      "exact token mint CLI",
+    ],
+    [
+      "register-bilateral-identity.mjs",
+      "register-identity.mjs",
+      "exact registration CLI",
+    ],
+    [
+      'node scripts/hash-bilateral-prompts.mjs --repository-sha "$BILATERAL_REPOSITORY_SHA"',
+      'node scripts/hash-bilateral-prompts.mjs --repository-sha "$OTHER_SHA"',
+      "exact prompt hash CLI",
+    ],
+  ];
+
+  for (const [expected, replacement, diagnostic] of mutations) {
+    await t.test(diagnostic, async () => {
+      const directory = await temporaryDocumentationFixture(t);
+      const path = join(
+        directory,
+        "docs/runbooks/bilateral-demo-day.md",
+      );
+      const contents = await readFile(path, "utf8");
+      assert.ok(contents.includes(expected));
+      await writeFile(
+        path,
+        contents.replace(expected, replacement),
+      );
+      assert.ok(
+        (
+          await checkDocumentation({
+            rootDirectory: directory,
+          })
+        ).some(
+          (failure) =>
+            failure.includes("bilateral-demo-day.md") &&
+            failure.includes(diagnostic),
+        ),
+      );
+    });
+  }
+});
+
+test("documentation checker rejects obsolete bilateral credential flags", async (t) => {
+  const directory = await temporaryDocumentationFixture(t);
+  const path = join(
+    directory,
+    "docs/runbooks/bilateral-demo-day.md",
+  );
+  const contents = await readFile(path, "utf8");
+  await writeFile(
+    path,
+    `${contents}\n--private-key-file\n--payer-token-file\n--payee-token-file\n`,
+  );
+
+  assert.ok(
+    (
+      await checkDocumentation({
+        rootDirectory: directory,
+      })
+    ).some(
+      (failure) =>
+        failure.includes("bilateral-demo-day.md") &&
+        failure.includes("obsolete bilateral CLI flag"),
+    ),
+  );
 });
 
 test("operator-only clean-client acceptance is prominently disclosed", async (t) => {
@@ -1562,6 +1804,6 @@ test("reports the true gated document count", async () => {
   assert.equal(exitCode, 0);
   assert.equal(
     stdout.text(),
-    "Documentation checks passed (4 gated documents).\n",
+    "Documentation checks passed (7 gated documents).\n",
   );
 });

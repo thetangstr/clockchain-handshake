@@ -1184,21 +1184,41 @@ test("a malformed independently fetched block height is FAILED", async () => {
   );
 });
 
-test("peer identity must be active with the descriptor owner", async () => {
-  for (const options of [
-    { inactiveIdentity: true },
-    {
-      mismatchedIdentityOwner:
-        "0x9999999999999999999999999999999999999999",
+test("peer identity status is non-authoritative while the descriptor owner remains required", async () => {
+  for (const resolveAgent of [
+    async () => ({
+      owner: PAYER_ADDRESS,
+      status: "inactive",
+    }),
+    async () => ({ owner: PAYER_ADDRESS }),
+    async () => {
+      const identity = { owner: PAYER_ADDRESS };
+      Object.defineProperty(identity, "status", {
+        enumerable: true,
+        get() {
+          throw new Error("status must not be read");
+        },
+      });
+      return identity;
     },
   ]) {
-    const fake = createSessionFake(options);
+    const fake = createSessionFake();
     await writeProposal(fake);
-    assert.equal(
-      await terminalCodeOf(verifyProposal(fake)),
-      "FAILED",
+    const verified = await verifyProposal(
+      clientWith(fake, { resolveAgent }),
     );
+    assert.equal(verified.anchoredHash, H1);
   }
+
+  const mismatched = createSessionFake({
+    mismatchedIdentityOwner:
+      "0x9999999999999999999999999999999999999999",
+  });
+  await writeProposal(mismatched);
+  assert.equal(
+    await terminalCodeOf(verifyProposal(mismatched)),
+    "FAILED",
+  );
 
   const missing = createFakeBilateralClockchain();
   await writeProposal(missing);
