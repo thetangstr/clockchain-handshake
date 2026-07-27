@@ -6,7 +6,11 @@ import {
   generateKeyPairSync,
   sign,
   verify as verifySignature,
+  X509Certificate,
 } from "node:crypto";
+import {
+  execFile as execFileCallback,
+} from "node:child_process";
 import {
   chmod,
   lstat,
@@ -25,11 +29,23 @@ import {
   dirname,
   join,
 } from "node:path";
+import {
+  promisify,
+} from "node:util";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
+import {
+  canonicalizeReceiptEventValue,
+} from "../src/canonical.mjs";
 import {
   publicKeyPemFromRawBase64,
   rawPublicKeyBase64FromPem,
 } from "../src/bilateral/descriptor.mjs";
+import {
+  coordinationEnrollmentSignaturePreimage,
+} from "../src/bilateral/coordination/enrollment.mjs";
+import {
+  createCoordinationReceipt,
+} from "../src/bilateral/coordination/receipt.mjs";
 import { McpRateLimitedError } from "../src/mcp.mjs";
 import test from "node:test";
 
@@ -41,13 +57,23 @@ import {
   main,
   runBilateralPreflight,
   runCli,
+  verifyCoordinationPreparationSet,
 } from "../scripts/probe-bilateral-rendezvous.mjs";
+
+const execFileAsync = promisify(execFileCallback);
 
 const SIGNATURE = Buffer.alloc(64, 1).toString("base64");
 const PREFLIGHT_KEY_ENROLLMENT_SIGNATURE_DOMAIN =
   "clockchain.bilateral-preflight-key-enrollment-signature/v1\n";
 const TOKEN_COMMITMENT_SIGNATURE_DOMAIN =
   "clockchain.bilateral-token-commitment-signature/v1\n";
+
+function stableBytes(value) {
+  return Buffer.from(
+    JSON.stringify(canonicalizeReceiptEventValue(value)),
+    "utf8",
+  );
+}
 
 function deterministicRandom() {
   const values = [
@@ -658,6 +684,383 @@ function preflightDependencies(fixture, additions = {}) {
     ...additions,
   };
 }
+
+function coordinationEnrollmentArtifact(fixture, role) {
+  const preparation = fixture[`${role}Preparation`];
+  const invitationDigits =
+    role === "payer" ? ["1", "2"] : ["3", "4"];
+  const unsigned = {
+    capabilityDigest:
+      role === "payer" ? "a".repeat(64) : "b".repeat(64),
+    coordinationKey: {
+      algorithm: "ed25519",
+      keyId: `${role}-coordination`,
+      publicKey: preparation.coordinationPublicKey,
+    },
+    invitations: {
+      rehearsal: {
+        address: `0x${invitationDigits[0].repeat(40)}`,
+        algorithm: "eip191",
+        signature: `0x${invitationDigits[0].repeat(130)}`,
+      },
+      stakeholder: {
+        address: `0x${invitationDigits[1].repeat(40)}`,
+        algorithm: "eip191",
+        signature: `0x${invitationDigits[1].repeat(130)}`,
+      },
+    },
+    paymentMoved: false,
+    preflightKey: {
+      algorithm: "ed25519",
+      keyId: `${role}-preflight`,
+      publicKey: preparation.publicKey,
+    },
+    releaseId: "preflight-test-release",
+    repositorySha: fixture.repositorySha,
+    role,
+    schema: "clockchain.bilateral-coordination-enrollment/v1",
+    sessionId: "00000000-0000-4000-8000-000000000001",
+  };
+  return {
+    ...unsigned,
+    signature: sign(
+      null,
+      coordinationEnrollmentSignaturePreimage(unsigned),
+      createPrivateKey(preparation.coordinationPrivateKeyPem),
+    ).toString("base64"),
+  };
+}
+
+function resignedCoordinationEnrollment(
+  fixture,
+  role,
+  changes,
+) {
+  const enrollment = coordinationEnrollmentArtifact(
+    fixture,
+    role,
+  );
+  const { signature: _signature, ...unsigned } = enrollment;
+  const updated = { ...unsigned, ...changes };
+  return {
+    ...updated,
+    signature: sign(
+      null,
+      coordinationEnrollmentSignaturePreimage(updated),
+      createPrivateKey(
+        fixture[`${role}Preparation`]
+          .coordinationPrivateKeyPem,
+      ),
+    ).toString("base64"),
+  };
+}
+
+async function coordinationPreparationInput(
+  fixture,
+  enrollmentOverrides = {},
+) {
+  const certificatePath = join(fixture.root, "relay-cert.pem");
+  const keyPath = join(fixture.root, "relay-key.pem");
+  await execFileAsync("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "ed25519",
+    "-keyout",
+    keyPath,
+    "-out",
+    certificatePath,
+    "-nodes",
+    "-days",
+    "1",
+    "-subj",
+    "/CN=127.0.0.1",
+  ]);
+  const [certificate, key] = await Promise.all([
+    readFile(certificatePath, "utf8"),
+    readFile(keyPath),
+  ]);
+  const certificateSha256 = createHash("sha256")
+    .update(new X509Certificate(certificate).raw)
+    .digest("hex");
+  const signer = {
+    certificateSha256,
+    sign: (preimage) => sign(
+      null,
+      preimage,
+      createPrivateKey(key),
+    ),
+    signatureAlgorithm: "ed25519",
+    verify: (preimage, signature) => verifySignature(
+      null,
+      preimage,
+      new X509Certificate(certificate).publicKey,
+      signature,
+    ),
+  };
+  const enrollments = {};
+  const selectedEnrollments = {};
+  for (const role of ["payer", "payee"]) {
+    const enrollment = coordinationEnrollmentArtifact(
+      fixture, role,
+    );
+    const selected = enrollmentOverrides[role] ?? enrollment;
+    selectedEnrollments[role] = selected;
+    const enrollmentBytes = canonicalBytes(selected);
+    enrollments[role] = {
+      enrollmentBase64: enrollmentBytes.toString("base64"),
+      enrollmentDigest: createHash("sha256")
+        .update(enrollmentBytes)
+        .digest("hex"),
+      receiptBase64: (await createCoordinationReceipt({
+        context: {
+          capabilityDigest: selected.capabilityDigest,
+          enrollmentDigest: createHash("sha256")
+            .update(enrollmentBytes)
+            .digest("hex"),
+          releaseId: selected.releaseId,
+          repositorySha: selected.repositorySha,
+          role,
+          sessionId: selected.sessionId,
+        },
+        signer,
+      })).toString("base64"),
+    };
+  }
+  return {
+    capabilityDigests: {
+      payer: selectedEnrollments.payer.capabilityDigest,
+      payee: selectedEnrollments.payee.capabilityDigest,
+    },
+    enrollmentSetBytes: stableBytes({
+      enrollments,
+      paymentMoved: false,
+      releaseId: "preflight-test-release",
+      repositorySha: fixture.repositorySha,
+      schema:
+        "clockchain.bilateral-coordination-enrollment-set/v1",
+      sessionId: "00000000-0000-4000-8000-000000000001",
+    }),
+    releaseId: "preflight-test-release",
+    repositorySha: fixture.repositorySha,
+    sessionId: "00000000-0000-4000-8000-000000000001",
+    tlsCertificatePem: certificate,
+    tokenCommitments: {
+      payer: fixture.payerPreparation.tokenCommitment,
+      payee: fixture.payeePreparation.tokenCommitment,
+    },
+  };
+}
+
+test("prepare accepts coordination-enrollment-bound public artifacts", async (t) => {
+  const fixture = await distributedFixture(t);
+  const input = await coordinationPreparationInput(fixture);
+  const envelope = await main(
+    [
+      "prepare",
+      "--operator-private-key",
+      fixture.operatorPrivateKeyPath,
+      "--operator-key-id",
+      "preflight-operator",
+      "--repository-sha",
+      fixture.repositorySha,
+      "--output",
+      join(fixture.root, "enrollment-bound-prepare"),
+    ],
+    preflightDependencies(fixture, {
+      prepareArtifacts: async () =>
+        verifyCoordinationPreparationSet(input),
+      randomBytes: deterministicRandom(),
+    }),
+  );
+
+  assert.deepEqual(envelope.plan.participants.payer, {
+    coordinationPublicKey:
+      fixture.payerPreparation.coordinationPublicKey,
+    publicKey: fixture.payerPreparation.publicKey,
+    tokenCommitment: fixture.payerPreparation.tokenCommitment,
+  });
+  assert.deepEqual(envelope.plan.participants.payee, {
+    coordinationPublicKey:
+      fixture.payeePreparation.coordinationPublicKey,
+    publicKey: fixture.payeePreparation.publicKey,
+    tokenCommitment: fixture.payeePreparation.tokenCommitment,
+  });
+});
+
+function mutatedEnrollmentSet(input, mutate) {
+  const value = JSON.parse(
+    input.enrollmentSetBytes.toString("utf8"),
+  );
+  mutate(value);
+  return {
+    ...input,
+    enrollmentSetBytes: stableBytes(value),
+  };
+}
+
+test("coordination preparation accepts only exact receipt-bound enrollment sets", async (t) => {
+  const fixture = await distributedFixture(t);
+  const input = await coordinationPreparationInput(fixture);
+  const preparation =
+    await verifyCoordinationPreparationSet(input);
+  assert.equal(Object.isFrozen(preparation), true);
+  assert.equal(Object.isFrozen(preparation.participants), true);
+
+  const duplicateInvitation =
+    resignedCoordinationEnrollment(fixture, "payer", {
+      invitations: {
+        rehearsal: {
+          address: "0x3333333333333333333333333333333333333333",
+          algorithm: "eip191",
+          signature: `0x${"3".repeat(130)}`,
+        },
+        stakeholder: {
+          address: "0x2222222222222222222222222222222222222222",
+          algorithm: "eip191",
+          signature: `0x${"2".repeat(130)}`,
+        },
+      },
+    });
+  const duplicateKeyId =
+    resignedCoordinationEnrollment(fixture, "payer", {
+      coordinationKey: {
+        algorithm: "ed25519",
+        keyId: "payee-coordination",
+        publicKey: fixture.payerPreparation.coordinationPublicKey,
+      },
+    });
+  const changedInvitation =
+    resignedCoordinationEnrollment(fixture, "payer", {
+      invitations: {
+        rehearsal: {
+          address: "0x5555555555555555555555555555555555555555",
+          algorithm: "eip191",
+          signature: `0x${"5".repeat(130)}`,
+        },
+        stakeholder: {
+          address: "0x6666666666666666666666666666666666666666",
+          algorithm: "eip191",
+          signature: `0x${"6".repeat(130)}`,
+        },
+      },
+    });
+  const wrongCertificate =
+    await coordinationPreparationInput(fixture);
+  const sharedCapabilityPayee =
+    resignedCoordinationEnrollment(fixture, "payee", {
+      capabilityDigest: "a".repeat(64),
+    });
+  const cases = [
+    ["wrong release", { ...input, releaseId: "wrong-release" }],
+    ["wrong session", {
+      ...input,
+      sessionId: "00000000-0000-4000-8000-000000000002",
+    }],
+    ["wrong capability", {
+      ...input,
+      capabilityDigests: {
+        ...input.capabilityDigests,
+        payer: "b".repeat(64),
+      },
+    }],
+    ["forged receipt", mutatedEnrollmentSet(input, (set) => {
+      set.enrollments.payer.receiptBase64 =
+        Buffer.alloc(64, 9).toString("base64");
+    })],
+    ["missing receipt", mutatedEnrollmentSet(input, (set) => {
+      delete set.enrollments.payer.receiptBase64;
+    })],
+    // Relay bootstrap validates EIP-191 invitation proofs before issuing
+    // this TLS-signed receipt; its enrollment digest prevents substitution.
+    ["changed invitations with stale receipt", mutatedEnrollmentSet(
+      input,
+      (set) => {
+        const bytes = canonicalBytes(changedInvitation);
+        set.enrollments.payer.enrollmentBase64 =
+          bytes.toString("base64");
+        set.enrollments.payer.enrollmentDigest =
+          createHash("sha256").update(bytes).digest("hex");
+      },
+    )],
+    ["wrong certificate", {
+      ...input,
+      tlsCertificatePem: wrongCertificate.tlsCertificatePem,
+    }],
+    ["duplicate invitations", await coordinationPreparationInput(
+      fixture,
+      { payer: duplicateInvitation },
+    )],
+    ["duplicate key IDs", await coordinationPreparationInput(
+      fixture,
+      { payer: duplicateKeyId },
+    )],
+    ["shared role capability", await coordinationPreparationInput(
+      fixture,
+      { payee: sharedCapabilityPayee },
+    )],
+    ["mismatched token", {
+      ...input,
+      tokenCommitments: {
+        payer: input.tokenCommitments.payee,
+        payee: input.tokenCommitments.payee,
+      },
+    }],
+  ];
+
+  for (const [label, value] of cases) {
+    await assert.rejects(
+      () => verifyCoordinationPreparationSet(value),
+      { code: "BILATERAL_PREFLIGHT_FAILED" },
+      label,
+    );
+  }
+
+  await assert.rejects(
+    () => main(
+      ["prepare", "--operator-private-key", fixture.operatorPrivateKeyPath,
+        "--operator-key-id", "preflight-operator", "--repository-sha",
+        fixture.repositorySha, "--output", join(fixture.root, "lookalike")],
+      preflightDependencies(fixture, {
+        prepareArtifacts: async () => ({
+          participants: preparation.participants,
+        }),
+        randomBytes: deterministicRandom(),
+      }),
+    ),
+    { code: "BILATERAL_PREFLIGHT_FAILED" },
+  );
+  const enrollmentSet = JSON.parse(
+    input.enrollmentSetBytes.toString("utf8"),
+  );
+  await assert.rejects(
+    () => main(
+      ["prepare", "--operator-private-key", fixture.operatorPrivateKeyPath,
+        "--operator-key-id", "preflight-operator", "--repository-sha",
+        fixture.repositorySha, "--output", join(fixture.root, "bare")],
+      preflightDependencies(fixture, {
+        prepareArtifacts: async () => ({
+          payer: {
+            coordinationEnrollment: JSON.parse(Buffer.from(
+              enrollmentSet.enrollments.payer.enrollmentBase64,
+              "base64",
+            ).toString("utf8")),
+            tokenCommitment: input.tokenCommitments.payer,
+          },
+          payee: {
+            coordinationEnrollment: JSON.parse(Buffer.from(
+              enrollmentSet.enrollments.payee.enrollmentBase64,
+              "base64",
+            ).toString("utf8")),
+            tokenCommitment: input.tokenCommitments.payee,
+          },
+        }),
+        randomBytes: deterministicRandom(),
+      }),
+    ),
+    { code: "BILATERAL_PREFLIGHT_FAILED" },
+  );
+});
 
 async function prepareDistributedPlan(fixture) {
   const output = join(fixture.root, "prepare");

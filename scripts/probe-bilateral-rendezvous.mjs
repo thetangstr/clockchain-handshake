@@ -39,6 +39,14 @@ import {
   verifyPreflightKeyEnrollment,
   verifyTokenCommitment,
 } from "../src/bilateral/coordination/preflight.mjs";
+import {
+  parseCoordinationEnrollment,
+  parseCoordinationEnrollmentSet,
+} from "../src/bilateral/coordination/enrollment.mjs";
+import {
+  createReceiptVerifierFromCertificate,
+  verifyCoordinationReceipt,
+} from "../src/bilateral/coordination/receipt.mjs";
 
 export const PREFLIGHT_REPORT_SCHEMA =
   "clockchain.bilateral-preflight/v2";
@@ -92,6 +100,7 @@ const DEFAULT_FILE_SYSTEM = Object.freeze({
   mkdir,
   open,
 });
+const PREPARATION_SET_BRAND = new WeakSet();
 const execFileAsync = promisify(execFile);
 
 export class BilateralPreflightError extends Error {
@@ -1747,6 +1756,114 @@ function verifiedPreparationParticipant(
   };
 }
 
+export async function verifyCoordinationPreparationSet(input) {
+  if (!exactKeys(input, [
+    "capabilityDigests",
+    "enrollmentSetBytes",
+    "releaseId",
+    "repositorySha",
+    "sessionId",
+    "tlsCertificatePem",
+    "tokenCommitments",
+  ])) {
+    fail();
+  }
+  if (
+    !exactKeys(input.capabilityDigests, ["payee", "payer"]) ||
+    !exactKeys(input.tokenCommitments, ["payee", "payer"]) ||
+    !Buffer.isBuffer(input.enrollmentSetBytes) ||
+    typeof input.releaseId !== "string" ||
+    typeof input.repositorySha !== "string" ||
+    typeof input.sessionId !== "string" ||
+    typeof input.tlsCertificatePem !== "string"
+  ) {
+    fail();
+  }
+  let enrollmentSet;
+  let verifier;
+  try {
+    enrollmentSet = parseCoordinationEnrollmentSet(
+      Buffer.from(input.enrollmentSetBytes),
+    );
+    verifier = createReceiptVerifierFromCertificate({
+      tlsCertificatePem: input.tlsCertificatePem,
+    });
+  } catch {
+    fail();
+  }
+  if (
+    enrollmentSet.paymentMoved !== false ||
+    enrollmentSet.releaseId !== input.releaseId ||
+    enrollmentSet.repositorySha !== input.repositorySha ||
+    enrollmentSet.sessionId !== input.sessionId ||
+    input.capabilityDigests.payer ===
+      input.capabilityDigests.payee
+  ) {
+    fail();
+  }
+  const participants = {};
+  for (const role of ["payer", "payee"]) {
+    const entry = enrollmentSet.enrollments[role];
+    let tokenCommitment;
+    try {
+      const enrollmentBytes = Buffer.from(
+        entry.enrollmentBase64,
+        "base64",
+      );
+      const roleEnrollment =
+        parseCoordinationEnrollment(enrollmentBytes);
+      if (
+        roleEnrollment.capabilityDigest !==
+          input.capabilityDigests[role] ||
+        roleEnrollment.paymentMoved !== false ||
+        roleEnrollment.releaseId !== input.releaseId ||
+        roleEnrollment.repositorySha !== input.repositorySha ||
+        roleEnrollment.role !== role ||
+        roleEnrollment.sessionId !== input.sessionId
+      ) {
+        fail();
+      }
+      await verifyCoordinationReceipt({
+        bytes: Buffer.from(entry.receiptBase64, "base64"),
+        expected: {
+          capabilityDigest: input.capabilityDigests[role],
+          enrollmentDigest: entry.enrollmentDigest,
+          releaseId: input.releaseId,
+          repositorySha: input.repositorySha,
+          role,
+          sessionId: input.sessionId,
+        },
+        verifier,
+      });
+      tokenCommitment = verifyTokenCommitment(
+        input.tokenCommitments[role],
+        {
+          coordinationPublicKey:
+            roleEnrollment.coordinationKey.publicKey,
+          repositorySha: input.repositorySha,
+          role,
+        },
+      );
+      participants[role] = {
+        coordinationPublicKey:
+          roleEnrollment.coordinationKey.publicKey,
+        publicKey: roleEnrollment.preflightKey.publicKey,
+        tokenCommitment,
+      };
+    } catch {
+      fail();
+    }
+  }
+  const preparation = deepFreeze({
+    participants: {
+      payee: participants.payee,
+      payer: participants.payer,
+    },
+  });
+  PREPARATION_SET_BRAND.add(preparation);
+  return preparation;
+}
+
 async function preparationParticipants(
   configuration,
   dependencies,
@@ -1807,6 +1924,9 @@ async function preparationParticipants(
     };
   }
   if (!exactKeys(source, ["payee", "payer"])) {
+    if (PREPARATION_SET_BRAND.has(source)) {
+      return source.participants;
+    }
     fail();
   }
   const participants = {
