@@ -1229,6 +1229,12 @@ Not-tested: Live two-client Clockchain visibility
 - Create: `src/bilateral/coordination/supervisor.mjs`
 - Create: `bin/handshake-supervisor.mjs`
 - Create: `test/bilateral-coordination-supervisor.test.mjs`
+- Modify: `src/bilateral/coordination/client.mjs`
+- Modify: `src/bilateral/coordination/relay.mjs`
+- Modify: `src/bilateral/coordination/storage.mjs`
+- Modify: `test/bilateral-coordination-client.test.mjs`
+- Modify: `test/bilateral-coordination-relay.test.mjs`
+- Modify: `test/bilateral-coordination-storage.test.mjs`
 
 - [ ] **Step 1: Write failing bootstrap and local-state tests**
 
@@ -1256,6 +1262,13 @@ stakeholder-invitation keys; raw capabilities disappear from active state only
 after a durable verified receipt; retry of an ambiguous bootstrap sends
 byte-identical enrollment bytes.
 
+Pin an authenticated enrollment-set read containing both exact signed
+enrollments and both persisted TLS-signed bootstrap receipts. The client must
+verify every enrollment signature, receipt signature, certificate digest,
+enrollment digest, role, release, session, and repository binding before
+returning either peer key. Missing, duplicated, substituted, cross-session, or
+receipt-free entries fail closed.
+
 - [ ] **Step 2: Write failing command-policy tests**
 
 Pin a closed dispatcher:
@@ -1271,7 +1284,7 @@ assert.deepEqual(policy, {
     "--descriptor", localState.rehearsal.descriptorPath,
     "--invitation", localState.rehearsal.invitationPath,
     "--output", localState.rehearsal.resultDirectory,
-    "--i-understand-this-anchors-clockchain-evidence",
+    "--i-understand-this-writes-to-clockchain",
   ],
   command: localState.role === "payer"
     ? "bin/handshake-propose.mjs"
@@ -1291,6 +1304,12 @@ before resume, exact recovery authorization for ambiguous writes, marker
 validation before upload, permanent abort on chain divergence, and fixed
 non-authorizing stdout/stderr. Scan supervisor source and runtime for the
 authorizing literal.
+
+Global replay is two-pass. First verify the authenticated enrollment set and
+the repository-pinned operator stream without reducing lifecycle state. Then
+verify all three sender chains against those frozen authorities and replay the
+complete global event order. Advisory event/session reads supply bytes only;
+they never supply authority.
 
 - [ ] **Step 4: Run RED**
 
@@ -1347,6 +1366,23 @@ state from that chain, and constructs only
 `createResumedCoordinationClient`. It never restores the retired manifest or
 passes relay `readEvents`/`readSessionView` output directly into a command
 decision.
+
+Add
+`GET /v1/sessions/:sessionId/enrollments` and matching
+`readEnrollmentSet()` service/client methods. The exact canonical response
+schema is
+`clockchain.bilateral-coordination-enrollment-set/v1` with exact keys
+`enrollments`, `paymentMoved`, `releaseId`, `repositorySha`, `schema`, and
+`sessionId`. `enrollments` has exact `payer` and `payee` entries; each entry has
+exact `enrollmentBase64`, `enrollmentDigest`, and `receiptBase64` fields.
+Storage returns a detached copy of the persisted receipt with each enrollment.
+The relay emits the set only after both roles are durably enrolled. The client
+independently parses and verifies both enrollment objects and both TLS-signed
+receipts against the manifest-pinned leaf certificate, then requires the two
+roles' coordination keys, preflight keys, and invitation addresses to remain
+pairwise distinct. This response is an authenticated coordination-identity
+source, not Clockchain protocol evidence, and always carries
+`paymentMoved:false`.
 
 The entrypoint accepts exactly:
 

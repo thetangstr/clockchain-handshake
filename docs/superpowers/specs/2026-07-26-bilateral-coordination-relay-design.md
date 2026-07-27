@@ -446,6 +446,28 @@ enrollment passes validation. A matching retry returns the already persisted
 receipt without invoking or re-signing through the factory, which preserves
 byte identity for randomized ECDSA and RSA-PSS signatures.
 
+Supervisors obtain peer coordination authority through one exact authenticated
+enrollment-set read, never from advisory event fields. After both roles are
+durably enrolled, `GET /v1/sessions/:sessionId/enrollments` returns canonical
+schema `clockchain.bilateral-coordination-enrollment-set/v1` with exact keys
+`enrollments`, `paymentMoved`, `releaseId`, `repositorySha`, `schema`, and
+`sessionId`. `enrollments` contains exact `payer` and `payee` entries, each
+with exact `enrollmentBase64`, `enrollmentDigest`, and `receiptBase64` fields.
+
+The client parses and verifies each self-signed enrollment, verifies each
+persisted TLS-signed bootstrap receipt against the manifest-pinned leaf
+certificate, and requires the receipt digest and full role/release/session/SHA
+scope to match the enrollment. It also repeats the cross-role distinctness
+checks for coordination keys, preflight keys, and all four invitation
+addresses. The enrollment set is usable only after those checks and always has
+`paymentMoved:false`. It authenticates coordination identities; it is not
+Clockchain protocol evidence and cannot authorize payment.
+
+Global supervisor replay is therefore two-pass: authenticate the enrollment
+set and repository-pinned operator stream first, then verify every sender chain
+against those frozen authorities and reduce the complete global order. Relay
+event and session-view reads provide untrusted bytes only.
+
 ### 5.4 Funding as approval, not authentication
 
 The launch capability authenticates the expected machine role. Invitation
