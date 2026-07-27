@@ -8,6 +8,7 @@ import { constants } from "node:fs";
 import {
   chmod,
   lstat,
+  link,
   mkdir,
   mkdtemp,
   open,
@@ -60,6 +61,7 @@ import {
   VERDICT_KEYS,
   VERDICT_SCHEMA,
   renderBilateralVerdictMarkdown,
+  validatePublishedBilateralVerdict,
   verifyBilateralAuthorization,
 } from "../src/bilateral/verdict.mjs";
 import {
@@ -82,6 +84,217 @@ const REPOSITORY_SHA =
   "0123456789abcdef0123456789abcdef01234567";
 const PROMPT_SHA256 =
   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+async function writePublishedVerdict(directory, verdict, options = {}) {
+  const json = Buffer.from(`${JSON.stringify(verdict, null, 2)}\n`, "utf8");
+  const markdown = Buffer.from(renderBilateralVerdictMarkdown(verdict), "utf8");
+  const marker = Buffer.from(
+    options.marker ??
+      `${JSON.stringify({
+        jsonSha256: createHash("sha256").update(json).digest("hex"),
+        markdownSha256: createHash("sha256").update(markdown).digest("hex"),
+        schema: "clockchain.bilateral-authorization-verdict-completion/v1",
+        ...options.markerFields,
+      })}\n`,
+    "utf8",
+  );
+  await mkdir(directory, { mode: 0o700, recursive: true });
+  await writeFile(join(directory, "bilateral-verdict.json"), json, { mode: 0o600 });
+  await writeFile(join(directory, "BILATERAL-VERDICT.md"), markdown, { mode: 0o600 });
+  await writeFile(join(directory, ".bilateral-verdict.complete.json"), marker, { mode: 0o600 });
+  return { json, markdown, marker };
+}
+
+function publicationMarker(json, markdown) {
+  return `${JSON.stringify({
+    jsonSha256: createHash("sha256").update(json).digest("hex"),
+    markdownSha256: createHash("sha256").update(markdown).digest("hex"),
+    schema: "clockchain.bilateral-authorization-verdict-completion/v1",
+  })}\n`;
+}
+
+test("validates an exact marker-complete published verdict", async (t) => {
+  const fixture = await completeFixture(t);
+  const verdict = await verifyBilateralAuthorization(fixture.input);
+  const directory = join(fixture.root, "published-verdict");
+  const publication = await writePublishedVerdict(directory, verdict);
+
+  const result = await validatePublishedBilateralVerdict({
+    outputDirectory: directory,
+    repositorySha: REPOSITORY_SHA,
+    sessionDigest: verdict.sessionDigest,
+  });
+
+  assert.deepEqual(result, {
+    publicationDigest: createHash("sha256")
+      .update(
+        JSON.stringify({
+          jsonSha256: createHash("sha256")
+            .update(publication.json)
+            .digest("hex"),
+          markdownSha256: createHash("sha256")
+            .update(publication.markdown)
+            .digest("hex"),
+          markerSha256: createHash("sha256")
+            .update(publication.marker)
+            .digest("hex"),
+        }),
+      )
+      .digest("hex"),
+    status: "VERIFICATION_PASSED",
+  });
+  assert.equal(Object.isFrozen(result), true);
+});
+
+test("rejects marker-incomplete, malformed, and hash-mismatched publications", async (t) => {
+  const fixture = await completeFixture(t);
+  const verdict = await verifyBilateralAuthorization(fixture.input);
+  const directory = join(fixture.root, "invalid-publication");
+  const expected = {
+    outputDirectory: directory,
+    repositorySha: REPOSITORY_SHA,
+    sessionDigest: verdict.sessionDigest,
+  };
+  await mkdir(directory, { mode: 0o700 });
+  await assert.rejects(() => validatePublishedBilateralVerdict(expected), BilateralVerdictError);
+
+  await writePublishedVerdict(directory, verdict, {
+    marker: "{not-json}\n",
+  });
+  await assert.rejects(() => validatePublishedBilateralVerdict(expected), BilateralVerdictError);
+
+  await rm(directory, { recursive: true, force: true });
+  await writePublishedVerdict(directory, verdict, {
+    markerFields: { jsonSha256: "0".repeat(64) },
+  });
+  await assert.rejects(() => validatePublishedBilateralVerdict(expected), BilateralVerdictError);
+
+  await rm(directory, { recursive: true, force: true });
+  const publication = await writePublishedVerdict(directory, verdict);
+  const moved = JSON.parse(publication.json.toString("utf8"));
+  moved.paymentMoved = true;
+  const movedJson = Buffer.from(`${JSON.stringify(moved, null, 2)}\n`, "utf8");
+  await writeFile(join(directory, "bilateral-verdict.json"), movedJson);
+  await writeFile(
+    join(directory, ".bilateral-verdict.complete.json"),
+    `${JSON.stringify({
+      jsonSha256: createHash("sha256").update(movedJson).digest("hex"),
+      markdownSha256: createHash("sha256")
+        .update(publication.markdown)
+        .digest("hex"),
+      schema: "clockchain.bilateral-authorization-verdict-completion/v1",
+    })}\n`,
+  );
+  await assert.rejects(() => validatePublishedBilateralVerdict(expected), BilateralVerdictError);
+});
+
+test("rejects stale expected bindings and symlinked or replaced publication paths", async (t) => {
+  const fixture = await completeFixture(t);
+  const verdict = await verifyBilateralAuthorization(fixture.input);
+  const directory = join(fixture.root, "published-verdict");
+  const expected = {
+    outputDirectory: directory,
+    repositorySha: REPOSITORY_SHA,
+    sessionDigest: verdict.sessionDigest,
+  };
+  await writePublishedVerdict(directory, verdict);
+  await assert.rejects(
+    () => validatePublishedBilateralVerdict({ ...expected, repositorySha: "f".repeat(40) }),
+    BilateralVerdictError,
+  );
+  await assert.rejects(
+    () => validatePublishedBilateralVerdict({ ...expected, sessionDigest: "f".repeat(64) }),
+    BilateralVerdictError,
+  );
+
+  const linkedMarker = join(fixture.root, "marker-link");
+  await writeFile(linkedMarker, await readFile(join(directory, ".bilateral-verdict.complete.json")));
+  await rm(join(directory, ".bilateral-verdict.complete.json"));
+  await symlink(linkedMarker, join(directory, ".bilateral-verdict.complete.json"));
+  await assert.rejects(() => validatePublishedBilateralVerdict(expected), BilateralVerdictError);
+
+  await rm(directory, { recursive: true, force: true });
+  const replacement = join(fixture.root, "replacement-publication");
+  await writePublishedVerdict(replacement, verdict);
+  await symlink(replacement, directory);
+  await assert.rejects(() => validatePublishedBilateralVerdict(expected), BilateralVerdictError);
+});
+
+test("rejects non-private directories and publication files, including hardlinks", async (t) => {
+  const fixture = await completeFixture(t);
+  const verdict = await verifyBilateralAuthorization(fixture.input);
+  const directory = join(fixture.root, "private-publication");
+  const expected = {
+    outputDirectory: directory,
+    repositorySha: REPOSITORY_SHA,
+    sessionDigest: verdict.sessionDigest,
+  };
+
+  await writePublishedVerdict(directory, verdict);
+  await chmod(directory, 0o755);
+  await assert.rejects(() => validatePublishedBilateralVerdict(expected), BilateralVerdictError);
+
+  await chmod(directory, 0o700);
+  await chmod(join(directory, "bilateral-verdict.json"), 0o644);
+  await assert.rejects(() => validatePublishedBilateralVerdict(expected), BilateralVerdictError);
+
+  await chmod(join(directory, "bilateral-verdict.json"), 0o600);
+  await link(
+    join(directory, "bilateral-verdict.json"),
+    join(fixture.root, "hardlinked-verdict.json"),
+  );
+  await assert.rejects(() => validatePublishedBilateralVerdict(expected), BilateralVerdictError);
+});
+
+test("rejects alternate valid JSON bytes even with matching marker and markdown", async (t) => {
+  const fixture = await completeFixture(t);
+  const verdict = await verifyBilateralAuthorization(fixture.input);
+  const directory = join(fixture.root, "alternate-json-publication");
+  const publication = await writePublishedVerdict(directory, verdict);
+  const compactJson = Buffer.from(JSON.stringify(verdict), "utf8");
+  await writeFile(join(directory, "bilateral-verdict.json"), compactJson, { mode: 0o600 });
+  await writeFile(
+    join(directory, ".bilateral-verdict.complete.json"),
+    publicationMarker(compactJson, publication.markdown),
+    { mode: 0o600 },
+  );
+
+  await assert.rejects(
+    () => validatePublishedBilateralVerdict({
+      outputDirectory: directory,
+      repositorySha: REPOSITORY_SHA,
+      sessionDigest: verdict.sessionDigest,
+    }),
+    BilateralVerdictError,
+  );
+
+  const reordered = Object.fromEntries(
+    Object.entries(verdict).reverse(),
+  );
+  const reorderedJson = Buffer.from(
+    `${JSON.stringify(reordered, null, 2)}\n`,
+    "utf8",
+  );
+  const reorderedMarkdown = Buffer.from(
+    renderBilateralVerdictMarkdown(reordered),
+    "utf8",
+  );
+  await writeFile(join(directory, "bilateral-verdict.json"), reorderedJson, { mode: 0o600 });
+  await writeFile(join(directory, "BILATERAL-VERDICT.md"), reorderedMarkdown, { mode: 0o600 });
+  await writeFile(
+    join(directory, ".bilateral-verdict.complete.json"),
+    publicationMarker(reorderedJson, reorderedMarkdown),
+    { mode: 0o600 },
+  );
+  await assert.rejects(
+    () => validatePublishedBilateralVerdict({
+      outputDirectory: directory,
+      repositorySha: REPOSITORY_SHA,
+      sessionDigest: verdict.sessionDigest,
+    }),
+    BilateralVerdictError,
+  );
+});
 
 function descriptorFixture() {
   return {

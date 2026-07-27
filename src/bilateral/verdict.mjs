@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { open } from "node:fs/promises";
+import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
 import { types } from "node:util";
 
@@ -103,11 +103,28 @@ const MAX_DESCRIPTOR_DEPTH = 32;
 const MAX_MARKER_BYTES = 2048;
 const MAX_JSON_BYTES = 1024 * 1024;
 const MAX_MARKDOWN_BYTES = 2 * 1024 * 1024;
-const DEFAULT_FILE_SYSTEM = Object.freeze({ open });
+const DEFAULT_FILE_SYSTEM = Object.freeze({ lstat, open });
 const PARTY_RESULT_FILES = Object.freeze({
   json: "party-result.json",
   markdown: "PARTY-RESULT.md",
   marker: ".party-result.complete.json",
+});
+const VERDICT_COMPLETION_MARKER_SCHEMA =
+  "clockchain.bilateral-authorization-verdict-completion/v1";
+const VERDICT_COMPLETION_MARKER_KEYS = Object.freeze([
+  "jsonSha256",
+  "markdownSha256",
+  "schema",
+]);
+const VERDICT_PUBLICATION_INPUT_KEYS = Object.freeze([
+  "outputDirectory",
+  "repositorySha",
+  "sessionDigest",
+]);
+const VERDICT_PUBLICATION_FILES = Object.freeze({
+  json: "bilateral-verdict.json",
+  markdown: "BILATERAL-VERDICT.md",
+  marker: ".bilateral-verdict.complete.json",
 });
 
 export class BilateralVerdictError extends Error {
@@ -393,6 +410,7 @@ async function readBoundedRegularFile(
   fileSystem,
   path,
   maxBytes,
+  validateMetadata = () => true,
 ) {
   let handle;
   let closeFailed = false;
@@ -418,7 +436,8 @@ async function readBoundedRegularFile(
       !before.isFile() ||
       !Number.isSafeInteger(before.size) ||
       before.size < 0 ||
-      before.size > maxBytes
+      before.size > maxBytes ||
+      !validateMetadata(before)
     ) {
       fail();
     }
@@ -428,7 +447,8 @@ async function readBoundedRegularFile(
       !Buffer.isBuffer(bytes) ||
       bytes.length > maxBytes ||
       bytes.length !== before.size ||
-      !sameStat(before, after)
+      !sameStat(before, after) ||
+      !validateMetadata(after)
     ) {
       fail();
     }
@@ -452,8 +472,140 @@ async function readBoundedRegularFile(
   }
 }
 
+function hasStablePosixMetadata(metadata) {
+  return [
+    metadata?.dev,
+    metadata?.ino,
+    metadata?.mode,
+    metadata?.nlink,
+    metadata?.uid,
+    metadata?.gid,
+    metadata?.rdev,
+  ].every(Number.isSafeInteger);
+}
+
+function isCurrentUserPrivate(metadata, mode, nlink) {
+  if (!hasStablePosixMetadata(metadata)) {
+    return false;
+  }
+  if (process.platform === "win32") {
+    return true;
+  }
+  return (
+    (metadata.mode & 0o777) === mode &&
+    metadata.nlink === nlink &&
+    (
+      typeof process.getuid !== "function" ||
+      metadata.uid === process.getuid()
+    )
+  );
+}
+
+function isPrivatePublicationDirectory(metadata) {
+  return (
+    typeof metadata?.isDirectory === "function" &&
+    metadata.isDirectory() &&
+    isCurrentUserPrivate(metadata, 0o700, metadata.nlink)
+  );
+}
+
+function isPrivatePublicationFile(metadata) {
+  return (
+    typeof metadata?.isFile === "function" &&
+    metadata.isFile() &&
+    isCurrentUserPrivate(metadata, 0o600, 1)
+  );
+}
+
+async function openPinnedPublicationDirectory(fileSystem, path) {
+  let handle;
+  try {
+    const metadata = await fileSystem.lstat(path);
+    if (!isPrivatePublicationDirectory(metadata)) {
+      fail();
+    }
+    handle = await fileSystem.open(
+      path,
+      constants.O_RDONLY |
+        (constants.O_DIRECTORY ?? 0) |
+        (constants.O_NOFOLLOW ?? 0),
+    );
+    if (
+      handle === null ||
+      typeof handle !== "object" ||
+      typeof handle.stat !== "function" ||
+      typeof handle.close !== "function"
+    ) {
+      fail();
+    }
+    const openedMetadata = await handle.stat();
+    if (
+      !isPrivatePublicationDirectory(openedMetadata) ||
+      !sameStat(metadata, openedMetadata)
+    ) {
+      fail();
+    }
+    return { handle, metadata };
+  } catch (error) {
+    if (handle !== undefined) {
+      try {
+        await handle.close();
+      } catch {
+        fail();
+      }
+    }
+    if (error instanceof BilateralVerdictError) {
+      throw error;
+    }
+    fail();
+  }
+}
+
+async function assertPinnedPublicationDirectory(
+  fileSystem,
+  path,
+  handle,
+  metadata,
+) {
+  const current = await fileSystem.lstat(path);
+  const opened = await handle.stat();
+  if (
+    !isPrivatePublicationDirectory(current) ||
+    !isPrivatePublicationDirectory(opened) ||
+    !sameStat(metadata, current) ||
+    !sameStat(metadata, opened)
+  ) {
+    fail();
+  }
+}
+
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+function publishedVerdictDigest(json, markdown, marker) {
+  return sha256(canonicalBytes({
+    jsonSha256: sha256(json),
+    markdownSha256: sha256(markdown),
+    markerSha256: sha256(marker),
+  }));
+}
+
+function publisherVerdictBytes(verdict) {
+  const published = {};
+  for (const key of VERDICT_KEYS) {
+    published[key] =
+      key === "transitions"
+        ? verdict.transitions.map((transition) => {
+          const publishedTransition = {};
+          for (const transitionKey of VERDICT_TRANSITION_KEYS) {
+            publishedTransition[transitionKey] = transition[transitionKey];
+          }
+          return publishedTransition;
+        })
+        : verdict[key];
+  }
+  return Buffer.from(`${JSON.stringify(published, null, 2)}\n`, "utf8");
 }
 
 function parseMarker(bytes, canaries) {
@@ -1017,6 +1169,127 @@ function validateVerdict(verdict) {
     )
   ) {
     fail();
+  }
+}
+
+function parsePublishedVerdictMarker(bytes) {
+  try {
+    const text = bytes.toString("utf8");
+    const marker = JSON.parse(text);
+    if (
+      !hasExactKeys(marker, VERDICT_COMPLETION_MARKER_KEYS) ||
+      marker.schema !== VERDICT_COMPLETION_MARKER_SCHEMA ||
+      typeof marker.jsonSha256 !== "string" ||
+      !HASH_PATTERN.test(marker.jsonSha256) ||
+      typeof marker.markdownSha256 !== "string" ||
+      !HASH_PATTERN.test(marker.markdownSha256) ||
+      `${canonicalBytes(marker).toString("utf8")}\n` !== text
+    ) {
+      fail();
+    }
+    return marker;
+  } catch (error) {
+    if (error instanceof BilateralVerdictError) {
+      throw error;
+    }
+    fail();
+  }
+}
+
+function exactPublishedVerdictInput(input) {
+  if (!hasExactKeys(input, VERDICT_PUBLICATION_INPUT_KEYS)) {
+    fail();
+  }
+  const outputDirectory = ownData(input, "outputDirectory");
+  const repositorySha = ownData(input, "repositorySha");
+  const sessionDigest = ownData(input, "sessionDigest");
+  if (
+    typeof outputDirectory !== "string" ||
+    outputDirectory.length === 0 ||
+    typeof repositorySha !== "string" ||
+    !/^[0-9a-f]{40}$/.test(repositorySha) ||
+    typeof sessionDigest !== "string" ||
+    !HASH_PATTERN.test(sessionDigest)
+  ) {
+    fail();
+  }
+  return { outputDirectory, repositorySha, sessionDigest };
+}
+
+export async function validatePublishedBilateralVerdict(input) {
+  let directoryHandle;
+  try {
+    const expected = exactPublishedVerdictInput(input);
+    const directory = await openPinnedPublicationDirectory(
+      DEFAULT_FILE_SYSTEM,
+      expected.outputDirectory,
+    );
+    directoryHandle = directory.handle;
+    const marker = await readBoundedRegularFile(
+      DEFAULT_FILE_SYSTEM,
+      join(expected.outputDirectory, VERDICT_PUBLICATION_FILES.marker),
+      MAX_MARKER_BYTES,
+      isPrivatePublicationFile,
+    );
+    const json = await readBoundedRegularFile(
+      DEFAULT_FILE_SYSTEM,
+      join(expected.outputDirectory, VERDICT_PUBLICATION_FILES.json),
+      MAX_JSON_BYTES,
+      isPrivatePublicationFile,
+    );
+    const markdown = await readBoundedRegularFile(
+      DEFAULT_FILE_SYSTEM,
+      join(expected.outputDirectory, VERDICT_PUBLICATION_FILES.markdown),
+      MAX_MARKDOWN_BYTES,
+      isPrivatePublicationFile,
+    );
+    const completion = parsePublishedVerdictMarker(marker);
+    if (
+      sha256(json) !== completion.jsonSha256 ||
+      sha256(markdown) !== completion.markdownSha256
+    ) {
+      fail();
+    }
+    const verdictText = json.toString("utf8");
+    const markdownText = markdown.toString("utf8");
+    assertSecretFree(verdictText);
+    assertSecretFree(markdownText);
+    const verdict = JSON.parse(verdictText);
+    validateVerdict(verdict);
+    if (
+      !publisherVerdictBytes(verdict).equals(json) ||
+      verdict.repositorySha !== expected.repositorySha ||
+      verdict.sessionDigest !== expected.sessionDigest ||
+      verdict.paymentMoved !== false ||
+      renderBilateralVerdictMarkdown(verdict) !== markdownText
+    ) {
+      fail();
+    }
+    await assertPinnedPublicationDirectory(
+      DEFAULT_FILE_SYSTEM,
+      expected.outputDirectory,
+      directoryHandle,
+      directory.metadata,
+    );
+    await directoryHandle.close();
+    directoryHandle = undefined;
+    return Object.freeze({
+      publicationDigest: publishedVerdictDigest(json, markdown, marker),
+      status: "VERIFICATION_PASSED",
+    });
+  } catch (error) {
+    if (error instanceof BilateralVerdictError) {
+      throw error;
+    }
+    fail();
+  } finally {
+    if (directoryHandle !== undefined) {
+      try {
+        await directoryHandle.close();
+      } catch {
+        fail();
+      }
+    }
   }
 }
 
