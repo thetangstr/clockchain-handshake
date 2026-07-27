@@ -87,6 +87,7 @@ import {
   RELAY_TOTAL_TIMEOUT_MS,
   createRelayRequestHandler,
   main as relayMain,
+  relayReadinessLine,
 } from "../bin/handshake-relay.mjs";
 
 const REPOSITORY_SHA = "e".repeat(40);
@@ -3311,6 +3312,63 @@ test("pins fixed HTTPS deadlines and rejects every non-exact CLI flag surface be
     relaySource,
     /isIP\(host\) === 6\s*\? `\[\$\{host\}\]:\$\{port\}`/,
   );
+});
+
+test("accepts only canonical port zero and reports the bound relay address without main output", async (t) => {
+  const tls = await tlsFixture(t);
+  const state = await privateRoot(t);
+  for (const port of ["00", "01", "-1", "+0", "1.0", "65536"]) {
+    await assert.rejects(
+      relayMain(
+        relayArguments({
+          certificatePath: tls.certificatePath,
+          port,
+          privateKeyPath: tls.privateKeyPath,
+          state,
+        }),
+        { checkoutProbe: cleanCheckoutProbe },
+      ),
+      { code: "COORDINATION_RELAY_STARTUP_INVALID" },
+    );
+  }
+  const writes = [];
+  const originalWrite = process.stdout.write;
+  let running;
+  process.stdout.write = (chunk, ...rest) => {
+    writes.push([chunk, rest]);
+    return true;
+  };
+  try {
+    running = await relayMain(
+      relayArguments({
+        certificatePath: tls.certificatePath,
+        port: 0,
+        privateKeyPath: tls.privateKeyPath,
+        state,
+      }),
+      { checkoutProbe: cleanCheckoutProbe },
+    );
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+  t.after(() => running?.close().catch(() => {}));
+  assert.deepEqual(writes, []);
+  assert.equal(running.address.host, "127.0.0.1");
+  assert.ok(Number.isSafeInteger(running.address.port) && running.address.port > 0);
+  const response = await httpsRequest({
+    ca: tls.certificate,
+    headers: { host: `127.0.0.1:${running.address.port}` },
+    method: "GET",
+    path: `/v1/sessions/${SESSION_ID}/events?waitMs=0`,
+    port: running.address.port,
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(
+    relayReadinessLine(running),
+    `{"host":"127.0.0.1","paymentMoved":false,"pid":${process.pid},"port":${running.address.port},"schema":"clockchain.bilateral-relay-ready/v1"}\n`,
+  );
+  await running.close();
+  await running.close();
 });
 
 test("production checkout attestation ignores poisoned Git repository, index, worktree, config, executable, and locale environment", async (t) => {

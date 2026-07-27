@@ -30,6 +30,9 @@ import {
   canonicalizeReceiptEventValue,
 } from "../src/canonical.mjs";
 import {
+  assertSecretFree,
+} from "../src/redact.mjs";
+import {
   operatorPublicKeyPath,
 } from "../src/bilateral/descriptor.mjs";
 import {
@@ -103,7 +106,9 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const REPOSITORY_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const PORT_PATTERN = /^(?:[1-9][0-9]{0,4})$/;
+const PORT_PATTERN = /^(?:0|[1-9][0-9]{0,4})$/;
+const READINESS_SCHEMA =
+  "clockchain.bilateral-relay-ready/v1";
 const REQUEST_ERROR = Object.freeze({
   code: "COORDINATION_RELAY_REQUEST_INVALID",
   paymentMoved: false,
@@ -202,6 +207,18 @@ function stableBytes(value) {
   } catch {
     invalid();
   }
+}
+
+export function relayReadinessLine(running) {
+  const readiness = {
+    host: running.address.host,
+    paymentMoved: false,
+    pid: process.pid,
+    port: running.address.port,
+    schema: READINESS_SCHEMA,
+  };
+  assertSecretFree(readiness);
+  return `${stableBytes(readiness).toString("utf8")}\n`;
 }
 
 function isCanonicalIpText(value) {
@@ -1038,17 +1055,10 @@ export async function main(arguments_, dependencies = {}) {
       repositoryPublicKeyResolver: gitShowPublicKey,
       store,
     });
-    server = https.createServer(
-      {
-        cert: certificateBytes,
-        key: privateKeyBytes,
-      },
-      createRelayRequestHandler(
-        service,
-        options.host,
-        options.port,
-      ),
-    );
+    server = https.createServer({
+      cert: certificateBytes,
+      key: privateKeyBytes,
+    });
     server.headersTimeout = RELAY_HEADER_TIMEOUT_MS;
     server.requestTimeout = RELAY_TOTAL_TIMEOUT_MS;
     server.timeout = RELAY_TOTAL_TIMEOUT_MS;
@@ -1069,11 +1079,26 @@ export async function main(arguments_, dependencies = {}) {
       );
     });
     await listen(server, options.port, options.host);
+    const bound = server.address();
+    if (
+      bound === null ||
+      typeof bound === "string" ||
+      !Number.isSafeInteger(bound.port) ||
+      bound.port < 1 ||
+      bound.port > 65_535
+    ) {
+      invalid();
+    }
+    const port = bound.port;
+    server.on(
+      "request",
+      createRelayRequestHandler(service, options.host, port),
+    );
     let closePromise;
     const running = Object.freeze({
       address: Object.freeze({
         host: options.host,
-        port: options.port,
+        port,
       }),
       close() {
         if (closePromise !== undefined) {
@@ -1116,7 +1141,31 @@ const isDirect =
     resolve(fileURLToPath(import.meta.url));
 
 if (isDirect) {
-  main(process.argv.slice(2)).catch(() => {
+  let running;
+  let closePromise;
+  let signalReceived = false;
+  const close = async () => {
+    signalReceived = true;
+    if (running === undefined) {
+      return;
+    }
+    closePromise ??= running.close();
+    await closePromise;
+  };
+  const onSignal = () => {
+    void close().catch(() => {
+      process.exitCode = 1;
+    });
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  main(process.argv.slice(2)).then(async (value) => {
+    running = value;
+    process.stdout.write(relayReadinessLine(running));
+    if (signalReceived) {
+      await close();
+    }
+  }).catch(() => {
     process.stderr.write(
       "COORDINATION_RELAY_STARTUP_INVALID\n",
     );
