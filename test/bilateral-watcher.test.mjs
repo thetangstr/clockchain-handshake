@@ -413,6 +413,30 @@ test("watch loop uses injected clock/sleeper/output and stops after acknowledgme
   assert.deepEqual(sleeps, []);
 });
 
+test("watcher aborts an in-flight observation without output or a retry", async () => {
+  const controller = new AbortController();
+  let beginSearch; let searches = 0; let outputs = 0;
+  const began = new Promise((resolve_) => { beginSearch = resolve_; });
+  const client = {
+    getBlock: async () => { throw new Error("unexpected block lookup"); },
+    resolveAgent: async () => { throw new Error("unexpected agent lookup"); },
+    searchActions: async () => { searches += 1; beginSearch(); return new Promise(() => {}); },
+    verifyCrossParty: async () => { throw new Error("unexpected verification"); },
+  };
+  const pending = watchBilateralSession({
+    advisory: { health: null, status: null }, canaries: [], client, descriptor: DESCRIPTOR,
+    intervalMs: 20_000, now: () => 1_784_923_300_000, output: () => { outputs += 1; }, signal: controller.signal,
+    sleeper: async () => { throw new Error("unexpected sleep"); }, windowMs: 60_000,
+  });
+  await began;
+  controller.abort();
+  const outcome = await Promise.race([pending, new Promise((resolve_) => setTimeout(() => resolve_("timed out"), 50))]);
+  assert.equal(outcome, null);
+  assert.equal(outputs, 0);
+  assert.equal(searches, 1);
+  await assert.rejects(watchBilateralSession({ advisory: { health: null, status: null }, canaries: [], client, descriptor: DESCRIPTOR, intervalMs: 20_000, now: () => 1_784_923_300_000, output: () => {}, signal: {}, sleeper: async () => {}, windowMs: 60_000 }));
+});
+
 test("CLI verifies an injected repository key before creating a client and watches the inner descriptor", async () => {
   const { fake } = await seedFake(1);
   const lines = [];

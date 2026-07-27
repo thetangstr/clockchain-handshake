@@ -49,6 +49,7 @@ const STATES = Object.freeze([
   "ACCEPTED",
   "ACKNOWLEDGED",
 ]);
+const ABORTED = Symbol("watcher-aborted");
 const MAX_TEXT_BYTES = 65_536;
 const MAX_TOKEN_BYTES = 4_096;
 const MAX_ADVISORY_LENGTH = 256;
@@ -99,6 +100,23 @@ function dataField(value, key) {
     return undefined;
   }
   return descriptor.value;
+}
+
+function optionalAbortSignal(value) {
+  if (value === undefined) return undefined;
+  if (!(value instanceof AbortSignal) || Object.getPrototypeOf(value) !== AbortSignal.prototype) fail();
+  return value;
+}
+
+async function abortable(signal, operation) {
+  if (signal?.aborted) return ABORTED;
+  if (signal === undefined) return operation();
+  let onAbort;
+  const aborted = new Promise((resolve_) => {
+    onAbort = () => resolve_(ABORTED);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try { return await Promise.race([Promise.resolve().then(operation), aborted]); } finally { signal.removeEventListener("abort", onAbort); }
 }
 
 function assertClient(client) {
@@ -374,6 +392,7 @@ export async function observeBilateralSession(options) {
   const client = dataField(options, "client");
   const descriptor = dataField(options, "descriptor");
   const now = dataField(options, "now");
+  const signal = optionalAbortSignal(dataField(options, "signal"));
   const canaries = validatedCanaries(
     dataField(options, "canaries") ?? [],
   );
@@ -385,6 +404,7 @@ export async function observeBilateralSession(options) {
   if (typeof now !== "function") {
     fail();
   }
+  if (signal?.aborted) return null;
 
   let sessionDigest;
   try {
@@ -406,22 +426,25 @@ export async function observeBilateralSession(options) {
   try {
     const records = [];
     for (let index = 0; index < displays.length; index += 1) {
-      const result = await client.searchActions({
+      const result = await abortable(signal, () => client.searchActions({
         asset_reference_id: displays[index].referenceId,
-      });
+      }));
+      if (result === ABORTED) return null;
       if (!Array.isArray(result)) {
         throw new WatcherTerminal("FAILED");
       }
       displays[index].cardinality = String(result.length);
       records.push(result);
     }
-    snapshot.state = await verifyObservedPrefix({
+    const state = await abortable(signal, () => verifyObservedPrefix({
       client,
       descriptor,
       displays,
       records,
       sessionDigest,
-    });
+    }));
+    if (state === ABORTED) return null;
+    snapshot.state = state;
     if (displays[0].verified) {
       snapshot.deadlineMs = String(
         deadlineMs(Number(displays[0].blockTimeMs)),
@@ -439,6 +462,7 @@ export async function watchBilateralSession(options) {
   }
   const now = dataField(options, "now");
   const sleeper = dataField(options, "sleeper");
+  const signal = optionalAbortSignal(dataField(options, "signal"));
   const output = dataField(options, "output");
   const intervalMs =
     dataField(options, "intervalMs") ?? WATCHER_INTERVAL_MS;
@@ -457,6 +481,7 @@ export async function watchBilateralSession(options) {
   ) {
     fail();
   }
+  if (signal?.aborted) return null;
   const startedAtMs = canonicalNow(now);
   let previousTime = startedAtMs;
   const maximumIterations =
@@ -474,7 +499,9 @@ export async function watchBilateralSession(options) {
       client: dataField(options, "client"),
       descriptor: dataField(options, "descriptor"),
       now,
+      signal,
     });
+    if (latest === null || signal?.aborted) return null;
     try {
       await output(latest);
     } catch {
@@ -494,10 +521,11 @@ export async function watchBilateralSession(options) {
     }
     const delay = Math.min(intervalMs, remaining);
     try {
-      await sleeper(delay);
+      if (await abortable(signal, () => sleeper(delay)) === ABORTED) return null;
     } catch {
       fail();
     }
+    if (signal?.aborted) return null;
     previousTime = canonicalNow(now, previousTime);
   }
   return latest;
