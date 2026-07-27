@@ -51,6 +51,10 @@ export const COORDINATION_EVENT_AUTHORITIES =
     WAIT_FOR_FUNDING: "operator",
   });
 
+export const COORDINATION_EVENT_KINDS = Object.freeze(
+  Object.keys(COORDINATION_EVENT_AUTHORITIES),
+);
+
 const INITIAL_KEYS = Object.freeze([
   "releaseId",
   "repositorySha",

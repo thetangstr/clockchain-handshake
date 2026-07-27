@@ -8,6 +8,7 @@ import {
 } from "../src/bilateral/coordination/envelope.mjs";
 import {
   COORDINATION_EVENT_AUTHORITIES,
+  COORDINATION_EVENT_KINDS,
   CoordinationLifecycleError,
   RELEASE_STATES,
   initialReleaseView,
@@ -388,6 +389,14 @@ test("pins the closed release states and event authorities", () => {
     Object.isFrozen(COORDINATION_EVENT_AUTHORITIES),
     true,
   );
+});
+
+test("exports a frozen canonical event-kind registry matching lifecycle authority", () => {
+  assert.deepEqual(
+    COORDINATION_EVENT_KINDS,
+    Object.keys(COORDINATION_EVENT_AUTHORITIES),
+  );
+  assert.equal(Object.isFrozen(COORDINATION_EVENT_KINDS), true);
 });
 
 test("initialReleaseView has an exact deep-frozen detached shape", () => {
