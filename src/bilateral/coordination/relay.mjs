@@ -1,5 +1,6 @@
 import {
   createHash,
+  timingSafeEqual,
 } from "node:crypto";
 
 import {
@@ -29,11 +30,18 @@ import {
   initialReleaseView,
   reduceReleaseEvent,
 } from "./lifecycle.mjs";
+import {
+  COORDINATION_RECEIPT_SCHEMA,
+  COORDINATION_RECEIPT_SIGNATURE_DOMAIN,
+  createCoordinationReceipt,
+  validateReceiptSigner,
+  verifyCoordinationReceipt,
+} from "./receipt.mjs";
 
-export const COORDINATION_RECEIPT_SCHEMA =
-  "clockchain.bilateral-coordination-receipt/v1";
-export const COORDINATION_RECEIPT_SIGNATURE_DOMAIN =
-  "clockchain.bilateral-coordination-receipt-signature/v1\n";
+export {
+  COORDINATION_RECEIPT_SCHEMA,
+  COORDINATION_RECEIPT_SIGNATURE_DOMAIN,
+};
 export const MAX_RELAY_REQUEST_BYTES = 65_536;
 export const MAX_RELAY_WAIT_MS = 30_000;
 
@@ -63,12 +71,6 @@ const STORE_METHODS = Object.freeze([
   "readEnrollment",
   "readEvents",
   "readReleaseView",
-]);
-const RECEIPT_SIGNER_KEYS = Object.freeze([
-  "certificateSha256",
-  "sign",
-  "signatureAlgorithm",
-  "verify",
 ]);
 const BOOTSTRAP_INPUT_KEYS = Object.freeze(["body"]);
 const BOOTSTRAP_KEYS = Object.freeze([
@@ -120,22 +122,6 @@ const ENVELOPE_SIGNATURE_KEYS = Object.freeze([
   "publicKey",
   "value",
 ]);
-const RECEIPT_KEYS = Object.freeze([
-  "capabilityDigest",
-  "certificateSha256",
-  "enrollmentDigest",
-  "paymentMoved",
-  "releaseId",
-  "repositorySha",
-  "role",
-  "schema",
-  "sessionId",
-  "signature",
-  "signatureAlgorithm",
-]);
-const RECEIPT_UNSIGNED_KEYS = Object.freeze(
-  RECEIPT_KEYS.filter((key) => key !== "signature"),
-);
 const RELEASE_VIEW_KEYS = Object.freeze([
   "events",
   "paymentMoved",
@@ -154,13 +140,6 @@ const CAPABILITY_PATTERN = /^[0-9a-f]{64}$/;
 const REPOSITORY_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const BASE64_PATTERN =
-  /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-const RECEIPT_SIGNATURE_ALGORITHMS = new Set([
-  "ecdsa-sha256",
-  "ed25519",
-  "rsa-pss-sha256",
-]);
 const DESCRIPTOR_EVENT_KINDS = new Set([
   "DESCRIPTOR_ACCEPTED",
   "REHEARSAL_DESCRIPTOR_READY",
@@ -246,6 +225,31 @@ function readExactData(value, keys) {
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+function enrollmentContainsCapability(
+  enrollmentBytes,
+  enrollment,
+  capability,
+) {
+  const text = enrollmentBytes.toString("utf8");
+  const coordinationKey = Buffer.from(
+    enrollment.coordinationKey.publicKey,
+    "base64",
+  );
+  const preflightKey = Buffer.from(
+    enrollment.preflightKey.publicKey,
+    "base64",
+  );
+  return (
+    text
+      .toLowerCase()
+      .includes(capability.toString("hex")) ||
+    text.includes(capability.toString("base64")) ||
+    text.includes(capability.toString("base64url")) ||
+    timingSafeEqual(coordinationKey, capability) ||
+    timingSafeEqual(preflightKey, capability)
+  );
 }
 
 function assertSha256(value) {
@@ -390,212 +394,6 @@ function validateStore(store) {
     }
   }
   return store;
-}
-
-function validateReceiptSigner(value) {
-  const data = readExactData(value, RECEIPT_SIGNER_KEYS);
-  if (
-    !SHA256_PATTERN.test(data.certificateSha256) ||
-    !RECEIPT_SIGNATURE_ALGORITHMS.has(
-      data.signatureAlgorithm,
-    ) ||
-    typeof data.sign !== "function" ||
-    typeof data.verify !== "function"
-  ) {
-    invalid();
-  }
-  return Object.freeze({
-    certificateSha256: data.certificateSha256,
-    sign: data.sign,
-    signatureAlgorithm: data.signatureAlgorithm,
-    verify: data.verify,
-  });
-}
-
-function receiptUnsigned(context, receiptSigner) {
-  return Object.freeze({
-    capabilityDigest: context.capabilityDigest,
-    certificateSha256:
-      receiptSigner.certificateSha256,
-    enrollmentDigest: context.enrollmentDigest,
-    paymentMoved: false,
-    releaseId: context.releaseId,
-    repositorySha: context.repositorySha,
-    role: context.role,
-    schema: COORDINATION_RECEIPT_SCHEMA,
-    sessionId: context.sessionId,
-    signatureAlgorithm:
-      receiptSigner.signatureAlgorithm,
-  });
-}
-
-function receiptPreimage(unsigned) {
-  return Buffer.concat([
-    Buffer.from(
-      COORDINATION_RECEIPT_SIGNATURE_DOMAIN,
-      "ascii",
-    ),
-    Buffer.from(
-      sha256(canonicalBytes(unsigned)),
-      "ascii",
-    ),
-  ]);
-}
-
-function readReceiptUnsigned(value) {
-  const data = readExactData(
-    value,
-    RECEIPT_UNSIGNED_KEYS,
-  );
-  if (
-    data.schema !== COORDINATION_RECEIPT_SCHEMA ||
-    data.paymentMoved !== false ||
-    !RECEIPT_SIGNATURE_ALGORITHMS.has(
-      data.signatureAlgorithm,
-    )
-  ) {
-    invalid();
-  }
-  return Object.freeze({
-    capabilityDigest: assertSha256(
-      data.capabilityDigest,
-    ),
-    certificateSha256: assertSha256(
-      data.certificateSha256,
-    ),
-    enrollmentDigest: assertSha256(
-      data.enrollmentDigest,
-    ),
-    paymentMoved: false,
-    releaseId: data.releaseId,
-    repositorySha: assertRepositorySha(
-      data.repositorySha,
-    ),
-    role:
-      data.role === "payer" || data.role === "payee"
-        ? data.role
-        : invalid(),
-    schema: data.schema,
-    sessionId: assertSessionId(data.sessionId),
-    signatureAlgorithm: data.signatureAlgorithm,
-  });
-}
-
-async function parseAndVerifyReceipt(
-  bytes,
-  expected,
-  receiptSigner,
-) {
-  const parsed = parseStableCanonical(
-    bytes,
-    MAX_RELAY_REQUEST_BYTES,
-  );
-  const data = readExactData(parsed, RECEIPT_KEYS);
-  const unsigned = readReceiptUnsigned({
-    capabilityDigest: data.capabilityDigest,
-    certificateSha256: data.certificateSha256,
-    enrollmentDigest: data.enrollmentDigest,
-    paymentMoved: data.paymentMoved,
-    releaseId: data.releaseId,
-    repositorySha: data.repositorySha,
-    role: data.role,
-    schema: data.schema,
-    sessionId: data.sessionId,
-    signatureAlgorithm: data.signatureAlgorithm,
-  });
-  if (
-    unsigned.capabilityDigest !==
-      expected.capabilityDigest ||
-    unsigned.certificateSha256 !==
-      receiptSigner.certificateSha256 ||
-    unsigned.enrollmentDigest !==
-      expected.enrollmentDigest ||
-    unsigned.releaseId !== expected.releaseId ||
-    unsigned.repositorySha !== expected.repositorySha ||
-    unsigned.role !== expected.role ||
-    unsigned.sessionId !== expected.sessionId ||
-    unsigned.signatureAlgorithm !==
-      receiptSigner.signatureAlgorithm ||
-    typeof data.signature !== "string" ||
-    !BASE64_PATTERN.test(data.signature)
-  ) {
-    invalid();
-  }
-  const signature = Buffer.from(
-    data.signature,
-    "base64",
-  );
-  if (
-    signature.length === 0 ||
-    signature.length > 1_024 ||
-    signature.toString("base64") !== data.signature
-  ) {
-    invalid();
-  }
-  let verified;
-  try {
-    verified = await receiptSigner.verify(
-      receiptPreimage(unsigned),
-      Buffer.from(signature),
-    );
-  } catch {
-    invalid();
-  }
-  if (verified !== true) {
-    invalid();
-  }
-  return Object.freeze({
-    ...unsigned,
-    signature: data.signature,
-  });
-}
-
-async function createReceiptBytes(
-  context,
-  receiptSigner,
-) {
-  const unsigned = receiptUnsigned(
-    context,
-    receiptSigner,
-  );
-  const preimage = receiptPreimage(unsigned);
-  let signature;
-  try {
-    signature = await receiptSigner.sign(
-      Buffer.from(preimage),
-    );
-  } catch {
-    invalid();
-  }
-  if (
-    !Buffer.isBuffer(signature) ||
-    signature.length === 0 ||
-    signature.length > 1_024
-  ) {
-    invalid();
-  }
-  let verified;
-  try {
-    verified = await receiptSigner.verify(
-      Buffer.from(preimage),
-      Buffer.from(signature),
-    );
-  } catch {
-    invalid();
-  }
-  if (verified !== true) {
-    invalid();
-  }
-  const bytes = stableBytes({
-    ...unsigned,
-    signature: signature.toString("base64"),
-  });
-  await parseAndVerifyReceipt(
-    bytes,
-    context,
-    receiptSigner,
-  );
-  return bytes;
 }
 
 async function verifyInvitationProofs(enrollment) {
@@ -1144,6 +942,15 @@ export function createRelayService(input) {
           invalid();
         }
         if (
+          enrollmentContainsCapability(
+            enrollmentBytes,
+            enrollment,
+            capability,
+          )
+        ) {
+          invalid();
+        }
+        if (
           enrollment.repositorySha !==
             frozenRepositorySha ||
           enrollment.paymentMoved !== false ||
@@ -1185,10 +992,10 @@ export function createRelayService(input) {
             enrollmentBytes,
             enrollmentDigest,
             receiptFactory: async (context) =>
-              createReceiptBytes(
+              createCoordinationReceipt({
                 context,
-                receiptSigner,
-              ),
+                signer: receiptSigner,
+              }),
           });
         } catch {
           invalid();
@@ -1211,9 +1018,9 @@ export function createRelayService(input) {
         ) {
           invalid();
         }
-        return parseAndVerifyReceipt(
-          consumption.receiptBytes,
-          {
+        return verifyCoordinationReceipt({
+          bytes: consumption.receiptBytes,
+          expected: {
             capabilityDigest:
               enrollment.capabilityDigest,
             enrollmentDigest,
@@ -1222,8 +1029,8 @@ export function createRelayService(input) {
             role: enrollment.role,
             sessionId: enrollment.sessionId,
           },
-          receiptSigner,
-        );
+          verifier: receiptSigner,
+        });
       });
     }
 

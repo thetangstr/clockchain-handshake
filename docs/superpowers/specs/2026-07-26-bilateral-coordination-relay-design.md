@@ -410,6 +410,28 @@ start. Any different request under that capability is terminal replay. The
 supervisor removes the raw capability from its active state only after it has
 durably stored and verified the receipt.
 
+The capability-free active launch state is
+`clockchain.bilateral-active-launch-state/v1`. It carries the exact canonical
+signed enrollment and TLS receipt, the capability digest, the complete redacted
+launch context, and `paymentMoved:false`; it never carries a raw capability,
+private key, or token. The enrolled coordination key signs the entire stable
+canonical state without `signature` under the ASCII domain
+`clockchain.bilateral-active-launch-state-signature/v1\n` followed by the
+lowercase SHA-256 of those bytes. Validation derives the signer from the signed
+enrollment and verifies this state signature before accepting the TLS receipt.
+That transitively binds the operator key ID, relay URL, exact certificate and
+fingerprint, issuance and expiry values, and all release/role/session/repository
+scope across restart.
+
+A fresh client cannot append coordination events or publish artifacts before
+bootstrap succeeds. Manifest validation excludes the capability's lower-,
+upper-, or mixed-case hexadecimal, canonical Base64, and canonical Base64url
+representations from every other field. Both client and relay repeat those
+checks across canonical enrollment bytes and reject a coordination or preflight
+public key whose decoded bytes equal the capability. Active-state creation
+scans the complete unsigned and signed public state again. The canonical
+wrapper contains the lowercase capability exactly once in its dedicated field.
+
 The relay remains authoritative for expiry. An unused capability is invalid at
 its expiry boundary, while a capability consumed before expiry may return its
 byte-identical persisted receipt to an exact retry after expiry. A client-side
@@ -957,7 +979,10 @@ hash mismatch fail startup closed.
 
 Bootstrap capability state stores only capability digests. Raw capabilities
 remain in private launch manifests and are destroyed or archived outside the
-active path after successful exchange.
+active path only after the signed active launch state, receipt, local
+coordination identity, and authenticated sender state are durably fsynced. A
+restart validates those durable values and uses the capability-free resumed
+client constructor. It never reconstructs or reactivates the retired manifest.
 
 ## 13. Interface and module boundaries
 

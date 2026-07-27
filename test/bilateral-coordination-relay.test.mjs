@@ -349,13 +349,14 @@ async function registerRole(
   store,
   {
     capability,
+    releaseId = RELEASE_ID,
     role,
   },
 ) {
   return store.registerCapability({
     capabilityDigest: sha256(capability),
     expiresAtMs: String(NOW_MS + 60_000),
-    releaseId: RELEASE_ID,
+    releaseId,
     role,
     sessionId: SESSION_ID,
   });
@@ -378,6 +379,9 @@ async function enrollmentFixture({
   invitationPrivateKeys,
   invitationSigners = invitationPrivateKeys,
   preflight,
+  preflightKeyId,
+  preflightPublicKey = rawPublicKey(preflight),
+  releaseId = RELEASE_ID,
   role,
 }) {
   const accounts = {
@@ -409,7 +413,7 @@ async function enrollmentFixture({
             invitationProofPreimage({
               address,
               capabilityDigest,
-              releaseId: RELEASE_ID,
+              releaseId,
               repositorySha: REPOSITORY_SHA,
               role,
               run,
@@ -432,10 +436,11 @@ async function enrollmentFixture({
       paymentMoved: false,
       preflightKey: {
         algorithm: "ed25519",
-        keyId: `${role}-preflight`,
-        publicKey: rawPublicKey(preflight),
+        keyId:
+          preflightKeyId ?? `${role}-preflight`,
+        publicKey: preflightPublicKey,
       },
-      releaseId: RELEASE_ID,
+      releaseId,
       repositorySha: REPOSITORY_SHA,
       role,
       schema:
@@ -824,6 +829,139 @@ test("rejects wrong invitation recovery before consuming or signing a receipt", 
   );
 });
 
+test("rejects a raw capability hidden in signed enrollment before consumption or persistence", async (t) => {
+  const { store } = await storeFixture(t);
+  await registerRole(store, {
+    capability: PAYER_CAPABILITY,
+    role: "payer",
+  });
+  const { receipt, relay } = relayFixture(store);
+  const rawCapability =
+    PAYER_CAPABILITY.toString("hex");
+  const enrollment = await enrollmentFixture({
+    capability: PAYER_CAPABILITY,
+    coordination: payerCoordination,
+    invitationPrivateKeys: invitationKeys.payer,
+    preflight: payerPreflight,
+    preflightKeyId: rawCapability,
+    role: "payer",
+  });
+  assert.equal(
+    canonicalBytes(enrollment).includes(
+      Buffer.from(rawCapability),
+    ),
+    true,
+  );
+  await assert.rejects(
+    relay.bootstrap({
+      body: bootstrapBody(
+        PAYER_CAPABILITY,
+        enrollment,
+      ),
+    }),
+    { code: "COORDINATION_RELAY_INVALID" },
+  );
+  assert.equal(receipt.signCalls, 0);
+  await assert.rejects(
+    store.readEnrollment({
+      role: "payer",
+      sessionId: SESSION_ID,
+    }),
+    { code: "COORDINATION_ENROLLMENT_NOT_FOUND" },
+  );
+});
+
+test("rejects capability bytes and alternate encodings in signed enrollment before consumption", async (t) => {
+  const capability = Buffer.alloc(32, 0xab);
+  const scenarios = [
+    {
+      preflightPublicKey:
+        capability.toString("base64"),
+      releaseId: RELEASE_ID,
+    },
+    {
+      releaseId: capability.toString("base64"),
+    },
+    {
+      releaseId:
+        capability.toString("base64url"),
+    },
+  ];
+  for (const scenario of scenarios) {
+    const { store } = await storeFixture(t);
+    await registerRole(store, {
+      capability,
+      releaseId: scenario.releaseId,
+      role: "payer",
+    });
+    const { receipt, relay } = relayFixture(store);
+    const enrollment = await enrollmentFixture({
+      capability,
+      coordination: payerCoordination,
+      invitationPrivateKeys:
+        invitationKeys.payer,
+      preflight: payerPreflight,
+      ...scenario,
+      role: "payer",
+    });
+    await assert.rejects(
+      relay.bootstrap({
+        body: bootstrapBody(
+          capability,
+          enrollment,
+        ),
+      }),
+      { code: "COORDINATION_RELAY_INVALID" },
+    );
+    assert.equal(receipt.signCalls, 0);
+    await assert.rejects(
+      store.readEnrollment({
+        role: "payer",
+        sessionId: SESSION_ID,
+      }),
+      { code: "COORDINATION_ENROLLMENT_NOT_FOUND" },
+    );
+  }
+});
+
+test("rejects an uppercase raw capability hidden in signed enrollment before consumption", async (t) => {
+  const { store } = await storeFixture(t);
+  const capability = Buffer.alloc(32, 0xab);
+  const releaseId =
+    capability.toString("hex").toUpperCase();
+  await registerRole(store, {
+    capability,
+    releaseId,
+    role: "payer",
+  });
+  const { receipt, relay } = relayFixture(store);
+  const enrollment = await enrollmentFixture({
+    capability,
+    coordination: payerCoordination,
+    invitationPrivateKeys: invitationKeys.payer,
+    preflight: payerPreflight,
+    releaseId,
+    role: "payer",
+  });
+  await assert.rejects(
+    relay.bootstrap({
+      body: bootstrapBody(
+        capability,
+        enrollment,
+      ),
+    }),
+    { code: "COORDINATION_RELAY_INVALID" },
+  );
+  assert.equal(receipt.signCalls, 0);
+  await assert.rejects(
+    store.readEnrollment({
+      role: "payer",
+      sessionId: SESSION_ID,
+    }),
+    { code: "COORDINATION_ENROLLMENT_NOT_FOUND" },
+  );
+});
+
 test("rejects malformed, noncanonical, extra, mismatched, and oversized bootstrap bodies", async (t) => {
   const { store } = await storeFixture(t);
   await registerRole(store, {
@@ -967,6 +1105,24 @@ test("requires the receipt signer to verify before persistence and re-verifies r
       sessionId: SESSION_ID,
     }),
     { code: "COORDINATION_ENROLLMENT_NOT_FOUND" },
+  );
+});
+
+test("shares one receipt schema, preimage, creation, and verification contract with clients", async () => {
+  const source = await readFile(
+    new URL(
+      "../src/bilateral/coordination/relay.mjs",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /from "\.\/receipt\.mjs";/,
+  );
+  assert.doesNotMatch(
+    source,
+    /function (?:createReceiptBytes|parseAndVerifyReceipt|receiptPreimage|receiptUnsigned)\(/,
   );
 });
 
@@ -1878,6 +2034,61 @@ test("pins fixed HTTPS deadlines and rejects every non-exact CLI flag surface be
       },
     );
   }
+
+  let checkoutProbes = 0;
+  for (const host of [
+    "0:0:0:0:0:0:0:1",
+    "2001:0DB8::1",
+    "2001:db8:0:0:0:0:0:1",
+  ]) {
+    await assert.rejects(
+      relayMain(
+        relayArguments({
+          certificatePath: "/tmp/certificate.pem",
+          host,
+          port: 8443,
+          privateKeyPath: "/tmp/private-key.pem",
+          state: "/tmp/relay-state",
+        }),
+        {
+          checkoutProbe() {
+            checkoutProbes += 1;
+            return cleanCheckoutProbe();
+          },
+        },
+      ),
+      { code: "COORDINATION_RELAY_STARTUP_INVALID" },
+    );
+  }
+  assert.equal(checkoutProbes, 0);
+
+  await assert.rejects(
+    relayMain(
+      relayArguments({
+        certificatePath: "/tmp/certificate.pem",
+        host: "2001:db8::1",
+        port: 8443,
+        privateKeyPath: "/tmp/private-key.pem",
+        state: "/tmp/relay-state",
+      }),
+      {
+        checkoutProbe() {
+          checkoutProbes += 1;
+          return cleanCheckoutProbe();
+        },
+      },
+    ),
+    { code: "COORDINATION_RELAY_STARTUP_INVALID" },
+  );
+  assert.equal(checkoutProbes, 1);
+  const relaySource = await readFile(
+    new URL("../bin/handshake-relay.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    relaySource,
+    /isIP\(host\) === 6\s*\? `\[\$\{host\}\]:\$\{port\}`/,
+  );
 });
 
 test("production checkout attestation ignores poisoned Git repository, index, worktree, config, executable, and locale environment", async (t) => {

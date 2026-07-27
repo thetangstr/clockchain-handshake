@@ -892,9 +892,13 @@ Not-tested: Real two-role HTTPS process topology
 
 **Files:**
 
+- Create: `src/bilateral/coordination/receipt.mjs`
 - Create: `src/bilateral/coordination/manifest.mjs`
 - Create: `src/bilateral/coordination/client.mjs`
+- Modify: `src/bilateral/coordination/relay.mjs`
+- Modify: `bin/handshake-relay.mjs`
 - Create: `test/bilateral-coordination-client.test.mjs`
+- Modify: `test/bilateral-coordination-relay.test.mjs`
 
 - [ ] **Step 1: Write failing manifest tests**
 
@@ -936,7 +940,7 @@ test. Assert:
 const transport = createPinnedHttpsTransport({
   expectedFingerprint,
   relayUrl,
-  ca: testCertificate,
+  tlsCertificatePem: testCertificate,
 });
 const response = await transport.request({
   body: canonicalBytes(request),
@@ -975,6 +979,9 @@ Expected: missing manifest/client modules.
 
 The manifest contains exact schema/protocol/repository/operator-key/role/session
 /relay/leaf-certificate/fingerprint/capability/release/issued/expiry fields.
+Manifest validation rejects the capability bytes when any other field contains
+their lower-, upper-, or mixed-case hexadecimal, canonical Base64, or canonical
+Base64url representation.
 Parsing validates the exact one-hour lifetime but does not apply a local
 freshness gate: the relay must allow an exact consumed-before-expiry retry to
 recover its persisted receipt after expiry. The client exports:
@@ -996,7 +1003,6 @@ createCoordinationClient({
     keyId
   },
   manifest,
-  senderState?,
   transport
 })
   -> {
@@ -1007,6 +1013,14 @@ createCoordinationClient({
     readEvents,
     readSessionView
   }
+
+createResumedCoordinationClient({
+  activeLaunchState,
+  coordinationIdentity,
+  senderState,
+  transport
+})
+  -> Promise<the same closed client surface>
 ```
 
 `createCoordinationClient` owns the sender sequence and previous digest,
@@ -1014,20 +1028,48 @@ serializes appends, signs and canonicalizes once, retries only byte-identical
 method/path/artifact-type/body tuples after ambiguous transport failures, and
 advances state only after the relay returns the exact canonical envelope.
 Transport performs one attempt and accepts no arbitrary headers. A restarted
-client receives an already authenticated own-sender state from the supervisor.
-Task 5 returns raw bounded event history without claiming it is authoritative;
-Task 7 authenticates the global chain against the frozen operator key and
-durable enrolled role keys before deriving restart state or executing a
-command.
+client is constructed only through `createResumedCoordinationClient` and
+receives an already authenticated own-sender state from the supervisor. Fresh
+clients reject sender state, and fresh clients cannot append events or publish
+artifacts until bootstrap succeeds. Task 5 returns raw bounded event history
+without claiming it is authoritative; Task 7 authenticates the global chain
+against the frozen operator key and durable enrolled role keys before deriving
+restart state or executing a command.
 
 Bootstrap verifies the canonical receipt with the public key in the pinned leaf
 certificate through one receipt parser/verifier shared with the relay.
+Successful bootstrap returns exact `{activeLaunchState, receipt}`. The active
+state schema is `clockchain.bilateral-active-launch-state/v1`; it contains the
+canonical signed public enrollment, persisted TLS receipt, capability digest,
+complete redacted launch context, `paymentMoved:false`, and one canonical
+Ed25519 signature by the enrolled coordination key. Its signature domain is
+`clockchain.bilateral-active-launch-state-signature/v1\n` followed by the
+lowercase SHA-256 of the stable canonical state without `signature`. Validation
+derives the public key from the signed enrollment and verifies the whole state
+before accepting the receipt, so operator key ID, relay URL, certificate,
+fingerprint, dates, and every scope field are authenticated on restart.
+
+Bootstrap rejects enrollment whose preflight key ID is not the exact
+role-scoped key ID; whose canonical public bytes contain the capability as
+hexadecimal, Base64, or Base64url; or whose decoded coordination/preflight
+public key equals the capability bytes. The relay repeats those
+capability-disclosure checks before proof verification, capability consumption,
+or persistence. The capability appears exactly once in the canonical bootstrap
+wrapper, in its dedicated field. Active-state creation repeats the complete
+public-state scan before and after signing.
+
 `getArtifact` requires the expected artifact type and digest, hashes and
 validates downloaded bytes locally, and `putArtifact` verifies the exact
 artifact acknowledgment. Ordinary connect/header/body deadlines are five
 seconds; long-poll header time is `waitMs + 5000` bounded to 35 seconds; total
 request time is 45 seconds, greater than the relay's 40-second total. Every
 exit clears timers, listeners, and sockets.
+
+Task 7 must persist and fsync the verified active state, receipt, coordination
+identity, and authenticated sender state before retiring the original
+mode-`0600` manifest. Restart then uses only those durable values through
+`createResumedCoordinationClient`; it never reconstructs or reactivates the raw
+capability.
 
 - [ ] **Step 5: Run client tests**
 
@@ -1044,15 +1086,16 @@ Expected: manifest, TLS, timeout, and retry tests pass.
 - [ ] **Step 6: Commit**
 
 ```text
-Bind each role start to one release and one TLS relay identity
+Bind each role start and restart to one authenticated relay identity
 
-Constraint: The user starts each machine once with a private role-specific manifest.
+Constraint: The user starts each machine once with a private role-specific manifest, while restart must not reactivate its one-time capability.
 Rejected: Reusable bearer login | it would permit role substitution after bootstrap
+Rejected: Unsigned redacted restart state | it could replace the release-specific operator key
 Confidence: high
-Scope-risk: moderate
-Directive: Never expose raw capabilities outside mode-0600 launch manifests or accept TLS downgrade switches.
-Tested: node --test test/bilateral-coordination-client.test.mjs; syntax checks for manifest and client
-Not-tested: Supervisor enrollment and relay restart
+Scope-risk: broad
+Directive: Persist signed active state before retiring the raw manifest, and authenticate global history before deriving sender state.
+Tested: focused client and relay tests, complete coordination matrix, npm run verify, documentation gates, and syntax checks
+Not-tested: Real two-machine deployed certificate topology
 ```
 
 ## Task 6: Role-local preflight identities and token commitments
@@ -1288,7 +1331,8 @@ The supervisor:
 
 1. reads one mode-`0600` manifest and verifies clean SHA;
 2. generates role-local coordination/preflight keys and two invitations;
-3. bootstraps once and stores the verified receipt;
+3. bootstraps once, durably stores the verified signed active state and receipt,
+   then retires the raw-capability manifest;
 4. mints or stores one role token locally, then publishes only its commitment;
 5. processes signed operator events in sequence;
 6. invokes existing exact CLIs with an environment allowlist;
@@ -1296,6 +1340,13 @@ The supervisor:
 8. rereads the token commitment before preflight and each role run;
 9. stays alive across rehearsal and stakeholder; and
 10. aborts permanently on any mismatch.
+
+On restart it validates the signed active state and enrolled local coordination
+identity, authenticates the complete global event chain, derives its own sender
+state from that chain, and constructs only
+`createResumedCoordinationClient`. It never restores the retired manifest or
+passes relay `readEvents`/`readSessionView` output directly into a command
+decision.
 
 The entrypoint accepts exactly:
 
@@ -1352,6 +1403,7 @@ const release = await createCoordinatorRelease({
   relayUrl,
   releaseRoot,
   repositorySha: "2".repeat(40),
+  tlsCertificatePem,
   tlsFingerprint,
 });
 assert.equal(release.manifests.length, 2);
@@ -1435,6 +1487,7 @@ The coordinator entrypoint accepts paths, never secret bytes:
 --relay-url <https URL>
 --repository-sha <40 lowercase hex>
 --rpc-url-file <operator-local 0600 file>
+--tls-certificate <operator-local exact relay leaf certificate PEM>
 --tls-fingerprint <sha256 fingerprint>
 ```
 
@@ -1444,6 +1497,10 @@ Billy/Iris role commands, and aggregate verifier. It persists public resumable
 state, signs every phase command, starts Iris polling before Billy, launches a
 new verifier process for each run, validates exit plus marker-complete verdict,
 and writes only a non-authorizing verification state to the relay.
+Before writing either launch manifest, it reads the bounded exact leaf
+certificate, requires its DER SHA-256 to equal `--tls-fingerprint`, and embeds
+the canonical PEM in both manifests. The path is operator-local configuration;
+the public certificate is not a secret.
 
 - [ ] **Step 6: Run coordinator tests**
 

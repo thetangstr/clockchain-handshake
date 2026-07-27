@@ -204,6 +204,27 @@ function stableBytes(value) {
   }
 }
 
+function isCanonicalIpText(value) {
+  const version = isIP(value);
+  if (version === 0) {
+    return false;
+  }
+  try {
+    const authority =
+      version === 6 ? `[${value}]` : value;
+    const normalized = new URL(
+      `https://${authority}:8443`,
+    ).hostname;
+    return (
+      version === 6
+        ? normalized.slice(1, -1)
+        : normalized
+    ) === value;
+  } catch {
+    return false;
+  }
+}
+
 function parseArguments(arguments_) {
   if (
     !Array.isArray(arguments_) ||
@@ -237,7 +258,7 @@ function parseArguments(arguments_) {
   const portText = values["--port"];
   const repositorySha = values["--repository-sha"];
   if (
-    isIP(host) === 0 ||
+    !isCanonicalIpText(host) ||
     host === "0.0.0.0" ||
     host === "::" ||
     !PORT_PATTERN.test(portText) ||
