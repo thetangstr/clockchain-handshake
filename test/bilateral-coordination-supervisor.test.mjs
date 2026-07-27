@@ -33,7 +33,46 @@ function replayFixture() {
   const entry = (value) => { const bytes = canonicalBytes(value); return { enrollmentBase64: bytes.toString("base64"), enrollmentDigest: sha256(bytes), receiptBase64: Buffer.from("{}").toString("base64") }; };
   const set = Buffer.from(JSON.stringify(canonicalizeReceiptEventValue({ enrollments: { payer: entry(payerEnrollment), payee: entry(payeeEnrollment) }, paymentMoved: false, releaseId: release, repositorySha: repo, schema: "clockchain.bilateral-coordination-enrollment-set/v1", sessionId: session })), "utf8");
   const event = (role, kind, pair) => createCoordinationEnvelope({ artifactDigest: null, kind, paymentMoved: false, previousEventDigest: null, privateKeyPem: pem(pair), publicKey: raw(pair), publicKeyId: role === "operator" ? "operator" : `${role}-coordination`, releaseId: release, repositorySha: repo, role, schema: "clockchain.bilateral-coordination-event/v1", sequence: "0", sessionId: session, subjectRun: "release" });
-  return { events: [event("payer", "ENROLLMENT_CONFIRMED", payer), event("payee", "ENROLLMENT_CONFIRMED", payee), event("operator", "ENROLLMENT_RECEIPT", operator)], operator, payer, release, repo, session, set };
+  return { events: [event("payer", "ENROLLMENT_CONFIRMED", payer), event("payee", "ENROLLMENT_CONFIRMED", payee), event("operator", "ENROLLMENT_RECEIPT", operator)], operator, payee, payer, release, repo, session, set };
+}
+
+function replayThroughDescriptor(fixture) {
+  const events = [...fixture.events];
+  const append = (role, pair, kind, artifactDigest = null, subjectRun = "release") => {
+    const prior = events.filter((event) => event.role === role);
+    const event = createCoordinationEnvelope({
+      artifactDigest,
+      kind,
+      paymentMoved: false,
+      previousEventDigest: prior.at(-1)?.eventDigest ?? null,
+      privateKeyPem: pem(pair),
+      publicKey: raw(pair),
+      publicKeyId: role === "operator" ? "operator" : `${role}-coordination`,
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      role,
+      schema: "clockchain.bilateral-coordination-event/v1",
+      sequence: String(prior.length),
+      sessionId: fixture.session,
+      subjectRun,
+    });
+    events.push(event);
+    return event;
+  };
+  append("operator", fixture.operator, "WAIT_FOR_FUNDING");
+  append("payer", fixture.payer, "FUNDING_INPUTS_READY");
+  append("payee", fixture.payee, "FUNDING_INPUTS_READY");
+  append("payer", fixture.payer, "TOKEN_READY", "1".repeat(64));
+  append("payee", fixture.payee, "TOKEN_READY", "2".repeat(64));
+  append("operator", fixture.operator, "PREFLIGHT_PLAN_READY", "3".repeat(64));
+  append("payer", fixture.payer, "PREFLIGHT_PARTICIPANT_READY", "4".repeat(64));
+  append("payee", fixture.payee, "PREFLIGHT_PARTICIPANT_READY", "5".repeat(64));
+  append("operator", fixture.operator, "REGISTER_REHEARSAL", "6".repeat(64), "rehearsal");
+  append("payer", fixture.payer, "IDENTITY_PACKAGE_READY", "7".repeat(64), "rehearsal");
+  append("payee", fixture.payee, "IDENTITY_PACKAGE_READY", "8".repeat(64), "rehearsal");
+  const descriptorBytes = Buffer.from("descriptor");
+  const descriptor = append("operator", fixture.operator, "REHEARSAL_DESCRIPTOR_READY", sha256(descriptorBytes), "rehearsal");
+  return { append, descriptor, descriptorBytes, events };
 }
 
 test("pins the supervisor schema and closed role-run command policy", () => {
@@ -82,7 +121,7 @@ test("bootstraps only through the pinned dependency contract", async () => {
 
 test("builds only exact preflight and registration commands", () => {
   const state = { repositorySha: "a".repeat(40), role: "payer", tokenPath: "/state/token", preflight: { planPath: "/state/plan", privateKeyPath: "/state/preflight", outputPath: "/state/preflight/report" }, rehearsal: { invitationPath: "/state/rehearsal/invitation", identityDirectory: "/state/rehearsal/identity" } };
-  assert.deepEqual(buildSupervisorCommand({ event: { kind: "PREFLIGHT_PLAN_READY", repositorySha: "a".repeat(40), role: "operator", subjectRun: "release" }, localState: state }), { command: "scripts/probe-bilateral-rendezvous.mjs", args: ["participant", "--role", "payer", "--plan", "/state/plan", "--token-file", "/state/token", "--participant-private-key", "/state/preflight", "--output", "/state/preflight/report"] });
+  assert.deepEqual(buildSupervisorCommand({ event: { kind: "PREFLIGHT_PLAN_READY", repositorySha: "a".repeat(40), role: "operator", subjectRun: "release" }, localState: state }), { command: "scripts/probe-bilateral-rendezvous.mjs", args: ["participant", "--role", "payer", "--plan", "/state/plan", "--token-file", "/state/token", "--participant-private-key", "/state/preflight", "--output", "/state/preflight"] });
   assert.deepEqual(buildSupervisorCommand({ event: { kind: "REGISTER_REHEARSAL", repositorySha: "a".repeat(40), role: "operator", subjectRun: "rehearsal" }, localState: state }), { command: "scripts/register-bilateral-identity.mjs", args: ["--invitation", "/state/rehearsal/invitation", "--output", "/state/rehearsal/identity", "--repository-sha", "a".repeat(40), "--i-understand-this-writes-to-sepolia"] });
 });
 
@@ -130,6 +169,130 @@ test("adopts an EVENT_APPENDED descriptor journal without rewriting or appending
   const result = await executeSupervisorTransition({ client: { async getArtifact() { reads += 1; return Buffer.from("descriptor"); }, async appendEvent() { assert.fail("must not append"); } }, event, localState: { authenticatedEvents: Object.freeze([event]), descriptorJournal: { artifactDigest: digest, eventDigest: event.eventDigest, stage: "EVENT_APPENDED", subjectRun: "rehearsal" }, repositorySha: "a".repeat(40), role: "payer", rehearsal: { descriptorPath: "/state/rehearsal/descriptor" } }, dependencies: { async verifyDescriptor() { assert.fail("must not verify"); }, async writeArtifactFile() { assert.fail("must not write"); }, async writeState() { assert.fail("must not write state"); }, async readState() { assert.fail("must not read state"); } } });
   assert.equal(result.kind, "DESCRIPTOR_ACCEPTED");
   assert.equal(reads, 0);
+});
+
+test("the long-lived supervisor accepts a descriptor without treating it as a child command", async () => {
+  const fixture = replayFixture();
+  const events = [...fixture.events];
+  const append = (role, pair, kind, artifactDigest = null, subjectRun = "release") => {
+    const prior = events.filter((event) => event.role === role);
+    const event = createCoordinationEnvelope({
+      artifactDigest,
+      kind,
+      paymentMoved: false,
+      previousEventDigest: prior.at(-1)?.eventDigest ?? null,
+      privateKeyPem: pem(pair),
+      publicKey: raw(pair),
+      publicKeyId: role === "operator" ? "operator" : `${role}-coordination`,
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      role,
+      schema: "clockchain.bilateral-coordination-event/v1",
+      sequence: String(prior.length),
+      sessionId: fixture.session,
+      subjectRun,
+    });
+    events.push(event);
+    return event;
+  };
+  append("operator", fixture.operator, "WAIT_FOR_FUNDING");
+  append("payer", fixture.payer, "FUNDING_INPUTS_READY");
+  append("payee", fixture.payee, "FUNDING_INPUTS_READY");
+  append("payer", fixture.payer, "TOKEN_READY", "1".repeat(64));
+  append("payee", fixture.payee, "TOKEN_READY", "2".repeat(64));
+  append("operator", fixture.operator, "PREFLIGHT_PLAN_READY", "3".repeat(64));
+  append("payer", fixture.payer, "PREFLIGHT_PARTICIPANT_READY", "4".repeat(64));
+  append("payee", fixture.payee, "PREFLIGHT_PARTICIPANT_READY", "5".repeat(64));
+  append("operator", fixture.operator, "REGISTER_REHEARSAL", "6".repeat(64), "rehearsal");
+  append("payer", fixture.payer, "IDENTITY_PACKAGE_READY", "7".repeat(64), "rehearsal");
+  append("payee", fixture.payee, "IDENTITY_PACKAGE_READY", "8".repeat(64), "rehearsal");
+  const descriptorBytes = Buffer.from("descriptor");
+  const descriptor = append("operator", fixture.operator, "REHEARSAL_DESCRIPTOR_READY", sha256(descriptorBytes), "rehearsal");
+  const processedEventDigests = events
+    .filter((event) => event.role === "operator" && event.eventDigest !== descriptor.eventDigest)
+    .map((event) => event.eventDigest);
+  let appended = null;
+  let persisted = null;
+  let writtenPath = null;
+  const result = await runSupervisor({
+    client: {
+      async appendEvent(value) { appended = value; },
+      async getArtifact(value) {
+        assert.deepEqual(value, { artifactType: "signed-descriptor", digest: descriptor.artifactDigest });
+        return descriptorBytes;
+      },
+      async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
+      async readEvents() { return structuredClone(events); },
+    },
+    dependencies: {
+      async readState() { return persisted; },
+      shouldContinue() { return false; },
+      async verifyDescriptor(bytes) { assert.deepEqual(bytes, descriptorBytes); },
+      verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
+      async writeArtifactFile({ path }) { writtenPath = path; },
+      async writeState(value) { persisted = value; },
+    },
+    localState: {
+      operatorPublicKey: raw(fixture.operator),
+      processedEventDigests,
+      rehearsal: { descriptorPath: "/state/rehearsal/descriptor.json" },
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      role: "payer",
+      sessionId: fixture.session,
+    },
+  });
+  assert.deepEqual(appended, {
+    artifactDigest: descriptor.artifactDigest,
+    kind: "DESCRIPTOR_ACCEPTED",
+    subjectRun: "rehearsal",
+  });
+  assert.equal(writtenPath, "/state/rehearsal/descriptor.json");
+  assert.ok(result.processedEventDigests.includes(descriptor.eventDigest));
+});
+
+test("the payer supervisor waits for authenticated payee readiness instead of failing the session", async () => {
+  const fixture = replayFixture();
+  const { append, descriptor, events } = replayThroughDescriptor(fixture);
+  append("payer", fixture.payer, "DESCRIPTOR_ACCEPTED", descriptor.artifactDigest, "rehearsal");
+  append("payee", fixture.payee, "DESCRIPTOR_ACCEPTED", descriptor.artifactDigest, "rehearsal");
+  const start = append("operator", fixture.operator, "START_REHEARSAL", null, "rehearsal");
+  const processedEventDigests = events
+    .filter((event) => event.role === "operator" && event.eventDigest !== start.eventDigest)
+    .map((event) => event.eventDigest);
+  const result = await runSupervisor({
+    client: {
+      async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
+      async readEvents() { return structuredClone(events); },
+    },
+    dependencies: {
+      shouldContinue() { return false; },
+      verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
+      async writeState() {},
+    },
+    localState: {
+      coordinationIdentity: { privateKeyPem: "private", publicKey: "public" },
+      operatorPublicKey: raw(fixture.operator),
+      processedEventDigests,
+      rehearsal: {
+        descriptorPath: "/state/rehearsal/descriptor.json",
+        invitationPath: "/state/rehearsal/invitation.json",
+        resultDirectory: "/state/rehearsal/result",
+      },
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      role: "payer",
+      sessionId: fixture.session,
+      tokenCommitment: {
+        paymentMoved: false,
+        repositorySha: fixture.repo,
+        role: "payer",
+        tokenSha256: "1".repeat(64),
+      },
+      tokenPath: "/state/token",
+    },
+  });
+  assert.equal(result.processedEventDigests.includes(start.eventDigest), false);
 });
 
 test("does not let payer start before authenticated payee ROLE_STARTED", async () => {

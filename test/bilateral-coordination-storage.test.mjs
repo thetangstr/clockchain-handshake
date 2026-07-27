@@ -2146,7 +2146,7 @@ test("identity packages bind the frozen registration artifact shape", async () =
     agentId: "7",
     chainId: "11155111",
     displayName: "Iris",
-    identityReference: "eip155:11155111:0x8004a818bfb912233c491871b3d84c89a494bd9e:7",
+    identityReference: "eip155:11155111:0x8004A818BFB912233c491871b3d84c89A494BD9e:7",
     metadata: { blockHeight: "2", transactionHash: `0x${"2".repeat(64)}` },
     paymentMoved: false,
     register: { blockHeight: "1", transactionHash: `0x${"3".repeat(64)}` },

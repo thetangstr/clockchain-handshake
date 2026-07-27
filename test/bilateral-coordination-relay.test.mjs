@@ -349,25 +349,40 @@ async function availablePort() {
 }
 
 function waitForTcpListener(host, port) {
-  return new Promise((resolveListener) => {
-    const deadline = Date.now() + 3_000;
+  let deadlineTimer;
+  let retryTimer;
+  let settled = false;
+  let resolveListener;
+  let socket;
+  const finish = (outcome) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(deadlineTimer);
+    clearTimeout(retryTimer);
+    socket?.destroy();
+    resolveListener(outcome);
+  };
+  const listener = new Promise((resolve) => {
+    resolveListener = resolve;
+    deadlineTimer = setTimeout(
+      () => finish({ kind: "deadline" }),
+      RELAY_TOTAL_TIMEOUT_MS,
+    );
     const attempt = () => {
-      const socket = net.createConnection({ host, port });
+      if (settled) return;
+      socket = net.createConnection({ host, port });
       socket.once("connect", () => {
         socket.destroy();
-        resolveListener({ kind: "listening" });
+        finish({ kind: "listening" });
       });
       socket.once("error", () => {
         socket.destroy();
-        if (Date.now() >= deadline) {
-          resolveListener({ kind: "listener-timeout" });
-          return;
-        }
-        setTimeout(attempt, 20);
+        retryTimer = setTimeout(attempt, 20);
       });
     };
     attempt();
   });
+  return { cancel: () => finish({ kind: "cancelled" }), listener };
 }
 
 async function observeRelayChild(child, host, port) {
@@ -376,9 +391,9 @@ async function observeRelayChild(child, host, port) {
   child.stderr.on("data", (chunk) => {
     stderr += chunk;
   });
-  const exit = new Promise((resolveExit) => {
-    child.once("exit", (code, signal) => {
-      resolveExit({
+  const closed = new Promise((resolveClose) => {
+    child.once("close", (code, signal) => {
+      resolveClose({
         code,
         kind: "exit",
         signal,
@@ -386,13 +401,15 @@ async function observeRelayChild(child, host, port) {
       });
     });
   });
+  const listener = waitForTcpListener(host, port);
   const outcome = await Promise.race([
-    exit,
-    waitForTcpListener(host, port),
+    closed,
+    listener.listener,
   ]);
+  listener.cancel();
   if (outcome.kind !== "exit") {
     child.kill("SIGTERM");
-    await exit;
+    await closed;
   }
   return outcome;
 }
@@ -950,7 +967,7 @@ function identityPackage(identity) {
     agentId: identity.agentId,
     chainId: "11155111",
     displayName: identity.displayName,
-    identityReference: `eip155:11155111:0x8004a818bfb912233c491871b3d84c89a494bd9e:${identity.agentId}`,
+    identityReference: `eip155:11155111:0x8004A818BFB912233c491871b3d84c89A494BD9e:${identity.agentId}`,
     metadata: { blockHeight: "2", transactionHash: `0x${"2".repeat(64)}` },
     paymentMoved: false,
     register: { blockHeight: "1", transactionHash: `0x${"3".repeat(64)}` },
@@ -3376,14 +3393,37 @@ test("production checkout attestation ignores poisoned Git repository, index, wo
   const state = await privateRoot(t);
   const poisonRoot = await privateRoot(t);
   const cleanClone = join(poisonRoot, "clean-clone");
+  const cleanArchive = join(poisonRoot, "clean-checkout.tar");
   await execFile(
     "/usr/bin/git",
     [
-      "clone",
-      "--no-hardlinks",
-      "--quiet",
+      "-C",
       RELAY_REPOSITORY_ROOT,
+      "archive",
+      "--format=tar",
+      "--output",
+      cleanArchive,
+      "HEAD",
+    ],
+  );
+  await mkdir(cleanClone, { mode: 0o700 });
+  await execFile("/usr/bin/tar", ["-xf", cleanArchive, "-C", cleanClone]);
+  await rm(cleanArchive, { force: true });
+  await execFile("/usr/bin/git", ["-C", cleanClone, "init", "--quiet"]);
+  await execFile("/usr/bin/git", ["-C", cleanClone, "add", "--all"]);
+  await execFile(
+    "/usr/bin/git",
+    [
+      "-C",
       cleanClone,
+      "-c",
+      "user.email=relay-e2e@example.invalid",
+      "-c",
+      "user.name=Relay E2E",
+      "commit",
+      "--quiet",
+      "-m",
+      "relay poisoned checkout fixture",
     ],
   );
   const { stdout: repositoryShaOutput } = await execFile(

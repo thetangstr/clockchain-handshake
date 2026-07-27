@@ -38,6 +38,7 @@ const MAX_CERTIFICATE_BYTES = 1024 * 1024;
 const STATE_MAX_BYTES = 64 * 1024;
 const MAX_WATCHER_BYTES = 16 * 1024;
 const VERIFIER_CONTEXT_SCHEMA = "clockchain.bilateral-coordinator-verifier-context/v1";
+const VERIFIER_PUBLICATION_SCHEMA = "clockchain.bilateral-verifier-publication/v1";
 const SHA40 = /^[0-9a-f]{40}$/;
 const SHA64 = /^[0-9a-f]{64}$/;
 const ADDRESS = /^0x[0-9a-f]{40}$/;
@@ -49,6 +50,7 @@ const sameFile = (a, b) => a.dev === b.dev && a.ino === b.ino && a.uid === b.uid
 const privateFile = (s) => s.isFile() && !s.isSymbolicLink() && s.uid === process.getuid() && s.nlink === 1 && (s.mode & 0o777) === 0o600;
 const publicFile = (s) => s.isFile() && !s.isSymbolicLink() && s.nlink === 1;
 const privateRoot = (s) => s.isDirectory() && !s.isSymbolicLink() && s.uid === process.getuid() && (s.mode & 0o777) === 0o700;
+const relayPackageBytes = (value) => Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(value)), "utf8");
 function tokenText(bytes) { const text = bytes.toString("utf8"); const value = text.endsWith("\n") ? text.slice(0, -1) : text; if (!/^[!-~]{1,4096}$/.test(value) || value.includes("\r") || value.includes("\n")) fail(); return value; }
 function abortableSleep(delay, signal) {
   if (!Number.isSafeInteger(delay) || delay < 0) fail();
@@ -201,6 +203,7 @@ export async function runPinnedVerifierChild(root, args, deadline, runner = runC
   try { return await runner(args, deadline); } finally { await assertRoot(root); }
 }
 function relayUrl(value) { let parsed; try { parsed = new URL(value); } catch { fail(); } if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash || isIP(parsed.hostname) !== 4) fail(); return parsed.href.endsWith("/") ? parsed.href.slice(0, -1) : parsed.href; }
+function rpcEndpoint(value) { let endpoint; try { endpoint = new URL(value); } catch { fail(); } if (!/^https?:$/.test(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.hash || endpoint.search || endpoint.pathname !== "/") fail(); return endpoint.href; }
 async function gitInspector(repositoryRoot = ROOT) {
   const run = (args) => exec("/usr/bin/git", ["--no-pager", "--no-replace-objects", "-c", "core.attributesFile=/dev/null", "-c", "core.hooksPath=/dev/null", "-C", repositoryRoot, ...args], { cwd: repositoryRoot, encoding: "utf8", env: GIT_ENV, maxBuffer: 8192 });
   const [{ stdout: head }, { stdout: status }] = await Promise.all([run(["rev-parse", "--verify", "HEAD^{commit}"]), run(["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"])]);
@@ -217,12 +220,11 @@ export async function readCoordinatorRuntimeConfig(values, dependencies = {}) {
     const [token, privateKeyPem, rpcUrl, certificate] = await Promise.all([
       readStable(input["--clockchain-token-file"], MAX_PRIVATE_BYTES, privateFile, fs), readStable(input["--operator-private-key"], MAX_PRIVATE_BYTES, privateFile, fs), readStable(input["--rpc-url-file"], MAX_PRIVATE_BYTES, privateFile, fs), readStable(input["--tls-certificate"], MAX_CERTIFICATE_BYTES, publicFile, fs),
     ]);
-    const relay = relayUrl(input["--relay-url"]); const rpc = rpcUrl.toString("utf8").trim(); let endpoint; try { endpoint = new URL(rpc); } catch { fail(); }
-    if (!/^https?:$/.test(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.hash || endpoint.search || endpoint.pathname !== "/") fail();
+    const relay = relayUrl(input["--relay-url"]); const endpoint = rpcEndpoint(rpcUrl.toString("utf8").trim());
     const pem = certificate.toString("utf8"); const fingerprint = createHash("sha256").update(new X509Certificate(pem).raw).digest("hex"); if (fingerprint !== input["--tls-fingerprint"]) fail();
     let actualKey; try { actualKey = rawPublicKeyBase64FromPem(createPublicKey(createPrivateKey(privateKeyPem)).export({ format: "pem", type: "spki" })); } catch { fail(); }
     const inspector = dependencies.gitInspector ?? await gitInspector(dependencies.repositoryRoot ?? ROOT); if (inspector.head !== input["--repository-sha"]) fail(); const pinned = await inspector.operatorKey(input["--repository-sha"], input["--operator-key-id"]); if (pinned !== actualKey) fail();
-    return Object.freeze({ clockchainToken: tokenText(token), clockchainTokenPath: input["--clockchain-token-file"], operatorIdentity: Object.freeze({ keyId: input["--operator-key-id"], privateKeyPem: privateKeyPem.toString("utf8"), publicKey: actualKey }), operatorPrivateKeyPath: input["--operator-private-key"], releaseRoot: root, relayUrl: relay, repositorySha: input["--repository-sha"], rpcUrl: endpoint.href, rpcUrlPath: input["--rpc-url-file"], tlsCertificatePem: pem, tlsCertificatePath: input["--tls-certificate"], tlsFingerprint: fingerprint, operatorPublicKey: pinned });
+    return Object.freeze({ clockchainToken: tokenText(token), clockchainTokenPath: input["--clockchain-token-file"], operatorIdentity: Object.freeze({ keyId: input["--operator-key-id"], privateKeyPem: privateKeyPem.toString("utf8"), publicKey: actualKey }), operatorPrivateKeyPath: input["--operator-private-key"], releaseRoot: root, relayUrl: relay, repositorySha: input["--repository-sha"], rpcUrl: endpoint, rpcUrlPath: input["--rpc-url-file"], tlsCertificatePem: pem, tlsCertificatePath: input["--tls-certificate"], tlsFingerprint: fingerprint, operatorPublicKey: pinned });
   } catch (error) { await root.handle.close(); throw error; }
 }
 
@@ -267,7 +269,7 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
     const key = await readStable(config.operatorPrivateKeyPath, MAX_PRIVATE_BYTES, privateFile);
     if (tokenText(token) !== config.clockchainToken || key.toString("utf8") !== config.operatorIdentity.privateKeyPem) fail();
     const rpc = await readStable(config.rpcUrlPath, MAX_PRIVATE_BYTES, privateFile); const certificate = await readStable(config.tlsCertificatePath, MAX_CERTIFICATE_BYTES, publicFile);
-    if (rpc.toString("utf8").trim() !== config.rpcUrl || createHash("sha256").update(new X509Certificate(certificate.toString("utf8")).raw).digest("hex") !== config.tlsFingerprint) fail();
+    if (rpcEndpoint(rpc.toString("utf8").trim()) !== config.rpcUrl || createHash("sha256").update(new X509Certificate(certificate.toString("utf8")).raw).digest("hex") !== config.tlsFingerprint) fail();
   };
   const state = { readState: () => readState(config.releaseRoot), writeState: ({ state: value }) => writeState(config.releaseRoot, value) };
   const runDependencyCache = new Map();
@@ -283,7 +285,7 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
         return createCapabilityRegistration({ capabilities, operatorKeyId: config.operatorIdentity.keyId, paymentMoved: false, privateKeyPem: config.operatorIdentity.privateKeyPem, releaseId: newRelease.releaseId, repositorySha: config.repositorySha, sessionId: newRelease.sessionId });
       },
       registerCapabilitySet: async ({ registration }) => clientFor(registration).registerCapabilitySet({ registration }),
-      ...state,
+      writeState: state.writeState,
     }),
     runDependencies: (release) => {
       const key = `${release?.releaseId}:${release?.repositorySha}:${release?.sessionId}`;
@@ -343,7 +345,7 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
         waitForPreflightParticipant: async ({ planDigest, role }) => {
           const event = await waitForRawEvent(client, release, { artifactDigest: undefined, kinds: ["PREFLIGHT_PARTICIPANT_READY"], role, subjectRun: "release" });
           const bytes = await client.getArtifact({ artifactType: "preflight-participant-report", digest: event.artifactDigest });
-          return Object.freeze({ bytes, digest: createHash("sha256").update(bytes).digest("hex"), planDigest });
+          return Object.freeze({ bytes, digest: createHash("sha256").update(bytes).digest("hex") });
         },
         waitForIdentityPackage: async ({ subjectRun }) => Promise.all(["payer", "payee"].map((role) => waitForRawEvent(client, release, { kinds: ["IDENTITY_PACKAGE_READY"], role, subjectRun }))),
         // START_* is the authority delivered to long-lived supervisors.  The
@@ -369,7 +371,7 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
           const output = join(root, "output"); await (dependencies.preflightMain ?? preflightMain)(["aggregate", "--plan", join(root, "probe-plan.json"), "--payer-report-dir", payer, "--payee-report-dir", payee, "--operator-private-key", config.operatorPrivateKeyPath, "--output", output, "--attest-separate-credentials", "--attest-separate-machines"]);
           const report = JSON.parse((await readStable(join(output, "preflight-report.json"), 1_048_576, privateFile)).toString("utf8")); if (report?.report?.outcome !== "RENDEZVOUS_OK") fail();
           const files = [".preflight-report.complete.json", "preflight-report.json"].map(async (name) => { const content = await readStable(join(output, name), 1_048_576, privateFile); return { byteLength: String(content.length), contentBase64: content.toString("base64"), name, sha256: createHash("sha256").update(content).digest("hex") }; });
-          return canonicalBytes({ files: await Promise.all(files), paymentMoved: false, schema: "clockchain.bilateral-relay-package/v1" });
+          return relayPackageBytes({ files: await Promise.all(files), paymentMoved: false, schema: "clockchain.bilateral-relay-package/v1" });
         },
         createDescriptor: async ({ repositorySha, subjectRun }) => {
           await immutable(); if (repositorySha !== config.repositorySha || !["rehearsal", "stakeholder"].includes(subjectRun)) fail();
@@ -417,7 +419,24 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
           const context = verifierContexts.get(outputDirectory) ?? await readVerifierContext(config.releaseRoot, `.verifier-context-${subjectRun}.json`); await assertRoot(config.releaseRoot); if (!context || context.outputDirectory !== outputDirectory || context.publicationDigest !== publicationDigest || context.subjectRun !== subjectRun || context.releaseId !== release.releaseId || context.sessionId !== release.sessionId || repositorySha !== config.repositorySha || JSON.stringify(context.packageDigests) !== JSON.stringify(packageDigests)) fail();
           const descriptor = await client.getArtifact({ artifactType: "signed-descriptor", digest: context.descriptorDigest }); const envelope = (await artifactValidator({ artifactType: "signed-descriptor", bytes: descriptor, expectedDigest: context.descriptorDigest, secretCanaries: [] })).facts;
           await assertRoot(config.releaseRoot); await immutable(); await assertRoot(config.releaseRoot); validatePinnedDescriptorEnvelope(envelope, { keyId: config.operatorIdentity.keyId, publicKey: config.operatorPublicKey, repositorySha: config.repositorySha, sessionId: deriveDescriptorSessionId({ releaseId: release.releaseId, repositorySha: config.repositorySha, sessionId: release.sessionId, subjectRun }) });
-          const publication = await validateVerdictPublication({ outputDirectory, repositorySha, sessionDigest: dSession(envelope.descriptor) }); await assertRoot(config.releaseRoot); if (publication.publicationDigest !== publicationDigest) fail(); return publication;
+          const publication = await validateVerdictPublication({ outputDirectory, repositorySha, sessionDigest: dSession(envelope.descriptor) });
+          await assertRoot(config.releaseRoot);
+          if (
+            !publication ||
+            Object.keys(publication).length !== 2 ||
+            publication.publicationDigest !== publicationDigest ||
+            publication.status !== "VERIFICATION_PASSED"
+          ) fail();
+          return Object.freeze({
+            paymentMoved: false,
+            publicationDigest,
+            releaseId: release.releaseId,
+            repositorySha: config.repositorySha,
+            schema: VERIFIER_PUBLICATION_SCHEMA,
+            sessionId: release.sessionId,
+            status: "VERIFICATION_PASSED",
+            subjectRun,
+          });
         },
       });
       runDependencyCache.set(key, runtimeDependencies);

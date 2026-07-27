@@ -411,7 +411,7 @@ async function assertPinnedOutputDirectory(pin) {
     !sameMetadata(
       pathMetadata,
       handleMetadata,
-      DIRECTORY_METADATA_KEYS,
+      PINNED_IDENTITY_KEYS,
     )
   ) {
     throw terminal("FAILED");
@@ -476,8 +476,8 @@ export async function pinOutputDirectory(input) {
       "directory",
     );
     if (
-      !sameMetadata(before, opened, DIRECTORY_METADATA_KEYS) ||
-      !sameMetadata(before, after, DIRECTORY_METADATA_KEYS)
+      !sameMetadata(before, opened, PINNED_IDENTITY_KEYS) ||
+      !sameMetadata(before, after, PINNED_IDENTITY_KEYS)
     ) {
       throw terminal("FAILED");
     }

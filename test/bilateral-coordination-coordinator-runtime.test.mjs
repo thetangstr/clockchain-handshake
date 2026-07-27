@@ -12,6 +12,7 @@ import {
   COORDINATOR_CLI_FLAGS,
   createCoordinatorRuntimeDependencies,
   deriveDescriptorSessionId,
+  loadOrCreateCoordinatorRelease,
   parseCoordinatorArguments,
   readCoordinatorRuntimeConfig,
   runChildWithDeadline,
@@ -29,6 +30,7 @@ import {
 } from "../src/bilateral/coordination/coordinator-runtime.mjs";
 import { createSignedEnvelope, rawPublicKeyBase64FromPem } from "../src/bilateral/descriptor.mjs";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
+import { runCoordinator as runCoordinatorCore } from "../src/bilateral/coordination/coordinator.mjs";
 
 const execFile = promisify(execFileCallback);
 
@@ -131,6 +133,93 @@ test("production runtime exposes real bridges and relay START remains the role a
   await bridges.startRole({ role: "payee", subjectRun: "rehearsal" });
 });
 
+test("runtime release dependencies satisfy the coordinator release contract", async (t) => {
+  const rootPath = await mkdtemp(join(tmpdir(), "coordinator-runtime-release-"));
+  await chmod(rootPath, 0o700);
+  const before = await lstat(rootPath);
+  const handle = await open(rootPath, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0));
+  t.after(() => handle.close());
+  t.after(() => rm(rootPath, { recursive: true, force: true }));
+  const certificatePath = join(rootPath, "relay.pem");
+  await execFile("openssl", ["req", "-x509", "-newkey", "ed25519", "-keyout", join(rootPath, "relay.key"), "-out", certificatePath, "-nodes", "-days", "1", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"]);
+  const tlsCertificatePem = await readFile(certificatePath, "utf8");
+  const keyPair = generateKeyPairSync("ed25519");
+  const config = Object.freeze({
+    clockchainToken: "token",
+    operatorIdentity: Object.freeze({
+      keyId: "clockchain-demo-2026",
+      privateKeyPem: keyPair.privateKey.export({ format: "pem", type: "pkcs8" }),
+      publicKey: rawPublicKeyBase64FromPem(keyPair.publicKey.export({ format: "pem", type: "spki" })),
+    }),
+    operatorPublicKey: rawPublicKeyBase64FromPem(keyPair.publicKey.export({ format: "pem", type: "spki" })),
+    releaseRoot: Object.freeze({ before, handle, path: rootPath }),
+    repositorySha: "a".repeat(40),
+    relayUrl: "https://127.0.0.1:8443",
+    rpcUrl: "https://127.0.0.1/",
+    tlsCertificatePem,
+    tlsFingerprint: createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex"),
+  });
+  const runtime = createCoordinatorRuntimeDependencies(config, {
+    createClient: () => ({
+      registerCapabilitySet: async ({ registration }) => ({
+        capabilities: registration.capabilities,
+        paymentMoved: false,
+        registrationDigest: "c".repeat(64),
+        releaseId: registration.releaseId,
+        repositorySha: registration.repositorySha,
+        requestDigest: "d".repeat(64),
+        schema: "clockchain.bilateral-capability-registration-receipt/v1",
+        sessionId: registration.sessionId,
+      }),
+    }),
+    createTransport: () => ({}),
+  });
+
+  const release = await loadOrCreateCoordinatorRelease(config, { runtime });
+
+  assert.equal(release.state, "BOOTSTRAPPING");
+  assert.equal((await readCoordinatorState(config.releaseRoot)).releaseId, release.releaseId);
+});
+
+test("runtime run dependencies cross the coordinator's exact validation boundary", async (t) => {
+  const rootPath = await mkdtemp(join(tmpdir(), "coordinator-runtime-run-"));
+  await chmod(rootPath, 0o700);
+  const before = await lstat(rootPath);
+  const handle = await open(rootPath, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0));
+  t.after(() => handle.close());
+  t.after(() => rm(rootPath, { recursive: true, force: true }));
+  const certificatePath = join(rootPath, "relay.pem");
+  await execFile("openssl", ["req", "-x509", "-newkey", "ed25519", "-keyout", join(rootPath, "relay.key"), "-out", certificatePath, "-nodes", "-days", "1", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"]);
+  const tlsCertificatePem = await readFile(certificatePath, "utf8");
+  const keyPair = generateKeyPairSync("ed25519");
+  const publicKey = rawPublicKeyBase64FromPem(keyPair.publicKey.export({ format: "pem", type: "spki" }));
+  const config = Object.freeze({
+    clockchainToken: "token",
+    operatorIdentity: Object.freeze({ keyId: "clockchain-demo-2026", privateKeyPem: keyPair.privateKey.export({ format: "pem", type: "pkcs8" }), publicKey }),
+    operatorPublicKey: publicKey,
+    releaseRoot: Object.freeze({ before, handle, path: rootPath }),
+    repositorySha: "a".repeat(40),
+    relayUrl: "https://127.0.0.1:8443",
+    rpcUrl: "https://127.0.0.1/",
+    tlsCertificatePem,
+    tlsFingerprint: createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex"),
+  });
+  let enrollmentReads = 0;
+  const runtime = createCoordinatorRuntimeDependencies(config, {
+    createClient: () => ({
+      appendOperatorEvent: async () => {}, appendVerifiedEvent: async () => {}, createVerifiedEvent: async () => {}, getArtifact: async () => Buffer.from("{}"), putArtifact: async () => ({ digest: "c".repeat(64) }),
+      readEnrollmentSet: async () => { enrollmentReads += 1; return Buffer.from("{}"); }, readEvents: async () => [], readSessionView: async () => ({ paymentMoved: false }), readVerifierPublication: async () => null,
+      registerCapabilitySet: async ({ registration }) => ({ capabilities: registration.capabilities, paymentMoved: false, registrationDigest: "c".repeat(64), releaseId: registration.releaseId, repositorySha: registration.repositorySha, requestDigest: "d".repeat(64), schema: "clockchain.bilateral-capability-registration-receipt/v1", sessionId: registration.sessionId }),
+    }),
+    createTransport: () => ({}),
+  });
+  const release = await loadOrCreateCoordinatorRelease(config, { runtime });
+
+  await assert.rejects(runCoordinatorCore({ dependencies: runtime.runDependencies(release), release, releaseRoot: rootPath }));
+
+  assert.equal(enrollmentReads, 1);
+});
+
 test("runtime rejects a substituted certificate before it trusts any private input", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "coordinator-runtime-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -161,6 +250,48 @@ test("runtime rejects a substituted certificate before it trusts any private inp
   await mkdir(releaseRoot, { mode: 0o700 });
   await assert.rejects(runtime.createReleaseDependencies.writeState({ state: { paymentMoved: false, state: "REPLACED" } }));
   await config.releaseRoot.handle.close();
+});
+
+test("runtime re-normalizes an accepted RPC endpoint before immutable preflight work", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "coordinator-runtime-rpc-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const certificatePath = join(root, "relay.pem"); const keyPath = join(root, "operator.pem");
+  const tokenPath = join(root, "token"); const rpcPath = join(root, "rpc"); const releaseRoot = join(root, "release");
+  await execFile("openssl", ["req", "-x509", "-newkey", "ed25519", "-keyout", join(root, "relay.key"), "-out", certificatePath, "-nodes", "-days", "1", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"]);
+  const pair = generateKeyPairSync("ed25519");
+  await Promise.all([
+    writeFile(keyPath, pair.privateKey.export({ format: "pem", type: "pkcs8" })), writeFile(tokenPath, "token"), writeFile(rpcPath, "http://127.0.0.1:8545\n"),
+  ]);
+  await Promise.all([chmod(keyPath, 0o600), chmod(tokenPath, 0o600), chmod(rpcPath, 0o600)]);
+  const fingerprint = createHash("sha256").update(new X509Certificate(await readFile(certificatePath, "utf8")).raw).digest("hex");
+  const publicKey = rawPublicKeyBase64FromPem(pair.publicKey.export({ format: "pem", type: "spki" }));
+  const config = await readCoordinatorRuntimeConfig({ ...VALUES, "--clockchain-token-file": tokenPath, "--operator-private-key": keyPath, "--release-root": releaseRoot, "--rpc-url-file": rpcPath, "--tls-certificate": certificatePath, "--tls-fingerprint": fingerprint }, { gitInspector: { head: "a".repeat(40), operatorKey: async () => publicKey } });
+  t.after(() => config.releaseRoot.handle.close());
+  assert.equal(config.rpcUrl, "http://127.0.0.1:8545/");
+  const runtime = createCoordinatorRuntimeDependencies(config, {
+    createClient: () => ({
+      getArtifact: async () => Buffer.from("token commitment"),
+      readEnrollmentSet: async () => Buffer.from("{}"),
+      readEvents: async () => [
+        { artifactDigest: "c".repeat(64), kind: "TOKEN_READY", role: "payer", subjectRun: "release" },
+        { artifactDigest: "d".repeat(64), kind: "TOKEN_READY", role: "payee", subjectRun: "release" },
+      ],
+    }),
+    createTransport: () => ({}),
+    gitInspector: { head: "a".repeat(40), operatorKey: async () => publicKey },
+    preflightMain: async (argv) => {
+      const output = argv[argv.indexOf("--output") + 1];
+      await writeFile(join(output, "probe-plan.json"), "{}", { mode: 0o600 });
+    },
+    validateArtifactWithFacts: async () => ({ facts: {} }),
+    verifyCoordinationPreparationSet: async () => ({ participants: { payer: {}, payee: {} } }),
+  });
+  const bridges = runtime.runDependencies({ releaseId: "release-a", sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" });
+  const args = { enrollments: { payer: {}, payee: {} }, repositorySha: "a".repeat(40) };
+
+  assert.deepEqual(await bridges.createPreflightPlan(args), Buffer.from("{}"));
+  await writeFile(rpcPath, "http://127.0.0.1:8546\n");
+  await assert.rejects(bridges.createPreflightPlan(args));
 });
 
 test("runtime source never carries the authorizing output literal", async () => {

@@ -16,8 +16,10 @@ import { recoverMessageAddress } from "viem";
 import { coordinationEnrollmentSignaturePreimage, invitationProofPreimage } from "../src/bilateral/coordination/enrollment.mjs";
 import { createProductionSepoliaRpc } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
+import { canonicalizeReceiptEventValue } from "../src/canonical.mjs";
 import { createSignedEnvelope } from "../src/bilateral/descriptor.mjs";
 import { createLaunchManifest, writeLaunchManifest } from "../src/bilateral/coordination/manifest.mjs";
+import { createCoordinationReceipt } from "../src/bilateral/coordination/receipt.mjs";
 
 const DESCRIPTOR_SESSION_DOMAIN =
   "clockchain.bilateral-descriptor-session/v1\n";
@@ -135,12 +137,12 @@ function enrollmentFixture({
   };
 }
 
-function enrollmentEntry(enrollment) {
+function enrollmentEntry(enrollment, receipt) {
   const bytes = canonicalBytes(enrollment);
   return {
     enrollmentBase64: bytes.toString("base64"),
     enrollmentDigest: sha256(bytes),
-    receiptBase64: Buffer.from("receipt", "utf8").toString("base64"),
+    receiptBase64: receipt.toString("base64"),
   };
 }
 
@@ -164,7 +166,7 @@ test("reads verifier publication through the context-bound client route", async 
   assert.deepEqual(request, { subjectRun: "rehearsal" });
 });
 
-test("production supervisor binds each descriptor to its derived run session instead of the coordination UUID", async (t) => {
+test("production supervisor verifies valid enrollment receipts and binds each descriptor to its derived run session", async (t) => {
   const stateRoot = await mkdtemp(join(tmpdir(), "supervisor-session-state-"));
   const manifestRoot = await mkdtemp(join(tmpdir(), "supervisor-session-manifest-"));
   t.after(() => Promise.all([
@@ -213,6 +215,7 @@ test("production supervisor binds each descriptor to its derived run session ins
     "subjectAltName=IP:127.0.0.1",
   ], { stdio: "ignore" });
   const tlsCertificatePem = await readFile(certificatePath, "utf8");
+  const tlsPrivateKeyPem = await readFile(privateKeyPath, "utf8");
   const expectedTlsFingerprint = sha256(
     new X509Certificate(tlsCertificatePem).raw,
   );
@@ -236,6 +239,12 @@ test("production supervisor binds each descriptor to its derived run session ins
     sepoliaRpc: async () => "0x0",
     stateRoot,
   });
+  for (const run of ["rehearsal", "stakeholder"]) {
+    const info = await stat(join(stateRoot, run));
+    assert.equal(info.isDirectory(), true);
+    assert.equal(info.isSymbolicLink(), false);
+    assert.equal(info.mode & 0o777, 0o700);
+  }
 
   const payer = enrollmentFixture({
     addresses: payerAddresses,
@@ -251,10 +260,34 @@ test("production supervisor binds each descriptor to its derived run session ins
     role: "payee",
     sessionId: coordinationSessionId,
   });
+  const receiptSigner = {
+    certificateSha256: expectedTlsFingerprint,
+    sign(preimage) {
+      return sign(null, preimage, tlsPrivateKeyPem);
+    },
+    signatureAlgorithm: "ed25519",
+    verify() {
+      return true;
+    },
+  };
+  const payerBytes = canonicalBytes(payer);
+  const payeeBytes = canonicalBytes(payee);
+  const receiptFor = async (enrollment, enrollmentBytes) =>
+    createCoordinationReceipt({
+      context: {
+        capabilityDigest: enrollment.capabilityDigest,
+        enrollmentDigest: sha256(enrollmentBytes),
+        releaseId,
+        repositorySha,
+        role: enrollment.role,
+        sessionId: coordinationSessionId,
+      },
+      signer: receiptSigner,
+    });
   const enrollmentSet = {
     enrollments: {
-      payee: enrollmentEntry(payee),
-      payer: enrollmentEntry(payer),
+      payee: enrollmentEntry(payee, await receiptFor(payee, payeeBytes)),
+      payer: enrollmentEntry(payer, await receiptFor(payer, payerBytes)),
     },
     paymentMoved: false,
     releaseId,
@@ -269,6 +302,18 @@ test("production supervisor binds each descriptor to its derived run session ins
     sessionId: coordinationSessionId,
     subjectRun,
   };
+  await assert.doesNotReject(
+    dependencies.verifyEnrollmentSet({
+      enrollmentBytes: Buffer.from(
+        JSON.stringify(canonicalizeReceiptEventValue(enrollmentSet)),
+        "utf8",
+      ),
+      enrollmentSet: structuredClone(enrollmentSet),
+      releaseId,
+      repositorySha,
+      sessionId: coordinationSessionId,
+    }),
+  );
   const signedDescriptor = (sessionId) => canonicalBytes(
     createSignedEnvelope({
       amountOptions: [

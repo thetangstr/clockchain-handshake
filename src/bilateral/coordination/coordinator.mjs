@@ -73,6 +73,12 @@ const VERIFIER_RESULT_KEYS = Object.freeze([
   "stderr",
   "stdout",
 ]);
+const VERIFIER_PUBLICATION_KEYS = Object.freeze([
+  "paymentMoved", "publicationDigest", "releaseId", "repositorySha",
+  "schema", "sessionId", "status", "subjectRun",
+]);
+const VERIFIER_PUBLICATION_SCHEMA =
+  "clockchain.bilateral-verifier-publication/v1";
 const CAPABILITY_SET_RECEIPT_KEYS = Object.freeze([
   "capabilities", "paymentMoved", "registrationDigest",
   "releaseId", "repositorySha", "requestDigest", "schema", "sessionId",
@@ -119,6 +125,7 @@ const RUN_ORCHESTRATION_DEPENDENCY_KEYS = Object.freeze([
   "startWatcher", "validatePublishedBilateralVerdict", "waitForDescriptorAcceptance",
   "validateRehearsalPackage", "waitForRolePackage", "waitForRoleStarted",
 ]);
+const RUN_OPTIONAL_DEPENDENCY_KEYS = Object.freeze(["drainWatchers"]);
 const SUCCESS_STATUS = "VERIFICATION_PASSED";
 const FUNDING_RECORD_KEYS = Object.freeze([
   "address",
@@ -154,6 +161,8 @@ const COORDINATOR_STATES = new Set([
   "REHEARSAL_IDENTITIES_READY", "REHEARSAL_DESCRIPTOR_READY", "REHEARSAL_PACKAGES_READY", "REHEARSAL_VERIFIED",
   "STAKEHOLDER_IDENTITIES_READY", "STAKEHOLDER_DESCRIPTOR_READY", "STAKEHOLDER_PACKAGES_READY", "STAKEHOLDER_VERIFIED", "COMPLETE",
 ]);
+const FUNDING_READINESS_DEADLINE_MS = 8 * 60_000;
+const FUNDING_READINESS_INTERVAL_MS = 20_000;
 const AUTHENTICATED_EVENT_KEYS = Object.freeze([
   "artifactDigest", "eventDigest", "kind", "paymentMoved", "previousEventDigest",
   "releaseId", "repositorySha", "role", "schema", "sequence", "sessionId",
@@ -885,8 +894,8 @@ function checkedAuthenticatedEvents(events, release) {
 }
 
 function verifierPublicationMatchesEvent(publication, event) {
-  const claim = exact(publication, ["paymentMoved", "publicationDigest", "releaseId", "repositorySha", "schema", "sessionId", "status", "subjectRun"]);
-  return claim.schema === "clockchain.bilateral-verifier-publication/v1" &&
+  const claim = exact(publication, VERIFIER_PUBLICATION_KEYS);
+  return claim.schema === VERIFIER_PUBLICATION_SCHEMA &&
     claim.paymentMoved === false &&
     claim.publicationDigest === event.artifactDigest &&
     claim.releaseId === event.releaseId &&
@@ -1120,10 +1129,15 @@ async function assertDurableVerifierCheckpoint({ dependencies, persisted, releas
 }
 
 async function storeDescriptor({ dependencies, persisted, release, releaseRoot, subjectRun, action }) {
-  if (typeof dependencies.getArtifact !== "function" || typeof dependencies.validateArtifact !== "function") invalid();
+  if (typeof dependencies.createDescriptor !== "function" || typeof dependencies.validateArtifact !== "function") invalid();
   const child = persisted.checkpoints.filter((entry) => entry.action === action && entry.role === "operator" && entry.subjectRun === subjectRun).at(-1);
   if (child?.status !== "CHILD_COMPLETE" || child.artifactDigest === null) invalid();
-  const bytes = await dependencies.getArtifact({ artifactType: "signed-descriptor", digest: child.artifactDigest });
+  const bytes = await dependencies.createDescriptor({
+    releaseId: release.releaseId,
+    repositorySha: release.repositorySha,
+    sessionId: release.sessionId,
+    subjectRun,
+  });
   if (!Buffer.isBuffer(bytes) || digest(bytes) !== child.artifactDigest) invalid();
   const artifact = await dependencies.validateArtifact({ artifactType: "signed-descriptor", bytes, expectedDigest: child.artifactDigest, secretCanaries: [] });
   const descriptor = artifact?.facts?.descriptor;
@@ -1334,8 +1348,28 @@ async function verifyRun({ dependencies, persisted, release, releaseRoot, subjec
   } else {
     invalid();
   }
-  const publication = exact(await dependencies.validatePublishedBilateralVerdict({ outputDirectory, packageDigests: Object.freeze(packages), publicationDigest, releaseId: release.releaseId, repositorySha: release.repositorySha, sessionId: release.sessionId, subjectRun }), ["publicationDigest", "status"]);
-  if (publication.publicationDigest !== publicationDigest || publication.status !== SUCCESS_STATUS) invalid();
+  const publication = exact(
+    await dependencies.validatePublishedBilateralVerdict({
+      outputDirectory,
+      packageDigests: Object.freeze(packages),
+      publicationDigest,
+      releaseId: release.releaseId,
+      repositorySha: release.repositorySha,
+      sessionId: release.sessionId,
+      subjectRun,
+    }),
+    VERIFIER_PUBLICATION_KEYS,
+  );
+  if (
+    publication.paymentMoved !== false ||
+    publication.publicationDigest !== publicationDigest ||
+    publication.releaseId !== release.releaseId ||
+    publication.repositorySha !== release.repositorySha ||
+    publication.schema !== VERIFIER_PUBLICATION_SCHEMA ||
+    publication.sessionId !== release.sessionId ||
+    publication.status !== SUCCESS_STATUS ||
+    publication.subjectRun !== subjectRun
+  ) invalid();
   if (existing?.status !== "VERDICT_VALIDATED") {
     state = descriptorState({ checkpoints: [...state.checkpoints, Object.freeze({ action: verdictAction, artifactDigest: publicationDigest, eventDigest: null, role: "operator", status: "VERDICT_VALIDATED", subjectRun })], release, state: packageState });
     await dependencies.writeState({ releaseRoot, state });
@@ -1407,13 +1441,25 @@ async function admitFundingLifecycle({ dependencies, persisted, release, release
 }
 
 async function assertRoleFundingReadiness({ dependencies, release }) {
-  if (typeof dependencies.readVerifiedRawEvents !== "function") invalid();
-  const events = checkedAuthenticatedEvents(await dependencies.readVerifiedRawEvents({ sessionId: release.sessionId }), release);
-  for (const [kind, artifact] of [["ENROLLMENT_CONFIRMED", null], ["FUNDING_INPUTS_READY", null], ["TOKEN_READY", "digest"]]) {
-    const matching = events.filter((event) => event.kind === kind && event.subjectRun === "release");
-    if (matching.length !== 2 || new Set(matching.map((event) => event.role)).size !== 2 || matching.some((event) => !["payer", "payee"].includes(event.role) || (artifact === null ? event.artifactDigest !== null : !SHA256_PATTERN.test(event.artifactDigest)))) invalid();
+  if (typeof dependencies.now !== "function" || typeof dependencies.readVerifiedRawEvents !== "function" || typeof dependencies.sleeper !== "function") invalid();
+  let attempts = 0;
+  let deadline;
+  for (;;) {
+    const events = checkedAuthenticatedEvents(await dependencies.readVerifiedRawEvents({ sessionId: release.sessionId }), release);
+    let complete = true;
+    for (const [kind, artifact] of [["ENROLLMENT_CONFIRMED", null], ["FUNDING_INPUTS_READY", null], ["TOKEN_READY", "digest"]]) {
+      const matching = events.filter((event) => event.kind === kind && event.subjectRun === "release");
+      if (matching.length > 2 || new Set(matching.map((event) => event.role)).size !== matching.length || matching.some((event) => !["payer", "payee"].includes(event.role) || (artifact === null ? event.artifactDigest !== null : !SHA256_PATTERN.test(event.artifactDigest)))) invalid();
+      if (matching.length !== 2) complete = false;
+    }
+    if (complete) return events;
+    const current = dependencies.now();
+    if (!Number.isSafeInteger(current) || current < 0) invalid();
+    deadline ??= current + FUNDING_READINESS_DEADLINE_MS;
+    if (current >= deadline || attempts >= FUNDING_READINESS_DEADLINE_MS / FUNDING_READINESS_INTERVAL_MS) invalid();
+    attempts += 1;
+    await dependencies.sleeper(Math.min(FUNDING_READINESS_INTERVAL_MS, Math.max(1, deadline - current)));
   }
-  return events;
 }
 
 export async function createCoordinatorRelease(input) {
@@ -1551,6 +1597,7 @@ export async function runCoordinator(input) {
     ...PREFLIGHT_DEPENDENCY_KEYS,
     ...REHEARSAL_IDENTITY_DEPENDENCY_KEYS,
     ...RUN_ORCHESTRATION_DEPENDENCY_KEYS,
+    ...RUN_OPTIONAL_DEPENDENCY_KEYS,
   ]);
   if (!isPlainObject(release) || release.schema !== COORDINATOR_STATE_SCHEMA || release.paymentMoved !== false || !Array.isArray(release.capabilityDigests) || release.capabilityDigests.length !== 2 || typeof value.releaseRoot !== "string" || value.releaseRoot.length === 0) invalid();
   for (const key of [...RUN_DEPENDENCY_KEYS, ...REPLAY_DEPENDENCY_KEYS]) {

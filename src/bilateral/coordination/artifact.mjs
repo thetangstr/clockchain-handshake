@@ -13,6 +13,9 @@ import {
   canonicalizeReceiptEventValue,
 } from "../../canonical.mjs";
 import {
+  REGISTRY_ADDRESS,
+} from "../../constants.mjs";
+import {
   SENSITIVE_KEY,
   assertSecretFree,
 } from "../../redact.mjs";
@@ -118,8 +121,7 @@ const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 const TRANSACTION_PATTERN = /^0x[0-9a-f]{64}$/i;
-const IDENTITY_REGISTRY_ADDRESS =
-  "0x8004a818bfb912233c491871b3d84c89a494bd9e";
+const IDENTITY_REGISTRY_ADDRESS = REGISTRY_ADDRESS.toLowerCase();
 const RECOVERY_COMMANDS = new Set([
   "scripts/probe-bilateral-rendezvous.mjs",
   "scripts/register-bilateral-identity.mjs",
@@ -579,7 +581,7 @@ function validateIdentityPackage(bytes, parsed, canaries) {
   if (data.schema !== "clockchain.bilateral-identity-registration/v1" || data.paymentMoved !== false ||
     !ADDRESS_PATTERN.test(data.address) || !DECIMAL_PATTERN.test(data.agentId) ||
     data.chainId !== "11155111" || data.registryAddress !== IDENTITY_REGISTRY_ADDRESS ||
-    data.identityReference !== `eip155:11155111:${IDENTITY_REGISTRY_ADDRESS}:${data.agentId}` ||
+    data.identityReference !== `eip155:11155111:${REGISTRY_ADDRESS}:${data.agentId}` ||
     typeof data.displayName !== "string" || data.displayName.length < 1 ||
     data.displayName.length > 128 || data.displayName.trim() !== data.displayName ||
     /[\u0000-\u001f\u007f-\u009f]/u.test(data.displayName) ||

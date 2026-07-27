@@ -6,6 +6,8 @@ import { lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPinnedHttpsTransport, createCoordinationClient, createResumedCoordinationClient } from "./client.mjs";
+import { canonicalBytes } from "../canonical.mjs";
+import { canonicalizeReceiptEventValue } from "../../canonical.mjs";
 import { validateActiveLaunchState } from "./manifest.mjs";
 import { readLaunchManifest } from "./manifest.mjs";
 import { createLocalPreflightEnrollment, readAndSignTokenCommitment } from "./preflight.mjs";
@@ -55,6 +57,8 @@ const canonicalJson = (value) => {
   if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) fail();
   return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
 };
+const canonicalEnrollmentSetBytes = (value) => Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(value)), "utf8");
+const relayPackageBytes = (value) => Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(value)), "utf8");
 export async function createPrivateRoot(root) {
   if (typeof root !== "string" || expectedUid === undefined) fail();
   try { await mkdir(root, { mode: 0o700 }); } catch (error) { if (error?.code !== "EEXIST") throw error; }
@@ -271,7 +275,7 @@ async function buildPackage({ artifactType, directory, root }) {
       const bytes = await readPrivateBytes(fileRoot, join(directory, name), MAX_STATE_BYTES);
       files.push(Object.freeze({ byteLength: String(bytes.length), contentBase64: bytes.toString("base64"), name, sha256: createHash("sha256").update(bytes).digest("hex") }));
     }
-    const bytes = canonicalBytes({ files, paymentMoved: false, schema: "clockchain.bilateral-relay-package/v1" });
+    const bytes = relayPackageBytes({ files, paymentMoved: false, schema: "clockchain.bilateral-relay-package/v1" });
     await validateRelayArtifact({ artifactType, bytes, expectedDigest: createHash("sha256").update(bytes).digest("hex"), secretCanaries: [] });
     return bytes;
   } finally { await fileRoot.handle.close(); }
@@ -281,7 +285,7 @@ function enrollmentVerifier({ tlsCertificatePem }) {
   const receiptVerifier = createReceiptVerifierFromCertificate({ tlsCertificatePem });
   return async ({ enrollmentBytes, enrollmentSet, releaseId, repositorySha, sessionId }) => {
     const set = parseCoordinationEnrollmentSet(Buffer.from(enrollmentBytes));
-    if (!canonicalBytes(set).equals(canonicalBytes(enrollmentSet)) || set.releaseId !== releaseId || set.repositorySha !== repositorySha || set.sessionId !== sessionId || set.paymentMoved !== false) fail();
+    if (!canonicalEnrollmentSetBytes(set).equals(canonicalEnrollmentSetBytes(enrollmentSet)) || set.releaseId !== releaseId || set.repositorySha !== repositorySha || set.sessionId !== sessionId || set.paymentMoved !== false) fail();
     const seen = new Set();
     for (const role of ["payer", "payee"]) {
       const entry = set.enrollments[role];
@@ -378,6 +382,19 @@ export async function createPrivateSupervisorStateStore({ stateRoot }) {
 async function privateDirectory(root) {
   const pinned = await createPrivateRoot(root);
   try { await pinned.assertPinned(); } finally { await pinned.handle.close(); }
+}
+async function createFixedRunDirectories(stateRoot) {
+  const root = await createPrivateRoot(stateRoot);
+  try {
+    for (const run of ["rehearsal", "stakeholder"]) {
+      const directory = join(stateRoot, run);
+      await root.assertPinned();
+      try { await mkdir(directory, { mode: 0o700 }); } catch (error) { if (error?.code !== "EEXIST") throw error; }
+      await root.assertPinned();
+      const pinned = await createPrivateRoot(directory);
+      try { await pinned.assertPinned(); } finally { await pinned.handle.close(); }
+    }
+  } finally { await root.handle.close(); }
 }
 async function readRegular(path) {
   const root = await createPrivateRoot(dirname(path));
@@ -477,6 +494,7 @@ export async function ensureInvitations({ capabilityDigest, releaseId, repositor
 }
 export async function createProductionSupervisorDependencies({ launchManifestPath, stateRoot, probe, repositoryRoot = SUPERVISOR_REPOSITORY_ROOT, sepoliaRpc, createSepoliaClient } = {}) {
   const store = await createPrivateSupervisorStateStore({ stateRoot });
+  await createFixedRunDirectories(stateRoot);
   const repositoryInspector = createGitInspector(repositoryRoot);
   const checkpoint = await store.readState();
   const resumed = checkpoint !== null && checkpoint?.phase !== "LOCAL_SECRETS_READY";

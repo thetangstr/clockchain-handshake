@@ -17,6 +17,26 @@ import {
   startFakeBilateralClockchainService,
 } from "./helpers/fake-bilateral-clockchain-service.mjs";
 
+function runCli(args) {
+  return new Promise((resolve, reject) => {
+    const { NODE_TEST_CONTEXT, ...environment } = process.env;
+    const child = spawn(process.execPath, args, { env: environment, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolve({ code, signal, stderr }));
+  });
+}
+
+test("fake service is inert when directly discovered by node:test but rejects an empty CLI", async () => {
+  const helper = new URL("./helpers/fake-bilateral-clockchain-service.mjs", import.meta.url).pathname;
+  const discovered = await runCli(["--test", helper]);
+  assert.equal(discovered.code, 0, discovered.stderr);
+  const direct = await runCli([helper]);
+  assert.notEqual(direct.code, 0);
+});
+
 async function request(listen, body, options = {}) {
   return new Promise((resolve, reject) => {
     const encoded = options.raw ?? canonicalJson(body);
@@ -167,7 +187,7 @@ test("CLI removes readiness and exits successfully after SIGTERM", async (t) => 
   const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "fake-clockchain-cli-")));
   const statePath = path.join(directory, "state.json"); const listenPath = path.join(directory, "listen.json");
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const child = spawn(process.execPath, [new URL("./helpers/fake-bilateral-clockchain-service.mjs", import.meta.url).pathname, "--state", statePath, "--listen-file", listenPath], { stdio: "ignore" });
+  const child = spawn(process.execPath, [new URL("./helpers/fake-bilateral-clockchain-service.mjs", import.meta.url).pathname, "--state", statePath, "--listen-file", listenPath, "--max-operations", "512"], { stdio: "ignore" });
   await eventually(() => readFile(listenPath, "utf8"));
   child.kill("SIGTERM");
   const [code] = await Promise.race([new Promise((resolve_) => child.once("exit", (exitCode) => resolve_([exitCode]))), new Promise((_resolve, reject) => setTimeout(() => reject(new Error("CLI did not exit")), 1_000))]);
@@ -459,6 +479,31 @@ test("oversized prospective fake state is rejected before it mutates counters or
 test("fake-service state limit seam is bounded by the production cap", () => {
   for (const maxStateBytes of [1_023, 128 * 1024 + 1, "4096"]) {
     assert.throws(() => createFakeBilateralClockchainService({ statePath: "/private/state.json", listenPath: "/private/listen.json", dependencies: { maxStateBytes } }));
+  }
+});
+
+test("fake-service operation ceiling is explicit and remains bounded", async (t) => {
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "fake-clockchain-operation-limit-")));
+  const service = await startFakeBilateralClockchainService({
+    statePath: path.join(directory, "state.json"),
+    listenPath: path.join(directory, "listen.json"),
+    dependencies: { maxOperations: 2 },
+  });
+  t.after(() => service.close());
+
+  assert.equal((await request(service.listen, { method: "snapshot", params: {} })).statusCode, 200);
+  assert.equal((await request(service.listen, { method: "snapshot", params: {} })).statusCode, 200);
+  assert.deepEqual(
+    await request(service.listen, { method: "snapshot", params: {} }),
+    { statusCode: 400, body: { ok: false, error: "request rejected" } },
+  );
+
+  for (const maxOperations of [0, 1_025, "512"]) {
+    assert.throws(() => createFakeBilateralClockchainService({
+      statePath: "/private/state.json",
+      listenPath: "/private/listen.json",
+      dependencies: { maxOperations },
+    }));
   }
 });
 

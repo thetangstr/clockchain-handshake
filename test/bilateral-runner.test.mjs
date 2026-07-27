@@ -494,6 +494,47 @@ test("a pinned output directory rejects replacement at every pre-dispatch path c
   }
 });
 
+test("directory pins tolerate benign link-count changes while preserving identity", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const baseline = await lstat(directory);
+  let nlink = baseline.nlink;
+  const changingStats = () => ({
+    dev: baseline.dev,
+    gid: baseline.gid,
+    ino: baseline.ino,
+    isDirectory: () => true,
+    mode: baseline.mode,
+    nlink: nlink++,
+    rdev: baseline.rdev,
+    uid: baseline.uid,
+  });
+  const fileSystem = {
+    async lstat(path) {
+      assert.equal(path, directory);
+      return changingStats();
+    },
+    async open(path, flags, mode) {
+      const handle = await nodeOpen(path, flags, mode);
+      return {
+        close: () => handle.close(),
+        stat: async () => changingStats(),
+        sync: () => handle.sync(),
+      };
+    },
+  };
+
+  const pin = await pinOutputDirectory({
+    directory,
+    fileSystem,
+  });
+  try {
+    await pin.assertCurrent();
+    await pin.sync();
+  } finally {
+    await closePinnedOutputDirectory(pin);
+  }
+});
+
 test("directory durability failures prevent the Clockchain write after a real marker write", async (t) => {
   for (const operation of ["open", "sync", "close"]) {
     await t.test(operation, async (t) => {

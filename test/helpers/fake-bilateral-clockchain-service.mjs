@@ -20,6 +20,7 @@ const MAX_BODY_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 2_000;
 const MAX_STATE_BYTES = 128 * 1024;
 const MAX_OPERATIONS = 128;
+const MAX_CONFIGURED_OPERATIONS = 1_024;
 const REJECTED = Object.freeze({ error: "request rejected", ok: false });
 const STATE_SCHEMA = "clockchain.fake-bilateral-clockchain-state/v1";
 const LISTEN_SCHEMA = "clockchain.fake-bilateral-clockchain-listen/v1";
@@ -305,7 +306,9 @@ export function createFakeBilateralClockchainService({ statePath, listenPath, de
   const fake = createFakeBilateralClockchain();
   const raceHooks = dependencies.raceHooks;
   const maxStateBytes = dependencies.maxStateBytes ?? MAX_STATE_BYTES;
+  const maxOperations = dependencies.maxOperations ?? MAX_OPERATIONS;
   if (!Number.isSafeInteger(maxStateBytes) || maxStateBytes < 1_024 || maxStateBytes > MAX_STATE_BYTES) throw new Error("invalid fake-service state limit");
+  if (!Number.isSafeInteger(maxOperations) || maxOperations < 1 || maxOperations > MAX_CONFIGURED_OPERATIONS) throw new Error("invalid fake-service operation limit");
 
   function snapshot({ calls = serviceCalls, callSequence = serviceCallSequence, counters = readCounters, agents = registeredAgents, writes = writeCount } = {}) {
     const state = { calls, callSequence, paymentMoved: false, readCounters: counters, registeredAgents: [...agents.values()].sort((left, right) => left.agentId.localeCompare(right.agentId)), schema: STATE_SCHEMA, writeCount: writes };
@@ -375,7 +378,7 @@ export function createFakeBilateralClockchainService({ statePath, listenPath, de
   }
   async function invoke(method, params) {
     if (poisoned) throw new Error("fake service is unavailable");
-    if (operations >= MAX_OPERATIONS) throw new Error("operation limit");
+    if (operations >= maxOperations) throw new Error("operation limit");
     assertSnapshotFits(prospectiveSnapshot(method, params));
     operations += 1;
     let mutated = false;
@@ -529,11 +532,21 @@ export function createFakeBilateralClockchainHttpClient(options) {
 }
 
 function cliArguments(argv) {
-  if (argv.length !== 4 || argv[0] !== "--state" || argv[2] !== "--listen-file") throw new Error("usage: --state <private canonical path> --listen-file <private canonical path>");
-  return { statePath: argv[1], listenPath: argv[3] };
+  if ((argv.length !== 4 && argv.length !== 6) || argv[0] !== "--state" || argv[2] !== "--listen-file" || (argv.length === 6 && (argv[4] !== "--max-operations" || !/^[1-9][0-9]{0,3}$/.test(argv[5])))) {
+    throw new Error("usage: --state <private canonical path> --listen-file <private canonical path> [--max-operations <bounded integer>]");
+  }
+  return {
+    statePath: argv[1],
+    listenPath: argv[3],
+    ...(argv.length === 6 ? { dependencies: { maxOperations: Number(argv[5]) } } : {}),
+  };
 }
 
-if (import.meta.url === new URL(process.argv[1], "file:").href) {
+function discoveredByNodeTest() {
+  return process.env.NODE_TEST_CONTEXT !== undefined && process.argv.length === 2;
+}
+
+if (import.meta.url === new URL(process.argv[1], "file:").href && !discoveredByNodeTest()) {
   let service; let started = false; let signalReceived = false; let closePromise;
   const close = async () => {
     signalReceived = true;

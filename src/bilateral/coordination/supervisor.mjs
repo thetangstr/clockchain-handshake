@@ -1,5 +1,6 @@
 import { readLaunchManifest } from "./manifest.mjs";
 import { createHash, createPublicKey, sign } from "node:crypto";
+import { dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { verifyCoordinationEnvelope } from "./envelope.mjs";
 import { coordinationEnrollmentSignaturePreimage, parseCoordinationEnrollment, parseCoordinationEnrollmentSet, verifyCoordinationEnrollment } from "./enrollment.mjs";
@@ -206,7 +207,7 @@ export async function authenticateSupervisorReplay({ events, enrollmentSet, oper
 
 export function buildSupervisorCommand({ event, localState }) {
   if (!event || !localState || event.repositorySha !== localState.repositorySha || event.role !== "operator") invalid();
-  if (event.kind === "PREFLIGHT_PLAN_READY" && event.subjectRun === "release" && localState.preflight?.outputPath) return Object.freeze({ command: "scripts/probe-bilateral-rendezvous.mjs", args: Object.freeze(["participant", "--role", localState.role, "--plan", localState.preflight.planPath, "--token-file", localState.tokenPath, "--participant-private-key", localState.preflight.privateKeyPath, "--output", localState.preflight.outputPath]) });
+  if (event.kind === "PREFLIGHT_PLAN_READY" && event.subjectRun === "release" && localState.preflight?.outputPath) return Object.freeze({ command: "scripts/probe-bilateral-rendezvous.mjs", args: Object.freeze(["participant", "--role", localState.role, "--plan", localState.preflight.planPath, "--token-file", localState.tokenPath, "--participant-private-key", localState.preflight.privateKeyPath, "--output", dirname(localState.preflight.outputPath)]) });
   if (["REGISTER_REHEARSAL", "REGISTER_STAKEHOLDER"].includes(event.kind)) {
     const run = event.kind === "REGISTER_REHEARSAL" ? "rehearsal" : "stakeholder";
     const state = localState[run];
@@ -508,10 +509,19 @@ export async function runSupervisor(input) {
         await persist("EVENT_PROCESSED");
         continue;
       }
-      const event = replay.events.find((entry) => entry.role === "operator" && Object.hasOwn(SUPERVISOR_COMMAND_POLICY, entry.kind) && !processed.has(entry.eventDigest) && localState.recovery?.commandEvent?.eventDigest !== entry.eventDigest && (!completionKind[entry.kind] || !completionFor(entry)));
+      const startOrderSatisfied = (entry) =>
+        localState.role !== "payer" ||
+        !["START_REHEARSAL", "START_STAKEHOLDER"].includes(entry.kind) ||
+        replay.events.some((candidate) =>
+          candidate.role === "payee" &&
+          candidate.kind === "ROLE_STARTED" &&
+          candidate.subjectRun === entry.subjectRun);
+      const event = replay.events.find((entry) => entry.role === "operator" && Object.hasOwn(SUPERVISOR_COMMAND_POLICY, entry.kind) && !processed.has(entry.eventDigest) && localState.recovery?.commandEvent?.eventDigest !== entry.eventDigest && (!completionKind[entry.kind] || !completionFor(entry)) && startOrderSatisfied(entry));
       if (event) {
-        const command = event.kind === "EXACT_RECOVERY_AUTHORIZATION" ? undefined : buildSupervisorCommand({ event, localState });
-        if (localState.phase === "BEFORE_CHILD" && sameJournal(localState.childJournal, { command, event, status: "BEFORE_CHILD" })) {
+        const command = ["PREFLIGHT_PLAN_READY", "REGISTER_REHEARSAL", "REGISTER_STAKEHOLDER", "START_REHEARSAL", "START_STAKEHOLDER"].includes(event.kind)
+          ? buildSupervisorCommand({ event, localState })
+          : undefined;
+        if (command !== undefined && localState.phase === "BEFORE_CHILD" && sameJournal(localState.childJournal, { command, event, status: "BEFORE_CHILD" })) {
           const recovery = await publishRecoveryRequired({ client, command, dependencies, event, localState: checkpoint(localState.phase) });
           localState = Object.freeze({ ...localState, phase: "RECOVERY_REQUIRED", recovery });
           continue;
