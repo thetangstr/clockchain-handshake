@@ -594,9 +594,12 @@ test("both CLIs require the exact frozen path flags and valueless write acknowle
     [proposeMain, "payer", "ACKNOWLEDGED"],
     [acceptMain, "payee", "ACCEPTED"],
   ]) {
+    const roleArguments = arguments_.map((value, index) => (
+      arguments_[index - 1] === "--output" ? `/evidence/${role}` : value
+    ));
     const writes = [];
     const seen = [];
-    const exitCode = await main(arguments_, {
+    const exitCode = await main(roleArguments, {
       buildRoleInput: async (values, actualRole) => {
         seen.push([values, actualRole]);
         return {};
@@ -616,7 +619,7 @@ test("both CLIs require the exact frozen path flags and valueless write acknowle
       descriptorPath: "/public/session.json",
       invitationPath: "/secret/invitation.json",
       clockchainTokenPath: "/secret/clockchain.token",
-      outputDirectory: `/evidence/${role === "payer" ? "payer" : "payer"}`,
+      outputDirectory: `/evidence/${role === "payer" ? "payer" : "payee"}`,
     });
     assert.deepEqual(writes, [[
       "out",
@@ -681,6 +684,42 @@ test("role CLIs reject missing acknowledgement, extra flags, and secret argv wit
     );
   }
   assert.equal(calls, 0);
+});
+
+test("role CLI emits readiness only after valid argv and input construction", async () => {
+  const writes = [];
+  let entered = false;
+  const arguments_ = [
+    "--descriptor", "/public/session.json",
+    "--invitation", "/secret/invitation.json",
+    "--clockchain-token-file", "/secret/clockchain.token",
+    "--output", "/evidence/payer",
+    ROLE_RISK_FLAG,
+  ];
+  const exitCode = await proposeMain(arguments_, {
+    buildRoleInput: async () => ({
+      notifyReady: () => writes.push("ready"),
+    }),
+    runRole: async (input) => {
+      input.notifyReady();
+      entered = true;
+      return { localVerdict: "LOCAL_OK", paymentMoved: false, state: "ACKNOWLEDGED" };
+    },
+    stderr: { write() {} },
+    stdout: { write() {} },
+  });
+  assert.equal(exitCode, 0);
+  assert.deepEqual(writes, ["ready"]);
+  assert.equal(entered, true);
+
+  writes.length = 0;
+  assert.equal(await proposeMain([], {
+    buildRoleInput: async () => assert.fail("invalid argv must not build input"),
+    runRole: async () => assert.fail("invalid argv must not enter role"),
+    stderr: { write() {} },
+    stdout: { write() {} },
+  }), 1);
+  assert.deepEqual(writes, []);
 });
 
 test("role modules and CLIs contain no authorizing verdict literal", async () => {

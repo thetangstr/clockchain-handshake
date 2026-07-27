@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { closeSync, constants as fsConstants, writeSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -81,6 +81,13 @@ export const ROLE_RISK_FLAG =
 export const ROLE_REPOSITORY_ROOT = dirname(
   dirname(dirname(fileURLToPath(import.meta.url))),
 );
+export const ROLE_READY_SCHEMA =
+  "clockchain.bilateral-role-ready/v1";
+const ROLE_READY_ENV = Object.freeze({
+  fd: "CLOCKCHAIN_BILATERAL_ROLE_READY_FD",
+  nonce: "CLOCKCHAIN_BILATERAL_ROLE_READY_NONCE",
+  schema: "CLOCKCHAIN_BILATERAL_ROLE_READY_SCHEMA",
+});
 
 const SIGNATURE_PATTERN = /^0x[0-9a-f]{130}$/;
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
@@ -106,6 +113,7 @@ const ROLE_INPUT_KEYS = new Set([
   "now",
   "outputDirectory",
   "ownerOf",
+  "notifyReady",
   "proposalPollDurationMs",
   "publishEvidence",
   "repositoryPublicKey",
@@ -265,6 +273,10 @@ function snapshotInput(input) {
     (
       snapshot.publishEvidence !== undefined &&
       typeof snapshot.publishEvidence !== "function"
+    ) ||
+    (
+      snapshot.notifyReady !== undefined &&
+      typeof snapshot.notifyReady !== "function"
     ) ||
     (
       snapshot.canaries !== undefined &&
@@ -494,6 +506,17 @@ async function publish(snapshot, result, directoryPin) {
   }
 }
 
+function announceReady(snapshot) {
+  if (snapshot.notifyReady === undefined) {
+    return;
+  }
+  try {
+    snapshot.notifyReady();
+  } catch {
+    throw terminal();
+  }
+}
+
 export async function runBillyRole(input) {
   let directoryPin;
   let primaryFailure;
@@ -525,6 +548,7 @@ export async function runBillyRole(input) {
       descriptor,
       sessionDigest,
     });
+    announceReady(snapshot);
     const proposed = await writeOrAdoptTransition({
       client: snapshot.client,
       directoryPin,
@@ -780,6 +804,7 @@ export async function runIrisRole(input) {
       descriptor,
       snapshot.ownerOf,
     );
+    announceReady(snapshot);
     const proposal = await discoverProposal(
       snapshot,
       descriptor,
@@ -943,6 +968,42 @@ function parseRoleArguments(arguments_) {
     invitationPath: values.get("--invitation"),
     outputDirectory: values.get("--output"),
   });
+}
+
+function readinessNotifier(role) {
+  const values = Object.freeze({
+    fd: process.env[ROLE_READY_ENV.fd],
+    nonce: process.env[ROLE_READY_ENV.nonce],
+    schema: process.env[ROLE_READY_ENV.schema],
+  });
+  if (Object.values(values).every((value) => value === undefined)) {
+    return undefined;
+  }
+  if (
+    values.fd !== "3" ||
+    values.schema !== ROLE_READY_SCHEMA ||
+    typeof values.nonce !== "string" ||
+    !/^[0-9a-f]{64}$/.test(values.nonce)
+  ) {
+    throw terminal();
+  }
+  const bytes = Buffer.from(`${JSON.stringify({
+    nonce: values.nonce,
+    role,
+    schema: values.schema,
+  })}\n`, "utf8");
+  let announced = false;
+  return () => {
+    if (announced || writeSync(3, bytes) !== bytes.length) {
+      throw terminal();
+    }
+    try {
+      closeSync(3);
+      announced = true;
+    } catch {
+      throw terminal();
+    }
+  };
 }
 
 function sameFile(left, right) {
@@ -1573,7 +1634,11 @@ export async function runRoleCli(
     }
     const values = parseRoleArguments(arguments_);
     const input = await buildRoleInput(values, role);
-    const result = await runRole(input);
+    const notifier = readinessNotifier(role);
+    const roleInput = notifier === undefined
+      ? input
+      : { ...input, notifyReady: notifier };
+    const result = await runRole(roleInput);
     const publicResult = {
       localVerdict: result.localVerdict,
       paymentMoved: false,
