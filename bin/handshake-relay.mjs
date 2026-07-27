@@ -773,6 +773,7 @@ export function createRelayRequestHandler(service, host, port) {
       if (
         request.method === "POST" &&
         (path === "/v1/bootstrap" ||
+          path === "/v1/capabilities" ||
           path === "/v1/events" ||
           path === "/v1/verified-events")
       ) {
@@ -787,6 +788,8 @@ export function createRelayRequestHandler(service, host, port) {
         const result =
           path === "/v1/bootstrap"
             ? await service.bootstrap({ body })
+            : path === "/v1/capabilities"
+              ? await service.registerCapabilities({ body })
             : path === "/v1/events"
               ? await service.appendEvent({ body })
               : await service.appendVerifiedEvent({ body });

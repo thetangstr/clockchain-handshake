@@ -33,6 +33,10 @@ import {
   parseCoordinationEnrollmentSet,
 } from "./enrollment.mjs";
 import {
+  CAPABILITY_REGISTRATION_SCHEMA,
+  verifyCapabilityRegistration,
+} from "./capability-registration.mjs";
+import {
   initialReleaseView,
   reduceReleaseEvent,
 } from "./lifecycle.mjs";
@@ -52,6 +56,8 @@ export const MAX_RELAY_REQUEST_BYTES = 65_536;
 export const MAX_RELAY_WAIT_MS = 30_000;
 export const VERIFIER_PUBLICATION_SCHEMA = "clockchain.bilateral-verifier-publication/v1";
 export const VERIFIED_EVENT_SCHEMA = "clockchain.bilateral-verified-event/v1";
+export const CAPABILITY_REGISTRATION_RECEIPT_SCHEMA =
+  "clockchain.bilateral-capability-registration-receipt/v1";
 
 const SERVICE_KEYS = Object.freeze([
   "appendEvent",
@@ -59,6 +65,7 @@ const SERVICE_KEYS = Object.freeze([
   "bootstrap",
   "getArtifact",
   "putArtifact",
+  "registerCapabilities",
   "readEnrollmentSet",
   "readEvents",
   "readSessionView",
@@ -80,9 +87,11 @@ const STORE_METHODS = Object.freeze([
   "getArtifact",
   "putArtifact",
   "readEnrollment",
+  "readCapabilitySet",
   "readEvents",
   "readReleaseView",
   "readVerifierPublication",
+  "registerCapabilitySet",
 ]);
 const BOOTSTRAP_INPUT_KEYS = Object.freeze(["body"]);
 const BOOTSTRAP_KEYS = Object.freeze([
@@ -1213,6 +1222,90 @@ export function createRelayService(input) {
       };
     }
 
+    async function registerCapabilities(value) {
+      return serializeMutation(async () => {
+        const inputData = readExactData(value, APPEND_INPUT_KEYS);
+        const request = parseCanonicalBody(
+          inputData.body,
+          MAX_RELAY_REQUEST_BYTES,
+        );
+        if (
+          !isPlainObject(request) ||
+          request.schema !== CAPABILITY_REGISTRATION_SCHEMA ||
+          typeof request.operatorKeyId !== "string"
+        ) {
+          invalid();
+        }
+        const operatorPublicKey = await resolvedOperatorPublicKey(
+          request.operatorKeyId,
+        );
+        const registration = verifyCapabilityRegistration(request, {
+          expectedOperatorKeyId: request.operatorKeyId,
+          expectedOperatorPublicKey: operatorPublicKey,
+          expectedRepositorySha: frozenRepositorySha,
+        });
+        const registrations = {
+            payee: {
+              ...registration.capabilities.payee,
+              releaseId: registration.releaseId,
+              role: "payee",
+              sessionId: registration.sessionId,
+            },
+            payer: {
+              ...registration.capabilities.payer,
+              releaseId: registration.releaseId,
+              role: "payer",
+              sessionId: registration.sessionId,
+            },
+          };
+        const registrationDigest = sha256(
+          canonicalBytes(registrations),
+        );
+        const requestDigest = sha256(canonicalBytes(request));
+        const existing = await store.readCapabilitySet({
+          releaseId: registration.releaseId,
+          sessionId: registration.sessionId,
+        });
+        if (existing === null) {
+          verifyCapabilityRegistration(request, {
+            expectedOperatorKeyId: request.operatorKeyId,
+            expectedOperatorPublicKey: operatorPublicKey,
+            expectedRepositorySha: frozenRepositorySha,
+            nowMs: now(),
+          });
+        }
+        const accepted = await store.registerCapabilitySet({
+          registrationDigest,
+          registrations,
+          requestDigest,
+        });
+        const set = readExactData(accepted, [
+          "registrationDigest",
+          "registrations",
+          "requestDigest",
+        ]);
+        if (
+          set.registrationDigest !== registrationDigest ||
+          set.requestDigest !== requestDigest ||
+          !canonicalBytes(set.registrations).equals(
+            canonicalBytes(registrations),
+          )
+        ) {
+          invalid();
+        }
+        return Object.freeze({
+          capabilities: registration.capabilities,
+          paymentMoved: false,
+          registrationDigest: set.registrationDigest,
+          releaseId: registration.releaseId,
+          repositorySha: frozenRepositorySha,
+          schema: CAPABILITY_REGISTRATION_RECEIPT_SCHEMA,
+          sessionId: registration.sessionId,
+          requestDigest: set.requestDigest,
+        });
+      });
+    }
+
     async function bootstrap(value) {
       return serializeMutation(async () => {
         const inputData = readExactData(
@@ -1666,6 +1759,7 @@ export function createRelayService(input) {
       bootstrap,
       getArtifact,
       putArtifact,
+      registerCapabilities,
       readEnrollmentSet,
       readEvents,
       readSessionView,

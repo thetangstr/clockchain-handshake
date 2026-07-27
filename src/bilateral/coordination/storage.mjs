@@ -129,9 +129,11 @@ const STORE_METHODS = Object.freeze([
   "putArtifact",
   "readVerifierPublication",
   "readEnrollment",
+  "readCapabilitySet",
   "readEvents",
   "readReleaseView",
   "registerCapability",
+  "registerCapabilitySet",
 ]);
 
 export class CoordinationStorageError extends Error {
@@ -987,6 +989,7 @@ async function acquireOwner(root, fileSystem) {
 
 function emptyState() {
   return {
+    capabilitySets: new Map(),
     capabilityScopes: new Map(),
     capabilities: new Map(),
     eventDigests: new Map(),
@@ -999,6 +1002,7 @@ function emptyState() {
 
 function cloneState(state) {
   return {
+    capabilitySets: new Map(state.capabilitySets),
     capabilityScopes: new Map(state.capabilityScopes),
     capabilities: new Map(
       [...state.capabilities].map(
@@ -1152,6 +1156,41 @@ function capabilityRegistration(value) {
   });
 }
 
+function capabilityRegistrationSet(value) {
+  const data = readExactData(value, [
+    "registrationDigest",
+    "registrations",
+    "requestDigest",
+  ]);
+  const registrations = readExactData(data.registrations, [
+    "payee",
+    "payer",
+  ]);
+  const payee = capabilityRegistration(registrations.payee);
+  const payer = capabilityRegistration(registrations.payer);
+  if (
+    payee.role !== "payee" ||
+    payer.role !== "payer" ||
+    payee.capabilityDigest === payer.capabilityDigest ||
+    payee.releaseId !== payer.releaseId ||
+    payee.sessionId !== payer.sessionId
+  ) {
+    fail();
+  }
+  const accepted = Object.freeze({
+    registrationDigest: assertSha256(data.registrationDigest),
+    registrations: Object.freeze({ payee, payer }),
+    requestDigest: assertSha256(data.requestDigest),
+  });
+  if (
+    accepted.registrationDigest !==
+    sha256(canonicalBytes(accepted.registrations))
+  ) {
+    fail();
+  }
+  return accepted;
+}
+
 function capabilityConsumption(value) {
   const data = readExactData(value, [
     "capabilityDigest",
@@ -1275,6 +1314,39 @@ function applyCapabilityRegistration(
   return registration;
 }
 
+function capabilitySetKey(registrations) {
+  return `${registrations.payee.releaseId}\n${registrations.payee.sessionId}`;
+}
+
+function sameCapabilityRegistrationSet(left, right) {
+  return (
+    left.registrationDigest === right.registrationDigest &&
+    left.requestDigest === right.requestDigest &&
+    sameRegistration(left.registrations.payee, right.registrations.payee) &&
+    sameRegistration(left.registrations.payer, right.registrations.payer)
+  );
+}
+
+function applyCapabilityRegistrationSet(state, set, loading) {
+  const key = capabilitySetKey(set.registrations);
+  const existing = state.capabilitySets.get(key);
+  if (existing !== undefined) {
+    if (!sameCapabilityRegistrationSet(existing, set) || loading) {
+      fail(loading ? undefined : "CAPABILITY_REPLAY");
+    }
+    return existing;
+  }
+  const candidate = cloneState(state);
+  applyCapabilityRegistration(candidate, set.registrations.payee, loading);
+  applyCapabilityRegistration(candidate, set.registrations.payer, loading);
+  candidate.capabilitySets.set(key, set);
+  state.capabilityScopes = candidate.capabilityScopes;
+  state.capabilities = candidate.capabilities;
+  state.sessions = candidate.sessions;
+  state.capabilitySets = candidate.capabilitySets;
+  return set;
+}
+
 function applyCapabilityConsumption(
   state,
   consumption,
@@ -1387,6 +1459,12 @@ function validatePayload(payload, state, repositorySha) {
       capabilityRegistration(data.value),
     );
   }
+  if (data.type === "CAPABILITY_SET_REGISTERED") {
+    return payloadFor(
+      data.type,
+      capabilityRegistrationSet(data.value),
+    );
+  }
   if (data.type === "CAPABILITY_CONSUMED") {
     const consumption = capabilityConsumption(
       data.value,
@@ -1445,6 +1523,13 @@ function applyPayload(
 ) {
   if (payload.type === "CAPABILITY_REGISTERED") {
     return applyCapabilityRegistration(
+      state,
+      payload.value,
+      loading,
+    );
+  }
+  if (payload.type === "CAPABILITY_SET_REGISTERED") {
+    return applyCapabilityRegistrationSet(
       state,
       payload.value,
       loading,
@@ -1538,6 +1623,17 @@ function stateSummary(state) {
     );
   return Object.freeze({
     capabilities,
+    capabilitySets: [...state.capabilitySets.values()]
+      .map((set) => ({
+        registrationDigest: set.registrationDigest,
+        registrations: set.registrations,
+        requestDigest: set.requestDigest,
+      }))
+      .sort((left, right) =>
+        left.registrations.payee.sessionId.localeCompare(
+          right.registrations.payee.sessionId,
+        ),
+      ),
     eventDigests: state.events.map(
       (event) => event.eventDigest,
     ),
@@ -2486,6 +2582,17 @@ function publicRegistration(registration) {
   return Object.freeze({ ...registration });
 }
 
+function publicCapabilityRegistrationSet(set) {
+  return Object.freeze({
+    registrationDigest: set.registrationDigest,
+    registrations: Object.freeze({
+      payee: publicRegistration(set.registrations.payee),
+      payer: publicRegistration(set.registrations.payer),
+    }),
+    requestDigest: set.requestDigest,
+  });
+}
+
 function frozenEvents(events) {
   return Object.freeze(events.map(cloneEvent));
 }
@@ -3093,6 +3200,57 @@ export async function openCoordinationStore(input) {
       });
     }
 
+    async function registerCapabilitySet(value) {
+      return serialize(async () => {
+        assertOpen();
+        await assertDirectory(root);
+        const set = capabilityRegistrationSet(value);
+        const key = capabilitySetKey(set.registrations);
+        const existing = state.capabilitySets.get(key);
+        if (existing !== undefined) {
+          if (!sameCapabilityRegistrationSet(existing, set)) {
+            fail("CAPABILITY_REPLAY");
+          }
+          return publicCapabilityRegistrationSet(existing);
+        }
+        for (const registration of Object.values(
+          set.registrations,
+        )) {
+          if (
+            state.capabilityScopes.has(
+              `${registration.sessionId}\n${registration.role}`,
+            ) ||
+            state.capabilities.has(registration.capabilityDigest)
+          ) {
+            fail("CAPABILITY_REPLAY");
+          }
+        }
+        const accepted = await appendPayload(
+          payloadFor("CAPABILITY_SET_REGISTERED", set),
+        );
+        return publicCapabilityRegistrationSet(accepted);
+      });
+    }
+
+    async function readCapabilitySet(value) {
+      return serialize(async () => {
+        assertOpen();
+        await assertDirectory(root);
+        const data = readExactData(value, [
+          "releaseId",
+          "sessionId",
+        ]);
+        const releaseId = assertReleaseId(data.releaseId);
+        const sessionId = assertSessionId(data.sessionId);
+        const set = state.capabilitySets.get(
+          `${releaseId}\n${sessionId}`,
+        );
+        return set === undefined
+          ? null
+          : publicCapabilityRegistrationSet(set);
+      });
+    }
+
     async function consumeCapability(value) {
       return serialize(async () => {
         assertOpen();
@@ -3531,10 +3689,12 @@ export async function openCoordinationStore(input) {
       getArtifact,
       putArtifact,
       readEnrollment,
+      readCapabilitySet,
       readVerifierPublication,
       readEvents,
       readReleaseView,
       registerCapability,
+      registerCapabilitySet,
     };
     if (
       !Object.keys(store).every((key) =>

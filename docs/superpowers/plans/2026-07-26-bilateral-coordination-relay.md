@@ -848,12 +848,17 @@ Map only:
 
 ```text
 POST /v1/bootstrap
+POST /v1/capabilities
 POST /v1/events
 PUT  /v1/artifacts/:sha256
 GET  /v1/artifacts/:sha256
 GET  /v1/sessions/:sessionId/events?after=<digest>&waitMs=<bounded>
 GET  /v1/sessions/:sessionId/view
 ```
+
+`POST /v1/capabilities` accepts only the operator-signed, digest-only
+two-role capability registration; it never accepts or returns raw
+capabilities.
 
 Use `node:https.createServer`, reject redirects and unknown methods/routes,
 apply fixed header/body/total deadlines, stream with maximum-plus-one bounds,

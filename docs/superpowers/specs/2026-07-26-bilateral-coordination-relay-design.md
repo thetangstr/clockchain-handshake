@@ -393,6 +393,10 @@ The supervisor verifies it against the public key in the pinned leaf
 certificate. This proves which pinned relay consumed the capability; it does
 not grant the relay operator-command or protocol authority.
 
+The closed HTTPS route list also includes `POST /v1/capabilities`. It accepts
+only the operator-signed, digest-only two-role capability registration and
+returns a secret-free receipt; raw capabilities never cross this route.
+
 The relay and role client share one canonical receipt parser, signature
 preimage, and verifier. The client verifies the receipt against the public key
 from the exact leaf certificate in its launch manifest and supports only the

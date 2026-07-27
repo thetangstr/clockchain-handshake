@@ -540,6 +540,33 @@ async function register(store, overrides = {}) {
   });
 }
 
+function capabilitySet(overrides = {}) {
+  const registrations = {
+    payee: {
+      capabilityDigest: sha256(Buffer.alloc(32, 0x51)),
+      expiresAtMs: String(NOW_MS + 60_000),
+      releaseId: RELEASE_ID,
+      role: "payee",
+      sessionId: SESSION_ID,
+    },
+    payer: {
+      capabilityDigest: sha256(Buffer.alloc(32, 0x52)),
+      expiresAtMs: String(NOW_MS + 120_000),
+      releaseId: RELEASE_ID,
+      role: "payer",
+      sessionId: SESSION_ID,
+    },
+    ...overrides.registrations,
+  };
+  return {
+    registrationDigest:
+      overrides.registrationDigest ??
+      sha256(canonicalBytes(registrations)),
+    registrations,
+    requestDigest: overrides.requestDigest ?? "d".repeat(64),
+  };
+}
+
 async function assertReceiptRejected(
   store,
   value,
@@ -5086,4 +5113,111 @@ test("atomically journals a verified event with its exact verifier publication",
   );
   const journal = await readFile(join(root, "journal.log"), "utf8");
   assert.equal(journal.includes("VERIFIED_EVENT_APPENDED"), true);
+});
+
+test("atomically persists an exact two-role capability set across restart and rejects every changed retry", async (t) => {
+  const { root, store } = await storeFixture(t);
+  const request = capabilitySet();
+  const accepted = await store.registerCapabilitySet(request);
+  assert.deepEqual(accepted, request);
+  assert.deepEqual(
+    await store.registerCapabilitySet(request),
+    request,
+  );
+  await assert.rejects(
+    store.registerCapabilitySet(capabilitySet({
+      requestDigest: "e".repeat(64),
+    })),
+    { code: "CAPABILITY_REPLAY" },
+  );
+  await assert.rejects(
+    store.registerCapabilitySet(capabilitySet({
+      registrations: {
+        payer: {
+          ...request.registrations.payer,
+          capabilityDigest: "f".repeat(64),
+        },
+      },
+    })),
+    { code: "CAPABILITY_REPLAY" },
+  );
+  await store.close();
+  const restarted = await openCoordinationStore({
+    now: () => NOW_MS,
+    repositorySha: REPOSITORY_SHA,
+    root,
+  });
+  t.after(() => restarted.close().catch(() => {}));
+  assert.deepEqual(
+    await restarted.registerCapabilitySet(request),
+    request,
+  );
+  await assert.rejects(
+    restarted.registerCapabilitySet(capabilitySet({
+      registrations: {
+        payee: {
+          ...request.registrations.payee,
+          expiresAtMs: String(NOW_MS + 180_000),
+        },
+      },
+    })),
+    { code: "CAPABILITY_REPLAY" },
+  );
+  const journal = await readFile(join(root, "journal.log"), "utf8");
+  assert.equal(journal.includes("CAPABILITY_SET_REGISTERED"), true);
+  assert.equal(journal.includes("CAPABILITY_REGISTERED"), false);
+});
+
+test("rejects a capability-set registration before journaling when legacy role registrations already occupy either scope", async (t) => {
+  const full = await storeFixture(t);
+  const legacySet = capabilitySet({
+    registrations: {
+      payee: {
+        capabilityDigest: sha256(Buffer.alloc(32, 0x61)),
+        expiresAtMs: String(NOW_MS + 60_000),
+        releaseId: RELEASE_ID,
+        role: "payee",
+        sessionId: SESSION_ID,
+      },
+      payer: {
+        capabilityDigest: sha256(Buffer.alloc(32, 0x62)),
+        expiresAtMs: String(NOW_MS + 120_000),
+        releaseId: RELEASE_ID,
+        role: "payer",
+        sessionId: SESSION_ID,
+      },
+    },
+  });
+  await full.store.registerCapability(legacySet.registrations.payee);
+  await full.store.registerCapability(legacySet.registrations.payer);
+  const before = await readFile(join(full.root, "journal.log"));
+  await assert.rejects(
+    full.store.registerCapabilitySet(legacySet),
+    { code: "CAPABILITY_REPLAY" },
+  );
+  assert.deepEqual(await readFile(join(full.root, "journal.log")), before);
+  assert.equal(before.includes(Buffer.from("CAPABILITY_SET_REGISTERED")), false);
+  await full.store.close();
+  const reopened = await openCoordinationStore({
+    now: () => NOW_MS,
+    repositorySha: REPOSITORY_SHA,
+    root: full.root,
+  });
+  t.after(() => reopened.close().catch(() => {}));
+  assert.deepEqual(
+    await reopened.registerCapability(legacySet.registrations.payee),
+    legacySet.registrations.payee,
+  );
+
+  const partial = await storeFixture(t);
+  await partial.store.registerCapability(legacySet.registrations.payer);
+  const partialBefore = await readFile(join(partial.root, "journal.log"));
+  await assert.rejects(
+    partial.store.registerCapabilitySet(legacySet),
+    { code: "CAPABILITY_REPLAY" },
+  );
+  assert.deepEqual(
+    await readFile(join(partial.root, "journal.log")),
+    partialBefore,
+  );
 });

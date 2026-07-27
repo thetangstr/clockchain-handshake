@@ -55,6 +55,9 @@ import {
   createCoordinationEnvelope,
 } from "../src/bilateral/coordination/envelope.mjs";
 import {
+  createCapabilityRegistration,
+} from "../src/bilateral/coordination/capability-registration.mjs";
+import {
   TOKEN_COMMITMENT_SIGNATURE_DOMAIN,
 } from "../src/bilateral/coordination/preflight.mjs";
 import {
@@ -133,6 +136,38 @@ test("routes only exact verified-event posts to the verified service seam", asyn
   const rejected = await invokeRelayHandler(handler, { body, url: "/v1/verified-events?x=1" });
   assert.equal(rejected.status, 400);
 });
+
+test("routes only exact capability-registration posts to the registration seam", async () => {
+  const calls = [];
+  const handler = createRelayRequestHandler({
+    appendEvent: async () => ({}),
+    appendVerifiedEvent: async () => ({}),
+    bootstrap: async () => ({}),
+    getArtifact: async () => Buffer.alloc(0),
+    putArtifact: async () => ({}),
+    readEnrollmentSet: async () => ({}),
+    readEvents: async () => [],
+    readSessionView: async () => ({}),
+    registerCapabilities: async ({ body }) => {
+      calls.push(Buffer.from(body));
+      return { paymentMoved: false };
+    },
+  }, "127.0.0.1", 8443);
+  const body = Buffer.from('{"paymentMoved":false}', "utf8");
+  const result = await invokeRelayHandler(handler, {
+    body,
+    url: "/v1/capabilities",
+  });
+  assert.equal(result.status, 200);
+  assert.deepEqual(calls, [body]);
+  assert.equal(
+    (await invokeRelayHandler(handler, {
+      body,
+      url: "/v1/capabilities?retry=1",
+    })).status,
+    400,
+  );
+});
 const operator = generateKeyPairSync("ed25519");
 
 const invitationKeys = Object.freeze({
@@ -168,6 +203,28 @@ function privateKeyPem(pair) {
   return pair.privateKey.export({
     format: "pem",
     type: "pkcs8",
+  });
+}
+
+function capabilityRegistration(overrides = {}) {
+  return createCapabilityRegistration({
+    capabilities: {
+      payee: {
+        capabilityDigest: sha256(PAYEE_CAPABILITY),
+        expiresAtMs: String(NOW_MS + 60_000),
+      },
+      payer: {
+        capabilityDigest: sha256(PAYER_CAPABILITY),
+        expiresAtMs: String(NOW_MS + 120_000),
+      },
+    },
+    operatorKeyId: OPERATOR_KEY_ID,
+    paymentMoved: false,
+    privateKeyPem: privateKeyPem(operator),
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    sessionId: SESSION_ID,
+    ...overrides,
   });
 }
 
@@ -572,12 +629,128 @@ function storeFacade(store, overrides = {}) {
     getArtifact: store.getArtifact,
     putArtifact: store.putArtifact,
     readEnrollment: store.readEnrollment,
+    readCapabilitySet: store.readCapabilitySet,
     readEvents: store.readEvents,
     readReleaseView: store.readReleaseView,
     readVerifierPublication: store.readVerifierPublication,
+    registerCapabilitySet: store.registerCapabilitySet,
     ...overrides,
   });
 }
+
+test("registers only an exact operator-signed capability pair and returns a secret-free receipt", async (t) => {
+  const { store } = await storeFixture(t);
+  const { relay } = relayFixture(store);
+  const request = capabilityRegistration();
+  const body = canonicalBytes(request);
+  const receipt = await relay.registerCapabilities({ body });
+  assert.deepEqual(receipt, {
+    capabilities: request.capabilities,
+    paymentMoved: false,
+    registrationDigest: sha256(canonicalBytes({
+      payee: {
+        ...request.capabilities.payee,
+        releaseId: RELEASE_ID,
+        role: "payee",
+        sessionId: SESSION_ID,
+      },
+      payer: {
+        ...request.capabilities.payer,
+        releaseId: RELEASE_ID,
+        role: "payer",
+        sessionId: SESSION_ID,
+      },
+    })),
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.bilateral-capability-registration-receipt/v1",
+    sessionId: SESSION_ID,
+    requestDigest: sha256(canonicalBytes(request)),
+  });
+  assert.equal(receipt.registrationDigest.includes(PAYER_CAPABILITY.toString("hex")), false);
+  assert.deepEqual(
+    await relay.registerCapabilities({ body }),
+    receipt,
+  );
+  const wrongKey = capabilityRegistration({
+    privateKeyPem: privateKeyPem(generateKeyPairSync("ed25519")),
+  });
+  const cases = [
+    canonicalBytes({ ...request, unexpected: false }),
+    canonicalBytes({ ...request, repositorySha: "d".repeat(40) }),
+    canonicalBytes(wrongKey),
+    Buffer.concat([body, Buffer.from(" ", "utf8")]),
+    Buffer.alloc(65_537, 0x61),
+  ];
+  for (const candidate of cases) {
+    await assert.rejects(
+      relay.registerCapabilities({ body: candidate }),
+      { code: "COORDINATION_RELAY_INVALID" },
+    );
+  }
+  await assert.rejects(
+    relay.registerCapabilities({
+      body: canonicalBytes(capabilityRegistration({
+        capabilities: {
+          payee: {
+            capabilityDigest: sha256(PAYEE_CAPABILITY),
+            expiresAtMs: String(NOW_MS),
+          },
+          payer: {
+            capabilityDigest: sha256(PAYER_CAPABILITY),
+            expiresAtMs: String(NOW_MS + 120_000),
+          },
+        },
+      })),
+    }),
+    { code: "COORDINATION_RELAY_INVALID" },
+  );
+});
+
+test("returns a durable identical capability-registration retry after expiry but rejects a changed expired retry", async (t) => {
+  const { root, store } = await storeFixture(t);
+  let nowMs = NOW_MS;
+  const receipt = makeReceiptSigner();
+  const request = capabilityRegistration();
+  const createRelay = (activeStore) => createRelayService({
+    frozenRepositorySha: REPOSITORY_SHA,
+    now: () => nowMs,
+    receiptSigner: receipt.signer,
+    repositoryPublicKeyResolver: repositoryResolver(),
+    store: activeStore,
+  });
+  const first = await createRelay(store).registerCapabilities({
+    body: canonicalBytes(request),
+  });
+  nowMs += 60_001;
+  await store.close();
+  const restartedStore = await openCoordinationStore({
+    now: () => nowMs,
+    repositorySha: REPOSITORY_SHA,
+    root,
+  });
+  t.after(() => restartedStore.close().catch(() => {}));
+  assert.deepEqual(
+    await createRelay(restartedStore).registerCapabilities({
+      body: canonicalBytes(request),
+    }),
+    first,
+  );
+  await assert.rejects(
+    createRelay(restartedStore).registerCapabilities({
+      body: canonicalBytes(capabilityRegistration({
+        capabilities: {
+          payee: {
+            ...request.capabilities.payee,
+            expiresAtMs: String(NOW_MS + 90_000),
+          },
+          payer: request.capabilities.payer,
+        },
+      })),
+    }),
+    { code: "COORDINATION_RELAY_INVALID" },
+  );
+});
 
 function eventFixture({
   artifactDigest = null,
@@ -1387,6 +1560,7 @@ test("creates the exact transport-independent service and requires every authori
     "bootstrap",
     "getArtifact",
     "putArtifact",
+    "registerCapabilities",
     "readEnrollmentSet",
     "readEvents",
     "readSessionView",
