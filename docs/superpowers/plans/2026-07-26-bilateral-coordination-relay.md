@@ -742,6 +742,7 @@ export function createRelayService({
     putArtifact,
     readEvents,
     readSessionView,
+    readVerifierPublication,
   });
 }
 ```
@@ -854,6 +855,7 @@ PUT  /v1/artifacts/:sha256
 GET  /v1/artifacts/:sha256
 GET  /v1/sessions/:sessionId/events?after=<digest>&waitMs=<bounded>
 GET  /v1/sessions/:sessionId/view
+GET  /v1/sessions/:sessionId/verifier-publications/:subjectRun
 ```
 
 `POST /v1/capabilities` accepts only the operator-signed, digest-only
@@ -1016,7 +1018,8 @@ createCoordinationClient({
     getArtifact,
     putArtifact,
     readEvents,
-    readSessionView
+    readSessionView,
+    readVerifierPublication
   }
 
 createResumedCoordinationClient({
@@ -1040,6 +1043,14 @@ artifacts until bootstrap succeeds. Task 5 returns raw bounded event history
 without claiming it is authoritative; Task 7 authenticates the global chain
 against the frozen operator key and durable enrolled role keys before deriving
 restart state or executing a command.
+
+`readVerifierPublication({ subjectRun, signal? })` is available only after
+authenticated bootstrap or from a resumed authenticated client. It binds the
+session, release, and repository context from that authenticated client state,
+so supervisors replay the durable claim without accepting caller-supplied
+session context. It permits only `rehearsal` or `stakeholder` and returns either
+canonical JSON `null` or the exact frozen eight-key
+`clockchain.bilateral-verifier-publication/v1` claim.
 
 Bootstrap verifies the canonical receipt with the public key in the pinned leaf
 certificate through one receipt parser/verifier shared with the relay.

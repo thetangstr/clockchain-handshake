@@ -100,11 +100,15 @@ const PAYER_CAPABILITY = Buffer.alloc(32, 0x41);
 const PAYEE_CAPABILITY = Buffer.alloc(32, 0x42);
 const execFile = promisify(execFileCallback);
 
-async function invokeRelayHandler(handler, { body, url }) {
+async function invokeRelayHandler(handler, { body = Buffer.alloc(0), method = "POST", url }) {
   const request = new PassThrough();
-  request.headers = { host: "127.0.0.1:8443", "content-type": "application/json" };
-  request.rawHeaders = ["host", "127.0.0.1:8443", "content-type", "application/json"];
-  request.method = "POST";
+  request.headers = method === "GET"
+    ? { host: "127.0.0.1:8443" }
+    : { host: "127.0.0.1:8443", "content-type": "application/json" };
+  request.rawHeaders = method === "GET"
+    ? ["host", "127.0.0.1:8443"]
+    : ["host", "127.0.0.1:8443", "content-type", "application/json"];
+  request.method = method;
   request.url = url;
   const response = new EventEmitter();
   const chunks = [];
@@ -135,6 +139,43 @@ test("routes only exact verified-event posts to the verified service seam", asyn
   assert.deepEqual(JSON.parse(result.body), event);
   const rejected = await invokeRelayHandler(handler, { body, url: "/v1/verified-events?x=1" });
   assert.equal(rejected.status, 400);
+});
+
+test("routes only an exact verifier-publication read to the durable service seam", async () => {
+  const calls = [];
+  let publication = {
+    paymentMoved: false,
+    publicationDigest: "a".repeat(64),
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.bilateral-verifier-publication/v1",
+    sessionId: SESSION_ID,
+    status: "VERIFICATION_PASSED",
+    subjectRun: "rehearsal",
+  };
+  const handler = createRelayRequestHandler({
+    appendEvent: async () => ({}), appendVerifiedEvent: async () => ({}), bootstrap: async () => ({}), getArtifact: async () => Buffer.alloc(0), putArtifact: async () => ({}), readEnrollmentSet: async () => ({}), readEvents: async () => [], readSessionView: async () => ({}),
+    readVerifierPublication: async (input) => { calls.push(input); return publication; },
+    registerCapabilities: async () => ({}),
+  }, "127.0.0.1", 8443);
+  const url = `/v1/sessions/${SESSION_ID}/verifier-publications/rehearsal`;
+  const result = await invokeRelayHandler(handler, { method: "GET", url });
+  assert.equal(result.status, 200);
+  assert.deepEqual(calls, [{ sessionId: SESSION_ID, subjectRun: "rehearsal" }]);
+  assert.deepEqual(JSON.parse(result.body), publication);
+  publication = null;
+  assert.equal(
+    JSON.parse((await invokeRelayHandler(handler, { method: "GET", url })).body),
+    null,
+  );
+  for (const rejected of [
+    `${url}?x=1`,
+    `/v1/sessions/${SESSION_ID}/verifier-publications/release`,
+    `/v1/sessions/${SESSION_ID}/verifier-publications/rehearsal/`,
+  ]) {
+    assert.equal((await invokeRelayHandler(handler, { method: "GET", url: rejected })).status, 400);
+  }
+  assert.equal((await invokeRelayHandler(handler, { body: Buffer.from("{}"), url })).status, 400);
 });
 
 test("routes only exact capability-registration posts to the registration seam", async () => {
@@ -1564,8 +1605,68 @@ test("creates the exact transport-independent service and requires every authori
     "readEnrollmentSet",
     "readEvents",
     "readSessionView",
+    "readVerifierPublication",
   ]);
   assert.equal(Object.isFrozen(relay), true);
+});
+
+test("reads only the exact frozen durable verifier-publication claim", async (t) => {
+  const { store } = await storeFixture(t);
+  const calls = [];
+  const claim = {
+    paymentMoved: false,
+    publicationDigest: "d".repeat(64),
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.bilateral-verifier-publication/v1",
+    sessionId: SESSION_ID,
+    status: "VERIFICATION_PASSED",
+    subjectRun: "rehearsal",
+  };
+  const { relay } = relayFixture(storeFacade(store, {
+    async readVerifierPublication(input) {
+      calls.push(input);
+      return claim;
+    },
+  }));
+  const result = await relay.readVerifierPublication({
+    sessionId: SESSION_ID,
+    subjectRun: "rehearsal",
+  });
+  assert.deepEqual({ ...result }, claim);
+  assert.equal(Object.isFrozen(result), true);
+  assert.deepEqual(calls, [{ sessionId: SESSION_ID, subjectRun: "rehearsal" }]);
+  const { relay: absent } = relayFixture(storeFacade(store, {
+    async readVerifierPublication() {
+      return null;
+    },
+  }));
+  assert.equal(
+    await absent.readVerifierPublication({
+      sessionId: SESSION_ID,
+      subjectRun: "rehearsal",
+    }),
+    null,
+  );
+  for (const mutation of [
+    { paymentMoved: true },
+    { publicationDigest: "invalid" },
+    { repositorySha: "f".repeat(40) },
+    { sessionId: "9f953393-86d0-4f99-9d6a-102f525fbecd" },
+    { subjectRun: "stakeholder" },
+    { status: "AUTHORIZED" },
+    { extra: true },
+  ]) {
+    const { relay: hostile } = relayFixture(storeFacade(store, {
+      async readVerifierPublication() {
+        return { ...claim, ...mutation };
+      },
+    }));
+    await assert.rejects(
+      hostile.readVerifierPublication({ sessionId: SESSION_ID, subjectRun: "rehearsal" }),
+      { code: "COORDINATION_RELAY_INVALID" },
+    );
+  }
 });
 
 test("trusted verifier seam completes the exact rehearsal lifecycle and is idempotent", async (t) => {

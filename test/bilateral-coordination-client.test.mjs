@@ -2087,6 +2087,7 @@ test("gates enrollment-set authority until bootstrap and returns one exact verif
       "readEnrollmentSet",
       "readEvents",
       "readSessionView",
+      "readVerifierPublication",
     ],
   );
 });
@@ -2445,6 +2446,7 @@ test("bootstraps with one raw capability, retries only identical bytes, verifies
       "readEnrollmentSet",
       "readEvents",
       "readSessionView",
+      "readVerifierPublication",
     ],
   );
   assert.equal(
@@ -3762,6 +3764,84 @@ test("readSessionView returns only a canonical context-bound advisory lifecycle 
   };
   await assert.rejects(
     fixture.client.readSessionView(),
+    { code: "COORDINATION_CLIENT_INVALID" },
+  );
+});
+
+test("readVerifierPublication returns a context-bound durable claim or null", async (t) => {
+  const requests = [];
+  const claim = {
+    paymentMoved: false,
+    publicationDigest: "d".repeat(64),
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.bilateral-verifier-publication/v1",
+    sessionId: SESSION_ID,
+    status: "VERIFICATION_PASSED",
+    subjectRun: "rehearsal",
+  };
+  let body = canonicalBytes(claim);
+  const fixture = await resumedClientFixture(t, async (input) => {
+    requests.push({ ...input });
+    return injectedResponse({ body });
+  });
+  const controller = new AbortController();
+  const result = await fixture.client.readVerifierPublication({
+    signal: controller.signal,
+    subjectRun: "rehearsal",
+  });
+  assert.deepEqual({ ...result }, claim);
+  assert.equal(Object.isFrozen(result), true);
+  assert.deepEqual(requests, [{
+    body: null,
+    method: "GET",
+    path: `/v1/sessions/${SESSION_ID}/verifier-publications/rehearsal`,
+    signal: controller.signal,
+  }]);
+  body = Buffer.from("null", "utf8");
+  assert.equal(
+    await fixture.client.readVerifierPublication({ subjectRun: "rehearsal" }),
+    null,
+  );
+});
+
+test("readVerifierPublication rejects hostile response and caller-context substitutions", async (t) => {
+  const claim = {
+    paymentMoved: false,
+    publicationDigest: "d".repeat(64),
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.bilateral-verifier-publication/v1",
+    sessionId: SESSION_ID,
+    status: "VERIFICATION_PASSED",
+    subjectRun: "rehearsal",
+  };
+  let response = claim;
+  const fixture = await resumedClientFixture(t, async () =>
+    injectedResponse({ body: canonicalBytes(response) }),
+  );
+  for (const mutation of [
+    { paymentMoved: true },
+    { publicationDigest: "invalid" },
+    { releaseId: "release-other" },
+    { repositorySha: "e".repeat(40) },
+    { sessionId: "9f953393-86d0-4f99-9d6a-102f525fbecd" },
+    { subjectRun: "stakeholder" },
+    { status: "AUTHORIZED" },
+    { extra: true },
+  ]) {
+    response = { ...claim, ...mutation };
+    await assert.rejects(
+      fixture.client.readVerifierPublication({ subjectRun: "rehearsal" }),
+      { code: "COORDINATION_CLIENT_INVALID" },
+    );
+  }
+  await assert.rejects(
+    fixture.client.readVerifierPublication({ sessionId: SESSION_ID, subjectRun: "rehearsal" }),
+    { code: "COORDINATION_CLIENT_INVALID" },
+  );
+  await assert.rejects(
+    fixture.client.readVerifierPublication({ subjectRun: "release" }),
     { code: "COORDINATION_CLIENT_INVALID" },
   );
 });

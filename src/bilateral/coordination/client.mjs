@@ -189,6 +189,25 @@ const READ_VIEW_KEYS = Object.freeze([]);
 const READ_VIEW_KEYS_WITH_SIGNAL = Object.freeze([
   "signal",
 ]);
+const READ_VERIFIER_PUBLICATION_KEYS = Object.freeze([
+  "subjectRun",
+]);
+const READ_VERIFIER_PUBLICATION_KEYS_WITH_SIGNAL = Object.freeze([
+  "signal",
+  "subjectRun",
+]);
+const VERIFIER_PUBLICATION_KEYS = Object.freeze([
+  "paymentMoved",
+  "publicationDigest",
+  "releaseId",
+  "repositorySha",
+  "schema",
+  "sessionId",
+  "status",
+  "subjectRun",
+]);
+const VERIFIER_PUBLICATION_SCHEMA =
+  "clockchain.bilateral-verifier-publication/v1";
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -539,6 +558,9 @@ function validateRequestInput(value) {
     const enrollments = new RegExp(
       `^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/enrollments$`,
     ).test(data.path);
+    const verifierPublication = new RegExp(
+      `^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/verifier-publications/(?:rehearsal|stakeholder)$`,
+    ).test(data.path);
     const events = new RegExp(
       `^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/events\\?(?:after=[0-9a-f]{64}&)?waitMs=(?:0|[1-9][0-9]*)$`,
     ).test(data.path);
@@ -546,7 +568,8 @@ function validateRequestInput(value) {
       (!artifact &&
         !view &&
         !events &&
-        !enrollments) ||
+        !enrollments &&
+        !verifierPublication) ||
       data.body !== null
     ) {
       invalid();
@@ -1965,6 +1988,77 @@ function createCoordinationClientCore({
       }
     }
 
+    async function readVerifierPublication(value) {
+      try {
+        if (!bootstrapComplete || authenticatedLaunchState === null) {
+          invalid();
+        }
+        const inputData = readExactData(
+          value,
+          keysWithOptionalSignal(
+            value,
+            READ_VERIFIER_PUBLICATION_KEYS,
+            READ_VERIFIER_PUBLICATION_KEYS_WITH_SIGNAL,
+          ),
+        );
+        const signal =
+          inputData.signal === undefined
+            ? undefined
+            : assertSignal(inputData.signal);
+        if (
+          !["rehearsal", "stakeholder"].includes(
+            inputData.subjectRun,
+          )
+        ) {
+          invalid();
+        }
+        const response = await exactRequest(
+          transport,
+          {
+            body: null,
+            method: "GET",
+            path:
+              `/v1/sessions/${context.sessionId}/verifier-publications/` +
+              inputData.subjectRun,
+            signal,
+          },
+        );
+        const responseBytes = validateInjectedResponse(
+          response,
+          "application/json",
+        );
+        const parsed = parseCanonicalJson(responseBytes);
+        if (parsed === null) {
+          return null;
+        }
+        const claim = readExactData(
+          parsed,
+          VERIFIER_PUBLICATION_KEYS,
+        );
+        if (
+          claim.schema !== VERIFIER_PUBLICATION_SCHEMA ||
+          claim.paymentMoved !== false ||
+          typeof claim.publicationDigest !== "string" ||
+          !SHA256_PATTERN.test(claim.publicationDigest) ||
+          typeof claim.releaseId !== "string" ||
+          claim.releaseId.length === 0 ||
+          claim.releaseId !== context.releaseId ||
+          claim.repositorySha !== context.repositorySha ||
+          claim.sessionId !== context.sessionId ||
+          claim.subjectRun !== inputData.subjectRun ||
+          claim.status !== "VERIFICATION_PASSED"
+        ) {
+          invalid();
+        }
+        return Object.freeze(claim);
+      } catch (error) {
+        if (error instanceof CoordinationClientError) {
+          throw error;
+        }
+        invalid();
+      }
+    }
+
     return Object.freeze({
       appendEvent,
       bootstrap,
@@ -1973,6 +2067,7 @@ function createCoordinationClientCore({
       readEnrollmentSet,
       readEvents,
       readSessionView,
+      readVerifierPublication,
     });
   } catch (error) {
     if (error instanceof CoordinationClientError) {

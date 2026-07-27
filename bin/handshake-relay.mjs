@@ -924,6 +924,29 @@ export function createRelayRequestHandler(service, host, port) {
         );
         return;
       }
+      const verifierPublicationMatch = path.match(
+        /^\/v1\/sessions\/([0-9a-f-]{36})\/verifier-publications\/(rehearsal|stakeholder)$/,
+      );
+      if (
+        request.method === "GET" &&
+        verifierPublicationMatch !== null
+      ) {
+        if (
+          query !== null ||
+          !UUID_PATTERN.test(verifierPublicationMatch[1])
+        ) {
+          throw new Error();
+        }
+        sendJson(
+          response,
+          200,
+          await service.readVerifierPublication({
+            sessionId: verifierPublicationMatch[1],
+            subjectRun: verifierPublicationMatch[2],
+          }),
+        );
+        return;
+      }
       throw new Error();
     } catch {
       sendJson(response, 400, REQUEST_ERROR);

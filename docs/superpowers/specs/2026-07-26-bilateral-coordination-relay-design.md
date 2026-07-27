@@ -397,6 +397,19 @@ The closed HTTPS route list also includes `POST /v1/capabilities`. It accepts
 only the operator-signed, digest-only two-role capability registration and
 returns a secret-free receipt; raw capabilities never cross this route.
 
+The closed read route list includes only
+`GET /v1/sessions/:sessionId/verifier-publications/:subjectRun`, where
+`:subjectRun` is exactly `rehearsal` or `stakeholder`; it accepts no query or
+body. It returns canonical JSON `null` or an exact eight-key
+`clockchain.bilateral-verifier-publication/v1` claim bound to the frozen
+repository, requested session and run, `paymentMoved:false`,
+`status:"VERIFICATION_PASSED"`, and the publication digest. The service reads
+only the durable verifier-publication store seam for this route; it never
+derives a claim from the advisory session view or event fields. Role clients
+call it as `readVerifierPublication({ subjectRun, signal? })`; their
+authenticated launch context supplies session, release, and repository bindings
+for supervisor replay without trusting caller-provided session context.
+
 The relay and role client share one canonical receipt parser, signature
 preimage, and verifier. The client verifies the receipt against the public key
 from the exact leaf certificate in its launch manifest and supports only the

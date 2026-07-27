@@ -69,6 +69,7 @@ const SERVICE_KEYS = Object.freeze([
   "readEnrollmentSet",
   "readEvents",
   "readSessionView",
+  "readVerifierPublication",
 ]);
 const DEPENDENCY_KEYS = Object.freeze([
   "frozenRepositorySha",
@@ -101,6 +102,10 @@ const BOOTSTRAP_KEYS = Object.freeze([
 const APPEND_INPUT_KEYS = Object.freeze(["body"]);
 const VERIFIED_WRAPPER_KEYS = Object.freeze(["event", "paymentMoved", "publication", "schema"]);
 const PUBLICATION_KEYS = Object.freeze(["paymentMoved", "publicationDigest", "releaseId", "repositorySha", "schema", "sessionId", "status", "subjectRun"]);
+const READ_VERIFIER_PUBLICATION_KEYS = Object.freeze([
+  "sessionId",
+  "subjectRun",
+]);
 const GET_ARTIFACT_KEYS = Object.freeze(["digest"]);
 const PUT_ARTIFACT_KEYS = Object.freeze([
   "artifactType",
@@ -120,6 +125,30 @@ function verifierPublicationMatchesEvent(publication, event) {
     claim.subjectRun === event.subjectRun &&
     claim.status === "VERIFICATION_PASSED"
   );
+}
+
+function readVerifierPublicationClaim(value, {
+  repositorySha,
+  sessionId,
+  subjectRun,
+}) {
+  const claim = readExactData(value, PUBLICATION_KEYS);
+  if (
+    claim.schema !== VERIFIER_PUBLICATION_SCHEMA ||
+    claim.paymentMoved !== false ||
+    typeof claim.publicationDigest !== "string" ||
+    !SHA256_PATTERN.test(claim.publicationDigest) ||
+    typeof claim.releaseId !== "string" ||
+    claim.releaseId.length === 0 ||
+    claim.repositorySha !== repositorySha ||
+    claim.sessionId !== sessionId ||
+    claim.subjectRun !== subjectRun ||
+    !["rehearsal", "stakeholder"].includes(claim.subjectRun) ||
+    claim.status !== "VERIFICATION_PASSED"
+  ) {
+    invalid();
+  }
+  return Object.freeze(claim);
 }
 const READ_EVENTS_KEYS = Object.freeze([
   "after",
@@ -1753,6 +1782,37 @@ export function createRelayService(input) {
       });
     }
 
+    async function readVerifierPublication(value) {
+      return guardedAsync(async () => {
+        const data = readExactData(
+          value,
+          READ_VERIFIER_PUBLICATION_KEYS,
+        );
+        const sessionId = assertSessionId(data.sessionId);
+        const subjectRun = data.subjectRun;
+        if (!["rehearsal", "stakeholder"].includes(subjectRun)) {
+          invalid();
+        }
+        let claim;
+        try {
+          claim = await store.readVerifierPublication({
+            sessionId,
+            subjectRun,
+          });
+        } catch {
+          invalid();
+        }
+        if (claim === null) {
+          return null;
+        }
+        return readVerifierPublicationClaim(claim, {
+          repositorySha: frozenRepositorySha,
+          sessionId,
+          subjectRun,
+        });
+      });
+    }
+
     const service = {
       appendEvent,
       appendVerifiedEvent,
@@ -1763,6 +1823,7 @@ export function createRelayService(input) {
       readEnrollmentSet,
       readEvents,
       readSessionView,
+      readVerifierPublication,
     };
     if (
       Object.keys(service).length !==
