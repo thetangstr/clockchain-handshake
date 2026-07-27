@@ -488,6 +488,27 @@ function bilateralContractFailures(relativePath, contents) {
       );
     }
   }
+  if (relativePath === "docs/runbooks/bilateral-demo-day.md") {
+    const hasExactOrderedAnchors =
+      /\bexactly\s+three\s+ordered\s+Clockchain\s+anchors\b/i.test(contents);
+    const hasIndependentVerification =
+      /\bindependently\s+(?:refetching|verif\w*)\s+all\s+three\s+Clockchain\s+anchors\b/i.test(
+        contents,
+      );
+    const permitsOtherCount =
+      /\b(?:at\s+least\s+three|three\s+or\s+more|any\s+number\s+of)\s+(?:ordered\s+)?Clockchain\s+anchors\b/i.test(
+        contents,
+      );
+    if (
+      !hasExactOrderedAnchors ||
+      !hasIndependentVerification ||
+      permitsOtherCount
+    ) {
+      failures.push(
+        `${relativePath}: primary runbook must require exactly three independently verifiable ordered Clockchain anchors and reject any other count.`,
+      );
+    }
+  }
   const requiredRoleCommands = {
     "prompts/run-billy-bilateral-demo.md": [
       ["exact token mint CLI", BILLY_TOKEN_COMMAND],

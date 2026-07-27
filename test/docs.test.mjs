@@ -241,6 +241,33 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
   }
 });
 
+test("primary bilateral runbook requires exactly three ordered independently verifiable anchors", async (t) => {
+  const directory = await temporaryDocumentationFixture(t);
+  const runbookPath = join(
+    directory,
+    "docs/runbooks/bilateral-demo-day.md",
+  );
+  const runbook = await readFile(runbookPath, "utf8");
+  const weakened = runbook.replace(
+    /exactly\s+three\s+ordered\s+Clockchain\s+anchors/i,
+    "at least three ordered Clockchain anchors",
+  );
+  assert.notEqual(weakened, runbook);
+  await writeFile(runbookPath, weakened);
+
+  const failures = await checkDocumentation({
+    rootDirectory: directory,
+  });
+  assert.ok(
+    failures.some((failure) =>
+      /primary runbook.*exactly three independently verifiable ordered Clockchain anchors/i.test(
+        failure,
+      ),
+    ),
+    failures.join("\n"),
+  );
+});
+
 test("automated bilateral happy path limits the user to four fundings and two supervisors", async () => {
   const [runbook, billy, iris, packageText] = await Promise.all([
     readFile(
