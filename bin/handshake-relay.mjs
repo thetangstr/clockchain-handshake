@@ -734,7 +734,7 @@ function parseRawQuery(query, allowed) {
   return result;
 }
 
-function requestHandler(service, host, port) {
+export function createRelayRequestHandler(service, host, port) {
   const expectedHost =
     isIP(host) === 6
       ? `[${host}]:${port}`
@@ -773,7 +773,8 @@ function requestHandler(service, host, port) {
       if (
         request.method === "POST" &&
         (path === "/v1/bootstrap" ||
-          path === "/v1/events")
+          path === "/v1/events" ||
+          path === "/v1/verified-events")
       ) {
         if (query !== null) {
           throw new Error();
@@ -786,7 +787,9 @@ function requestHandler(service, host, port) {
         const result =
           path === "/v1/bootstrap"
             ? await service.bootstrap({ body })
-            : await service.appendEvent({ body });
+            : path === "/v1/events"
+              ? await service.appendEvent({ body })
+              : await service.appendVerifiedEvent({ body });
         sendJson(response, 200, result);
         return;
       }
@@ -1014,7 +1017,7 @@ export async function main(arguments_, dependencies = {}) {
         cert: certificateBytes,
         key: privateKeyBytes,
       },
-      requestHandler(
+      createRelayRequestHandler(
         service,
         options.host,
         options.port,

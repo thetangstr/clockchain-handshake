@@ -50,9 +50,12 @@ export {
 };
 export const MAX_RELAY_REQUEST_BYTES = 65_536;
 export const MAX_RELAY_WAIT_MS = 30_000;
+export const VERIFIER_PUBLICATION_SCHEMA = "clockchain.bilateral-verifier-publication/v1";
+export const VERIFIED_EVENT_SCHEMA = "clockchain.bilateral-verified-event/v1";
 
 const SERVICE_KEYS = Object.freeze([
   "appendEvent",
+  "appendVerifiedEvent",
   "bootstrap",
   "getArtifact",
   "putArtifact",
@@ -72,12 +75,14 @@ const DEPENDENCY_KEYS_WITHOUT_NOW = Object.freeze(
 );
 const STORE_METHODS = Object.freeze([
   "appendEvent",
+  "appendVerifiedEvent",
   "consumeCapability",
   "getArtifact",
   "putArtifact",
   "readEnrollment",
   "readEvents",
   "readReleaseView",
+  "readVerifierPublication",
 ]);
 const BOOTSTRAP_INPUT_KEYS = Object.freeze(["body"]);
 const BOOTSTRAP_KEYS = Object.freeze([
@@ -85,12 +90,28 @@ const BOOTSTRAP_KEYS = Object.freeze([
   "enrollment",
 ]);
 const APPEND_INPUT_KEYS = Object.freeze(["body"]);
+const VERIFIED_WRAPPER_KEYS = Object.freeze(["event", "paymentMoved", "publication", "schema"]);
+const PUBLICATION_KEYS = Object.freeze(["paymentMoved", "publicationDigest", "releaseId", "repositorySha", "schema", "sessionId", "status", "subjectRun"]);
 const GET_ARTIFACT_KEYS = Object.freeze(["digest"]);
 const PUT_ARTIFACT_KEYS = Object.freeze([
   "artifactType",
   "body",
   "expectedDigest",
 ]);
+
+function verifierPublicationMatchesEvent(publication, event) {
+  const claim = readExactData(publication, PUBLICATION_KEYS);
+  return (
+    claim.schema === VERIFIER_PUBLICATION_SCHEMA &&
+    claim.paymentMoved === false &&
+    claim.publicationDigest === event.artifactDigest &&
+    claim.releaseId === event.releaseId &&
+    claim.repositorySha === event.repositorySha &&
+    claim.sessionId === event.sessionId &&
+    claim.subjectRun === event.subjectRun &&
+    claim.status === "VERIFICATION_PASSED"
+  );
+}
 const READ_EVENTS_KEYS = Object.freeze([
   "after",
   "sessionId",
@@ -1166,17 +1187,20 @@ export function createRelayService(input) {
         });
       for (const event of stored.events) {
         const envelope = readEnvelope(event);
-        if (envelope.kind === "VERIFICATION_PASSED") {
-          invalid();
-        }
         const expectedPublicKey =
           await eventAuthority(event);
-        await descriptorArtifacts.validate(event);
+        if (envelope.kind !== "VERIFICATION_PASSED") await descriptorArtifacts.validate(event);
         try {
+          const options = { expectedPublicKey };
+          if (envelope.kind === "VERIFICATION_PASSED") {
+            const claim = await store.readVerifierPublication({ sessionId: envelope.sessionId, subjectRun: envelope.subjectRun });
+            if (claim === null || !verifierPublicationMatchesEvent(claim, event)) invalid();
+            options.verifierPublicationVerified = true;
+          }
           view = reduceReleaseEvent(
             view,
             event,
-            { expectedPublicKey },
+            options,
           );
         } catch {
           invalid();
@@ -1375,6 +1399,32 @@ export function createRelayService(input) {
         } catch {
           invalid();
         }
+        notifySession(envelope.sessionId);
+        return accepted;
+      });
+    }
+
+    async function appendVerifiedEvent(value) {
+      return serializeMutation(async () => {
+        const input = readExactData(value, APPEND_INPUT_KEYS);
+        const wrapper = readExactData(parseCanonicalBody(input.body, MAX_RELAY_REQUEST_BYTES), VERIFIED_WRAPPER_KEYS);
+        if (wrapper.schema !== VERIFIED_EVENT_SCHEMA || wrapper.paymentMoved !== false) invalid();
+        const event = wrapper.event;
+        const envelope = readEnvelope(event);
+        const claim = readExactData(wrapper.publication, PUBLICATION_KEYS);
+        if (envelope.kind !== "VERIFICATION_PASSED" || envelope.role !== "operator" || event.paymentMoved !== false || envelope.artifactDigest === null || claim.repositorySha !== frozenRepositorySha || !verifierPublicationMatchesEvent(claim, event)) invalid();
+        const replayed = await replaySession(envelope.sessionId);
+        const existing = replayed.events.find((candidate) => candidate.eventDigest === event.eventDigest);
+        if (existing !== undefined) {
+          if (!canonicalBytes(existing).equals(canonicalBytes(event))) invalid();
+          const durable = await store.readVerifierPublication({ sessionId: envelope.sessionId, subjectRun: envelope.subjectRun });
+          if (durable === null || !canonicalBytes(durable).equals(canonicalBytes(claim))) invalid();
+          return existing;
+        }
+        const expectedPublicKey = await eventAuthority(event);
+        try { reduceReleaseEvent(replayed.view, event, { expectedPublicKey, verifierPublicationVerified: true }); } catch { invalid(); }
+        let accepted;
+        try { accepted = await store.appendVerifiedEvent({ event, publication: claim }); } catch { invalid(); }
         notifySession(envelope.sessionId);
         return accepted;
       });
@@ -1612,6 +1662,7 @@ export function createRelayService(input) {
 
     const service = {
       appendEvent,
+      appendVerifiedEvent,
       bootstrap,
       getArtifact,
       putArtifact,

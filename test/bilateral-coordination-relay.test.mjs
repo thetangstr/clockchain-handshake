@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import {
   chmod,
   mkdir,
@@ -80,6 +82,7 @@ import {
   RELAY_HEADER_TIMEOUT_MS,
   RELAY_REPOSITORY_ROOT,
   RELAY_TOTAL_TIMEOUT_MS,
+  createRelayRequestHandler,
   main as relayMain,
 } from "../bin/handshake-relay.mjs";
 
@@ -94,10 +97,42 @@ const PAYER_CAPABILITY = Buffer.alloc(32, 0x41);
 const PAYEE_CAPABILITY = Buffer.alloc(32, 0x42);
 const execFile = promisify(execFileCallback);
 
+async function invokeRelayHandler(handler, { body, url }) {
+  const request = new PassThrough();
+  request.headers = { host: "127.0.0.1:8443", "content-type": "application/json" };
+  request.rawHeaders = ["host", "127.0.0.1:8443", "content-type", "application/json"];
+  request.method = "POST";
+  request.url = url;
+  const response = new EventEmitter();
+  const chunks = [];
+  response.writeHead = (status, headers) => { response.status = status; response.headers = headers; };
+  response.end = (chunk) => { if (chunk !== undefined) chunks.push(Buffer.from(chunk)); response.emit("close"); };
+  request.end(body);
+  await handler(request, response);
+  return { body: Buffer.concat(chunks), status: response.status };
+}
+
 const payerCoordination = generateKeyPairSync("ed25519");
 const payerPreflight = generateKeyPairSync("ed25519");
 const payeeCoordination = generateKeyPairSync("ed25519");
 const payeePreflight = generateKeyPairSync("ed25519");
+
+test("routes only exact verified-event posts to the verified service seam", async () => {
+  const calls = [];
+  const event = { eventDigest: "a".repeat(64) };
+  const handler = createRelayRequestHandler({
+    appendEvent: async () => ({ eventDigest: "b".repeat(64) }),
+    appendVerifiedEvent: async ({ body }) => { calls.push(Buffer.from(body)); return event; },
+    bootstrap: async () => ({}), getArtifact: async () => Buffer.alloc(0), putArtifact: async () => ({}), readEnrollmentSet: async () => Buffer.alloc(0), readEvents: async () => [], readSessionView: async () => ({}),
+  }, "127.0.0.1", 8443);
+  const body = Buffer.from('{"paymentMoved":false}', "utf8");
+  const result = await invokeRelayHandler(handler, { body, url: "/v1/verified-events" });
+  assert.equal(result.status, 200);
+  assert.deepEqual(calls, [body]);
+  assert.deepEqual(JSON.parse(result.body), event);
+  const rejected = await invokeRelayHandler(handler, { body, url: "/v1/verified-events?x=1" });
+  assert.equal(rejected.status, 400);
+});
 const operator = generateKeyPairSync("ed25519");
 
 const invitationKeys = Object.freeze({
@@ -532,12 +567,14 @@ function relayFixture(
 function storeFacade(store, overrides = {}) {
   return Object.freeze({
     appendEvent: store.appendEvent,
+    appendVerifiedEvent: store.appendVerifiedEvent,
     consumeCapability: store.consumeCapability,
     getArtifact: store.getArtifact,
     putArtifact: store.putArtifact,
     readEnrollment: store.readEnrollment,
     readEvents: store.readEvents,
     readReleaseView: store.readReleaseView,
+    readVerifierPublication: store.readVerifierPublication,
     ...overrides,
   });
 }
@@ -1272,6 +1309,64 @@ async function bootstrapRole(
   });
 }
 
+function verifiedEventBody(event, publication = {}) {
+  return canonicalBytes({
+    event,
+    paymentMoved: false,
+    publication: {
+      paymentMoved: false,
+      publicationDigest: event.artifactDigest,
+      releaseId: RELEASE_ID,
+      repositorySha: REPOSITORY_SHA,
+      schema: "clockchain.bilateral-verifier-publication/v1",
+      sessionId: SESSION_ID,
+      status: "VERIFICATION_PASSED",
+      subjectRun: "rehearsal",
+      ...publication,
+    },
+    schema: "clockchain.bilateral-verified-event/v1",
+  });
+}
+
+async function rehearsalReadyForVerification(t) {
+  const { root, store } = await storeFixture(t);
+  await registerRole(store, { capability: PAYER_CAPABILITY, role: "payer" });
+  await registerRole(store, { capability: PAYEE_CAPABILITY, role: "payee" });
+  const receipt = makeReceiptSigner();
+  const { relay } = relayFixture(store, { receipt });
+  await bootstrapRole(relay, { capability: PAYER_CAPABILITY, coordination: payerCoordination, invitationPrivateKeys: invitationKeys.payer, preflight: payerPreflight, role: "payer" });
+  await bootstrapRole(relay, { capability: PAYEE_CAPABILITY, coordination: payeeCoordination, invitationPrivateKeys: invitationKeys.payee, preflight: payeePreflight, role: "payee" });
+  const artifacts = contextualPreflightArtifacts();
+  const identities = {
+    payer: { address: privateKeyToAccount(invitationKeys.payer.rehearsal).address.toLowerCase(), agentId: "8677", displayName: "Billy" },
+    payee: { address: privateKeyToAccount(invitationKeys.payee.rehearsal).address.toLowerCase(), agentId: "8678", displayName: "Iris" },
+  };
+  const descriptor = enrolledDescriptor(identities);
+  const payerPackage = await partyResultPackage(t, { descriptor, role: "payer" });
+  const payeePackage = await partyResultPackage(t, { descriptor, role: "payee" });
+  const uploads = [
+    ["token-commitment", stableBytes(artifacts.tokens.payer)], ["token-commitment", stableBytes(artifacts.tokens.payee)],
+    ["preflight-plan", artifacts.plan], ["preflight-participant-report", artifacts.participants.payer], ["preflight-participant-report", artifacts.participants.payee], ["preflight-aggregate-report", artifacts.aggregate],
+    ["identity-package", identityPackage(identities.payer)], ["identity-package", identityPackage(identities.payee)],
+    ["signed-descriptor", canonicalBytes(descriptor)], ["party-result-package", payerPackage], ["party-result-package", payeePackage],
+  ];
+  for (const [artifactType, body] of uploads) await relay.putArtifact({ artifactType, body, expectedDigest: sha256(body) });
+  const build = eventBuilder();
+  const append = async (role, kind, artifactDigest = null, subjectRun = "release") => relay.appendEvent({ body: canonicalBytes(build({ role, kind, artifactDigest, subjectRun })) });
+  for (const [role, kind, artifactDigest, subjectRun] of [
+    ["payer", "ENROLLMENT_CONFIRMED"], ["payee", "ENROLLMENT_CONFIRMED"], ["operator", "ENROLLMENT_RECEIPT"], ["operator", "WAIT_FOR_FUNDING"], ["payer", "FUNDING_INPUTS_READY"], ["payee", "FUNDING_INPUTS_READY"],
+    ["payer", "TOKEN_READY", sha256(stableBytes(artifacts.tokens.payer))], ["payee", "TOKEN_READY", sha256(stableBytes(artifacts.tokens.payee))], ["operator", "PREFLIGHT_PLAN_READY", sha256(artifacts.plan)], ["payer", "PREFLIGHT_PARTICIPANT_READY", sha256(artifacts.participants.payer)], ["payee", "PREFLIGHT_PARTICIPANT_READY", sha256(artifacts.participants.payee)], ["operator", "REGISTER_REHEARSAL", sha256(artifacts.aggregate), "rehearsal"],
+    ["payer", "IDENTITY_PACKAGE_READY", sha256(identityPackage(identities.payer)), "rehearsal"], ["payee", "IDENTITY_PACKAGE_READY", sha256(identityPackage(identities.payee)), "rehearsal"], ["operator", "REHEARSAL_DESCRIPTOR_READY", sha256(canonicalBytes(descriptor)), "rehearsal"], ["payer", "DESCRIPTOR_ACCEPTED", sha256(canonicalBytes(descriptor)), "rehearsal"], ["payee", "DESCRIPTOR_ACCEPTED", sha256(canonicalBytes(descriptor)), "rehearsal"], ["operator", "START_REHEARSAL", null, "rehearsal"], ["payee", "ROLE_STARTED", null, "rehearsal"], ["payer", "ROLE_STARTED", null, "rehearsal"], ["payer", "ROLE_PACKAGE_READY", sha256(payerPackage), "rehearsal"], ["payee", "ROLE_PACKAGE_READY", sha256(payeePackage), "rehearsal"],
+  ]) {
+    try {
+      await append(role, kind, artifactDigest, subjectRun);
+    } catch (error) {
+      throw new Error(`rehearsal setup rejected ${kind} for ${role}`, { cause: error });
+    }
+  }
+  return { build, receipt, relay, root, store };
+}
+
 test("creates the exact transport-independent service and requires every authority dependency", async (t) => {
   const { store } = await storeFixture(t);
   const receipt = makeReceiptSigner();
@@ -1288,6 +1383,7 @@ test("creates the exact transport-independent service and requires every authori
   const { relay } = relayFixture(store, { receipt });
   assert.deepEqual(Object.keys(relay), [
     "appendEvent",
+    "appendVerifiedEvent",
     "bootstrap",
     "getArtifact",
     "putArtifact",
@@ -1296,6 +1392,81 @@ test("creates the exact transport-independent service and requires every authori
     "readSessionView",
   ]);
   assert.equal(Object.isFrozen(relay), true);
+});
+
+test("trusted verifier seam completes the exact rehearsal lifecycle and is idempotent", async (t) => {
+  const { build, relay, root, store } = await rehearsalReadyForVerification(t);
+  const event = build({ artifactDigest: "d".repeat(64), kind: "VERIFICATION_PASSED", role: "operator", subjectRun: "rehearsal" });
+  const body = verifiedEventBody(event);
+
+  await assert.rejects(
+    relay.appendEvent({ body: canonicalBytes(event) }),
+    { code: "COORDINATION_RELAY_INVALID" },
+  );
+  assert.deepEqual(await relay.appendVerifiedEvent({ body }), event);
+  assert.equal((await relay.readSessionView({ sessionId: SESSION_ID })).state, "REHEARSAL_VERIFIED");
+  assert.deepEqual(await relay.appendVerifiedEvent({ body }), event);
+  assert.equal((await store.readEvents({ after: null, sessionId: SESSION_ID })).length, 23);
+  const journal = await readFile(join(root, "journal.log"), "utf8");
+  assert.equal(journal.includes("VERIFIED_EVENT_APPENDED"), true);
+});
+
+test("trusted verifier seam fails closed when its durable claim disagrees with the event", async (t) => {
+  const { build, relay, store } = await rehearsalReadyForVerification(t);
+  const event = build({ artifactDigest: "d".repeat(64), kind: "VERIFICATION_PASSED", role: "operator", subjectRun: "rehearsal" });
+  const cases = [
+    ["digest", { publicationDigest: "e".repeat(64) }],
+    ["run", { subjectRun: "stakeholder" }],
+    ["session", { sessionId: "9f953393-86d0-4f99-9d6a-102f525fbecd" }],
+    ["repository", { repositorySha: "f".repeat(40) }],
+    ["payment moved", { paymentMoved: true }],
+  ];
+  for (const [label, publication] of cases) {
+    await assert.rejects(relay.appendVerifiedEvent({ body: verifiedEventBody(event, publication) }), { code: "COORDINATION_RELAY_INVALID" }, label);
+  }
+  await assert.equal((await store.readEvents({ after: null, sessionId: SESSION_ID })).length, 22);
+  assert.equal(await store.readVerifierPublication({ sessionId: SESSION_ID, subjectRun: "rehearsal" }), null);
+});
+
+test("trusted verifier claim survives restart and replay", async (t) => {
+  const { build, receipt, relay, root, store } = await rehearsalReadyForVerification(t);
+  const event = build({ artifactDigest: "d".repeat(64), kind: "VERIFICATION_PASSED", role: "operator", subjectRun: "rehearsal" });
+  const body = verifiedEventBody(event);
+  await relay.appendVerifiedEvent({ body });
+  await store.close();
+  const restartedStore = await openCoordinationStore({ now: () => NOW_MS, repositorySha: REPOSITORY_SHA, root });
+  t.after(() => restartedStore.close().catch(() => {}));
+  const { relay: restarted } = relayFixture(restartedStore, { receipt });
+  assert.equal((await restarted.readSessionView({ sessionId: SESSION_ID })).state, "REHEARSAL_VERIFIED");
+  assert.deepEqual(await restarted.appendVerifiedEvent({ body }), event);
+});
+
+test("replay rejects every hostile persisted verifier claim substitution", async (t) => {
+  const { build, relay, store } = await rehearsalReadyForVerification(t);
+  const event = build({ artifactDigest: "d".repeat(64), kind: "VERIFICATION_PASSED", role: "operator", subjectRun: "rehearsal" });
+  await relay.appendVerifiedEvent({ body: verifiedEventBody(event) });
+  const claim = await store.readVerifierPublication({ sessionId: SESSION_ID, subjectRun: "rehearsal" });
+  const mutations = [
+    { schema: "clockchain.bilateral-verifier-publication/v2" },
+    { paymentMoved: true },
+    { publicationDigest: "e".repeat(64) },
+    { releaseId: "release-other" },
+    { repositorySha: "f".repeat(40) },
+    { sessionId: "9f953393-86d0-4f99-9d6a-102f525fbecd" },
+    { subjectRun: "stakeholder" },
+    { status: "AUTHORIZED" },
+  ];
+  for (const mutation of mutations) {
+    const { relay: hostile } = relayFixture(storeFacade(store, {
+      async readVerifierPublication() {
+        return { ...claim, ...mutation };
+      },
+    }));
+    await assert.rejects(
+      hostile.readSessionView({ sessionId: SESSION_ID }),
+      { code: "COORDINATION_RELAY_INVALID" },
+    );
+  }
 });
 
 test("returns an authenticated enrollment set only after both durable role records exist", async (t) => {
@@ -1932,8 +2103,7 @@ test("rejects a persisted receipt whose returned signature no longer verifies", 
     capability: PAYER_CAPABILITY,
     role: "payer",
   });
-  const corruptingStore = Object.freeze({
-    appendEvent: store.appendEvent,
+  const corruptingStore = storeFacade(store, {
     async consumeCapability(input) {
       const consumed = await store.consumeCapability(input);
       const receipt = JSON.parse(
@@ -1950,11 +2120,6 @@ test("rejects a persisted receipt whose returned signature no longer verifies", 
         receiptBytes: stableBytes(receipt),
       });
     },
-    getArtifact: store.getArtifact,
-    putArtifact: store.putArtifact,
-    readEnrollment: store.readEnrollment,
-    readEvents: store.readEvents,
-    readReleaseView: store.readReleaseView,
   });
   const { relay } = relayFixture(corruptingStore);
   await assert.rejects(
@@ -2029,11 +2194,7 @@ test("rejects durable role authority returned outside the event scope", async (t
     },
     payerCoordination,
   );
-  const wrongScopeStore = Object.freeze({
-    appendEvent: store.appendEvent,
-    consumeCapability: store.consumeCapability,
-    getArtifact: store.getArtifact,
-    putArtifact: store.putArtifact,
+  const wrongScopeStore = storeFacade(store, {
     async readEnrollment() {
       const bytes = canonicalBytes(wrongScopeEnrollment);
       return Object.freeze({
@@ -2041,8 +2202,6 @@ test("rejects durable role authority returned outside the event scope", async (t
         digest: sha256(bytes),
       });
     },
-    readEvents: store.readEvents,
-    readReleaseView: store.readReleaseView,
   });
   const { relay } = relayFixture(wrongScopeStore);
   const failure = eventFixture({
@@ -2615,12 +2774,7 @@ test("long-poll registration cannot miss an append during its initial read", asy
     markInitialReadStarted = resolve;
   });
   let firstRead = true;
-  const delayedReadStore = Object.freeze({
-    appendEvent: store.appendEvent,
-    consumeCapability: store.consumeCapability,
-    getArtifact: store.getArtifact,
-    putArtifact: store.putArtifact,
-    readEnrollment: store.readEnrollment,
+  const delayedReadStore = storeFacade(store, {
     async readEvents(input) {
       const snapshot = await store.readEvents(input);
       if (firstRead) {
@@ -2630,7 +2784,6 @@ test("long-poll registration cannot miss an append during its initial read", asy
       }
       return snapshot;
     },
-    readReleaseView: store.readReleaseView,
   });
   const { relay } = relayFixture(delayedReadStore);
   await bootstrapRole(relay, {
@@ -2672,12 +2825,7 @@ test("aborting a long poll removes its waiter without a later reread", async (t)
   const firstRead = new Promise((resolve) => {
     markFirstRead = resolve;
   });
-  const countedStore = Object.freeze({
-    appendEvent: store.appendEvent,
-    consumeCapability: store.consumeCapability,
-    getArtifact: store.getArtifact,
-    putArtifact: store.putArtifact,
-    readEnrollment: store.readEnrollment,
+  const countedStore = storeFacade(store, {
     async readEvents(input) {
       readCount += 1;
       const result = await store.readEvents(input);
@@ -2686,7 +2834,6 @@ test("aborting a long poll removes its waiter without a later reread", async (t)
       }
       return result;
     },
-    readReleaseView: store.readReleaseView,
   });
   const { relay } = relayFixture(countedStore);
   await bootstrapRole(relay, {

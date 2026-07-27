@@ -5016,3 +5016,74 @@ test("detects same-length journal mutation after fsync before acknowledging the 
     { code: "COORDINATION_STORAGE_INVALID" },
   );
 });
+
+test("atomically journals a verified event with its exact verifier publication", async (t) => {
+  const { root, store } = await storeFixture(t);
+  const eventValue = event({
+    digest: "a".repeat(64),
+    kind: "VERIFICATION_PASSED",
+    role: "operator",
+    subjectRun: "rehearsal",
+  });
+  const publication = {
+    paymentMoved: false,
+    publicationDigest: eventValue.artifactDigest,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.bilateral-verifier-publication/v1",
+    sessionId: SESSION_ID,
+    status: "VERIFICATION_PASSED",
+    subjectRun: "rehearsal",
+  };
+
+  assert.deepEqual(
+    await store.appendVerifiedEvent({ event: eventValue, publication }),
+    eventValue,
+  );
+  assert.deepEqual(
+    await store.appendVerifiedEvent({ event: eventValue, publication }),
+    eventValue,
+  );
+  assert.deepEqual(
+    await store.readVerifierPublication({
+      sessionId: SESSION_ID,
+      subjectRun: "rehearsal",
+    }),
+    publication,
+  );
+  await assert.rejects(
+    store.appendVerifiedEvent({
+      event: eventValue,
+      publication: { ...publication, publicationDigest: "b".repeat(64) },
+    }),
+    { code: "COORDINATION_STORAGE_INVALID" },
+  );
+  await store.close();
+  await assert.rejects(
+    store.readVerifierPublication({
+      sessionId: SESSION_ID,
+      subjectRun: "rehearsal",
+    }),
+    { code: "COORDINATION_STORAGE_CLOSED" },
+  );
+
+  const restarted = await openCoordinationStore({
+    now: () => NOW_MS,
+    repositorySha: REPOSITORY_SHA,
+    root,
+  });
+  t.after(() => restarted.close().catch(() => {}));
+  assert.deepEqual(
+    await restarted.readEvents({ after: null, sessionId: SESSION_ID }),
+    [eventValue],
+  );
+  assert.deepEqual(
+    await restarted.readVerifierPublication({
+      sessionId: SESSION_ID,
+      subjectRun: "rehearsal",
+    }),
+    publication,
+  );
+  const journal = await readFile(join(root, "journal.log"), "utf8");
+  assert.equal(journal.includes("VERIFIED_EVENT_APPENDED"), true);
+});

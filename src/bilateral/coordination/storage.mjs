@@ -122,10 +122,12 @@ const FILE_SYSTEM_KEYS = Object.freeze([
 ]);
 const STORE_METHODS = Object.freeze([
   "appendEvent",
+  "appendVerifiedEvent",
   "close",
   "consumeCapability",
   "getArtifact",
   "putArtifact",
+  "readVerifierPublication",
   "readEnrollment",
   "readEvents",
   "readReleaseView",
@@ -991,6 +993,7 @@ function emptyState() {
     events: [],
     senders: new Map(),
     sessions: new Map(),
+    verifierPublications: new Map(),
   };
 }
 
@@ -1021,7 +1024,34 @@ function cloneState(state) {
       ]),
     ),
     sessions: new Map(state.sessions),
+    verifierPublications: new Map(state.verifierPublications),
   };
+}
+
+function verifierPublication(value, repositorySha) {
+  const data = readExactData(value, ["paymentMoved", "publicationDigest", "releaseId", "repositorySha", "schema", "sessionId", "status", "subjectRun"]);
+  if (data.schema !== "clockchain.bilateral-verifier-publication/v1" || data.paymentMoved !== false || !SHA256_PATTERN.test(data.publicationDigest) || data.repositorySha !== repositorySha || typeof data.releaseId !== "string" || data.releaseId.length === 0 || !UUID_PATTERN.test(data.sessionId) || data.status !== "VERIFICATION_PASSED" || !["rehearsal", "stakeholder"].includes(data.subjectRun)) fail();
+  return Object.freeze(data);
+}
+
+function verifiedEventPublication(value, repositorySha, replayState) {
+  const data = readExactData(value, ["event", "publication"]);
+  const event = validateEvent(data.event, repositorySha, { replayState });
+  const publication = verifierPublication(data.publication, repositorySha);
+  if (
+    event.kind !== "VERIFICATION_PASSED" ||
+    event.role !== "operator" ||
+    event.paymentMoved !== false ||
+    event.artifactDigest === null ||
+    event.artifactDigest !== publication.publicationDigest ||
+    event.releaseId !== publication.releaseId ||
+    event.repositorySha !== publication.repositorySha ||
+    event.sessionId !== publication.sessionId ||
+    event.subjectRun !== publication.subjectRun
+  ) {
+    fail();
+  }
+  return Object.freeze({ event, publication });
 }
 
 function cloneEvent(event) {
@@ -1399,6 +1429,12 @@ function validatePayload(payload, state, repositorySha) {
       }),
     );
   }
+  if (data.type === "VERIFIED_EVENT_APPENDED") {
+    return payloadFor(
+      data.type,
+      verifiedEventPublication(data.value, repositorySha, state),
+    );
+  }
   fail();
 }
 
@@ -1423,6 +1459,19 @@ function applyPayload(
   }
   if (payload.type === "EVENT_APPENDED") {
     return applyEvent(state, payload.value, loading);
+  }
+  if (payload.type === "VERIFIED_EVENT_APPENDED") {
+    const key = `${payload.value.publication.sessionId}:${payload.value.publication.subjectRun}`;
+    const existing = state.verifierPublications.get(key);
+    if (
+      existing !== undefined &&
+      JSON.stringify(existing) !== JSON.stringify(payload.value.publication)
+    ) {
+      fail(loading ? undefined : "VERIFIER_PUBLICATION_CONFLICT");
+    }
+    const accepted = applyEvent(state, payload.value.event, loading);
+    state.verifierPublications.set(key, payload.value.publication);
+    return accepted;
   }
   fail();
 }
@@ -1500,6 +1549,8 @@ function stateSummary(state) {
       .sort((left, right) =>
         left.sessionId.localeCompare(right.sessionId),
       ),
+    verifierPublications: [...state.verifierPublications.values()]
+      .sort((left, right) => left.sessionId.localeCompare(right.sessionId) || left.subjectRun.localeCompare(right.subjectRun)),
   });
 }
 
@@ -3284,6 +3335,38 @@ export async function openCoordinationStore(input) {
       });
     }
 
+    async function appendVerifiedEvent(value) {
+      return serialize(async () => {
+        assertOpen();
+        await assertDirectory(root);
+        const verified = verifiedEventPublication(
+          value,
+          repositorySha,
+          state,
+        );
+        const existingEvent = state.eventDigests.get(
+          verified.event.eventDigest,
+        );
+        const publicationKey = `${verified.publication.sessionId}:${verified.publication.subjectRun}`;
+        const existingPublication = state.verifierPublications.get(publicationKey);
+        if (existingEvent !== undefined || existingPublication !== undefined) {
+          if (
+            existingEvent !== undefined &&
+            existingPublication !== undefined &&
+            sameEvent(existingEvent, verified.event) &&
+            JSON.stringify(existingPublication) === JSON.stringify(verified.publication)
+          ) {
+            return cloneEvent(existingEvent);
+          }
+          fail();
+        }
+        const accepted = await appendPayload(
+          payloadFor("VERIFIED_EVENT_APPENDED", verified),
+        );
+        return cloneEvent(accepted);
+      });
+    }
+
     async function readEvents(value) {
       return serialize(async () => {
         assertOpen();
@@ -3386,6 +3469,17 @@ export async function openCoordinationStore(input) {
       });
     }
 
+    async function readVerifierPublication(value) {
+      return serialize(async () => {
+        assertOpen();
+        await assertDirectory(root);
+        const data = readExactData(value, ["sessionId", "subjectRun"]);
+        if (!UUID_PATTERN.test(data.sessionId) || !["rehearsal", "stakeholder"].includes(data.subjectRun)) fail();
+        const claim = state.verifierPublications.get(`${data.sessionId}:${data.subjectRun}`);
+        return claim === undefined ? null : Object.freeze({ ...claim });
+      });
+    }
+
     function close() {
       if (closePromise !== undefined) {
         return closePromise;
@@ -3431,11 +3525,13 @@ export async function openCoordinationStore(input) {
 
     const store = {
       appendEvent,
+      appendVerifiedEvent,
       close,
       consumeCapability,
       getArtifact,
       putArtifact,
       readEnrollment,
+      readVerifierPublication,
       readEvents,
       readReleaseView,
       registerCapability,
