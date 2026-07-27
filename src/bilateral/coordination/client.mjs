@@ -197,7 +197,16 @@ const ARTIFACT_TYPE_PATTERN =
   /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const LOCALLY_SUPPORTED_ARTIFACT_TYPES = new Set([
   "coordination-enrollment",
+  "failure-summary",
+  "identity-package",
+  "party-result-package",
+  "preflight-aggregate-report",
+  "preflight-participant-report",
+  "preflight-plan",
+  "preflight-public-key",
+  "recovery-command-manifest",
   "signed-descriptor",
+  "token-commitment",
 ]);
 const RELAY_URL_PATTERN =
   /^https:\/\/(\[[0-9a-fA-F:.]+\]|[0-9.]+):([0-9]{1,5})$/;

@@ -1006,7 +1006,7 @@ function validatePreflightReportPackage(bytes, parsed, canaries, type) {
   }
 }
 
-export async function validateRelayArtifact(input) {
+async function validateRelayArtifactInternal(input) {
   try {
     const data = readExactData(input, INPUT_KEYS);
     const policy = ARTIFACT_POLICIES[data.artifactType];
@@ -1084,6 +1084,103 @@ export async function validateRelayArtifact(input) {
       artifactType: data.artifactType,
       byteLength: String(bytes.length),
       digest,
+      parsed,
+    });
+  } catch (error) {
+    if (error instanceof RelayArtifactError) {
+      throw error;
+    }
+    invalid();
+  }
+}
+
+function deepFreeze(value) {
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    !Object.isFrozen(value)
+  ) {
+    for (const child of Object.values(value)) {
+      deepFreeze(child);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function parseValidatedPackageJson(parsed, names, filename) {
+  const { files } = parsePackage(parsed, names);
+  try {
+    return JSON.parse(files.get(filename).toString("utf8"));
+  } catch {
+    invalid();
+  }
+}
+
+function normalizedFacts(artifactType, parsed) {
+  if (artifactType === "identity-package") {
+    return Object.freeze({
+      identity: parseValidatedPackageJson(
+        parsed,
+        [".identity.complete.json", "identity.json"],
+        "identity.json",
+      ),
+    });
+  }
+  if (artifactType === "preflight-participant-report") {
+    return Object.freeze({
+      participantReport: parseValidatedPackageJson(
+        parsed,
+        [".participant-report.complete.json", "participant-report.json"],
+        "participant-report.json",
+      ),
+    });
+  }
+  if (artifactType === "preflight-aggregate-report") {
+    return Object.freeze({
+      aggregateReport: parseValidatedPackageJson(
+        parsed,
+        [".preflight-report.complete.json", "preflight-report.json"],
+        "preflight-report.json",
+      ),
+    });
+  }
+  if (artifactType === "party-result-package") {
+    return Object.freeze({
+      partyResult: parseValidatedPackageJson(
+        parsed,
+        [
+          ".party-result.complete.json",
+          "PARTY-RESULT.md",
+          "party-result.json",
+        ],
+        "party-result.json",
+      ),
+    });
+  }
+  return parsed;
+}
+
+export async function validateRelayArtifact(input) {
+  const result = await validateRelayArtifactInternal(input);
+  return Object.freeze({
+    artifactType: result.artifactType,
+    byteLength: result.byteLength,
+    digest: result.digest,
+  });
+}
+
+// This sibling shares the exact snapshotted parser and validators above. It
+// deliberately never rereads caller-owned bytes after an async validator.
+export async function validateRelayArtifactWithFacts(input) {
+  try {
+    const result = await validateRelayArtifactInternal(input);
+    const facts = deepFreeze(normalizedFacts(result.artifactType, result.parsed));
+    return Object.freeze({
+      artifactType: result.artifactType,
+      byteLength: result.byteLength,
+      digest: result.digest,
+      facts,
     });
   } catch (error) {
     if (error instanceof RelayArtifactError) {

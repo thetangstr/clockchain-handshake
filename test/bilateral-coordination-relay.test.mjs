@@ -42,10 +42,22 @@ import {
 } from "../src/canonical.mjs";
 import {
   createSignedEnvelope,
+  dSession,
 } from "../src/bilateral/descriptor.mjs";
+import {
+  PARTY_RESULT_SCHEMA,
+  partySignatureBytes,
+  writePartyResult,
+} from "../src/bilateral/evidence.mjs";
 import {
   createCoordinationEnvelope,
 } from "../src/bilateral/coordination/envelope.mjs";
+import {
+  TOKEN_COMMITMENT_SIGNATURE_DOMAIN,
+} from "../src/bilateral/coordination/preflight.mjs";
+import {
+  probeKey,
+} from "../src/bilateral/refid.mjs";
 import {
   coordinationEnrollmentSignaturePreimage,
   invitationProofPreimage,
@@ -57,8 +69,12 @@ import {
 import {
   MAX_RELAY_WAIT_MS,
   createDescriptorArtifactTransitionValidator,
+  createRelayArtifactTransitionValidator,
   createRelayService,
 } from "../src/bilateral/coordination/relay.mjs";
+import {
+  validateRelayArtifactWithFacts,
+} from "../src/bilateral/coordination/artifact.mjs";
 import {
   RELAY_BODY_TIMEOUT_MS,
   RELAY_HEADER_TIMEOUT_MS,
@@ -626,6 +642,566 @@ function descriptorValidator(artifacts) {
     },
   });
 }
+
+function relayPackage(files) {
+  return stableBytes({
+    files: files.map(([name, bytes]) => ({
+      byteLength: String(bytes.length),
+      contentBase64: bytes.toString("base64"),
+      name,
+      sha256: sha256(bytes),
+    })),
+    paymentMoved: false,
+    schema: "clockchain.bilateral-relay-package/v1",
+  });
+}
+
+function tokenCommitment(role, coordination, token = `${role}-token`) {
+  const unsigned = {
+    algorithm: "ed25519",
+    coordinationPublicKey: rawPublicKey(coordination),
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    role,
+    schema: "clockchain.bilateral-token-commitment/v1",
+    tokenSha256: sha256(Buffer.from(token)),
+  };
+  return {
+    ...unsigned,
+    signature: sign(null, Buffer.concat([
+      Buffer.from(TOKEN_COMMITMENT_SIGNATURE_DOMAIN, "ascii"),
+      Buffer.from(sha256(canonicalBytes(unsigned)), "ascii"),
+    ]), coordination.privateKey).toString("base64"),
+  };
+}
+
+function repackPreflight(bytes, name, markerSchema, mutate, signer) {
+  const wrapper = JSON.parse(bytes.toString("utf8"));
+  const file = wrapper.files.find((entry) => entry.name === `${name}.json`);
+  const envelope = JSON.parse(Buffer.from(file.contentBase64, "base64").toString("utf8"));
+  mutate(envelope);
+  envelope.signature.value = sign(null, canonicalBytes(envelope.report), signer.privateKey).toString("base64");
+  return preflightPackage(name, envelope, markerSchema);
+}
+
+function preflightPackage(name, envelope, markerSchema) {
+  const content = stableBytes(envelope);
+  return relayPackage([
+    [`.${name}.complete.json`, stableBytes({ fileSha256: sha256(content), schema: markerSchema })],
+    [`${name}.json`, content],
+  ]);
+}
+
+function identityPackage(identity) {
+  const content = stableBytes({
+    address: identity.address,
+    agentId: identity.agentId,
+    chainId: "11155111",
+    displayName: identity.displayName,
+    identityReference: `eip155:11155111:0x8004a818bfb912233c491871b3d84c89a494bd9e:${identity.agentId}`,
+    metadata: { blockHeight: "2", transactionHash: `0x${"2".repeat(64)}` },
+    paymentMoved: false,
+    register: { blockHeight: "1", transactionHash: `0x${"3".repeat(64)}` },
+    registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e",
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.bilateral-identity-registration/v1",
+  });
+  return relayPackage([
+    [".identity.complete.json", stableBytes({ fileSha256: sha256(content), schema: "clockchain.bilateral-identity-registration-completion/v1" })],
+    ["identity.json", content],
+  ]);
+}
+
+function recoveryManifest({ command = "bin/handshake-propose.mjs", outputPath = "/state/output", role = "payer", subjectRun = "rehearsal", ...scope } = {}) {
+  return stableBytes({ arguments: ["--clockchain-token-file", "/state/plan", "--descriptor", "/state/descriptor", "--invitation", "/state/invitation", "--output", outputPath, "--i-understand-this-writes-to-clockchain"], command, paymentMoved: false, reasonCode: "AMBIGUOUS_WRITE", releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, role, schema: "clockchain.bilateral-recovery-command-manifest/v1", sessionId: SESSION_ID, subjectRun, ...scope });
+}
+
+function failureSummary({ role = "payer", subjectRun = "rehearsal", ...scope } = {}) {
+  return stableBytes({ eventKind: "TERMINAL_FAILURE", paymentMoved: false, releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, role, schema: "clockchain.bilateral-failure-summary/v1", sessionId: SESSION_ID, subjectRun, terminalCode: "FAILED", ...scope });
+}
+
+function enrolledDescriptor(identities) {
+  return createSignedEnvelope({
+    amountOptions: [{ currency: "USD", value: "100" }], chainId: "11155111", expirySeconds: "600", namespace: "cbv1",
+    payee: { ...identities.payee, role: "payee" }, payer: { ...identities.payer, role: "payer" },
+    paymentMoved: false, promptSha256: "ef".repeat(32), protocol: "clockchain.bilateral-authorization/v1", protocolVersion: "1",
+    registry: "0x8004a818bfb912233c491871b3d84c89a494bd9e", repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.bilateral-session-descriptor/v1", sessionId: "00112233445566778899aabbccddeeff", settlement: "not-executed",
+  }, { keyId: OPERATOR_KEY_ID, privateKeyPem: privateKeyPem(operator) });
+}
+
+function contextualPreflightArtifacts() {
+  const tokens = {
+    payer: tokenCommitment("payer", payerCoordination),
+    payee: tokenCommitment("payee", payeeCoordination),
+  };
+  const nonce = "0123456789abcdef0123456789abcdef";
+  const plan = {
+    digests: { payer: "a".repeat(64), payee: "b".repeat(64) },
+    keys: { payer: probeKey(nonce, "payer"), payee: probeKey(nonce, "payee") },
+    nonce,
+    participants: {
+      payer: { coordinationPublicKey: rawPublicKey(payerCoordination), publicKey: rawPublicKey(payerPreflight), tokenCommitment: tokens.payer },
+      payee: { coordinationPublicKey: rawPublicKey(payeeCoordination), publicKey: rawPublicKey(payeePreflight), tokenCommitment: tokens.payee },
+    },
+    paymentMoved: false, protocol: "clockchain.bilateral-authorization/v1", protocolVersion: "1",
+    repositorySha: REPOSITORY_SHA, schema: "clockchain.bilateral-preflight-plan/v1", writeBudget: "2",
+  };
+  const planEnvelope = { operator: { algorithm: "ed25519", keyId: OPERATOR_KEY_ID, publicKey: rawPublicKey(operator), signature: sign(null, canonicalBytes(plan), operator.privateKey).toString("base64") }, plan };
+  const planDigest = sha256(canonicalBytes(plan));
+  const write = (role) => ({ anchoredHash: plan.digests[role], assetReferenceId: plan.keys[role], blockHeight: role === "payer" ? "7" : "8", digest: plan.digests[role], key: plan.keys[role], ledgerId: role === "payer" ? "8f953393-86d0-4f99-9d6a-102f525fbecd" : "9f953393-86d0-4f99-9d6a-102f525fbecd", role });
+  const anchor = (role) => {
+    const { digest, key, role: ignored, ...value } = write(role);
+    return value;
+  };
+  const observation = (peer) => ({ conflict: false, digestAnchor: anchor(peer), digestResolved: true, finalAnchor: anchor(peer), finalVerified: true, peer, referenceAnchor: anchor(peer), referenceResolved: true });
+  const participant = (role, key) => {
+    const peer = role === "payer" ? "payee" : "payer";
+    const report = { channel: "derived-reference-id", completedAtMs: "120000", deadlineAtMs: "120000", observations: [{ channel: "ledger-height", code: "PREFLIGHT_READ_FAILED", observer: role }], paymentMoved: false, peerObservation: observation(peer), planDigest, rateLimits: [{ channel: "digest-hash", code: "MCP_RATE_LIMIT", observer: role, retryAfterMs: "0", wireShape: "http-429" }], repositorySha: REPOSITORY_SHA, role, schema: "clockchain.bilateral-preflight-participant/v1", serializedCadenceMs: "20000", sleeps: ["20000"], startedAtMs: "100000", tokenCommitment: tokens[role], write: write(role) };
+    return { report, signature: { algorithm: "ed25519", role, value: sign(null, canonicalBytes(report), key.privateKey).toString("base64") } };
+  };
+  const participants = { payer: participant("payer", payerPreflight), payee: participant("payee", payeePreflight) };
+  const aggregateReport = { channel: "derived-reference-id", completedAtMs: "120001", directions: [{ observer: "payer", ...observation("payee") }, { observer: "payee", ...observation("payer") }], outcome: "RENDEZVOUS_OK", paymentMoved: false, planDigest, protocol: "clockchain.bilateral-authorization/v1", protocolVersion: "1", repositorySha: REPOSITORY_SHA, schema: "clockchain.bilateral-preflight/v2", scope: { separateCredentialsAttested: true, separateMachinesAttested: true }, tenancy: "cross-client", writes: [write("payer"), write("payee")] };
+  const aggregate = { report: aggregateReport, signature: { algorithm: "ed25519", keyId: OPERATOR_KEY_ID, value: sign(null, canonicalBytes(aggregateReport), operator.privateKey).toString("base64") } };
+  return { aggregate: preflightPackage("preflight-report", aggregate, "clockchain.bilateral-preflight-completion/v1"), participants: { payer: preflightPackage("participant-report", participants.payer, "clockchain.bilateral-preflight-participant-completion/v1"), payee: preflightPackage("participant-report", participants.payee, "clockchain.bilateral-preflight-participant-completion/v1") }, plan: stableBytes(planEnvelope), tokens };
+}
+
+test("binds the complete signed preflight artifact chain", async () => {
+  const artifacts = contextualPreflightArtifacts();
+  const enrollment = {
+    payer: await enrollmentFixture({ capability: PAYER_CAPABILITY, coordination: payerCoordination, invitationPrivateKeys: invitationKeys.payer, preflight: payerPreflight, role: "payer" }),
+    payee: await enrollmentFixture({ capability: PAYEE_CAPABILITY, coordination: payeeCoordination, invitationPrivateKeys: invitationKeys.payee, preflight: payeePreflight, role: "payee" }),
+  };
+  const bytes = new Map([
+    [sha256(stableBytes(artifacts.tokens.payer)), stableBytes(artifacts.tokens.payer)],
+    [sha256(stableBytes(artifacts.tokens.payee)), stableBytes(artifacts.tokens.payee)],
+    [sha256(artifacts.plan), artifacts.plan],
+    [sha256(artifacts.participants.payer), artifacts.participants.payer],
+    [sha256(artifacts.participants.payee), artifacts.participants.payee],
+    [sha256(artifacts.aggregate), artifacts.aggregate],
+  ]);
+  const validator = createRelayArtifactTransitionValidator({
+    frozenRepositorySha: REPOSITORY_SHA,
+    async readArtifact(digest) { return bytes.get(digest); },
+    async readEnrollment({ role }) { return { bytes: canonicalBytes(enrollment[role]) }; },
+    async resolveOperatorPublicKey() { return rawPublicKey(operator); },
+  });
+  const event = (role, kind, artifactDigest) => eventFixture({ artifactDigest, coordination: role === "payer" ? payerCoordination : role === "payee" ? payeeCoordination : operator, keyId: role === "operator" ? OPERATOR_KEY_ID : `${role}-coordination`, kind, role, subjectRun: kind === "REGISTER_REHEARSAL" ? "rehearsal" : "release" });
+  await assert.doesNotReject(validator.validate(event("payer", "TOKEN_READY", sha256(stableBytes(artifacts.tokens.payer)))));
+  await assert.doesNotReject(validator.validate(event("payee", "TOKEN_READY", sha256(stableBytes(artifacts.tokens.payee)))));
+  await assert.doesNotReject(validator.validate(event("operator", "PREFLIGHT_PLAN_READY", sha256(artifacts.plan))));
+  await assert.doesNotReject(validator.validate(event("payer", "PREFLIGHT_PARTICIPANT_READY", sha256(artifacts.participants.payer))));
+  await assert.doesNotReject(validator.validate(event("payee", "PREFLIGHT_PARTICIPANT_READY", sha256(artifacts.participants.payee))));
+  await assert.doesNotReject(validator.validate(event("operator", "REGISTER_REHEARSAL", sha256(artifacts.aggregate))));
+});
+
+test("rebinds operator plan enrollment scope instead of trusting store indexing", async () => {
+  const artifacts = contextualPreflightArtifacts();
+  const correct = {
+    payer: await enrollmentFixture({ capability: PAYER_CAPABILITY, coordination: payerCoordination, invitationPrivateKeys: invitationKeys.payer, preflight: payerPreflight, role: "payer" }),
+    payee: await enrollmentFixture({ capability: PAYEE_CAPABILITY, coordination: payeeCoordination, invitationPrivateKeys: invitationKeys.payee, preflight: payeePreflight, role: "payee" }),
+  };
+  const wrongPayer = await enrollmentFixture({ capability: PAYER_CAPABILITY, coordination: payerCoordination, invitationPrivateKeys: invitationKeys.payer, preflight: payerPreflight, releaseId: "release-b", role: "payer" });
+  const values = new Map([[sha256(stableBytes(artifacts.tokens.payer)), stableBytes(artifacts.tokens.payer)], [sha256(stableBytes(artifacts.tokens.payee)), stableBytes(artifacts.tokens.payee)], [sha256(artifacts.plan), artifacts.plan]]);
+  let payerReads = 0;
+  const validator = createRelayArtifactTransitionValidator({ frozenRepositorySha: REPOSITORY_SHA, async readArtifact(digest) { return values.get(digest); }, async readEnrollment({ role }) { if (role === "payer" && payerReads++ === 1) return { bytes: canonicalBytes(wrongPayer) }; return { bytes: canonicalBytes(correct[role]) }; }, async resolveOperatorPublicKey() { return rawPublicKey(operator); } });
+  const event = (role, kind, artifactDigest) => eventFixture({ artifactDigest, coordination: role === "payer" ? payerCoordination : role === "payee" ? payeeCoordination : operator, keyId: role === "operator" ? OPERATOR_KEY_ID : `${role}-coordination`, kind, role, subjectRun: "release" });
+  await validator.validate(event("payer", "TOKEN_READY", sha256(stableBytes(artifacts.tokens.payer))));
+  await validator.validate(event("payee", "TOKEN_READY", sha256(stableBytes(artifacts.tokens.payee))));
+  await assert.rejects(validator.validate(event("operator", "PREFLIGHT_PLAN_READY", sha256(artifacts.plan))), { code: "COORDINATION_RELAY_INVALID" });
+});
+
+test("replays contextual artifacts across relay restart fail-closed", async (t) => {
+  const { store } = await storeFixture(t);
+  await registerRole(store, { capability: PAYER_CAPABILITY, role: "payer" });
+  await registerRole(store, { capability: PAYEE_CAPABILITY, role: "payee" });
+  const receipt = makeReceiptSigner();
+  const { relay } = relayFixture(store, { receipt });
+  await bootstrapRole(relay, { capability: PAYER_CAPABILITY, coordination: payerCoordination, invitationPrivateKeys: invitationKeys.payer, preflight: payerPreflight, role: "payer" });
+  await bootstrapRole(relay, { capability: PAYEE_CAPABILITY, coordination: payeeCoordination, invitationPrivateKeys: invitationKeys.payee, preflight: payeePreflight, role: "payee" });
+  const artifacts = contextualPreflightArtifacts();
+  const identity = identityPackage({ address: privateKeyToAccount(invitationKeys.payer.rehearsal).address.toLowerCase(), agentId: "8677", displayName: "Billy" });
+  const uploads = [["token-commitment", stableBytes(artifacts.tokens.payer)], ["token-commitment", stableBytes(artifacts.tokens.payee)], ["preflight-plan", artifacts.plan], ["preflight-participant-report", artifacts.participants.payer], ["preflight-participant-report", artifacts.participants.payee], ["preflight-aggregate-report", artifacts.aggregate], ["identity-package", identity]];
+  for (const [artifactType, body] of uploads) await relay.putArtifact({ artifactType, body, expectedDigest: sha256(body) });
+  const build = eventBuilder();
+  for (const input of [["payer", "ENROLLMENT_CONFIRMED"], ["payee", "ENROLLMENT_CONFIRMED"], ["operator", "ENROLLMENT_RECEIPT"], ["operator", "WAIT_FOR_FUNDING"], ["payer", "FUNDING_INPUTS_READY"], ["payee", "FUNDING_INPUTS_READY"], ["payer", "TOKEN_READY", sha256(stableBytes(artifacts.tokens.payer))], ["payee", "TOKEN_READY", sha256(stableBytes(artifacts.tokens.payee))], ["operator", "PREFLIGHT_PLAN_READY", sha256(artifacts.plan)], ["payer", "PREFLIGHT_PARTICIPANT_READY", sha256(artifacts.participants.payer)], ["payee", "PREFLIGHT_PARTICIPANT_READY", sha256(artifacts.participants.payee)]]) await relay.appendEvent({ body: canonicalBytes(build({ role: input[0], kind: input[1], artifactDigest: input[2] })) });
+  const { relay: restarted } = relayFixture(store, { receipt });
+  await restarted.appendEvent({ body: canonicalBytes(build({ role: "operator", kind: "REGISTER_REHEARSAL", artifactDigest: sha256(artifacts.aggregate), subjectRun: "rehearsal" })) });
+  assert.equal((await store.readEvents({ after: null, sessionId: SESSION_ID })).length, 12);
+  const broken = relayFixture(storeFacade(store, { getArtifact: async (digest) => { if (digest === sha256(artifacts.plan)) throw new Error("missing plan"); return store.getArtifact(digest); } }), { receipt }).relay;
+  const identityEvent = build({ role: "payer", kind: "IDENTITY_PACKAGE_READY", artifactDigest: sha256(identity), subjectRun: "rehearsal" });
+  await assert.rejects(broken.appendEvent({ body: canonicalBytes(identityEvent) }), { code: "COORDINATION_RELAY_INVALID" });
+  assert.equal((await store.readEvents({ after: null, sessionId: SESSION_ID })).length, 12);
+  const { relay: normal } = relayFixture(store, { receipt });
+  await normal.appendEvent({ body: canonicalBytes(identityEvent) });
+  assert.equal((await store.readEvents({ after: null, sessionId: SESSION_ID })).length, 13);
+});
+
+test("rejects contextually substituted preflight artifacts", async () => {
+  const fixture = contextualPreflightArtifacts();
+  const enrollment = {
+    payer: await enrollmentFixture({ capability: PAYER_CAPABILITY, coordination: payerCoordination, invitationPrivateKeys: invitationKeys.payer, preflight: payerPreflight, role: "payer" }),
+    payee: await enrollmentFixture({ capability: PAYEE_CAPABILITY, coordination: payeeCoordination, invitationPrivateKeys: invitationKeys.payee, preflight: payeePreflight, role: "payee" }),
+  };
+  const alternate = generateKeyPairSync("ed25519");
+  const participant = (bytes, mutate, signer = payerPreflight) => repackPreflight(bytes, "participant-report", "clockchain.bilateral-preflight-participant-completion/v1", mutate, signer);
+  const aggregate = (mutate, signer = operator) => repackPreflight(fixture.aggregate, "preflight-report", "clockchain.bilateral-preflight-completion/v1", mutate, signer);
+  const cases = [
+    ["participant signer", "participant", participant(fixture.participants.payer, () => {}, alternate)],
+    ["participant plan digest", "participant", participant(fixture.participants.payer, ({ report }) => { report.planDigest = "c".repeat(64); })],
+    ["participant token", "participant", participant(fixture.participants.payer, ({ report }) => { report.tokenCommitment = tokenCommitment("payer", payerCoordination, "substituted-token"); })],
+    ["participant write digest", "participant", participant(fixture.participants.payer, ({ report }) => { report.write.digest = "c".repeat(64); report.write.anchoredHash = report.write.digest; })],
+    ["participant write key", "participant", participant(fixture.participants.payer, ({ report }) => { const key = probeKey("fedcba9876543210fedcba9876543210", "payer"); report.write.key = key; report.write.assetReferenceId = key; })],
+    ["aggregate signer", "aggregate", aggregate(() => {}, alternate)],
+    ["aggregate plan digest", "aggregate", aggregate(({ report }) => { report.planDigest = "c".repeat(64); })],
+    ["aggregate writes reordered", "aggregate", aggregate(({ report }) => { report.writes.reverse(); })],
+    ["aggregate directions reordered", "aggregate", aggregate(({ report }) => { report.directions.reverse(); })],
+  ];
+  for (const [name, phase, hostile] of cases) {
+    const bytes = new Map([
+      [sha256(stableBytes(fixture.tokens.payer)), stableBytes(fixture.tokens.payer)],
+      [sha256(stableBytes(fixture.tokens.payee)), stableBytes(fixture.tokens.payee)],
+      [sha256(fixture.plan), fixture.plan],
+      [sha256(fixture.participants.payer), fixture.participants.payer],
+      [sha256(fixture.participants.payee), fixture.participants.payee],
+      [sha256(fixture.aggregate), fixture.aggregate],
+      [sha256(hostile), hostile],
+    ]);
+    const validator = createRelayArtifactTransitionValidator({ frozenRepositorySha: REPOSITORY_SHA, async readArtifact(digest) { return bytes.get(digest); }, async readEnrollment({ role }) { return { bytes: canonicalBytes(enrollment[role]) }; }, async resolveOperatorPublicKey() { return rawPublicKey(operator); } });
+    const event = (role, kind, artifactDigest, subjectRun = "release") => eventFixture({ artifactDigest, coordination: role === "payer" ? payerCoordination : role === "payee" ? payeeCoordination : operator, keyId: role === "operator" ? OPERATOR_KEY_ID : `${role}-coordination`, kind, role, subjectRun });
+    await validator.validate(event("payer", "TOKEN_READY", sha256(stableBytes(fixture.tokens.payer))));
+    await validator.validate(event("payee", "TOKEN_READY", sha256(stableBytes(fixture.tokens.payee))));
+    await validator.validate(event("operator", "PREFLIGHT_PLAN_READY", sha256(fixture.plan)));
+    if (phase === "participant") {
+      await assert.rejects(validator.validate(event("payer", "PREFLIGHT_PARTICIPANT_READY", sha256(hostile))), { code: "COORDINATION_RELAY_INVALID" }, name);
+      continue;
+    }
+    await validator.validate(event("payer", "PREFLIGHT_PARTICIPANT_READY", sha256(fixture.participants.payer)));
+    await validator.validate(event("payee", "PREFLIGHT_PARTICIPANT_READY", sha256(fixture.participants.payee)));
+    await assert.rejects(validator.validate(event("operator", "REGISTER_REHEARSAL", sha256(hostile), "rehearsal")), { code: "COORDINATION_RELAY_INVALID" }, name);
+  }
+});
+
+test("binds enrolled identities through descriptor acceptance", async (t) => {
+  const identities = {
+    payer: { address: privateKeyToAccount(invitationKeys.payer.rehearsal).address.toLowerCase(), agentId: "8677", displayName: "Billy" },
+    payee: { address: privateKeyToAccount(invitationKeys.payee.rehearsal).address.toLowerCase(), agentId: "8678", displayName: "Iris" },
+  };
+  const descriptor = enrolledDescriptor(identities);
+  const values = new Map([
+    [sha256(identityPackage(identities.payer)), identityPackage(identities.payer)], [sha256(identityPackage(identities.payee)), identityPackage(identities.payee)],
+    [sha256(canonicalBytes(descriptor)), canonicalBytes(descriptor)],
+  ]);
+  const enrollment = {
+    payer: await enrollmentFixture({ capability: PAYER_CAPABILITY, coordination: payerCoordination, invitationPrivateKeys: invitationKeys.payer, preflight: payerPreflight, role: "payer" }),
+    payee: await enrollmentFixture({ capability: PAYEE_CAPABILITY, coordination: payeeCoordination, invitationPrivateKeys: invitationKeys.payee, preflight: payeePreflight, role: "payee" }),
+  };
+  const validator = createRelayArtifactTransitionValidator({ frozenRepositorySha: REPOSITORY_SHA, async readArtifact(digest) { return values.get(digest); }, async readEnrollment({ role }) { return { bytes: canonicalBytes(enrollment[role]) }; }, async resolveOperatorPublicKey() { return rawPublicKey(operator); } });
+  const event = (role, kind, digest) => eventFixture({ artifactDigest: digest, coordination: role === "payer" ? payerCoordination : role === "payee" ? payeeCoordination : operator, keyId: role === "operator" ? OPERATOR_KEY_ID : `${role}-coordination`, kind, role, subjectRun: "rehearsal" });
+  const digest = sha256(canonicalBytes(descriptor));
+  await validator.validate(event("payer", "IDENTITY_PACKAGE_READY", sha256(identityPackage(identities.payer))));
+  await validator.validate(event("payee", "IDENTITY_PACKAGE_READY", sha256(identityPackage(identities.payee))));
+  await validator.validate(event("operator", "REHEARSAL_DESCRIPTOR_READY", digest));
+  await validator.validate(event("payer", "DESCRIPTOR_ACCEPTED", digest));
+  await assert.doesNotReject(validator.validate(event("payee", "DESCRIPTOR_ACCEPTED", digest)));
+  const payerPackage = await partyResultPackage(t, { descriptor, role: "payer" });
+  values.set(sha256(payerPackage), payerPackage);
+  await assert.doesNotReject(validator.validate(event("payer", "ROLE_PACKAGE_READY", sha256(payerPackage))));
+  const payeePackage = await partyResultPackage(t, { descriptor, role: "payee" });
+  values.set(sha256(payeePackage), payeePackage);
+  await assert.doesNotReject(validator.validate(event("payee", "ROLE_PACKAGE_READY", sha256(payeePackage))));
+});
+
+test("rejects an identity package outside its enrolled invitation", async () => {
+  const enrolled = await enrollmentFixture({ capability: PAYER_CAPABILITY, coordination: payerCoordination, invitationPrivateKeys: invitationKeys.payer, preflight: payerPreflight, role: "payer" });
+  const hostile = identityPackage({ address: `0x${"f".repeat(40)}`, agentId: "8677", displayName: "Billy" });
+  const digest = sha256(hostile);
+  const validator = createRelayArtifactTransitionValidator({ frozenRepositorySha: REPOSITORY_SHA, async readArtifact() { return hostile; }, async readEnrollment() { return { bytes: canonicalBytes(enrolled) }; }, async resolveOperatorPublicKey() { return rawPublicKey(operator); } });
+  await assert.rejects(validator.validate(eventFixture({ artifactDigest: digest, coordination: payerCoordination, keyId: "payer-coordination", kind: "IDENTITY_PACKAGE_READY", role: "payer", subjectRun: "rehearsal" })), { code: "COORDINATION_RELAY_INVALID" });
+});
+
+test("normalizes unsupported contextual runs to relay errors", async () => {
+  const identity = identityPackage({ address: privateKeyToAccount(invitationKeys.payer.rehearsal).address.toLowerCase(), agentId: "8677", displayName: "Billy" });
+  const enrolled = await enrollmentFixture({ capability: PAYER_CAPABILITY, coordination: payerCoordination, invitationPrivateKeys: invitationKeys.payer, preflight: payerPreflight, role: "payer" });
+  const validator = createRelayArtifactTransitionValidator({ frozenRepositorySha: REPOSITORY_SHA, async readArtifact() { return identity; }, async readEnrollment() { return { bytes: canonicalBytes(enrolled) }; }, async resolveOperatorPublicKey() { return rawPublicKey(operator); } });
+  await assert.rejects(validator.validate(eventFixture({ artifactDigest: sha256(identity), coordination: payerCoordination, keyId: "payer-coordination", kind: "IDENTITY_PACKAGE_READY", role: "payer" })), { code: "COORDINATION_RELAY_INVALID" });
+});
+
+test("keeps exported descriptor validator descriptor-only", async () => {
+  const token = stableBytes(tokenCommitment("payer", payerCoordination));
+  const validator = createDescriptorArtifactTransitionValidator({ frozenRepositorySha: REPOSITORY_SHA, async readArtifact() { return token; }, async resolveOperatorPublicKey() { return rawPublicKey(operator); } });
+  await assert.rejects(validator.validate(eventFixture({ artifactDigest: sha256(token), coordination: payerCoordination, keyId: "payer-coordination", kind: "TOKEN_READY", role: "payer" })), { code: "COORDINATION_RELAY_INVALID" });
+});
+
+test("rejects substituted and replayed descriptor acceptances", async () => {
+  const identities = {
+    payer: { address: privateKeyToAccount(invitationKeys.payer.rehearsal).address.toLowerCase(), agentId: "8677", displayName: "Billy" },
+    payee: { address: privateKeyToAccount(invitationKeys.payee.rehearsal).address.toLowerCase(), agentId: "8678", displayName: "Iris" },
+  };
+  const enrollment = {
+    payer: await enrollmentFixture({ capability: PAYER_CAPABILITY, coordination: payerCoordination, invitationPrivateKeys: invitationKeys.payer, preflight: payerPreflight, role: "payer" }),
+    payee: await enrollmentFixture({ capability: PAYEE_CAPABILITY, coordination: payeeCoordination, invitationPrivateKeys: invitationKeys.payee, preflight: payeePreflight, role: "payee" }),
+  };
+  const original = enrolledDescriptor(identities);
+  const alteredAgent = enrolledDescriptor({ ...identities, payer: { ...identities.payer, agentId: "9999" } });
+  const alteredName = enrolledDescriptor({ ...identities, payee: { ...identities.payee, displayName: "Eve" } });
+  const alteredPrompt = createSignedEnvelope({ ...original.descriptor, promptSha256: "ab".repeat(32) }, { keyId: OPERATOR_KEY_ID, privateKeyPem: privateKeyPem(operator) });
+  const prepare = async () => {
+    const values = new Map([[sha256(identityPackage(identities.payer)), identityPackage(identities.payer)], [sha256(identityPackage(identities.payee)), identityPackage(identities.payee)], [sha256(canonicalBytes(original)), canonicalBytes(original)], [sha256(canonicalBytes(alteredAgent)), canonicalBytes(alteredAgent)], [sha256(canonicalBytes(alteredName)), canonicalBytes(alteredName)], [sha256(canonicalBytes(alteredPrompt)), canonicalBytes(alteredPrompt)]]);
+    const validator = createRelayArtifactTransitionValidator({ frozenRepositorySha: REPOSITORY_SHA, async readArtifact(digest) { return values.get(digest); }, async readEnrollment({ role }) { return { bytes: canonicalBytes(enrollment[role]) }; }, async resolveOperatorPublicKey() { return rawPublicKey(operator); } });
+    const event = (role, kind, digest) => eventFixture({ artifactDigest: digest, coordination: role === "payer" ? payerCoordination : role === "payee" ? payeeCoordination : operator, keyId: role === "operator" ? OPERATOR_KEY_ID : `${role}-coordination`, kind, role, subjectRun: "rehearsal" });
+    await validator.validate(event("payer", "IDENTITY_PACKAGE_READY", sha256(identityPackage(identities.payer))));
+    await validator.validate(event("payee", "IDENTITY_PACKAGE_READY", sha256(identityPackage(identities.payee))));
+    return { event, validator };
+  };
+  for (const [name, descriptor] of [["payer agent", alteredAgent], ["payee display name", alteredName]]) {
+    const { event, validator } = await prepare();
+    await assert.rejects(validator.validate(event("operator", "REHEARSAL_DESCRIPTOR_READY", sha256(canonicalBytes(descriptor)))), { code: "COORDINATION_RELAY_INVALID" }, name);
+  }
+  { const { event, validator } = await prepare(); await validator.validate(event("operator", "REHEARSAL_DESCRIPTOR_READY", sha256(canonicalBytes(original)))); await assert.rejects(validator.validate(event("payer", "DESCRIPTOR_ACCEPTED", sha256(canonicalBytes(alteredPrompt)))), { code: "COORDINATION_RELAY_INVALID" }); }
+  { const { event, validator } = await prepare(); const digest = sha256(canonicalBytes(original)); await validator.validate(event("operator", "REHEARSAL_DESCRIPTOR_READY", digest)); await validator.validate(event("payer", "DESCRIPTOR_ACCEPTED", digest)); await assert.rejects(validator.validate(event("payer", "DESCRIPTOR_ACCEPTED", digest)), { code: "COORDINATION_RELAY_INVALID" }); }
+});
+
+test("rejects storage-valid party packages outside accepted descriptor context", async (t) => {
+  const identities = {
+    payer: { address: privateKeyToAccount(invitationKeys.payer.rehearsal).address.toLowerCase(), agentId: "8677", displayName: "Billy" },
+    payee: { address: privateKeyToAccount(invitationKeys.payee.rehearsal).address.toLowerCase(), agentId: "8678", displayName: "Iris" },
+  };
+  const descriptor = enrolledDescriptor(identities);
+  const enrollment = {
+    payer: await enrollmentFixture({ capability: PAYER_CAPABILITY, coordination: payerCoordination, invitationPrivateKeys: invitationKeys.payer, preflight: payerPreflight, role: "payer" }),
+    payee: await enrollmentFixture({ capability: PAYEE_CAPABILITY, coordination: payeeCoordination, invitationPrivateKeys: invitationKeys.payee, preflight: payeePreflight, role: "payee" }),
+  };
+  const prefix = async (partyBytes, eventRole) => {
+    const descriptorDigest = sha256(canonicalBytes(descriptor));
+    const values = new Map([[sha256(identityPackage(identities.payer)), identityPackage(identities.payer)], [sha256(identityPackage(identities.payee)), identityPackage(identities.payee)], [descriptorDigest, canonicalBytes(descriptor)], [sha256(partyBytes), partyBytes]]);
+    const validator = createRelayArtifactTransitionValidator({ frozenRepositorySha: REPOSITORY_SHA, async readArtifact(digest) { return values.get(digest); }, async readEnrollment({ role }) { return { bytes: canonicalBytes(enrollment[role]) }; }, async resolveOperatorPublicKey() { return rawPublicKey(operator); } });
+    const event = (role, kind, digest) => eventFixture({ artifactDigest: digest, coordination: role === "payer" ? payerCoordination : role === "payee" ? payeeCoordination : operator, keyId: role === "operator" ? OPERATOR_KEY_ID : `${role}-coordination`, kind, role, subjectRun: "rehearsal" });
+    await validator.validate(event("payer", "IDENTITY_PACKAGE_READY", sha256(identityPackage(identities.payer))));
+    await validator.validate(event("payee", "IDENTITY_PACKAGE_READY", sha256(identityPackage(identities.payee))));
+    await validator.validate(event("operator", "REHEARSAL_DESCRIPTOR_READY", descriptorDigest));
+    await validator.validate(event("payer", "DESCRIPTOR_ACCEPTED", descriptorDigest));
+    await validator.validate(event("payee", "DESCRIPTOR_ACCEPTED", descriptorDigest));
+    return validator.validate(event(eventRole, "ROLE_PACKAGE_READY", sha256(partyBytes)));
+  };
+  const alternateKey = `0x${"55".repeat(32)}`;
+  const alternateAddress = privateKeyToAccount(alternateKey).address.toLowerCase();
+  const cases = [
+    ["session digest", await partyResultPackage(t, { descriptor, sessionDigest: "ab".repeat(32) }), "payer"],
+    ["prompt hash", await partyResultPackage(t, { descriptor, promptSha256: "ab".repeat(32) }), "payer"],
+    ["party address", await partyResultPackage(t, { accountKey: alternateKey, descriptor, parties: { ...identities, payer: { address: alternateAddress, agentId: identities.payer.agentId } } }), "payer"],
+    ["party agent", await partyResultPackage(t, { descriptor, parties: { ...identities, payer: { address: identities.payer.address, agentId: "9999" } } }), "payer"],
+    ["wrong event role", await partyResultPackage(t, { descriptor, role: "payer" }), "payee"],
+  ];
+  for (const [name, bytes, role] of cases) {
+    await assert.doesNotReject(validateRelayArtifactWithFacts({ artifactType: "party-result-package", bytes, expectedDigest: sha256(bytes), secretCanaries: [] }), name);
+    await assert.rejects(prefix(bytes, role), { code: "COORDINATION_RELAY_INVALID" }, name);
+  }
+});
+
+test("binds exact recovery manifests and terminal failure summaries", async () => {
+  const manifest = recoveryManifest();
+  const summary = failureSummary();
+  const values = new Map([[sha256(manifest), manifest], [sha256(summary), summary]]);
+  const validator = createRelayArtifactTransitionValidator({ frozenRepositorySha: REPOSITORY_SHA, async readArtifact(digest) { return values.get(digest); }, async readEnrollment() { throw new Error("unexpected"); }, async resolveOperatorPublicKey() { return rawPublicKey(operator); } });
+  const event = (role, kind, digest) => eventFixture({ artifactDigest: digest, coordination: role === "operator" ? operator : payerCoordination, keyId: role === "operator" ? OPERATOR_KEY_ID : "payer-coordination", kind, role, subjectRun: "rehearsal" });
+  await validator.validate(event("payer", "RECOVERY_REQUIRED", sha256(manifest)));
+  await assert.doesNotReject(validator.validate(event("operator", "EXACT_RECOVERY_AUTHORIZATION", sha256(manifest))));
+  await assert.doesNotReject(validator.validate(event("payer", "TERMINAL_FAILURE", sha256(summary))));
+});
+
+test("rejects recovery replay and failure-summary scope substitutions", async () => {
+  const manifest = recoveryManifest();
+  const summaries = [failureSummary({ role: "payee" }), failureSummary({ releaseId: "release-b" }), failureSummary({ sessionId: "9f953393-86d0-4f99-9d6a-102f525fbecd" }), failureSummary({ subjectRun: "stakeholder" })];
+  for (const summary of summaries) {
+    const values = new Map([[sha256(summary), summary]]);
+    const validator = createRelayArtifactTransitionValidator({ frozenRepositorySha: REPOSITORY_SHA, async readArtifact(digest) { return values.get(digest); }, async readEnrollment() { throw new Error("unexpected"); }, async resolveOperatorPublicKey() { return rawPublicKey(operator); } });
+    await assert.rejects(validator.validate(eventFixture({ artifactDigest: sha256(summary), coordination: payerCoordination, keyId: "payer-coordination", kind: "TERMINAL_FAILURE", role: "payer", subjectRun: "rehearsal" })), { code: "COORDINATION_RELAY_INVALID" });
+  }
+  const values = new Map([[sha256(manifest), manifest]]);
+  const validator = createRelayArtifactTransitionValidator({ frozenRepositorySha: REPOSITORY_SHA, async readArtifact(digest) { return values.get(digest); }, async readEnrollment() { throw new Error("unexpected"); }, async resolveOperatorPublicKey() { return rawPublicKey(operator); } });
+  const required = eventFixture({ artifactDigest: sha256(manifest), coordination: payerCoordination, keyId: "payer-coordination", kind: "RECOVERY_REQUIRED", role: "payer", subjectRun: "rehearsal" });
+  await validator.validate(required);
+  await assert.rejects(validator.validate(required), { code: "COORDINATION_RELAY_INVALID" });
+  await validator.validate(eventFixture({ artifactDigest: sha256(manifest), coordination: operator, keyId: OPERATOR_KEY_ID, kind: "EXACT_RECOVERY_AUTHORIZATION", role: "operator", subjectRun: "rehearsal" }));
+  await assert.rejects(validator.validate(eventFixture({ artifactDigest: sha256(manifest), coordination: operator, keyId: OPERATOR_KEY_ID, kind: "EXACT_RECOVERY_AUTHORIZATION", role: "operator", subjectRun: "rehearsal" })), { code: "COORDINATION_RELAY_INVALID" });
+});
+
+test("rejects distinct and cross-role recovery authorizations", async () => {
+  const payer = recoveryManifest();
+  const alternate = recoveryManifest({ outputPath: "/state/other-output" });
+  const payee = recoveryManifest({ command: "bin/handshake-accept.mjs", role: "payee" });
+  for (const candidate of [alternate, payee]) {
+    await assert.doesNotReject(validateRelayArtifactWithFacts({ artifactType: "recovery-command-manifest", bytes: candidate, expectedDigest: sha256(candidate), secretCanaries: [] }));
+    const values = new Map([[sha256(payer), payer], [sha256(candidate), candidate]]);
+    const validator = createRelayArtifactTransitionValidator({ frozenRepositorySha: REPOSITORY_SHA, async readArtifact(digest) { return values.get(digest); }, async readEnrollment() { throw new Error("unexpected"); }, async resolveOperatorPublicKey() { return rawPublicKey(operator); } });
+    await validator.validate(eventFixture({ artifactDigest: sha256(payer), coordination: payerCoordination, keyId: "payer-coordination", kind: "RECOVERY_REQUIRED", role: "payer", subjectRun: "rehearsal" }));
+    await assert.rejects(validator.validate(eventFixture({ artifactDigest: sha256(candidate), coordination: operator, keyId: OPERATOR_KEY_ID, kind: "EXACT_RECOVERY_AUTHORIZATION", role: "operator", subjectRun: "rehearsal" })), { code: "COORDINATION_RELAY_INVALID" });
+  }
+});
+
+async function partyResultPackage(t, { accountKey, descriptor, parties, promptSha256, role = "payer", sessionDigest: suppliedSessionDigest } = {}) {
+  const account = privateKeyToAccount(accountKey ?? invitationKeys[role].rehearsal);
+  const descriptorData = descriptor?.descriptor;
+  const sessionDigest = suppliedSessionDigest ?? (descriptorData === undefined ? "cd".repeat(32) : dSession(descriptorData));
+  const party = (partyRole) => {
+    const supplied = parties?.[partyRole];
+    if (supplied !== undefined) return { address: supplied.address, agentId: supplied.agentId };
+    return descriptorData === undefined ? (partyRole === "payer"
+    ? { address: account.address.toLowerCase(), agentId: "8677" }
+    : { address: `0x${"22".repeat(20)}`, agentId: "9001" }) : {
+    address: descriptorData[partyRole].address,
+    agentId: descriptorData[partyRole].agentId,
+    };
+  };
+  const head = {
+    amount: { currency: "USD", moved: false, value: "100" },
+    expirySeconds: "600",
+    payee: party("payee"),
+    payer: { ...party("payer"), reference: `eip155:11155111:0x8004a818bfb912233c491871b3d84c89a494bd9e:${party("payer").agentId}` },
+    protocol: "clockchain.bilateral-authorization/v1",
+    schema: "clockchain.bilateral-transition/v1",
+    sessionDigest,
+  };
+  const proposal = { ...head, kind: "proposal", predecessor: null, sequence: "1" };
+  const proposalAnchor = { anchoredHash: sha256(canonicalBytes(proposal)), blockHeight: "1869000", kind: "proposal", ledgerId: "3f8a1c2e-9d4b-4a6c-8f2e-0123456789ab" };
+  const acceptance = { ...head, decision: "ACCEPT", kind: "acceptance", predecessor: proposalAnchor, sequence: "2" };
+  const acceptanceAnchor = { anchoredHash: sha256(canonicalBytes(acceptance)), blockHeight: "1869030", kind: "acceptance", ledgerId: "4a9b2d3f-0e5c-4b7d-9a3f-123456789abc" };
+  const acknowledgment = { ...head, kind: "acknowledgment", outcome: "ACKNOWLEDGED", paymentMoved: false, predecessor: acceptanceAnchor, proposal: proposalAnchor, sequence: "3" };
+  const transitions = [proposal, acceptance, acknowledgment].map((message, index) => ({
+    blockTimeMs: String([1784923200100, 1784923231204, 1784923262309][index]),
+    blockTimeRaw: ["2026-07-24T20:00:00.100000001Z", "2026-07-24T20:00:31.204500000Z", "2026-07-24T20:01:02.309999999Z"][index],
+    digest: sha256(canonicalBytes(message)),
+    onChain: { anchoredHash: sha256(canonicalBytes(message)), blockHeight: ["1869000", "1869030", "1869060"][index], ledgerId: [proposalAnchor.ledgerId, acceptanceAnchor.ledgerId, "5b0c3e40-1f6d-4c8e-ab40-23456789abcd"][index] },
+    message,
+    upperBoundMs: index === 0 ? null : String([1784923200100, 1784923231204, 1784923262309][index] + 1100),
+  }));
+  const result = {
+    ackObserved: true,
+    deadlineMs: "1784923800100",
+    localVerdict: "LOCAL_OK",
+    paymentMoved: false,
+    poolHealth: { degradedAtSubmission: true, nodeParticipationPct: "0.0", totalNodes: "1.0" },
+    promptSha256: promptSha256 ?? descriptorData?.promptSha256 ?? "ef".repeat(32),
+    protocolVersion: "1",
+    rendezvous: { channel: "derived-reference-id", degradedAtSubmission: true, tenancy: "cross-client" },
+    repositorySha: REPOSITORY_SHA,
+    role,
+    schema: PARTY_RESULT_SCHEMA,
+    sessionDigest,
+    signature: { address: account.address.toLowerCase(), algorithm: "eip191", signature: "" },
+    transitions,
+  };
+  result.signature.signature = await account.signMessage({
+    message: { raw: partySignatureBytes({ role, sessionDigest, transitions: result.transitions }) },
+  });
+  const directory = await mkdtemp(join(tmpdir(), "relay-role-package-"));
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  await writePartyResult({ directory, result });
+  return relayPackage([
+    [".party-result.complete.json", await readFile(join(directory, ".party-result.complete.json"))],
+    ["PARTY-RESULT.md", await readFile(join(directory, "PARTY-RESULT.md"))],
+    ["party-result.json", await readFile(join(directory, "party-result.json"))],
+  ]);
+}
+
+test("rejects a role package without its accepted descriptor context", async (t) => {
+  const bytes = await partyResultPackage(t);
+  const digest = sha256(bytes);
+  const validator = createRelayArtifactTransitionValidator({
+    frozenRepositorySha: REPOSITORY_SHA,
+    async readArtifact(candidate) {
+      if (candidate !== digest) throw new Error("missing artifact");
+      return bytes;
+    },
+    async readEnrollment() {
+      throw new Error("role package must not reach enrollment without a descriptor");
+    },
+    async resolveOperatorPublicKey() {
+      return rawPublicKey(operator);
+    },
+  });
+
+  await assert.rejects(
+    validator.validate(eventFixture({
+      artifactDigest: digest,
+      coordination: payerCoordination,
+      keyId: "payer-coordination",
+      kind: "ROLE_PACKAGE_READY",
+      role: "payer",
+      subjectRun: "rehearsal",
+    })),
+    { code: "COORDINATION_RELAY_INVALID" },
+  );
+});
+
+test("rejects verification passed directly without a trusted verifier seam", async () => {
+  const validator = createRelayArtifactTransitionValidator({
+    frozenRepositorySha: REPOSITORY_SHA,
+    async readArtifact() { throw new Error("unexpected artifact read"); },
+    async readEnrollment() { throw new Error("unexpected enrollment read"); },
+    async resolveOperatorPublicKey() { return rawPublicKey(operator); },
+  });
+  await assert.rejects(
+    validator.validate(eventFixture({
+      coordination: operator,
+      keyId: OPERATOR_KEY_ID,
+      kind: "VERIFICATION_PASSED",
+      role: "operator",
+      subjectRun: "rehearsal",
+    })),
+    { code: "COORDINATION_RELAY_INVALID" },
+  );
+});
+
+test("keeps only the declared non-artifact terminal and stakeholder gates", async () => {
+  let reads = 0;
+  const validator = createRelayArtifactTransitionValidator({
+    frozenRepositorySha: REPOSITORY_SHA,
+    async readArtifact() { reads += 1; throw new Error("missing artifact"); },
+    async readEnrollment() { throw new Error("unexpected enrollment read"); },
+    async resolveOperatorPublicKey() { return rawPublicKey(operator); },
+  });
+  const operatorEvent = (kind, artifactDigest = null) => eventFixture({
+    artifactDigest,
+    coordination: operator,
+    keyId: OPERATOR_KEY_ID,
+    kind,
+    role: "operator",
+    subjectRun: kind === "REGISTER_STAKEHOLDER" ? "stakeholder" : "rehearsal",
+  });
+  await assert.doesNotReject(validator.validate(operatorEvent("REGISTER_STAKEHOLDER")));
+  await assert.doesNotReject(validator.validate(operatorEvent("TERMINAL_FAILURE")));
+  for (const kind of ["REGISTER_STAKEHOLDER", "VERIFICATION_FAILED"]) {
+    await assert.rejects(
+      validator.validate(operatorEvent(kind, "a".repeat(64))),
+      { code: "COORDINATION_RELAY_INVALID" },
+    );
+  }
+  assert.equal(reads, 0);
+});
+
+test("uses one immutable artifact read for a contextual artifact validation", async (t) => {
+  const bytes = await partyResultPackage(t);
+  const digest = sha256(bytes);
+  let reads = 0;
+  const validator = createRelayArtifactTransitionValidator({
+    frozenRepositorySha: REPOSITORY_SHA,
+    async readArtifact(candidate) {
+      assert.equal(candidate, digest);
+      reads += 1;
+      return bytes;
+    },
+    async readEnrollment() { throw new Error("unexpected enrollment read"); },
+    async resolveOperatorPublicKey() { return rawPublicKey(operator); },
+  });
+  await assert.rejects(validator.validate(eventFixture({
+    artifactDigest: digest, coordination: payerCoordination,
+    keyId: "payer-coordination", kind: "ROLE_PACKAGE_READY", role: "payer",
+    subjectRun: "rehearsal",
+  })), { code: "COORDINATION_RELAY_INVALID" });
+  assert.equal(reads, 1);
+});
 
 function eventBuilder() {
   const state = Object.fromEntries(

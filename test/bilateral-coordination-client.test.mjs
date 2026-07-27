@@ -3527,7 +3527,7 @@ test("fails unsupported reserved artifacts and mismatched acknowledgments locall
   });
   await assert.rejects(
     fixture.client.putArtifact({
-      artifactType: "token-commitment",
+      artifactType: "coordination-receipt",
       bytes: unsupported,
       expectedDigest: sha256(unsupported),
     }),
@@ -3558,7 +3558,7 @@ test("fails unsupported reserved artifacts and mismatched acknowledgments locall
   );
   await assert.rejects(
     getFixture.client.getArtifact({
-      artifactType: "token-commitment",
+      artifactType: "coordination-receipt",
       digest: sha256(unsupported),
     }),
     { code: "COORDINATION_CLIENT_INVALID" },

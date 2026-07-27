@@ -68,6 +68,7 @@ import {
   MAX_RELAY_PACKAGE_BYTES,
   RELAY_PACKAGE_SCHEMA,
   validateRelayArtifact,
+  validateRelayArtifactWithFacts,
 } from "../src/bilateral/coordination/artifact.mjs";
 import {
   COORDINATION_OWNER_LOCK_LIMITATION,
@@ -1522,6 +1523,29 @@ test("accepts exact signed token commitments and rejects wrong signature, key, S
       }),
     { code: "RELAY_ARTIFACT_INVALID" },
   );
+});
+
+test("returns deeply frozen normalized public token commitment facts", async () => {
+  const artifact = tokenCommitmentArtifact();
+  const bytes = stableBytes(artifact);
+  const result = await validateRelayArtifactWithFacts({
+    artifactType: "token-commitment",
+    bytes,
+    expectedDigest: sha256(bytes),
+    secretCanaries: [],
+  });
+
+  assert.deepEqual(result, {
+    artifactType: "token-commitment",
+    byteLength: String(bytes.length),
+    digest: sha256(bytes),
+    facts: artifact,
+  });
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.isFrozen(result.facts), true);
+  assert.throws(() => {
+    result.facts.role = "payee";
+  }, TypeError);
 });
 
 test("validates canonical named artifacts and rejects digest or secret mismatch", async () => {

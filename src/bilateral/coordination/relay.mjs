@@ -1,6 +1,8 @@
 import {
   createHash,
+  createPublicKey,
   timingSafeEqual,
+  verify,
 } from "node:crypto";
 
 import {
@@ -16,11 +18,13 @@ import {
 } from "../canonical.mjs";
 import {
   operatorPublicKeyPath,
+  dSession,
   publicKeyPemFromRawBase64,
   verifyDescriptorEnvelope,
 } from "../descriptor.mjs";
 import {
   validateRelayArtifact,
+  validateRelayArtifactWithFacts,
 } from "./artifact.mjs";
 import {
   COORDINATION_ENROLLMENT_SET_SCHEMA,
@@ -109,6 +113,12 @@ const DESCRIPTOR_VALIDATOR_KEYS = Object.freeze([
   "readArtifact",
   "resolveOperatorPublicKey",
 ]);
+const ARTIFACT_TRANSITION_VALIDATOR_KEYS = Object.freeze([
+  "frozenRepositorySha",
+  "readArtifact",
+  "readEnrollment",
+  "resolveOperatorPublicKey",
+]);
 const ENVELOPE_KEYS = Object.freeze([
   "artifactDigest",
   "eventDigest",
@@ -144,6 +154,7 @@ const CONSUMPTION_KEYS = Object.freeze([
   "receiptBytes",
 ]);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const CAPABILITY_PATTERN = /^[0-9a-f]{64}$/;
 const REPOSITORY_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const UUID_PATTERN =
@@ -153,15 +164,17 @@ const DESCRIPTOR_EVENT_KINDS = new Set([
   "REHEARSAL_DESCRIPTOR_READY",
   "STAKEHOLDER_DESCRIPTOR_READY",
 ]);
-const UNSUPPORTED_ARTIFACT_EVENT_KINDS = new Set([
-  "EXACT_RECOVERY_AUTHORIZATION",
-  "IDENTITY_PACKAGE_READY",
-  "PREFLIGHT_PARTICIPANT_READY",
-  "PREFLIGHT_PLAN_READY",
-  "RECOVERY_REQUIRED",
-  "ROLE_PACKAGE_READY",
-  "TOKEN_READY",
-]);
+const ARTIFACT_EVENT_TYPES = Object.freeze({
+  EXACT_RECOVERY_AUTHORIZATION: "recovery-command-manifest",
+  IDENTITY_PACKAGE_READY: "identity-package",
+  PREFLIGHT_PARTICIPANT_READY: "preflight-participant-report",
+  PREFLIGHT_PLAN_READY: "preflight-plan",
+  RECOVERY_REQUIRED: "recovery-command-manifest",
+  REGISTER_REHEARSAL: "preflight-aggregate-report",
+  ROLE_PACKAGE_READY: "party-result-package",
+  TERMINAL_FAILURE: "failure-summary",
+  TOKEN_READY: "token-commitment",
+});
 
 export class CoordinationRelayError extends Error {
   constructor() {
@@ -510,8 +523,68 @@ function assertReleaseView(value, sessionId, repositorySha) {
   };
 }
 
-export function createDescriptorArtifactTransitionValidator(
+function assertArtifactEventScope(envelope, artifactType, facts) {
+  const scoped = (value) => {
+    if (
+      value.role !== envelope.role ||
+      value.repositorySha !== envelope.repositorySha ||
+      value.paymentMoved !== false
+    ) {
+      invalid();
+    }
+  };
+  if (artifactType === "token-commitment") {
+    scoped(facts);
+  } else if (artifactType === "preflight-plan") {
+    if (
+      facts.plan.repositorySha !== envelope.repositorySha ||
+      facts.plan.paymentMoved !== false ||
+      facts.operator.keyId !== envelope.keyId
+    ) {
+      invalid();
+    }
+  } else if (artifactType === "preflight-participant-report") {
+    scoped(facts.participantReport.report);
+  } else if (artifactType === "preflight-aggregate-report") {
+    const report = facts.aggregateReport.report;
+    if (
+      report.repositorySha !== envelope.repositorySha ||
+      report.paymentMoved !== false ||
+      report.outcome !== "RENDEZVOUS_OK"
+    ) {
+      invalid();
+    }
+  } else if (artifactType === "identity-package") {
+    const identity = facts.identity;
+    if (
+      identity.repositorySha !== envelope.repositorySha ||
+      identity.paymentMoved !== false
+    ) {
+      invalid();
+    }
+  } else if (artifactType === "party-result-package") {
+    scoped(facts.partyResult);
+  } else if (
+    artifactType === "recovery-command-manifest" ||
+    artifactType === "failure-summary"
+  ) {
+    if (
+      facts.releaseId !== envelope.releaseId ||
+      facts.repositorySha !== envelope.repositorySha ||
+      (envelope.kind !== "EXACT_RECOVERY_AUTHORIZATION" &&
+        facts.role !== envelope.role) ||
+      facts.sessionId !== envelope.sessionId ||
+      facts.subjectRun !== envelope.subjectRun ||
+      facts.paymentMoved !== false
+    ) {
+      invalid();
+    }
+  }
+}
+
+function createArtifactTransitionShapeValidator(
   input,
+  allowContextualArtifacts,
 ) {
   return guarded(() => {
     const data = readExactData(
@@ -535,18 +608,34 @@ export function createDescriptorArtifactTransitionValidator(
     async function validate(unverifiedEvent) {
       return guardedAsync(async () => {
         const envelope = readEnvelope(unverifiedEvent);
-        if (
-          UNSUPPORTED_ARTIFACT_EVENT_KINDS.has(
-            envelope.kind,
-          )
-        ) {
-          invalid();
-        }
         if (!DESCRIPTOR_EVENT_KINDS.has(envelope.kind)) {
-          if (envelope.artifactDigest !== null) {
+          const artifactType = ARTIFACT_EVENT_TYPES[envelope.kind];
+          if (artifactType === undefined) {
+            if (envelope.artifactDigest !== null) invalid();
+            return null;
+          }
+          if (!allowContextualArtifacts) invalid();
+          if (
+            envelope.kind === "TERMINAL_FAILURE" &&
+            envelope.artifactDigest === null
+          ) {
+            return null;
+          }
+          if (envelope.artifactDigest === null) invalid();
+          const digest = assertSha256(envelope.artifactDigest);
+          let artifact;
+          try {
+            artifact = await validateRelayArtifactWithFacts({
+              artifactType,
+              bytes: await data.readArtifact(digest),
+              expectedDigest: digest,
+              secretCanaries: [],
+            });
+          } catch {
             invalid();
           }
-          return null;
+          assertArtifactEventScope(envelope, artifactType, artifact.facts);
+          return artifact;
         }
         if (envelope.artifactDigest === null) {
           invalid();
@@ -595,26 +684,18 @@ export function createDescriptorArtifactTransitionValidator(
         const digest = assertSha256(
           envelope.artifactDigest,
         );
-        let bytes;
+        let artifact;
         try {
-          bytes = await data.readArtifact(digest);
-          await validateRelayArtifact({
+          artifact = await validateRelayArtifactWithFacts({
             artifactType: "signed-descriptor",
-            bytes,
+            bytes: await data.readArtifact(digest),
             expectedDigest: digest,
             secretCanaries: [],
           });
         } catch {
           invalid();
         }
-        let descriptorEnvelope;
-        try {
-          descriptorEnvelope = JSON.parse(
-            bytes.toString("utf8"),
-          );
-        } catch {
-          invalid();
-        }
+        const descriptorEnvelope = artifact.facts;
         const descriptorData = readExactData(
           descriptorEnvelope,
           ["descriptor", "operator"],
@@ -669,7 +750,7 @@ export function createDescriptorArtifactTransitionValidator(
             invalid();
           }
           bindings[run] = candidate;
-          return candidate;
+          return Object.freeze({ ...candidate, facts: descriptorEnvelope });
         }
         const ready = bindings[run];
         if (
@@ -682,10 +763,205 @@ export function createDescriptorArtifactTransitionValidator(
         ) {
           invalid();
         }
-        return candidate;
+        return Object.freeze({ ...candidate, facts: descriptorEnvelope });
       });
     }
 
+    return Object.freeze({ validate });
+  });
+}
+
+export function createDescriptorArtifactTransitionValidator(input) {
+  return createArtifactTransitionShapeValidator(input, false);
+}
+
+function ed25519PublicKey(raw) {
+  if (
+    typeof raw !== "string" ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+      raw,
+    )
+  ) {
+    invalid();
+  }
+  const bytes = Buffer.from(raw, "base64");
+  if (bytes.length !== 32 || bytes.toString("base64") !== raw) {
+    invalid();
+  }
+  try {
+    return createPublicKey({
+      format: "der",
+      key: Buffer.concat([ED25519_SPKI_PREFIX, bytes]),
+      type: "spki",
+    });
+  } catch {
+    invalid();
+  }
+}
+
+function sameCanonical(left, right) {
+  try {
+    return stableBytes(left).equals(stableBytes(right));
+  } catch {
+    invalid();
+  }
+}
+
+export function createRelayArtifactTransitionValidator(input) {
+  return guarded(() => {
+    const data = readExactData(input, ARTIFACT_TRANSITION_VALIDATOR_KEYS);
+    if (typeof data.readEnrollment !== "function") invalid();
+    const artifactShapeValidator =
+      createArtifactTransitionShapeValidator(
+        {
+          frozenRepositorySha: data.frozenRepositorySha,
+          readArtifact: data.readArtifact,
+          resolveOperatorPublicKey:
+            data.resolveOperatorPublicKey,
+        },
+        true,
+      );
+    const tokens = Object.create(null);
+    const participants = Object.create(null);
+    const identities = {
+      rehearsal: Object.create(null),
+      stakeholder: Object.create(null),
+    };
+    const descriptors = {
+      rehearsal: null,
+      stakeholder: null,
+    };
+    const descriptorAccepted = {
+      rehearsal: Object.create(null),
+      stakeholder: Object.create(null),
+    };
+    const outstandingRecovery = new Map();
+    let plan = null;
+
+    async function enrollment(envelope) {
+      try {
+        const stored = await data.readEnrollment({
+          role: envelope.role,
+          sessionId: envelope.sessionId,
+        });
+        const value = parseCoordinationEnrollment(stored.bytes);
+        if (
+          value.role !== envelope.role ||
+          value.releaseId !== envelope.releaseId ||
+          value.sessionId !== envelope.sessionId ||
+          value.repositorySha !== data.frozenRepositorySha ||
+          value.paymentMoved !== false
+        ) {
+          invalid();
+        }
+        return value;
+      } catch {
+        invalid();
+      }
+    }
+    async function validate(event) {
+      return guardedAsync(async () => {
+      const envelope = readEnvelope(event);
+      if (envelope.kind === "VERIFICATION_PASSED") invalid();
+      const result = await artifactShapeValidator.validate(event);
+      const type = DESCRIPTOR_EVENT_KINDS.has(envelope.kind)
+        ? "signed-descriptor"
+        : ARTIFACT_EVENT_TYPES[envelope.kind];
+      if (type === undefined || envelope.artifactDigest === null) return result;
+      const digest = assertSha256(envelope.artifactDigest);
+      const facts = result?.facts;
+      if (facts === undefined) invalid();
+      if (envelope.kind === "TOKEN_READY") {
+        const enrolled = await enrollment(envelope);
+        if (facts.coordinationPublicKey !== enrolled.coordinationKey.publicKey) invalid();
+        if (tokens[envelope.role] !== undefined) invalid();
+        tokens[envelope.role] = Object.freeze({ digest, facts });
+      } else if (envelope.kind === "PREFLIGHT_PLAN_READY") {
+        if (envelope.role !== "operator" || plan !== null || tokens.payer === undefined || tokens.payee === undefined) invalid();
+        const pinned = await data.resolveOperatorPublicKey(facts.operator.keyId);
+        if (facts.operator.publicKey !== pinned || facts.operator.keyId !== envelope.keyId) invalid();
+        for (const role of ["payer", "payee"]) {
+          const enrolled = await enrollment({ ...envelope, role });
+          const participant = facts.plan.participants[role];
+          if (participant.coordinationPublicKey !== enrolled.coordinationKey.publicKey || participant.publicKey !== enrolled.preflightKey.publicKey || !sameCanonical(participant.tokenCommitment, tokens[role].facts)) invalid();
+        }
+        plan = Object.freeze({ digest, planDigest: sha256(canonicalBytes(facts.plan)), facts });
+      } else if (envelope.kind === "PREFLIGHT_PARTICIPANT_READY") {
+        if (plan === null || participants[envelope.role] !== undefined) invalid();
+        const report = facts.participantReport.report;
+        const signature = facts.participantReport.signature;
+        const enrolled = await enrollment(envelope);
+        const planned = plan.facts.plan;
+        if (report.planDigest !== plan.planDigest || !sameCanonical(report.tokenCommitment, tokens[envelope.role]?.facts) || report.write.digest !== planned.digests[envelope.role] || report.write.key !== planned.keys[envelope.role] || signature.role !== envelope.role || !verify(null, canonicalBytes(report), ed25519PublicKey(enrolled.preflightKey.publicKey), Buffer.from(signature.value, "base64"))) invalid();
+        participants[envelope.role] = Object.freeze({ digest, report });
+      } else if (envelope.kind === "REGISTER_REHEARSAL") {
+        if (plan === null || participants.payer === undefined || participants.payee === undefined) invalid();
+        const report = facts.aggregateReport.report;
+        const signature = facts.aggregateReport.signature;
+        const pinned = await data.resolveOperatorPublicKey(signature.keyId);
+        if (signature.keyId !== envelope.keyId || report.planDigest !== plan.planDigest || !verify(null, canonicalBytes(report), ed25519PublicKey(pinned), Buffer.from(signature.value, "base64"))) invalid();
+        for (const role of ["payer", "payee"]) {
+          const index = role === "payer" ? 0 : 1;
+          const write = report.writes[index];
+          const direction = report.directions[index];
+          const { observer, ...observation } = direction;
+          if (!sameCanonical(write, participants[role].report.write) || observer !== role || direction.peer !== (role === "payer" ? "payee" : "payer") || !sameCanonical(observation, participants[role].report.peerObservation)) invalid();
+        }
+      } else if (envelope.kind === "IDENTITY_PACKAGE_READY") {
+        if (!Object.hasOwn(identities, envelope.subjectRun)) invalid();
+        const enrolled = await enrollment(envelope);
+        const identity = facts.identity;
+        if (identities[envelope.subjectRun][envelope.role] !== undefined || identity.address.toLowerCase() !== enrolled.invitations[envelope.subjectRun].address.toLowerCase()) invalid();
+        identities[envelope.subjectRun][envelope.role] = identity;
+      } else if (DESCRIPTOR_EVENT_KINDS.has(envelope.kind)) {
+        const descriptor = facts.descriptor;
+        const run = envelope.subjectRun;
+        if (descriptor.payee.address.toLowerCase() !== identities[run].payee?.address.toLowerCase() || descriptor.payee.agentId !== identities[run].payee?.agentId || descriptor.payee.displayName !== identities[run].payee?.displayName || descriptor.payer.address.toLowerCase() !== identities[run].payer?.address.toLowerCase() || descriptor.payer.agentId !== identities[run].payer?.agentId || descriptor.payer.displayName !== identities[run].payer?.displayName) invalid();
+        if (envelope.kind === "DESCRIPTOR_ACCEPTED") {
+          if (
+            descriptors[run] === null ||
+            descriptors[run].digest !== digest ||
+            descriptors[run].sessionDigest !== dSession(descriptor) ||
+            descriptorAccepted[run][envelope.role] !== undefined
+          ) invalid();
+          descriptorAccepted[run][envelope.role] = true;
+        } else {
+          if (descriptors[run] !== null) invalid();
+          descriptors[run] = Object.freeze({
+            descriptor,
+            digest,
+            sessionDigest: dSession(descriptor),
+          });
+        }
+      } else if (envelope.kind === "ROLE_PACKAGE_READY") {
+        if (!Object.hasOwn(descriptors, envelope.subjectRun)) invalid();
+        const descriptorContext = descriptors[envelope.subjectRun];
+        const party = facts.partyResult;
+        if (descriptorContext === null || descriptorAccepted[envelope.subjectRun][envelope.role] !== true) invalid();
+        const descriptorParty = descriptorContext.descriptor[envelope.role];
+        const transitionParty = party.transitions[0]?.message?.[envelope.role];
+        if (
+          party.role !== envelope.role ||
+          party.repositorySha !== envelope.repositorySha ||
+          party.localVerdict !== "LOCAL_OK" ||
+          party.sessionDigest !== descriptorContext.sessionDigest ||
+          party.promptSha256 !== descriptorContext.descriptor.promptSha256 ||
+          party.signature.address.toLowerCase() !== descriptorParty.address.toLowerCase() ||
+          transitionParty?.address?.toLowerCase() !== descriptorParty.address.toLowerCase() ||
+          transitionParty?.agentId !== descriptorParty.agentId
+        ) invalid();
+      } else if (envelope.kind === "RECOVERY_REQUIRED") {
+        const key = `${envelope.subjectRun}:${envelope.role}`;
+        if (outstandingRecovery.has(key) || [...outstandingRecovery.values()].includes(digest)) invalid();
+        outstandingRecovery.set(key, digest);
+      } else if (envelope.kind === "EXACT_RECOVERY_AUTHORIZATION") {
+        const key = `${envelope.subjectRun}:${facts.role}`;
+        if (outstandingRecovery.get(key) !== digest) invalid();
+        outstandingRecovery.delete(key);
+      }
+      return result;
+      });
+    }
     return Object.freeze({ validate });
   });
 }
@@ -881,9 +1157,10 @@ export function createRelayService(input) {
         sessionId,
       });
       const descriptorArtifacts =
-        createDescriptorArtifactTransitionValidator({
+        createRelayArtifactTransitionValidator({
           frozenRepositorySha,
           readArtifact: store.getArtifact,
+          readEnrollment: store.readEnrollment,
           resolveOperatorPublicKey:
             resolvedOperatorPublicKey,
         });
