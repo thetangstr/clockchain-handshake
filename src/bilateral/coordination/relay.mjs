@@ -598,7 +598,7 @@ export function createDescriptorArtifactTransitionValidator(
         let bytes;
         try {
           bytes = await data.readArtifact(digest);
-          validateRelayArtifact({
+          await validateRelayArtifact({
             artifactType: "signed-descriptor",
             bytes,
             expectedDigest: digest,

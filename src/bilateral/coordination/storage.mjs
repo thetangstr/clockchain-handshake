@@ -3358,7 +3358,7 @@ export async function openCoordinationStore(input) {
         const bytes = Buffer.from(data.bytes);
         let metadata;
         try {
-          metadata = validateRelayArtifact({
+          metadata = await validateRelayArtifact({
             artifactType: data.artifactType,
             bytes,
             expectedDigest: data.expectedDigest,

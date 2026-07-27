@@ -1146,13 +1146,13 @@ async function exactRequest(
   invalid();
 }
 
-function assertArtifactInput(
+async function assertArtifactInput(
   artifactType,
   bytes,
   expectedDigest,
 ) {
   try {
-    return validateRelayArtifact({
+    return await validateRelayArtifact({
       artifactType,
       bytes,
       expectedDigest,
@@ -1586,7 +1586,7 @@ function createCoordinationClientCore({
           inputData.signal === undefined
             ? undefined
             : assertSignal(inputData.signal);
-        const metadata = assertArtifactInput(
+        const metadata = await assertArtifactInput(
           inputData.artifactType,
           inputData.bytes,
           inputData.expectedDigest,
@@ -1669,7 +1669,7 @@ function createCoordinationClientCore({
             response,
             "application/octet-stream",
           );
-        assertArtifactInput(
+        await assertArtifactInput(
           inputData.artifactType,
           responseBytes,
           inputData.digest,

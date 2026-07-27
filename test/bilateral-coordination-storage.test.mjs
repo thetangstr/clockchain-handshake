@@ -25,6 +25,12 @@ import {
   generateKeyPairSync,
   sign,
 } from "node:crypto";
+import {
+  recoverMessageAddress,
+} from "viem";
+import {
+  privateKeyToAccount,
+} from "viem/accounts";
 
 import {
   COORDINATION_ENVELOPE_SCHEMA,
@@ -44,8 +50,17 @@ import {
 } from "../src/bilateral/coordination/enrollment.mjs";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import {
+  PARTY_RESULT_SCHEMA,
+  partySignatureBytes,
+  renderPartyResultMarkdown,
+  writePartyResult,
+} from "../src/bilateral/evidence.mjs";
+import {
   createSignedEnvelope,
 } from "../src/bilateral/descriptor.mjs";
+import {
+  probeKey,
+} from "../src/bilateral/refid.mjs";
 import { canonicalizeReceiptEventValue } from "../src/canonical.mjs";
 import {
   ARTIFACT_POLICIES,
@@ -1074,6 +1089,7 @@ test("pins the closed artifact policy and storage bounds", () => {
       maximum: 1_048_576,
       markerRequired: true,
     },
+    "recovery-command-manifest": { maximum: 65_536 },
     "preflight-plan": { maximum: 65_536 },
     "preflight-public-key": { maximum: 65_536 },
     "signed-descriptor": { maximum: 1_048_576 },
@@ -1089,10 +1105,10 @@ test("pins the closed artifact policy and storage bounds", () => {
   );
 });
 
-test("accepts only exact coordination enrollments and signed descriptors while other schemas fail closed", () => {
+test("accepts only exact coordination enrollments and signed descriptors while other schemas fail closed", async () => {
   const bytes = signedDescriptorBytes();
   assert.deepEqual(
-    validateRelayArtifact({
+    await validateRelayArtifact({
       artifactType: "signed-descriptor",
       bytes,
       expectedDigest: sha256(bytes),
@@ -1118,9 +1134,9 @@ test("accepts only exact coordination enrollments and signed descriptors while o
     incomplete,
   ]) {
     const hostileBytes = stableBytes(value);
-    assert.throws(
-      () =>
-        validateRelayArtifact({
+    await assert.rejects(
+      async () =>
+        await validateRelayArtifact({
           artifactType: "signed-descriptor",
           bytes: hostileBytes,
           expectedDigest: sha256(hostileBytes),
@@ -1132,7 +1148,7 @@ test("accepts only exact coordination enrollments and signed descriptors while o
 
   const exactEnrollment = enrollmentBytes();
   assert.deepEqual(
-    validateRelayArtifact({
+    await validateRelayArtifact({
       artifactType: "coordination-enrollment",
       bytes: exactEnrollment,
       expectedDigest: sha256(exactEnrollment),
@@ -1150,9 +1166,9 @@ test("accepts only exact coordination enrollments and signed descriptors while o
   const malformedEnrollmentBytes = canonicalBytes(
     malformedEnrollment,
   );
-  assert.throws(
-    () =>
-      validateRelayArtifact({
+  await assert.rejects(
+    async () =>
+      await validateRelayArtifact({
         artifactType: "coordination-enrollment",
         bytes: malformedEnrollmentBytes,
         expectedDigest: sha256(malformedEnrollmentBytes),
@@ -1242,9 +1258,9 @@ test("accepts only exact coordination enrollments and signed descriptors while o
     }
     for (const value of [candidate, extra, incomplete]) {
       const unsupportedBytes = stableBytes(value);
-      assert.throws(
-        () =>
-          validateRelayArtifact({
+      await assert.rejects(
+        async () =>
+          await validateRelayArtifact({
             artifactType,
             bytes: unsupportedBytes,
             expectedDigest: sha256(unsupportedBytes),
@@ -1286,7 +1302,7 @@ test("stores a valid self-signed descriptor as non-authorizing content without t
   );
 });
 
-test("artifact validation accepts only exact own data inputs", () => {
+test("artifact validation accepts only exact own data inputs", async () => {
   const bytes = stableBytes({
     paymentMoved: false,
     schema: "clockchain.bilateral-coordination-enrollment/v1",
@@ -1307,8 +1323,8 @@ test("artifact validation accepts only exact own data inputs", () => {
       },
     }),
   ]) {
-    assert.throws(
-      () => validateRelayArtifact(input),
+    await assert.rejects(
+      async () => await validateRelayArtifact(input),
       { code: "RELAY_ARTIFACT_INVALID" },
     );
   }
@@ -1319,7 +1335,7 @@ test("artifact validation and store opening convert hostile prototype traps into
     "ARTIFACT_PROXY_SECRET_CANARY";
   let artifactError;
   try {
-    validateRelayArtifact(
+    await validateRelayArtifact(
       new Proxy(
         {},
         {
@@ -1398,11 +1414,11 @@ test("artifact validation and store opening convert hostile prototype traps into
   }
 });
 
-test("accepts exact signed preflight public keys and rejects wrong signature, key, SHA, role, extra keys, and canaries", () => {
+test("accepts exact signed preflight public keys and rejects wrong signature, key, SHA, role, extra keys, and canaries", async () => {
   const artifact = preflightPublicKeyArtifact();
   const bytes = stableBytes(artifact);
   assert.deepEqual(
-    validateRelayArtifact({
+    await validateRelayArtifact({
       artifactType: "preflight-public-key",
       bytes,
       expectedDigest: sha256(bytes),
@@ -1430,9 +1446,9 @@ test("accepts exact signed preflight public keys and rejects wrong signature, ke
     { ...artifact, extra: "untrusted" },
   ]) {
     const hostileBytes = stableBytes(hostile);
-    assert.throws(
-      () =>
-        validateRelayArtifact({
+    await assert.rejects(
+      async () =>
+        await validateRelayArtifact({
           artifactType: "preflight-public-key",
           bytes: hostileBytes,
           expectedDigest: sha256(hostileBytes),
@@ -1441,9 +1457,9 @@ test("accepts exact signed preflight public keys and rejects wrong signature, ke
       { code: "RELAY_ARTIFACT_INVALID" },
     );
   }
-  assert.throws(
-    () =>
-      validateRelayArtifact({
+  await assert.rejects(
+    async () =>
+      await validateRelayArtifact({
         artifactType: "preflight-public-key",
         bytes,
         expectedDigest: sha256(bytes),
@@ -1453,11 +1469,11 @@ test("accepts exact signed preflight public keys and rejects wrong signature, ke
   );
 });
 
-test("accepts exact signed token commitments and rejects wrong signature, key, SHA, role, extra keys, and canaries", () => {
+test("accepts exact signed token commitments and rejects wrong signature, key, SHA, role, extra keys, and canaries", async () => {
   const artifact = tokenCommitmentArtifact();
   const bytes = stableBytes(artifact);
   assert.deepEqual(
-    validateRelayArtifact({
+    await validateRelayArtifact({
       artifactType: "token-commitment",
       bytes,
       expectedDigest: sha256(bytes),
@@ -1485,9 +1501,9 @@ test("accepts exact signed token commitments and rejects wrong signature, key, S
     { ...artifact, extra: "untrusted" },
   ]) {
     const hostileBytes = stableBytes(hostile);
-    assert.throws(
-      () =>
-        validateRelayArtifact({
+    await assert.rejects(
+      async () =>
+        await validateRelayArtifact({
           artifactType: "token-commitment",
           bytes: hostileBytes,
           expectedDigest: sha256(hostileBytes),
@@ -1496,9 +1512,9 @@ test("accepts exact signed token commitments and rejects wrong signature, key, S
       { code: "RELAY_ARTIFACT_INVALID" },
     );
   }
-  assert.throws(
-    () =>
-      validateRelayArtifact({
+  await assert.rejects(
+    async () =>
+      await validateRelayArtifact({
         artifactType: "token-commitment",
         bytes,
         expectedDigest: sha256(bytes),
@@ -1508,9 +1524,9 @@ test("accepts exact signed token commitments and rejects wrong signature, key, S
   );
 });
 
-test("validates canonical named artifacts and rejects digest or secret mismatch", () => {
+test("validates canonical named artifacts and rejects digest or secret mismatch", async () => {
   const bytes = signedDescriptorBytes();
-  const metadata = validateRelayArtifact({
+  const metadata = await validateRelayArtifact({
     artifactType: "signed-descriptor",
     bytes,
     expectedDigest: sha256(bytes),
@@ -1523,9 +1539,9 @@ test("validates canonical named artifacts and rejects digest or secret mismatch"
   });
   assert.ok(Object.isFrozen(metadata));
 
-  assert.throws(
-    () =>
-      validateRelayArtifact({
+  await assert.rejects(
+    async () =>
+      await validateRelayArtifact({
         artifactType: "signed-descriptor",
         bytes,
         expectedDigest: "0".repeat(64),
@@ -1537,9 +1553,9 @@ test("validates canonical named artifacts and rejects digest or secret mismatch"
   secretValue.descriptor.payer.displayName =
     "cc_secret_canary_1234567890";
   const secretBytes = stableBytes(secretValue);
-  assert.throws(
-    () =>
-      validateRelayArtifact({
+  await assert.rejects(
+    async () =>
+      await validateRelayArtifact({
         artifactType: "signed-descriptor",
         bytes: secretBytes,
         expectedDigest: sha256(secretBytes),
@@ -1549,7 +1565,7 @@ test("validates canonical named artifacts and rejects digest or secret mismatch"
   );
 });
 
-test("rejects noncanonical JSON, archives, unknown types, private keys, and oversized artifacts", () => {
+test("rejects noncanonical JSON, archives, unknown types, private keys, and oversized artifacts", async () => {
   const cases = [
     {
       artifactType: "coordination-enrollment",
@@ -1590,9 +1606,9 @@ test("rejects noncanonical JSON, archives, unknown types, private keys, and over
     },
   ];
   for (const input of cases) {
-    assert.throws(
-      () =>
-        validateRelayArtifact({
+    await assert.rejects(
+      async () =>
+        await validateRelayArtifact({
           ...input,
           expectedDigest: sha256(input.bytes),
           secretCanaries: [],
@@ -1602,7 +1618,7 @@ test("rejects noncanonical JSON, archives, unknown types, private keys, and over
   }
 });
 
-test("rejects a noncanonical base64 pad-bit alias even when decoded package bytes and digests agree", () => {
+test("rejects a noncanonical base64 pad-bit alias even when decoded package bytes and digests agree", async () => {
   const packageValue = JSON.parse(partyPackage().toString("utf8"));
   const file = packageValue.files.find(
     ({ name }) => name === "PARTY-RESULT.md",
@@ -1629,9 +1645,9 @@ test("rejects a noncanonical base64 pad-bit alias even when decoded package byte
     Buffer.from(canonicalBase64, "base64"),
   );
   const bytes = stableBytes(packageValue);
-  assert.throws(
-    () =>
-      validateRelayArtifact({
+  await assert.rejects(
+    async () =>
+      await validateRelayArtifact({
         artifactType: "party-result-package",
         bytes,
         expectedDigest: sha256(bytes),
@@ -1700,11 +1716,65 @@ function partyPackage({
   });
 }
 
-test("keeps marker-complete packages fail-closed until trusted package validators land", () => {
+async function producerPartyPackage(t) {
+  const account = privateKeyToAccount(`0x${"11".repeat(32)}`);
+  const sessionDigest = "cd".repeat(32);
+  const head = {
+    amount: { currency: "USD", moved: false, value: "100" },
+    expirySeconds: "600",
+    payee: { address: `0x${"22".repeat(20)}`, agentId: "9001" },
+    payer: { address: account.address.toLowerCase(), agentId: "8677", reference: "eip155:11155111:0x8004a818bfb912233c491871b3d84c89a494bd9e:8677" },
+    protocol: "clockchain.bilateral-authorization/v1",
+    schema: "clockchain.bilateral-transition/v1",
+    sessionDigest,
+  };
+  const proposal = { ...head, kind: "proposal", predecessor: null, sequence: "1" };
+  const proposalTriple = { anchoredHash: sha256(canonicalBytes(proposal)), blockHeight: "1869000", kind: "proposal", ledgerId: "3f8a1c2e-9d4b-4a6c-8f2e-0123456789ab" };
+  const acceptance = { ...head, decision: "ACCEPT", kind: "acceptance", predecessor: proposalTriple, sequence: "2" };
+  const acceptanceTriple = { anchoredHash: sha256(canonicalBytes(acceptance)), blockHeight: "1869030", kind: "acceptance", ledgerId: "4a9b2d3f-0e5c-4b7d-9a3f-123456789abc" };
+  const acknowledgment = { ...head, kind: "acknowledgment", outcome: "ACKNOWLEDGED", paymentMoved: false, predecessor: acceptanceTriple, proposal: proposalTriple, sequence: "3" };
+  const messages = [proposal, acceptance, acknowledgment];
+  const rawTimes = ["2026-07-24T20:00:00.100000001Z", "2026-07-24T20:00:31.204500000Z", "2026-07-24T20:01:02.309999999Z"];
+  const times = [1784923200100, 1784923231204, 1784923262309];
+  const ledgers = [proposalTriple.ledgerId, acceptanceTriple.ledgerId, "5b0c3e40-1f6d-4c8e-ab40-23456789abcd"];
+  const heights = ["1869000", "1869030", "1869060"];
+  const transitions = messages.map((message, index) => ({
+    blockTimeMs: String(times[index]), blockTimeRaw: rawTimes[index],
+    digest: sha256(canonicalBytes(message)), message,
+    onChain: { anchoredHash: sha256(canonicalBytes(message)), blockHeight: heights[index], ledgerId: ledgers[index] },
+    upperBoundMs: index === 0 ? null : String(times[index] + 1100),
+  }));
+  const result = {
+    ackObserved: true, deadlineMs: String(times[0] + 600000), localVerdict: "LOCAL_OK", paymentMoved: false,
+    poolHealth: { degradedAtSubmission: true, nodeParticipationPct: "0.0", totalNodes: "1.0" },
+    promptSha256: "ef".repeat(32), protocolVersion: "1",
+    rendezvous: { channel: "derived-reference-id", degradedAtSubmission: true, tenancy: "cross-client" },
+    repositorySha: REPOSITORY_SHA, role: "payer", schema: PARTY_RESULT_SCHEMA, sessionDigest,
+    signature: { address: account.address.toLowerCase(), algorithm: "eip191", signature: `0x${"00".repeat(65)}` },
+    transitions,
+  };
+  result.signature.signature = await account.signMessage({
+    message: { raw: partySignatureBytes({
+      role: result.role,
+      sessionDigest: result.sessionDigest,
+      transitions: result.transitions,
+    }) },
+  });
+  const directory = await mkdtemp(join(tmpdir(), "relay-party-package-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await writePartyResult({ directory, result });
+  return relayPackage([
+    [".party-result.complete.json", await readFile(join(directory, ".party-result.complete.json"))],
+    ["PARTY-RESULT.md", await readFile(join(directory, "PARTY-RESULT.md"))],
+    ["party-result.json", await readFile(join(directory, "party-result.json"))],
+  ]);
+}
+
+test("rejects structurally incomplete party-result packages", async () => {
   const bytes = partyPackage();
-  assert.throws(
-    () =>
-      validateRelayArtifact({
+  await assert.rejects(
+    async () =>
+      await validateRelayArtifact({
         artifactType: "party-result-package",
         bytes,
         expectedDigest: sha256(bytes),
@@ -1714,7 +1784,79 @@ test("keeps marker-complete packages fail-closed until trusted package validator
   );
 });
 
-test("rejects incomplete, mismatched, unknown-file, and oversized packages", () => {
+test("validates producer-written party result packages and signer recovery", async (t) => {
+  const bytes = await producerPartyPackage(t);
+  await assert.doesNotReject(validateRelayArtifact({
+    artifactType: "party-result-package", bytes, expectedDigest: sha256(bytes), secretCanaries: [],
+  }));
+  const mutated = JSON.parse(bytes.toString("utf8"));
+  const json = mutated.files.find((file) => file.name === "party-result.json");
+  const party = JSON.parse(Buffer.from(json.contentBase64, "base64").toString("utf8"));
+  party.signature.signature = `0x${"00".repeat(65)}`;
+  const partyBytes = Buffer.from(`${JSON.stringify(party, null, 2)}\n`);
+  json.byteLength = String(partyBytes.length);
+  json.contentBase64 = partyBytes.toString("base64");
+  json.sha256 = sha256(partyBytes);
+  const markdown = mutated.files.find((file) => file.name === "PARTY-RESULT.md");
+  const markdownBytes = Buffer.from(renderPartyResultMarkdown(party));
+  markdown.byteLength = String(markdownBytes.length);
+  markdown.contentBase64 = markdownBytes.toString("base64");
+  markdown.sha256 = sha256(markdownBytes);
+  const marker = mutated.files.find((file) => file.name === ".party-result.complete.json");
+  const markerValue = JSON.parse(Buffer.from(marker.contentBase64, "base64").toString("utf8"));
+  markerValue.jsonSha256 = json.sha256;
+  markerValue.markdownSha256 = markdown.sha256;
+  const markerBytes = Buffer.from(
+    `${canonicalBytes(markerValue).toString("utf8")}\n`,
+  );
+  marker.byteLength = String(markerBytes.length);
+  marker.contentBase64 = markerBytes.toString("base64");
+  marker.sha256 = sha256(markerBytes);
+  const hostile = stableBytes(mutated);
+  await assert.rejects(validateRelayArtifact({
+    artifactType: "party-result-package", bytes: hostile, expectedDigest: sha256(hostile), secretCanaries: [],
+  }), { code: "RELAY_ARTIFACT_INVALID" });
+
+  const highS = JSON.parse(bytes.toString("utf8"));
+  const highSJson = highS.files.find((file) => file.name === "party-result.json");
+  const highSParty = JSON.parse(Buffer.from(highSJson.contentBase64, "base64").toString("utf8"));
+  const signature = highSParty.signature.signature;
+  const order = BigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
+  const s = BigInt(`0x${signature.slice(66, 130)}`);
+  highSParty.signature.signature = `0x${signature.slice(2, 66)}${(order - s).toString(16).padStart(64, "0")}${signature.slice(130) === "1b" ? "1c" : "1b"}`;
+  const highSBytes = Buffer.from(`${JSON.stringify(highSParty, null, 2)}\n`);
+  highSJson.byteLength = String(highSBytes.length);
+  highSJson.contentBase64 = highSBytes.toString("base64");
+  highSJson.sha256 = sha256(highSBytes);
+  const highSMarkdown = highS.files.find((file) => file.name === "PARTY-RESULT.md");
+  const highSMarkdownBytes = Buffer.from(renderPartyResultMarkdown(highSParty));
+  highSMarkdown.byteLength = String(highSMarkdownBytes.length);
+  highSMarkdown.contentBase64 = highSMarkdownBytes.toString("base64");
+  highSMarkdown.sha256 = sha256(highSMarkdownBytes);
+  assert.equal((await recoverMessageAddress({
+    message: { raw: partySignatureBytes({
+      role: highSParty.role,
+      sessionDigest: highSParty.sessionDigest,
+      transitions: highSParty.transitions,
+    }) },
+    signature: highSParty.signature.signature,
+  })).toLowerCase(), highSParty.signature.address.toLowerCase());
+  const highSMarker = highS.files.find((file) => file.name === ".party-result.complete.json");
+  const highSMarkerValue = JSON.parse(Buffer.from(highSMarker.contentBase64, "base64").toString("utf8"));
+  highSMarkerValue.jsonSha256 = highSJson.sha256;
+  highSMarkerValue.markdownSha256 = highSMarkdown.sha256;
+  const highSMarkerBytes = Buffer.from(`${canonicalBytes(highSMarkerValue).toString("utf8")}\n`);
+  highSMarker.byteLength = String(highSMarkerBytes.length);
+  highSMarker.contentBase64 = highSMarkerBytes.toString("base64");
+  highSMarker.sha256 = sha256(highSMarkerBytes);
+  const highSArtifact = stableBytes(highS);
+  await assert.rejects(validateRelayArtifact({
+    artifactType: "party-result-package", bytes: highSArtifact,
+    expectedDigest: sha256(highSArtifact), secretCanaries: [],
+  }), { code: "RELAY_ARTIFACT_INVALID" });
+});
+
+test("rejects incomplete, mismatched, unknown-file, and oversized packages", async () => {
   const cases = [
     partyPackage({ includeMarker: false }),
     partyPackage({ markerDigest: "e".repeat(64) }),
@@ -1754,9 +1896,9 @@ test("rejects incomplete, mismatched, unknown-file, and oversized packages", () 
     Buffer.alloc(MAX_RELAY_PACKAGE_BYTES + 1, 0x61),
   ];
   for (const bytes of cases) {
-    assert.throws(
-      () =>
-        validateRelayArtifact({
+    await assert.rejects(
+      async () =>
+        await validateRelayArtifact({
           artifactType: "party-result-package",
           bytes,
           expectedDigest: sha256(bytes),
@@ -1767,14 +1909,14 @@ test("rejects incomplete, mismatched, unknown-file, and oversized packages", () 
   }
 });
 
-test("rejects nested-only paymentMoved and package tar, token, or private-key content", () => {
+test("rejects nested-only paymentMoved and package tar, token, or private-key content", async () => {
   const nestedOnly = stableBytes({
     payload: { paymentMoved: false },
     schema: "clockchain.bilateral-coordination-enrollment/v1",
   });
-  assert.throws(
-    () =>
-      validateRelayArtifact({
+  await assert.rejects(
+    async () =>
+      await validateRelayArtifact({
         artifactType: "coordination-enrollment",
         bytes: nestedOnly,
         expectedDigest: sha256(nestedOnly),
@@ -1797,9 +1939,9 @@ test("rejects nested-only paymentMoved and package tar, token, or private-key co
     const bytes = partyPackage({
       markdownPayload: payload,
     });
-    assert.throws(
-      () =>
-        validateRelayArtifact({
+    await assert.rejects(
+      async () =>
+        await validateRelayArtifact({
           artifactType: "party-result-package",
           bytes,
           expectedDigest: sha256(bytes),
@@ -1810,7 +1952,7 @@ test("rejects nested-only paymentMoved and package tar, token, or private-key co
   }
 });
 
-test("keeps oversized identity packages fail-closed pending an exact package validator", () => {
+test("rejects oversized identity packages before parsing", async () => {
   const baseIdentity = {
     padding: "",
     paymentMoved: false,
@@ -1841,9 +1983,9 @@ test("keeps oversized identity packages fail-closed pending an exact package val
     paymentMoved: false,
     schema: RELAY_PACKAGE_SCHEMA,
   });
-  assert.throws(
-    () =>
-      validateRelayArtifact({
+  await assert.rejects(
+    async () =>
+      await validateRelayArtifact({
         artifactType: "identity-package",
         bytes,
         expectedDigest: sha256(bytes),
@@ -1851,6 +1993,577 @@ test("keeps oversized identity packages fail-closed pending an exact package val
       }),
     { code: "RELAY_ARTIFACT_INVALID" },
   );
+});
+
+function recoveryManifest({
+  command = "scripts/probe-bilateral-rendezvous.mjs",
+  role = "payer",
+  subjectRun = "release",
+  reasonCode = "AMBIGUOUS_WRITE",
+  arguments: argv,
+} = {}) {
+  const paths = ["/state/plan.json", "/state/token", "/state/private", "/state/output"];
+  const argumentsForCommand = argv ?? (command === "scripts/probe-bilateral-rendezvous.mjs"
+    ? ["participant", "--role", role, "--plan", paths[0], "--token-file", paths[1], "--participant-private-key", paths[2], "--output", paths[3]]
+    : command === "scripts/register-bilateral-identity.mjs"
+      ? ["--invitation", paths[0], "--output", paths[1], "--repository-sha", REPOSITORY_SHA, "--i-understand-this-writes-to-sepolia"]
+      : ["--clockchain-token-file", paths[0], "--descriptor", paths[1], "--invitation", paths[2], "--output", paths[3], "--i-understand-this-writes-to-clockchain"]);
+  return stableBytes({
+    arguments: argumentsForCommand, command, paymentMoved: false, reasonCode,
+    releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, role,
+    schema: "clockchain.bilateral-recovery-command-manifest/v1", sessionId: SESSION_ID,
+    subjectRun,
+  });
+}
+
+test("validates exact recovery manifests and terminal failure summaries", async () => {
+  const recovery = recoveryManifest();
+  const failure = stableBytes({
+    eventKind: "TERMINAL_FAILURE",
+    paymentMoved: false,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    role: "payer",
+    schema: "clockchain.bilateral-failure-summary/v1",
+    sessionId: SESSION_ID,
+    subjectRun: "rehearsal",
+    terminalCode: "FAILED",
+  });
+  for (const [artifactType, bytes] of [
+    ["recovery-command-manifest", recovery],
+    ["failure-summary", failure],
+  ]) {
+    assert.deepEqual(
+      await validateRelayArtifact({
+        artifactType,
+        bytes,
+        expectedDigest: sha256(bytes),
+        secretCanaries: [],
+      }),
+      {
+        artifactType,
+        byteLength: String(bytes.length),
+        digest: sha256(bytes),
+      },
+    );
+  }
+  for (const releaseId of [" release", "release ", "", "\nrelease"]) {
+    const bytes = stableBytes({
+      eventKind: "TERMINAL_FAILURE", paymentMoved: false, releaseId,
+      repositorySha: REPOSITORY_SHA, role: "payer",
+      schema: "clockchain.bilateral-failure-summary/v1", sessionId: SESSION_ID,
+      subjectRun: "rehearsal", terminalCode: "FAILED",
+    });
+    await assert.rejects(validateRelayArtifact({
+      artifactType: "failure-summary", bytes, expectedDigest: sha256(bytes), secretCanaries: [],
+    }), { code: "RELAY_ARTIFACT_INVALID" });
+  }
+  for (const bytes of [
+    recoveryManifest(),
+    recoveryManifest({ command: "scripts/register-bilateral-identity.mjs", role: "payee", subjectRun: "rehearsal" }),
+    recoveryManifest({ command: "bin/handshake-propose.mjs", role: "payer", subjectRun: "stakeholder" }),
+    recoveryManifest({ command: "bin/handshake-accept.mjs", role: "payee", subjectRun: "stakeholder" }),
+  ]) {
+    await assert.doesNotReject(validateRelayArtifact({
+      artifactType: "recovery-command-manifest", bytes, expectedDigest: sha256(bytes), secretCanaries: [],
+    }));
+  }
+  for (const bytes of [
+    recoveryManifest({ reasonCode: "FAILED" }),
+    recoveryManifest({ subjectRun: "rehearsal" }),
+    recoveryManifest({ command: "scripts/register-bilateral-identity.mjs", subjectRun: "release" }),
+    recoveryManifest({ command: "bin/handshake-propose.mjs", role: "payee", subjectRun: "rehearsal" }),
+    recoveryManifest({ command: "bin/handshake-accept.mjs", role: "payer", subjectRun: "rehearsal" }),
+    recoveryManifest({ arguments: ["participant", "--role", "payer"] }),
+    recoveryManifest({ arguments: ["participant", "--role", "payer", "--role", "payer", "--plan", "/state/plan.json", "--token-file", "/state/token", "--participant-private-key", "/state/private", "--output", "/state/output"] }),
+    recoveryManifest({ arguments: ["participant", "--plan", "/state/plan.json", "--role", "payer", "--token-file", "/state/token", "--participant-private-key", "/state/private", "--output", "/state/output"] }),
+    recoveryManifest({ arguments: ["participant", "--role", "payer", "--plan", "relative", "--token-file", "/state/token", "--participant-private-key", "/state/private", "--output", "/state/output"] }),
+    recoveryManifest({ arguments: ["participant", "--role", "payee", "--plan", "/state/plan.json", "--token-file", "/state/token", "--participant-private-key", "/state/private", "--output", "/state/output"] }),
+    recoveryManifest({ arguments: ["participant", "--role", "payer", "--plan", "/state/plan.json", "--token-file", "/state/token", "--participant-private-key", "/state/token", "--output", "/state/output"] }),
+    recoveryManifest({ command: "scripts/register-bilateral-identity.mjs", role: "payer", subjectRun: "rehearsal", arguments: ["--invitation", "/state/invitation", "--output", "/state/output", "--repository-sha", "a".repeat(40), "--i-understand-this-writes-to-sepolia"] }),
+    recoveryManifest({ arguments: ["participant", "--role", "payer", "--plan", "/state/plan.json", "--token-file", "/state/token", "--participant-private-key", "/state/private", "--output", "/state/output", "--extra"] }),
+  ]) {
+    await assert.rejects(validateRelayArtifact({
+      artifactType: "recovery-command-manifest", bytes, expectedDigest: sha256(bytes), secretCanaries: [],
+    }), { code: "RELAY_ARTIFACT_INVALID" });
+  }
+});
+
+test("identity packages bind the frozen registration artifact shape", async () => {
+  const identity = {
+    address: `0x${"1".repeat(40)}`,
+    agentId: "7",
+    chainId: "11155111",
+    displayName: "Iris",
+    identityReference: "eip155:11155111:0x8004a818bfb912233c491871b3d84c89a494bd9e:7",
+    metadata: { blockHeight: "2", transactionHash: `0x${"2".repeat(64)}` },
+    paymentMoved: false,
+    register: { blockHeight: "1", transactionHash: `0x${"3".repeat(64)}` },
+    registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e",
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.bilateral-identity-registration/v1",
+  };
+  const identityBytes = stableBytes(identity);
+  const marker = stableBytes({
+    fileSha256: sha256(identityBytes),
+    schema: "clockchain.bilateral-identity-registration-completion/v1",
+  });
+  const packageBytes = stableBytes({
+    files: [[".identity.complete.json", marker], ["identity.json", identityBytes]].map(([name, content]) => ({
+      byteLength: String(content.length), contentBase64: content.toString("base64"), name, sha256: sha256(content),
+    })), paymentMoved: false, schema: RELAY_PACKAGE_SCHEMA,
+  });
+  await assert.doesNotReject(validateRelayArtifact({ artifactType: "identity-package", bytes: packageBytes, expectedDigest: sha256(packageBytes), secretCanaries: [] }));
+  const producerCompatible = {
+    ...identity,
+    displayName: "Íris",
+    metadata: { blockHeight: "2", transactionHash: `0x${"A".repeat(64)}` },
+  };
+  const producerCompatibleBytes = stableBytes(producerCompatible);
+  const producerCompatibleMarker = stableBytes({
+    fileSha256: sha256(producerCompatibleBytes),
+    schema: "clockchain.bilateral-identity-registration-completion/v1",
+  });
+  const producerCompatiblePackage = relayPackage([
+    [".identity.complete.json", producerCompatibleMarker],
+    ["identity.json", producerCompatibleBytes],
+  ]);
+  await assert.doesNotReject(validateRelayArtifact({ artifactType: "identity-package", bytes: producerCompatiblePackage, expectedDigest: sha256(producerCompatiblePackage), secretCanaries: [] }));
+  const hostile = { ...identity, chainId: "1" };
+  const hostileIdentityBytes = stableBytes(hostile);
+  const hostileMarker = stableBytes({ fileSha256: sha256(hostileIdentityBytes), schema: "clockchain.bilateral-identity-registration-completion/v1" });
+  const hostileBytes = stableBytes({
+    files: [[".identity.complete.json", hostileMarker], ["identity.json", hostileIdentityBytes]].map(([name, content]) => ({
+      byteLength: String(content.length), contentBase64: content.toString("base64"), name, sha256: sha256(content),
+    })), paymentMoved: false, schema: RELAY_PACKAGE_SCHEMA,
+  });
+  await assert.rejects(async () => await validateRelayArtifact({ artifactType: "identity-package", bytes: hostileBytes, expectedDigest: sha256(hostileBytes), secretCanaries: [] }), { code: "RELAY_ARTIFACT_INVALID" });
+  for (const displayName of [" Iris", "Iris ", "Iris\n"]) {
+    const invalidIdentity = { ...identity, displayName };
+    const invalidIdentityBytes = stableBytes(invalidIdentity);
+    const invalidIdentityMarker = stableBytes({ fileSha256: sha256(invalidIdentityBytes), schema: "clockchain.bilateral-identity-registration-completion/v1" });
+    const invalidIdentityPackage = relayPackage([[".identity.complete.json", invalidIdentityMarker], ["identity.json", invalidIdentityBytes]]);
+    await assert.rejects(validateRelayArtifact({ artifactType: "identity-package", bytes: invalidIdentityPackage, expectedDigest: sha256(invalidIdentityPackage), secretCanaries: [] }), { code: "RELAY_ARTIFACT_INVALID" });
+  }
+});
+
+test("accepts a self-signed exact preflight plan envelope", async () => {
+  const operator = generateKeyPairSync("ed25519");
+  const plan = {
+    digests: { payee: "b".repeat(64), payer: "a".repeat(64) },
+    keys: {
+      payee: probeKey("0123456789abcdef0123456789abcdef", "payee"),
+      payer: probeKey("0123456789abcdef0123456789abcdef", "payer"),
+    },
+    nonce: "0123456789abcdef0123456789abcdef",
+    participants: {
+      payee: {
+        coordinationPublicKey: PAYEE_PUBLIC_KEY,
+        publicKey: PAYEE_PREFLIGHT_PUBLIC_KEY,
+        tokenCommitment: tokenCommitmentArtifact({
+          coordinationPublicKey: PAYEE_PUBLIC_KEY,
+          privateKeyPem: payeeKeyPair.privateKey,
+          role: "payee",
+        }),
+      },
+      payer: {
+        coordinationPublicKey: PUBLIC_KEY,
+        publicKey: PREFLIGHT_PUBLIC_KEY,
+        tokenCommitment: tokenCommitmentArtifact(),
+      },
+    },
+    paymentMoved: false,
+    protocol: "clockchain.bilateral-authorization/v1",
+    protocolVersion: "1",
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.bilateral-preflight-plan/v1",
+    writeBudget: "2",
+  };
+  const operatorPublicKey = operator.publicKey
+    .export({ format: "der", type: "spki" })
+    .subarray(-32)
+    .toString("base64");
+  const bytes = stableBytes({
+    operator: {
+      algorithm: "ed25519",
+      keyId: "storage-test-operator",
+      publicKey: operatorPublicKey,
+      signature: sign(null, canonicalBytes(plan), operator.privateKey)
+        .toString("base64"),
+    },
+    plan,
+  });
+  await assert.doesNotReject(validateRelayArtifact({
+    artifactType: "preflight-plan",
+    bytes,
+    expectedDigest: sha256(bytes),
+    secretCanaries: [],
+  }));
+  const reusedKeyPlan = structuredClone(plan);
+  reusedKeyPlan.participants.payee.publicKey =
+    reusedKeyPlan.participants.payer.coordinationPublicKey;
+  const reusedKeyBytes = stableBytes({
+    operator: {
+      algorithm: "ed25519", keyId: "storage-test-operator", publicKey: operatorPublicKey,
+      signature: sign(null, canonicalBytes(reusedKeyPlan), operator.privateKey).toString("base64"),
+    },
+    plan: reusedKeyPlan,
+  });
+  await assert.rejects(validateRelayArtifact({
+    artifactType: "preflight-plan", bytes: reusedKeyBytes,
+    expectedDigest: sha256(reusedKeyBytes), secretCanaries: [],
+  }), { code: "RELAY_ARTIFACT_INVALID" });
+  const operatorReusedPlan = structuredClone(plan);
+  operatorReusedPlan.participants.payer.publicKey = operatorPublicKey;
+  const operatorReusedBytes = stableBytes({
+    operator: {
+      algorithm: "ed25519", keyId: "storage-test-operator", publicKey: operatorPublicKey,
+      signature: sign(null, canonicalBytes(operatorReusedPlan), operator.privateKey).toString("base64"),
+    },
+    plan: operatorReusedPlan,
+  });
+  await assert.rejects(validateRelayArtifact({
+    artifactType: "preflight-plan", bytes: operatorReusedBytes,
+    expectedDigest: sha256(operatorReusedBytes), secretCanaries: [],
+  }), { code: "RELAY_ARTIFACT_INVALID" });
+  const aliasPlan = JSON.parse(bytes.toString("utf8"));
+  const canonicalSignature = aliasPlan.operator.signature;
+  aliasPlan.operator.signature = base64PadBitAlias(canonicalSignature);
+  assert.deepEqual(
+    Buffer.from(aliasPlan.operator.signature, "base64"),
+    Buffer.from(canonicalSignature, "base64"),
+  );
+  const aliasPlanBytes = stableBytes(aliasPlan);
+  await assert.rejects(validateRelayArtifact({
+    artifactType: "preflight-plan", bytes: aliasPlanBytes,
+    expectedDigest: sha256(aliasPlanBytes), secretCanaries: [],
+  }), { code: "RELAY_ARTIFACT_INVALID" });
+});
+
+function relayPackage(files) {
+  return stableBytes({
+    files: files.map(([name, content]) => ({
+      byteLength: String(content.length),
+      contentBase64: content.toString("base64"),
+      name,
+      sha256: sha256(content),
+    })),
+    paymentMoved: false,
+    schema: RELAY_PACKAGE_SCHEMA,
+  });
+}
+
+function preflightAnchor({ digest, key, ledgerId, blockHeight }) {
+  return {
+    anchoredHash: digest,
+    assetReferenceId: key,
+    blockHeight,
+    ledgerId,
+  };
+}
+
+function preflightReportFixtures() {
+  const nonce = "0123456789abcdef0123456789abcdef";
+  const payer = {
+    digest: "a".repeat(64),
+    key: probeKey(nonce, "payer"),
+    ledgerId: "8f953393-86d0-4f99-9d6a-102f525fbecd",
+    role: "payer",
+  };
+  const payee = {
+    digest: "b".repeat(64),
+    key: probeKey(nonce, "payee"),
+    ledgerId: "9f953393-86d0-4f99-9d6a-102f525fbecd",
+    role: "payee",
+  };
+  payer.write = preflightAnchor({ ...payer, blockHeight: "7" });
+  payee.write = preflightAnchor({ ...payee, blockHeight: "8" });
+  const observationFor = (peer) => ({
+    conflict: false,
+    digestAnchor: peer.write,
+    digestResolved: true,
+    finalAnchor: peer.write,
+    finalVerified: true,
+    peer: peer.role,
+    referenceAnchor: peer.write,
+    referenceResolved: true,
+  });
+  const participant = (self, peer) => {
+    const report = {
+      channel: "derived-reference-id",
+      completedAtMs: "120000",
+      deadlineAtMs: "120000",
+      observations: [{
+        channel: "ledger-height",
+        code: "PREFLIGHT_READ_FAILED",
+        observer: self.role,
+      }],
+      paymentMoved: false,
+      peerObservation: observationFor(peer),
+      planDigest: "d".repeat(64),
+      rateLimits: [{
+        channel: "digest-hash",
+        code: "MCP_RATE_LIMIT",
+        observer: self.role,
+        retryAfterMs: "0",
+        wireShape: "http-429",
+      }],
+      repositorySha: REPOSITORY_SHA,
+      role: self.role,
+      schema: "clockchain.bilateral-preflight-participant/v1",
+      serializedCadenceMs: "20000",
+      sleeps: ["20000"],
+      startedAtMs: "100000",
+      tokenCommitment: tokenCommitmentArtifact({
+        coordinationPublicKey: self.role === "payer" ? PUBLIC_KEY : PAYEE_PUBLIC_KEY,
+        privateKeyPem: self.role === "payer" ? PRIVATE_KEY_PEM : payeeKeyPair.privateKey,
+        role: self.role,
+      }),
+      write: { ...self.write, digest: self.digest, key: self.key, role: self.role },
+    };
+    return {
+      report,
+      signature: {
+      algorithm: "ed25519",
+      role: self.role,
+      value: sign(null, canonicalBytes(report), self.role === "payer" ? preflightKeyPair.privateKey : payeePreflightKeyPair.privateKey).toString("base64"),
+    },
+    };
+  };
+  const participantEnvelope = participant(payer, payee);
+  const participantBytes = stableBytes(participantEnvelope);
+  const participantMarker = stableBytes({
+    fileSha256: sha256(participantBytes),
+    schema: "clockchain.bilateral-preflight-participant-completion/v1",
+  });
+  const aggregateReport = {
+      channel: "derived-reference-id",
+      completedAtMs: "120001",
+      directions: [
+        { observer: "payer", peer: "payee", ...observationFor(payee) },
+        { observer: "payee", peer: "payer", ...observationFor(payer) },
+      ],
+      outcome: "RENDEZVOUS_OK",
+      paymentMoved: false,
+      planDigest: "d".repeat(64),
+      protocol: "clockchain.bilateral-authorization/v1",
+      protocolVersion: "1",
+      repositorySha: REPOSITORY_SHA,
+      schema: "clockchain.bilateral-preflight/v2",
+      scope: {
+        separateCredentialsAttested: true,
+        separateMachinesAttested: true,
+      },
+      tenancy: "cross-client",
+      writes: [
+        { ...payer.write, digest: payer.digest, key: payer.key, role: "payer" },
+        { ...payee.write, digest: payee.digest, key: payee.key, role: "payee" },
+      ],
+  };
+  const aggregateEnvelope = {
+    report: aggregateReport,
+    signature: {
+      algorithm: "ed25519",
+      keyId: "storage-test-operator",
+      value: sign(null, canonicalBytes(aggregateReport), keyPair.privateKey).toString("base64"),
+    },
+  };
+  const aggregateBytes = stableBytes(aggregateEnvelope);
+  const aggregateMarker = stableBytes({
+    fileSha256: sha256(aggregateBytes),
+    schema: "clockchain.bilateral-preflight-completion/v1",
+  });
+  return {
+    aggregate: relayPackage([
+      [".preflight-report.complete.json", aggregateMarker],
+      ["preflight-report.json", aggregateBytes],
+    ]),
+    participant: relayPackage([
+      [".participant-report.complete.json", participantMarker],
+      ["participant-report.json", participantBytes],
+    ]),
+  };
+}
+
+function resignPreflightEnvelope(envelope) {
+  const privateKey = envelope.signature.role === "payer"
+    ? preflightKeyPair.privateKey
+    : envelope.signature.role === "payee"
+      ? payeePreflightKeyPair.privateKey
+      : keyPair.privateKey;
+  envelope.signature.value = sign(null, canonicalBytes(envelope.report), privateKey)
+    .toString("base64");
+}
+
+function mutatePreflightPackage(bytes, mutate, { resign = false } = {}) {
+  const packageValue = JSON.parse(bytes.toString("utf8"));
+  const [marker, report] = packageValue.files;
+  const envelope = JSON.parse(
+    Buffer.from(report.contentBase64, "base64").toString("utf8"),
+  );
+  mutate(envelope, packageValue);
+  if (resign) resignPreflightEnvelope(envelope);
+  const reportBytes = stableBytes(envelope);
+  const markerValue = JSON.parse(
+    Buffer.from(marker.contentBase64, "base64").toString("utf8"),
+  );
+  markerValue.fileSha256 = sha256(reportBytes);
+  const markerBytes = stableBytes(markerValue);
+  return relayPackage([
+    [marker.name, markerBytes],
+    [report.name, reportBytes],
+  ]);
+}
+
+test("validates exact canonical preflight participant and aggregate report packages", async () => {
+  const fixtures = preflightReportFixtures();
+  for (const [artifactType, bytes] of [
+    ["preflight-participant-report", fixtures.participant],
+    ["preflight-aggregate-report", fixtures.aggregate],
+  ]) {
+    await assert.doesNotReject(validateRelayArtifact({
+      artifactType,
+      bytes,
+      expectedDigest: sha256(bytes),
+      secretCanaries: [],
+    }), artifactType);
+  }
+
+  const completedAfterDeadline = mutatePreflightPackage(
+    fixtures.participant,
+    (envelope) => {
+      envelope.report.completedAtMs = "130000";
+      envelope.report.sleeps = ["1"];
+    },
+    { resign: true },
+  );
+  await assert.doesNotReject(validateRelayArtifact({
+    artifactType: "preflight-participant-report",
+    bytes: completedAfterDeadline,
+    expectedDigest: sha256(completedAfterDeadline),
+    secretCanaries: [],
+  }));
+
+  const conflictAfterFinalVerification = mutatePreflightPackage(
+    fixtures.participant,
+    (envelope) => {
+      envelope.report.peerObservation.conflict = true;
+      envelope.report.peerObservation.referenceAnchor = {
+        ...envelope.report.peerObservation.referenceAnchor,
+        blockHeight: "9",
+      };
+    },
+    { resign: true },
+  );
+  await assert.doesNotReject(validateRelayArtifact({
+    artifactType: "preflight-participant-report",
+    bytes: conflictAfterFinalVerification,
+    expectedDigest: sha256(conflictAfterFinalVerification),
+    secretCanaries: [],
+  }));
+
+  const unresolvedFinalAggregate = mutatePreflightPackage(
+    fixtures.aggregate,
+    (envelope) => {
+      envelope.report.channel = "mixed";
+      envelope.report.outcome = "RENDEZVOUS_UNAVAILABLE";
+      envelope.report.directions[1].finalVerified = false;
+      envelope.report.directions[1].finalAnchor = null;
+    },
+    { resign: true },
+  );
+  await assert.doesNotReject(validateRelayArtifact({
+    artifactType: "preflight-aggregate-report",
+    bytes: unresolvedFinalAggregate,
+    expectedDigest: sha256(unresolvedFinalAggregate),
+    secretCanaries: [],
+  }));
+});
+
+test("rejects hostile preflight report package semantics with fixed errors", async () => {
+  const fixtures = preflightReportFixtures();
+  const hostile = [
+    ["preflight-participant-report", fixtures.participant, (envelope) => {
+      envelope.report.channel = "unavailable";
+    }],
+    ["preflight-participant-report", fixtures.participant, (envelope) => {
+      envelope.report.serializedCadenceMs = "1";
+    }],
+    ["preflight-participant-report", fixtures.participant, (envelope) => {
+      envelope.report.peerObservation.finalAnchor = null;
+    }],
+    ["preflight-participant-report", fixtures.participant, (envelope) => {
+      envelope.report.peerObservation.conflict = true;
+    }],
+    ["preflight-participant-report", fixtures.participant, (envelope) => {
+      envelope.report.peerObservation.finalAnchor = { ...envelope.report.peerObservation.finalAnchor, blockHeight: "99" };
+    }],
+    ["preflight-participant-report", fixtures.participant, (envelope) => {
+      envelope.report.write.assetReferenceId = "wrong";
+    }],
+    ["preflight-participant-report", fixtures.participant, (envelope) => {
+      envelope.report.observations[0].code = "OTHER";
+    }],
+    ["preflight-participant-report", fixtures.participant, (envelope) => {
+      envelope.report.rateLimits[0].wireShape = "typed-rate-limit";
+    }],
+    ["preflight-participant-report", fixtures.participant, (envelope) => {
+      envelope.signature.role = "payee";
+    }],
+    ["preflight-aggregate-report", fixtures.aggregate, (envelope) => {
+      envelope.report.directions.reverse();
+    }],
+    ["preflight-aggregate-report", fixtures.aggregate, (envelope) => {
+      envelope.report.writes[1] = { ...envelope.report.writes[0], role: "payee" };
+    }],
+    ["preflight-aggregate-report", fixtures.aggregate, (envelope) => {
+      envelope.report.writes[1] = {
+        ...envelope.report.writes[1],
+        ledgerId: envelope.report.writes[0].ledgerId,
+        blockHeight: envelope.report.writes[0].blockHeight,
+      };
+    }],
+    ["preflight-aggregate-report", fixtures.aggregate, (envelope) => {
+      envelope.report.scope.separateMachinesAttested = false;
+    }],
+    ["preflight-aggregate-report", fixtures.aggregate, (envelope) => {
+      envelope.report.directions[0].finalAnchor = null;
+    }],
+    ["preflight-aggregate-report", fixtures.aggregate, (envelope) => {
+      envelope.signature.keyId = "not valid";
+    }],
+    ["preflight-aggregate-report", fixtures.aggregate, (envelope) => {
+      envelope.report.unexpected = false;
+    }],
+  ];
+  for (const [artifactType, original, mutate] of hostile) {
+    const bytes = mutatePreflightPackage(original, mutate);
+    await assert.rejects(
+      async () => await validateRelayArtifact({
+        artifactType,
+        bytes,
+        expectedDigest: sha256(bytes),
+        secretCanaries: [],
+      }),
+      { code: "RELAY_ARTIFACT_INVALID" },
+    );
+  }
+  for (const [artifactType, original] of [
+    ["preflight-participant-report", fixtures.participant],
+    ["preflight-aggregate-report", fixtures.aggregate],
+  ]) {
+    const bytes = mutatePreflightPackage(original, (envelope) => {
+      const canonicalSignature = envelope.signature.value;
+      envelope.signature.value = base64PadBitAlias(canonicalSignature);
+      assert.deepEqual(
+        Buffer.from(envelope.signature.value, "base64"),
+        Buffer.from(canonicalSignature, "base64"),
+      );
+    });
+    await assert.rejects(validateRelayArtifact({
+      artifactType, bytes, expectedDigest: sha256(bytes), secretCanaries: [],
+    }), { code: "RELAY_ARTIFACT_INVALID" });
+  }
 });
 
 test("opens only an exact private nonsymlink state root", async (t) => {
