@@ -844,6 +844,28 @@ function requestHandler(service, host, port) {
       const eventsMatch = path.match(
         /^\/v1\/sessions\/([0-9a-f-]{36})\/events$/,
       );
+      const enrollmentsMatch = path.match(
+        /^\/v1\/sessions\/([0-9a-f-]{36})\/enrollments$/,
+      );
+      if (
+        request.method === "GET" &&
+        enrollmentsMatch !== null
+      ) {
+        if (
+          query !== null ||
+          !UUID_PATTERN.test(enrollmentsMatch[1])
+        ) {
+          throw new Error();
+        }
+        sendJson(
+          response,
+          200,
+          await service.readEnrollmentSet({
+            sessionId: enrollmentsMatch[1],
+          }),
+        );
+        return;
+      }
       if (
         request.method === "GET" &&
         eventsMatch !== null

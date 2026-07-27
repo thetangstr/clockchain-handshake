@@ -33,6 +33,7 @@ import {
 } from "./envelope.mjs";
 import {
   parseCoordinationEnrollment,
+  parseCoordinationEnrollmentSet,
   verifyCoordinationEnrollment,
 } from "./enrollment.mjs";
 import {
@@ -526,11 +527,17 @@ function validateRequestInput(value) {
     const view = new RegExp(
       `^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/view$`,
     ).test(data.path);
+    const enrollments = new RegExp(
+      `^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/enrollments$`,
+    ).test(data.path);
     const events = new RegExp(
       `^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/events\\?(?:after=[0-9a-f]{64}&)?waitMs=(?:0|[1-9][0-9]*)$`,
     ).test(data.path);
     if (
-      (!artifact && !view && !events) ||
+      (!artifact &&
+        !view &&
+        !events &&
+        !enrollments) ||
       data.body !== null
     ) {
       invalid();
@@ -1281,6 +1288,8 @@ function createCoordinationClientCore({
         ? launchState.capabilityDigest
         : sha256(capability);
     let bootstrapComplete = capability === null;
+    let authenticatedLaunchState =
+      manifest === null ? launchState : null;
     let previousEventDigest =
       initialState.previousEventDigest;
     let sequence = initialState.sequence;
@@ -1440,6 +1449,8 @@ function createCoordinationClientCore({
           activeLaunchState,
           receipt,
         });
+        authenticatedLaunchState =
+          activeLaunchState;
         bootstrapComplete = true;
         capability.fill(0);
         capability = null;
@@ -1741,6 +1752,138 @@ function createCoordinationClientCore({
       }
     }
 
+    async function readEnrollmentSet(value) {
+      try {
+        if (
+          value !== undefined ||
+          !bootstrapComplete ||
+          capability !== null ||
+          authenticatedLaunchState === null
+        ) {
+          invalid();
+        }
+        const response = await exactRequest(
+          transport,
+          {
+            body: null,
+            method: "GET",
+            path:
+              `/v1/sessions/${context.sessionId}` +
+              "/enrollments",
+          },
+        );
+        const responseBytes =
+          validateInjectedResponse(
+            response,
+            "application/json",
+          );
+        const set = parseCoordinationEnrollmentSet(
+          responseBytes,
+        );
+        if (
+          set.paymentMoved !== false ||
+          set.releaseId !== context.releaseId ||
+          set.repositorySha !==
+            context.repositorySha ||
+          set.sessionId !== context.sessionId
+        ) {
+          invalid();
+        }
+        for (const role of ["payee", "payer"]) {
+          const entry = set.enrollments[role];
+          const enrollmentBytes = Buffer.from(
+            entry.enrollmentBase64,
+            "base64",
+          );
+          const receiptBytes = Buffer.from(
+            entry.receiptBase64,
+            "base64",
+          );
+          const enrollment =
+            parseCoordinationEnrollment(
+              enrollmentBytes,
+            );
+          const expected = Object.freeze({
+            capabilityDigest:
+              enrollment.capabilityDigest,
+            enrollmentDigest:
+              entry.enrollmentDigest,
+            releaseId: context.releaseId,
+            repositorySha:
+              context.repositorySha,
+            role,
+            sessionId: context.sessionId,
+          });
+          let localReceipt;
+          let transportReceipt;
+          try {
+            localReceipt =
+              await verifyCoordinationReceipt({
+                bytes: Buffer.from(receiptBytes),
+                expected,
+                verifier: localReceiptVerifier,
+              });
+            transportReceipt =
+              await transport.verifyReceipt(
+                Buffer.from(receiptBytes),
+                { ...expected },
+              );
+          } catch {
+            invalid();
+          }
+          const localData = readExactData(
+            localReceipt,
+            RECEIPT_KEYS,
+          );
+          const transportData = readExactData(
+            transportReceipt,
+            RECEIPT_KEYS,
+          );
+          if (
+            !stableBytes(localData).equals(
+              stableBytes(transportData),
+            ) ||
+            localData.schema !==
+              COORDINATION_RECEIPT_SCHEMA ||
+            localData.paymentMoved !== false ||
+            localData.capabilityDigest !==
+              enrollment.capabilityDigest ||
+            localData.certificateSha256 !==
+              expectedTlsFingerprint ||
+            localData.enrollmentDigest !==
+              entry.enrollmentDigest ||
+            localData.releaseId !==
+              context.releaseId ||
+            localData.repositorySha !==
+              context.repositorySha ||
+            localData.role !== role ||
+            localData.sessionId !==
+              context.sessionId
+          ) {
+            invalid();
+          }
+        }
+        const own =
+          set.enrollments[context.role];
+        if (
+          own.enrollmentBase64 !==
+            authenticatedLaunchState.enrollmentBase64 ||
+          own.enrollmentDigest !==
+            authenticatedLaunchState.enrollmentDigest ||
+          own.receiptBase64 !==
+            authenticatedLaunchState.receiptBase64
+        ) {
+          invalid();
+        }
+        return set;
+      } catch (error) {
+        if (error instanceof CoordinationClientError) {
+          throw error;
+        }
+        invalid();
+      }
+    }
+
     async function readSessionView(value) {
       try {
         const inputData =
@@ -1818,6 +1961,7 @@ function createCoordinationClientCore({
       bootstrap,
       getArtifact,
       putArtifact,
+      readEnrollmentSet,
       readEvents,
       readSessionView,
     });

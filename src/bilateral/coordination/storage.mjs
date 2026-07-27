@@ -3216,6 +3216,9 @@ export async function openCoordinationStore(input) {
             consumption.enrollmentBytes,
           ),
           digest: consumption.enrollmentDigest,
+          receiptBytes: Buffer.from(
+            consumption.receiptBytes,
+          ),
         });
       });
     }

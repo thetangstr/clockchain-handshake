@@ -11,16 +11,23 @@ import {
   KEY_ID_PATTERN,
 } from "../descriptor.mjs";
 import {
+  canonicalizeReceiptEventValue,
+} from "../../canonical.mjs";
+import {
   assertSecretFree,
 } from "../../redact.mjs";
 
 export const COORDINATION_ENROLLMENT_SCHEMA =
   "clockchain.bilateral-coordination-enrollment/v1";
+export const COORDINATION_ENROLLMENT_SET_SCHEMA =
+  "clockchain.bilateral-coordination-enrollment-set/v1";
 export const COORDINATION_ENROLLMENT_SIGNATURE_DOMAIN =
   "clockchain.bilateral-coordination-enrollment-signature/v1\n";
 export const INVITATION_PROOF_DOMAIN =
   "clockchain.bilateral-invitation-proof/v1\n";
 export const MAX_COORDINATION_ENROLLMENT_BYTES = 65_536;
+export const MAX_COORDINATION_ENROLLMENT_SET_BYTES =
+  524_288;
 
 const ENROLLMENT_KEYS = Object.freeze([
   "capabilityDigest",
@@ -34,6 +41,23 @@ const ENROLLMENT_KEYS = Object.freeze([
   "schema",
   "sessionId",
   "signature",
+]);
+const ENROLLMENT_SET_KEYS = Object.freeze([
+  "enrollments",
+  "paymentMoved",
+  "releaseId",
+  "repositorySha",
+  "schema",
+  "sessionId",
+]);
+const ENROLLMENTS_KEYS = Object.freeze([
+  "payee",
+  "payer",
+]);
+const ENROLLMENT_SET_ENTRY_KEYS = Object.freeze([
+  "enrollmentBase64",
+  "enrollmentDigest",
+  "receiptBase64",
 ]);
 const UNSIGNED_ENROLLMENT_KEYS = Object.freeze(
   ENROLLMENT_KEYS.filter((key) => key !== "signature"),
@@ -145,6 +169,13 @@ function readExactData(value, keys) {
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+function stableBytes(value) {
+  return Buffer.from(
+    JSON.stringify(canonicalizeReceiptEventValue(value)),
+    "utf8",
+  );
 }
 
 function assertSha256(value) {
@@ -313,6 +344,25 @@ function signatureBytes(value) {
   return bytes;
 }
 
+function canonicalBase64Bytes(value, maximum) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    !BASE64_PATTERN.test(value)
+  ) {
+    invalid();
+  }
+  const bytes = Buffer.from(value, "base64");
+  if (
+    bytes.length === 0 ||
+    bytes.length > maximum ||
+    bytes.toString("base64") !== value
+  ) {
+    invalid();
+  }
+  return bytes;
+}
+
 function publicKeyObject(rawBase64) {
   const raw = Buffer.from(rawBase64, "base64");
   return createPublicKey({
@@ -434,6 +484,145 @@ export function parseCoordinationEnrollment(bytes) {
       JSON.parse(text),
     );
     if (!canonicalBytes(verified).equals(copy)) {
+      invalid();
+    }
+    return verified;
+  });
+}
+
+function enrollmentSetEntry(
+  value,
+  role,
+  {
+    releaseId,
+    repositorySha,
+    sessionId,
+  },
+) {
+  const data = readExactData(
+    value,
+    ENROLLMENT_SET_ENTRY_KEYS,
+  );
+  const enrollmentBytes = canonicalBase64Bytes(
+    data.enrollmentBase64,
+    MAX_COORDINATION_ENROLLMENT_BYTES,
+  );
+  canonicalBase64Bytes(data.receiptBase64, 65_536);
+  const enrollmentDigest = assertSha256(
+    data.enrollmentDigest,
+  );
+  const enrollment =
+    parseCoordinationEnrollment(enrollmentBytes);
+  if (
+    sha256(enrollmentBytes) !== enrollmentDigest ||
+    enrollment.paymentMoved !== false ||
+    enrollment.releaseId !== releaseId ||
+    enrollment.repositorySha !== repositorySha ||
+    enrollment.role !== role ||
+    enrollment.sessionId !== sessionId
+  ) {
+    invalid();
+  }
+  return Object.freeze({
+    entry: Object.freeze({
+      enrollmentBase64: data.enrollmentBase64,
+      enrollmentDigest,
+      receiptBase64: data.receiptBase64,
+    }),
+    enrollment,
+  });
+}
+
+function verifyEnrollmentSet(value) {
+  const data = readExactData(
+    value,
+    ENROLLMENT_SET_KEYS,
+  );
+  const releaseId = assertReleaseId(data.releaseId);
+  const repositorySha = assertRepositorySha(
+    data.repositorySha,
+  );
+  const sessionId = assertSessionId(data.sessionId);
+  if (
+    data.schema !==
+      COORDINATION_ENROLLMENT_SET_SCHEMA ||
+    data.paymentMoved !== false
+  ) {
+    invalid();
+  }
+  const enrollmentsData = readExactData(
+    data.enrollments,
+    ENROLLMENTS_KEYS,
+  );
+  const payee = enrollmentSetEntry(
+    enrollmentsData.payee,
+    "payee",
+    { releaseId, repositorySha, sessionId },
+  );
+  const payer = enrollmentSetEntry(
+    enrollmentsData.payer,
+    "payer",
+    { releaseId, repositorySha, sessionId },
+  );
+  const keyIds = [
+    payee.enrollment.coordinationKey.keyId,
+    payee.enrollment.preflightKey.keyId,
+    payer.enrollment.coordinationKey.keyId,
+    payer.enrollment.preflightKey.keyId,
+  ];
+  const publicKeys = [
+    payee.enrollment.coordinationKey.publicKey,
+    payee.enrollment.preflightKey.publicKey,
+    payer.enrollment.coordinationKey.publicKey,
+    payer.enrollment.preflightKey.publicKey,
+  ];
+  const addresses = [
+    payee.enrollment.invitations.rehearsal.address,
+    payee.enrollment.invitations.stakeholder.address,
+    payer.enrollment.invitations.rehearsal.address,
+    payer.enrollment.invitations.stakeholder.address,
+  ];
+  if (
+    new Set(keyIds).size !== keyIds.length ||
+    new Set(publicKeys).size !== publicKeys.length ||
+    new Set(addresses).size !== addresses.length
+  ) {
+    invalid();
+  }
+  const snapshot = Object.freeze({
+    enrollments: Object.freeze({
+      payee: payee.entry,
+      payer: payer.entry,
+    }),
+    paymentMoved: false,
+    releaseId,
+    repositorySha,
+    schema: COORDINATION_ENROLLMENT_SET_SCHEMA,
+    sessionId,
+  });
+  assertSecretFree(snapshot);
+  return snapshot;
+}
+
+export function parseCoordinationEnrollmentSet(bytes) {
+  return guarded(() => {
+    if (
+      !Buffer.isBuffer(bytes) ||
+      bytes.length === 0 ||
+      bytes.length >
+        MAX_COORDINATION_ENROLLMENT_SET_BYTES
+    ) {
+      invalid();
+    }
+    const copy = Buffer.from(bytes);
+    const text = copy.toString("utf8");
+    if (!Buffer.from(text, "utf8").equals(copy)) {
+      invalid();
+    }
+    const verified = verifyEnrollmentSet(
+      JSON.parse(text),
+    );
+    if (!stableBytes(verified).equals(copy)) {
       invalid();
     }
     return verified;

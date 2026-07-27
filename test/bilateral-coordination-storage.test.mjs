@@ -32,12 +32,14 @@ import {
 } from "../src/bilateral/coordination/envelope.mjs";
 import {
   COORDINATION_ENROLLMENT_SCHEMA,
+  COORDINATION_ENROLLMENT_SET_SCHEMA,
   COORDINATION_ENROLLMENT_SIGNATURE_DOMAIN,
   INVITATION_PROOF_DOMAIN,
   MAX_COORDINATION_ENROLLMENT_BYTES,
   coordinationEnrollmentSignaturePreimage,
   invitationProofPreimage,
   parseCoordinationEnrollment,
+  parseCoordinationEnrollmentSet,
   verifyCoordinationEnrollment,
 } from "../src/bilateral/coordination/enrollment.mjs";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
@@ -83,6 +85,18 @@ const PREFLIGHT_PUBLIC_KEY = preflightKeyPair.publicKey
   .export({ format: "der", type: "spki" })
   .subarray(-32)
   .toString("base64");
+const payeeKeyPair = generateKeyPairSync("ed25519");
+const PAYEE_PUBLIC_KEY = payeeKeyPair.publicKey
+  .export({ format: "der", type: "spki" })
+  .subarray(-32)
+  .toString("base64");
+const payeePreflightKeyPair =
+  generateKeyPairSync("ed25519");
+const PAYEE_PREFLIGHT_PUBLIC_KEY =
+  payeePreflightKeyPair.publicKey
+    .export({ format: "der", type: "spki" })
+    .subarray(-32)
+    .toString("base64");
 
 function enrollmentValue(overrides = {}) {
   const unsigned = {
@@ -339,6 +353,96 @@ function receiptBytes(overrides = {}) {
 
 const RECEIPT_BYTES = receiptBytes();
 
+function payeeEnrollmentValue(overrides = {}) {
+  return enrollmentValue({
+    capability: Buffer.alloc(32, 0x43),
+    coordinationKey: {
+      algorithm: "ed25519",
+      keyId: "payee-coordination",
+      publicKey: PAYEE_PUBLIC_KEY,
+    },
+    invitations: {
+      rehearsal: {
+        address: `0x${"3".repeat(40)}`,
+        algorithm: "eip191",
+        signature: `0x${"3".repeat(130)}`,
+      },
+      stakeholder: {
+        address: `0x${"4".repeat(40)}`,
+        algorithm: "eip191",
+        signature: `0x${"4".repeat(130)}`,
+      },
+    },
+    preflightKey: {
+      algorithm: "ed25519",
+      keyId: "payee-preflight",
+      publicKey: PAYEE_PREFLIGHT_PUBLIC_KEY,
+    },
+    privateKeyPem: payeeKeyPair.privateKey,
+    role: "payee",
+    ...overrides,
+  });
+}
+
+function enrollmentSetValue({
+  payee = payeeEnrollmentValue(),
+  payer = enrollmentValue(),
+  ...overrides
+} = {}) {
+  const payeeBytes = canonicalBytes(payee);
+  const payerBytes = canonicalBytes(payer);
+  return {
+    enrollments: {
+      payee: {
+        enrollmentBase64:
+          payeeBytes.toString("base64"),
+        enrollmentDigest: sha256(payeeBytes),
+        receiptBase64: receiptBytes({
+          capabilityDigest:
+            payee.capabilityDigest,
+          enrollmentDigest: sha256(payeeBytes),
+          role: "payee",
+        }).toString("base64"),
+      },
+      payer: {
+        enrollmentBase64:
+          payerBytes.toString("base64"),
+        enrollmentDigest: sha256(payerBytes),
+        receiptBase64: receiptBytes({
+          capabilityDigest:
+            payer.capabilityDigest,
+          enrollmentDigest: sha256(payerBytes),
+          role: "payer",
+        }).toString("base64"),
+      },
+    },
+    paymentMoved: false,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema:
+      "clockchain.bilateral-coordination-enrollment-set/v1",
+    sessionId: SESSION_ID,
+    ...overrides,
+  };
+}
+
+function base64PadBitAlias(value) {
+  const alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const padIndex = value.endsWith("==")
+    ? value.length - 3
+    : value.length - 2;
+  const original = alphabet.indexOf(value[padIndex]);
+  const aliasIndex = value.endsWith("==")
+    ? (original & 0b110000) | 0b000001
+    : (original & 0b111100) | 0b000001;
+  return (
+    value.slice(0, padIndex) +
+    alphabet[aliasIndex] +
+    value.slice(padIndex + 1)
+  );
+}
+
 function consumeInput({
   capability = RAW_CAPABILITY,
   enrollment = enrollmentBytes({ capability }),
@@ -560,6 +664,206 @@ test("verifies, detaches, and freezes an exact canonical coordination enrollment
   source.coordinationKey.publicKey =
     PREFLIGHT_PUBLIC_KEY;
   assert.equal(verified.coordinationKey.publicKey, PUBLIC_KEY);
+});
+
+test("parses one exact frozen authenticated enrollment set and rejects hostile scope, digest, canonicality, and cross-role identity reuse", () => {
+  assert.equal(
+    COORDINATION_ENROLLMENT_SET_SCHEMA,
+    "clockchain.bilateral-coordination-enrollment-set/v1",
+  );
+  const exact = enrollmentSetValue();
+  const bytes = stableBytes(exact);
+  const parsed = parseCoordinationEnrollmentSet(bytes);
+  assert.deepEqual(parsed, exact);
+  assert.equal(Object.isFrozen(parsed), true);
+  assert.equal(Object.isFrozen(parsed.enrollments), true);
+  assert.equal(
+    Object.isFrozen(parsed.enrollments.payer),
+    true,
+  );
+
+  const cases = [];
+  for (const key of Object.keys(exact)) {
+    const candidate = structuredClone(exact);
+    delete candidate[key];
+    cases.push({ label: `missing ${key}`, value: candidate });
+  }
+  for (const role of ["payee", "payer"]) {
+    for (const key of Object.keys(
+      exact.enrollments[role],
+    )) {
+      const candidate = structuredClone(exact);
+      delete candidate.enrollments[role][key];
+      cases.push({
+        label: `missing ${role}.${key}`,
+        value: candidate,
+      });
+    }
+  }
+  cases.push(
+    {
+      label: "extra top-level field",
+      value: { ...exact, advisoryStatus: "ready" },
+    },
+    {
+      label: "extra enrollment field",
+      value: {
+        ...exact,
+        enrollments: {
+          ...exact.enrollments,
+          payer: {
+            ...exact.enrollments.payer,
+            receiptDigest: "0".repeat(64),
+          },
+        },
+      },
+    },
+    {
+      label: "payment moved",
+      value: { ...exact, paymentMoved: true },
+    },
+    {
+      label: "substituted role",
+      value: {
+        ...exact,
+        enrollments: {
+          payee: exact.enrollments.payer,
+          payer: exact.enrollments.payer,
+        },
+      },
+    },
+    {
+      label: "digest mismatch",
+      value: {
+        ...exact,
+        enrollments: {
+          ...exact.enrollments,
+          payer: {
+            ...exact.enrollments.payer,
+            enrollmentDigest: "0".repeat(64),
+          },
+        },
+      },
+    },
+    {
+      label: "cross-release enrollment",
+      value: enrollmentSetValue({
+        payee: payeeEnrollmentValue({
+          releaseId: "release-b",
+        }),
+      }),
+    },
+    {
+      label: "invalid enrollment signature",
+      value: enrollmentSetValue({
+        payee: {
+          ...payeeEnrollmentValue(),
+          signature:
+            Buffer.alloc(64).toString("base64"),
+        },
+      }),
+    },
+  );
+
+  const sameCoordination = payeeEnrollmentValue({
+    coordinationKey: {
+      algorithm: "ed25519",
+      keyId: "payee-coordination",
+      publicKey: PUBLIC_KEY,
+    },
+    privateKeyPem: PRIVATE_KEY_PEM,
+  });
+  cases.push({
+    label: "same coordination key",
+    value: enrollmentSetValue({
+      payee: sameCoordination,
+    }),
+  });
+  cases.push({
+    label: "same preflight key",
+    value: enrollmentSetValue({
+      payee: payeeEnrollmentValue({
+        preflightKey: {
+          algorithm: "ed25519",
+          keyId: "payee-preflight",
+          publicKey: PREFLIGHT_PUBLIC_KEY,
+        },
+      }),
+    }),
+  });
+  cases.push({
+    label: "same invitation address",
+    value: enrollmentSetValue({
+      payee: payeeEnrollmentValue({
+        invitations: {
+          rehearsal: {
+            address:
+              enrollmentValue().invitations.rehearsal.address,
+            algorithm: "eip191",
+            signature: `0x${"3".repeat(130)}`,
+          },
+          stakeholder: {
+            address: `0x${"4".repeat(40)}`,
+            algorithm: "eip191",
+            signature: `0x${"4".repeat(130)}`,
+          },
+        },
+      }),
+    }),
+  });
+  const aliased = structuredClone(exact);
+  aliased.enrollments.payer.enrollmentBase64 =
+    base64PadBitAlias(
+      aliased.enrollments.payer.enrollmentBase64,
+    );
+  assert.deepEqual(
+    Buffer.from(
+      aliased.enrollments.payer.enrollmentBase64,
+      "base64",
+    ),
+    Buffer.from(
+      exact.enrollments.payer.enrollmentBase64,
+      "base64",
+    ),
+  );
+  cases.push({
+    label: "noncanonical enrollment base64",
+    value: aliased,
+  });
+
+  for (const { label, value } of cases) {
+    assert.throws(
+      () =>
+        parseCoordinationEnrollmentSet(
+          stableBytes(value),
+        ),
+      { code: "COORDINATION_ENROLLMENT_INVALID" },
+      label,
+    );
+  }
+  assert.throws(
+    () =>
+      parseCoordinationEnrollmentSet(
+        Buffer.from(`${bytes.toString("utf8")} `),
+      ),
+    { code: "COORDINATION_ENROLLMENT_INVALID" },
+    "noncanonical JSON",
+  );
+  assert.throws(
+    () =>
+      parseCoordinationEnrollmentSet(
+        Buffer.from(
+          bytes
+            .toString("utf8")
+            .replace(
+              '"paymentMoved":false,',
+              '"paymentMoved":false,"paymentMoved":false,',
+            ),
+        ),
+      ),
+    { code: "COORDINATION_ENROLLMENT_INVALID" },
+    "duplicate JSON key",
+  );
 });
 
 test("rejects missing, extra, nested, malformed, and self-conflicting enrollment fields", () => {
@@ -1798,6 +2102,7 @@ test("atomically persists enrollment and invokes a randomized receipt factory on
     {
       bytes: enrollment,
       digest: enrollmentDigest,
+      receiptBytes: first.receiptBytes,
     },
   );
   await store.close();
@@ -1823,15 +2128,16 @@ test("atomically persists enrollment and invokes a randomized receipt factory on
   });
   assert.equal(Object.isFrozen(read), true);
   read.bytes.fill(0);
+  read.receiptBytes.fill(0);
+  const reread = await restarted.readEnrollment({
+    role: "payer",
+    sessionId: SESSION_ID,
+  });
   assert.deepEqual(
-    (
-      await restarted.readEnrollment({
-        role: "payer",
-        sessionId: SESSION_ID,
-      })
-    ).bytes,
+    reread.bytes,
     enrollment,
   );
+  assert.deepEqual(reread.receiptBytes, first.receiptBytes);
 });
 
 test("fails factory exceptions and hostile returns generically without consuming the capability", async (t) => {

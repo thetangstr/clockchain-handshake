@@ -102,6 +102,10 @@ const INVITATION_KEYS = Object.freeze({
   rehearsal: `0x${"1".repeat(64)}`,
   stakeholder: `0x${"2".repeat(64)}`,
 });
+const PEER_INVITATION_KEYS = Object.freeze({
+  rehearsal: `0x${"3".repeat(64)}`,
+  stakeholder: `0x${"4".repeat(64)}`,
+});
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -1196,6 +1200,17 @@ test("transport accepts only closed raw relay paths and method-specific bodies a
   });
   assert.equal(observed[1].artifactType, undefined);
   assert.equal(observed[1].contentType, undefined);
+  await transport.request({
+    body: null,
+    method: "GET",
+    path: `/v1/sessions/${SESSION_ID}/enrollments`,
+  });
+  assert.equal(observed[2].body.length, 0);
+  assert.equal(observed[2].method, "GET");
+  assert.equal(
+    observed[2].url,
+    `/v1/sessions/${SESSION_ID}/enrollments`,
+  );
 
   for (const request of [
     {
@@ -1217,6 +1232,13 @@ test("transport accepts only closed raw relay paths and method-specific bodies a
       body: Buffer.from("{}"),
       method: "GET",
       path: `/v1/sessions/${SESSION_ID}/view`,
+    },
+    {
+      body: null,
+      method: "GET",
+      path:
+        `/v1/sessions/${SESSION_ID}/enrollments?` +
+        "advisoryStatus=ready",
     },
     {
       body: null,
@@ -1524,6 +1546,7 @@ test("bounds a response body that stalls after exact headers", async (t) => {
 async function enrollmentFixture({
   capability,
   coordination,
+  invitationKeys = INVITATION_KEYS,
   preflight,
   preflightPublicKey = rawPublicKey(preflight),
   role = "payer",
@@ -1533,10 +1556,10 @@ async function enrollmentFixture({
 }) {
   const accounts = {
     rehearsal: privateKeyToAccount(
-      INVITATION_KEYS.rehearsal,
+      invitationKeys.rehearsal,
     ),
     stakeholder: privateKeyToAccount(
-      INVITATION_KEYS.stakeholder,
+      invitationKeys.stakeholder,
     ),
   };
   const capabilityDigest = sha256(capability);
@@ -1757,9 +1780,15 @@ async function clientFixture(
     coordination = generateKeyPairSync("ed25519"),
     releaseId = RELEASE_ID,
     role = "payer",
+    tlsAlgorithm = "ed25519",
+    verifyReceipt: verifyReceiptOverride,
   } = {},
 ) {
-  const tls = await tlsFixture(t);
+  const tls = await tlsFixture(
+    t,
+    "127.0.0.1",
+    tlsAlgorithm,
+  );
   const preflight = generateKeyPairSync("ed25519");
   const { manifest } = manifestFixture(tls, {
     randomBytes: () => Buffer.from(capability),
@@ -1780,6 +1809,13 @@ async function clientFixture(
   const transport = Object.freeze({
     request,
     verifyReceipt(bytes, expected) {
+      if (verifyReceiptOverride !== undefined) {
+        return verifyReceiptOverride(
+          Buffer.from(bytes),
+          { ...expected },
+          verifier,
+        );
+      }
       return verifyCoordinationReceipt({
         bytes,
         expected,
@@ -1820,9 +1856,15 @@ async function resumedClientFixture(
       previousEventDigest: null,
       sequence: "0",
     },
+    tlsAlgorithm = "ed25519",
+    verifyReceipt: verifyReceiptOverride,
   } = {},
 ) {
-  const tls = await tlsFixture(t);
+  const tls = await tlsFixture(
+    t,
+    "127.0.0.1",
+    tlsAlgorithm,
+  );
   const preflight = generateKeyPairSync("ed25519");
   const { manifest } = manifestFixture(tls, {
     nowMs,
@@ -1861,6 +1903,13 @@ async function resumedClientFixture(
   const transport = Object.freeze({
     request,
     verifyReceipt(bytes, expected) {
+      if (verifyReceiptOverride !== undefined) {
+        return verifyReceiptOverride(
+          Buffer.from(bytes),
+          { ...expected },
+          verifier,
+        );
+      }
       return verifyCoordinationReceipt({
         bytes,
         expected,
@@ -1891,6 +1940,408 @@ async function resumedClientFixture(
     transport,
   };
 }
+
+async function enrollmentSetFixture({
+  activeLaunchState,
+  tls,
+}) {
+  const activeRole = activeLaunchState.role;
+  const peerRole =
+    activeRole === "payer" ? "payee" : "payer";
+  const peerCapability = Buffer.alloc(32, 0x52);
+  const peerCoordination =
+    generateKeyPairSync("ed25519");
+  const peerPreflight =
+    generateKeyPairSync("ed25519");
+  const peerEnrollment = await enrollmentFixture({
+    capability: peerCapability,
+    coordination: peerCoordination,
+    invitationKeys: PEER_INVITATION_KEYS,
+    preflight: peerPreflight,
+    role: peerRole,
+  });
+  const peerEnrollmentBytes =
+    canonicalBytes(peerEnrollment);
+  const peerReceipt = await receiptBytes({
+    capabilityDigest: sha256(peerCapability),
+    enrollmentDigest: sha256(peerEnrollmentBytes),
+    role: peerRole,
+    tls,
+  });
+  const activeEntry = {
+    enrollmentBase64:
+      activeLaunchState.enrollmentBase64,
+    enrollmentDigest:
+      activeLaunchState.enrollmentDigest,
+    receiptBase64:
+      activeLaunchState.receiptBase64,
+  };
+  const peerEntry = {
+    enrollmentBase64:
+      peerEnrollmentBytes.toString("base64"),
+    enrollmentDigest: sha256(peerEnrollmentBytes),
+    receiptBase64: peerReceipt.toString("base64"),
+  };
+  return {
+    enrollments: {
+      payee:
+        activeRole === "payee"
+          ? activeEntry
+          : peerEntry,
+      payer:
+        activeRole === "payer"
+          ? activeEntry
+          : peerEntry,
+    },
+    paymentMoved: false,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema:
+      "clockchain.bilateral-coordination-enrollment-set/v1",
+    sessionId: SESSION_ID,
+  };
+}
+
+test("gates enrollment-set authority until bootstrap and returns one exact verified frozen set afterward", async (t) => {
+  const requests = [];
+  const receiptVerifications = [];
+  let fixture;
+  let setBytes;
+  const request = async (input) => {
+    requests.push({
+      ...input,
+      body:
+        input.body === null
+          ? null
+          : Buffer.from(input.body),
+    });
+    if (input.path === "/v1/bootstrap") {
+      const wrapper = JSON.parse(
+        input.body.toString("utf8"),
+      );
+      return injectedResponse({
+        body: await receiptBytes({
+          capabilityDigest:
+            wrapper.enrollment.capabilityDigest,
+          enrollmentDigest: sha256(
+            canonicalBytes(wrapper.enrollment),
+          ),
+          tls: fixture.tls,
+        }),
+      });
+    }
+    return injectedResponse({ body: setBytes });
+  };
+  fixture = await clientFixture(t, request, {
+    async verifyReceipt(bytes, expected, verifier) {
+      receiptVerifications.push({
+        bytes: Buffer.from(bytes),
+        expected: { ...expected },
+      });
+      return verifyCoordinationReceipt({
+        bytes,
+        expected,
+        verifier,
+      });
+    },
+  });
+  await assert.rejects(
+    () => fixture.client.readEnrollmentSet(),
+    { code: "COORDINATION_CLIENT_INVALID" },
+  );
+  assert.equal(requests.length, 0);
+  const bootstrap = await fixture.client.bootstrap({
+    enrollment: fixture.enrollment,
+  });
+  const exact = await enrollmentSetFixture({
+    activeLaunchState: bootstrap.activeLaunchState,
+    tls: fixture.tls,
+  });
+  setBytes = stableBytes(exact);
+  receiptVerifications.length = 0;
+  const set = await fixture.client.readEnrollmentSet();
+  assert.deepEqual(set, exact);
+  assert.equal(Object.isFrozen(set), true);
+  assert.equal(Object.isFrozen(set.enrollments), true);
+  assert.deepEqual(
+    requests.at(-1),
+    {
+      body: null,
+      method: "GET",
+      path: `/v1/sessions/${SESSION_ID}/enrollments`,
+    },
+  );
+  assert.deepEqual(
+    receiptVerifications.map(
+      ({ expected }) => expected.role,
+    ),
+    ["payee", "payer"],
+  );
+  assert.deepEqual(
+    Object.keys(fixture.client).sort(),
+    [
+      "appendEvent",
+      "bootstrap",
+      "getArtifact",
+      "putArtifact",
+      "readEnrollmentSet",
+      "readEvents",
+      "readSessionView",
+    ],
+  );
+});
+
+test("resumed clients are immediately ready to read the exact authenticated enrollment set", async (t) => {
+  for (const role of ["payer", "payee"]) {
+    const requests = [];
+    const receiptRoles = [];
+    let setBytes;
+    const fixture = await resumedClientFixture(
+      t,
+      async (input) => {
+        requests.push({ ...input });
+        return injectedResponse({ body: setBytes });
+      },
+      {
+        role,
+        async verifyReceipt(
+          bytes,
+          expected,
+          verifier,
+        ) {
+          receiptRoles.push(expected.role);
+          return verifyCoordinationReceipt({
+            bytes,
+            expected,
+            verifier,
+          });
+        },
+      },
+    );
+    const exact = await enrollmentSetFixture({
+      activeLaunchState: fixture.activeLaunchState,
+      tls: fixture.tls,
+    });
+    setBytes = stableBytes(exact);
+    const set =
+      await fixture.client.readEnrollmentSet();
+    assert.deepEqual(set, exact, role);
+    assert.deepEqual(
+      receiptRoles,
+      ["payee", "payer"],
+      role,
+    );
+    assert.deepEqual(
+      requests,
+      [
+        {
+          body: null,
+          method: "GET",
+          path:
+            `/v1/sessions/${SESSION_ID}/enrollments`,
+        },
+      ],
+      role,
+    );
+  }
+});
+
+test("rejects hostile enrollment-set JSON, receipt bindings, certificates, and own-record substitutions", async (t) => {
+  let responseBytes;
+  const fixture = await resumedClientFixture(
+    t,
+    async () =>
+      injectedResponse({ body: responseBytes }),
+    { tlsAlgorithm: "ecdsa-sha256" },
+  );
+  const exact = await enrollmentSetFixture({
+    activeLaunchState: fixture.activeLaunchState,
+    tls: fixture.tls,
+  });
+  const alternateCoordination =
+    generateKeyPairSync("ed25519");
+  const alternatePreflight =
+    generateKeyPairSync("ed25519");
+  const alternateEnrollment = await enrollmentFixture({
+    capability: fixture.capability,
+    coordination: alternateCoordination,
+    preflight: alternatePreflight,
+    role: "payer",
+  });
+  const alternateEnrollmentBytes =
+    canonicalBytes(alternateEnrollment);
+  const alternateReceipt = await receiptBytes({
+    capabilityDigest: sha256(fixture.capability),
+    enrollmentDigest: sha256(
+      alternateEnrollmentBytes,
+    ),
+    tls: fixture.tls,
+  });
+  const secondExactReceipt = await receiptBytes({
+    capabilityDigest:
+      fixture.activeLaunchState.capabilityDigest,
+    enrollmentDigest:
+      fixture.activeLaunchState.enrollmentDigest,
+    tls: fixture.tls,
+  });
+  assert.notDeepEqual(
+    secondExactReceipt,
+    Buffer.from(
+      fixture.activeLaunchState.receiptBase64,
+      "base64",
+    ),
+  );
+
+  const parsedOwnReceipt = JSON.parse(
+    Buffer.from(
+      exact.enrollments.payer.receiptBase64,
+      "base64",
+    ).toString("utf8"),
+  );
+  const cases = [
+    {
+      label: "missing top-level field",
+      value: (() => {
+        const candidate = structuredClone(exact);
+        delete candidate.paymentMoved;
+        return candidate;
+      })(),
+    },
+    {
+      label: "extra enrollment field",
+      value: {
+        ...exact,
+        enrollments: {
+          ...exact.enrollments,
+          payer: {
+            ...exact.enrollments.payer,
+            advisoryStatus: "ready",
+          },
+        },
+      },
+    },
+    {
+      label: "digest mismatch",
+      value: {
+        ...exact,
+        enrollments: {
+          ...exact.enrollments,
+          payer: {
+            ...exact.enrollments.payer,
+            enrollmentDigest: "0".repeat(64),
+          },
+        },
+      },
+    },
+    {
+      label: "receipt signature",
+      value: {
+        ...exact,
+        enrollments: {
+          ...exact.enrollments,
+          payer: {
+            ...exact.enrollments.payer,
+            receiptBase64: stableBytes({
+              ...parsedOwnReceipt,
+              signature:
+                Buffer.alloc(64).toString("base64"),
+            }).toString("base64"),
+          },
+        },
+      },
+    },
+    {
+      label: "receipt certificate",
+      value: {
+        ...exact,
+        enrollments: {
+          ...exact.enrollments,
+          payer: {
+            ...exact.enrollments.payer,
+            receiptBase64: stableBytes({
+              ...parsedOwnReceipt,
+              certificateSha256: "0".repeat(64),
+            }).toString("base64"),
+          },
+        },
+      },
+    },
+    {
+      label: "cross-role receipt substitution",
+      value: {
+        ...exact,
+        enrollments: {
+          ...exact.enrollments,
+          payer: {
+            ...exact.enrollments.payer,
+            receiptBase64:
+              exact.enrollments.payee.receiptBase64,
+          },
+        },
+      },
+    },
+    {
+      label: "own enrollment substitution",
+      value: {
+        ...exact,
+        enrollments: {
+          ...exact.enrollments,
+          payer: {
+            enrollmentBase64:
+              alternateEnrollmentBytes.toString("base64"),
+            enrollmentDigest:
+              sha256(alternateEnrollmentBytes),
+            receiptBase64:
+              alternateReceipt.toString("base64"),
+          },
+        },
+      },
+    },
+    {
+      label: "own receipt byte substitution",
+      value: {
+        ...exact,
+        enrollments: {
+          ...exact.enrollments,
+          payer: {
+            ...exact.enrollments.payer,
+            receiptBase64:
+              secondExactReceipt.toString("base64"),
+          },
+        },
+      },
+    },
+  ];
+  for (const { label, value } of cases) {
+    responseBytes = stableBytes(value);
+    await assert.rejects(
+      () => fixture.client.readEnrollmentSet(),
+      { code: "COORDINATION_CLIENT_INVALID" },
+      label,
+    );
+  }
+  responseBytes = Buffer.from(
+    `${stableBytes(exact).toString("utf8")} `,
+  );
+  await assert.rejects(
+    () => fixture.client.readEnrollmentSet(),
+    { code: "COORDINATION_CLIENT_INVALID" },
+    "noncanonical response",
+  );
+  responseBytes = Buffer.from(
+    stableBytes(exact)
+      .toString("utf8")
+      .replace(
+        '"paymentMoved":false,',
+        '"paymentMoved":false,"paymentMoved":false,',
+      ),
+  );
+  await assert.rejects(
+    () => fixture.client.readEnrollmentSet(),
+    { code: "COORDINATION_CLIENT_INVALID" },
+    "duplicate response key",
+  );
+});
 
 test("bootstraps with one raw capability, retries only identical bytes, verifies the TLS receipt, and exposes no capability state", async (t) => {
   const requests = [];
@@ -1991,6 +2442,7 @@ test("bootstraps with one raw capability, retries only identical bytes, verifies
       "bootstrap",
       "getArtifact",
       "putArtifact",
+      "readEnrollmentSet",
       "readEvents",
       "readSessionView",
     ],

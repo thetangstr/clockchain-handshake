@@ -23,8 +23,10 @@ import {
   validateRelayArtifact,
 } from "./artifact.mjs";
 import {
+  COORDINATION_ENROLLMENT_SET_SCHEMA,
   invitationProofPreimage,
   parseCoordinationEnrollment,
+  parseCoordinationEnrollmentSet,
 } from "./enrollment.mjs";
 import {
   initialReleaseView,
@@ -50,6 +52,7 @@ const SERVICE_KEYS = Object.freeze([
   "bootstrap",
   "getArtifact",
   "putArtifact",
+  "readEnrollmentSet",
   "readEvents",
   "readSessionView",
 ]);
@@ -96,6 +99,11 @@ const READ_EVENTS_KEYS_WITH_SIGNAL = Object.freeze([
   "waitMs",
 ]);
 const READ_SESSION_KEYS = Object.freeze(["sessionId"]);
+const STORED_ENROLLMENT_KEYS = Object.freeze([
+  "bytes",
+  "digest",
+  "receiptBytes",
+]);
 const DESCRIPTOR_VALIDATOR_KEYS = Object.freeze([
   "frozenRepositorySha",
   "readArtifact",
@@ -1214,6 +1222,103 @@ export function createRelayService(input) {
       });
     }
 
+    async function readEnrollmentSet(value) {
+      return guardedAsync(async () => {
+        const data = readExactData(
+          value,
+          READ_SESSION_KEYS,
+        );
+        const sessionId = assertSessionId(
+          data.sessionId,
+        );
+        const records = Object.create(null);
+        const verifiedEnrollments =
+          Object.create(null);
+        for (const role of ["payee", "payer"]) {
+          const stored = readExactData(
+            await store.readEnrollment({
+              role,
+              sessionId,
+            }),
+            STORED_ENROLLMENT_KEYS,
+          );
+          if (
+            !Buffer.isBuffer(stored.bytes) ||
+            !Buffer.isBuffer(stored.receiptBytes)
+          ) {
+            invalid();
+          }
+          const enrollmentBytes = Buffer.from(
+            stored.bytes,
+          );
+          const receiptBytes = Buffer.from(
+            stored.receiptBytes,
+          );
+          const enrollment =
+            parseCoordinationEnrollment(
+              enrollmentBytes,
+            );
+          const enrollmentDigest =
+            assertSha256(stored.digest);
+          if (
+            sha256(enrollmentBytes) !==
+              enrollmentDigest ||
+            enrollment.paymentMoved !== false ||
+            enrollment.repositorySha !==
+              frozenRepositorySha ||
+            enrollment.role !== role ||
+            enrollment.sessionId !== sessionId
+          ) {
+            invalid();
+          }
+          await verifyCoordinationReceipt({
+            bytes: receiptBytes,
+            expected: {
+              capabilityDigest:
+                enrollment.capabilityDigest,
+              enrollmentDigest,
+              releaseId: enrollment.releaseId,
+              repositorySha:
+                enrollment.repositorySha,
+              role,
+              sessionId,
+            },
+            verifier: receiptSigner,
+          });
+          verifiedEnrollments[role] = enrollment;
+          records[role] = Object.freeze({
+            enrollmentBase64:
+              enrollmentBytes.toString("base64"),
+            enrollmentDigest,
+            receiptBase64:
+              receiptBytes.toString("base64"),
+          });
+        }
+        const releaseId =
+          verifiedEnrollments.payer.releaseId;
+        if (
+          verifiedEnrollments.payee.releaseId !==
+          releaseId
+        ) {
+          invalid();
+        }
+        return parseCoordinationEnrollmentSet(
+          stableBytes({
+            enrollments: {
+              payee: records.payee,
+              payer: records.payer,
+            },
+            paymentMoved: false,
+            releaseId,
+            repositorySha: frozenRepositorySha,
+            schema:
+              COORDINATION_ENROLLMENT_SET_SCHEMA,
+            sessionId,
+          }),
+        );
+      });
+    }
+
     async function readSessionView(value) {
       return guardedAsync(async () => {
         const data = readExactData(
@@ -1233,6 +1338,7 @@ export function createRelayService(input) {
       bootstrap,
       getArtifact,
       putArtifact,
+      readEnrollmentSet,
       readEvents,
       readSessionView,
     };
