@@ -241,6 +241,88 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
   }
 });
 
+test("automated bilateral happy path limits the user to four fundings and two supervisors", async () => {
+  const [runbook, billy, iris, packageText] = await Promise.all([
+    readFile(
+      join(ROOT_DIRECTORY, "docs/runbooks/bilateral-demo-day.md"),
+      "utf8",
+    ),
+    readFile(
+      join(ROOT_DIRECTORY, "prompts/run-billy-bilateral-demo.md"),
+      "utf8",
+    ),
+    readFile(
+      join(ROOT_DIRECTORY, "prompts/run-iris-bilateral-demo.md"),
+      "utf8",
+    ),
+    readFile(join(ROOT_DIRECTORY, "package.json"), "utf8"),
+  ]);
+  const primaryRunbook = runbook.split(
+    /^## Operator-authorized recovery appendix$/m,
+    1,
+  )[0];
+  for (const [prompt, role] of [
+    [billy, "Billy"],
+    [iris, "Iris"],
+  ]) {
+    const primaryPrompt = prompt.split(
+      /^## Operator-authorized recovery appendix$/m,
+      1,
+    )[0];
+    assert.match(
+      primaryPrompt,
+      new RegExp(
+        String.raw`npm run bilateral:supervisor --\s*\\?\s*--launch-manifest[\s\S]*--state`,
+      ),
+      role,
+    );
+    assert.doesNotMatch(
+      primaryPrompt,
+      /handshake-(?:propose|accept)|probe-bilateral-rendezvous|register-bilateral-identity/,
+      role,
+    );
+    assert.match(primaryPrompt, /stays alive[^.]*both runs/i, role);
+    assert.match(primaryPrompt, /must not improvise commands/i, role);
+    assert.match(primaryPrompt, /cannot declare authorization/i, role);
+  }
+  assert.match(primaryRunbook, /fund (?:the )?four displayed addresses/i);
+  assert.match(
+    primaryRunbook,
+    /start (?:exactly )?two (?:role|agent|supervisor) sessions/i,
+  );
+  assert.match(primaryRunbook, /one .*preflight.*both runs/i);
+  assert.match(primaryRunbook, /one .*token per role.*both runs/i);
+  assert.match(
+    primaryRunbook,
+    /physical separation.*attested.*not cryptographically proven/i,
+  );
+  assert.match(primaryRunbook, /code.*prompt.*change.*abort/i);
+  assert.doesNotMatch(
+    primaryRunbook,
+    /copy .*artifact|transfer .*private key|start four/i,
+  );
+  const scripts = JSON.parse(packageText).scripts;
+  assert.equal(
+    scripts["bilateral:coordinator"],
+    "node bin/handshake-coordinator.mjs",
+  );
+  assert.equal(
+    scripts["bilateral:relay"],
+    "node bin/handshake-relay.mjs",
+  );
+  assert.equal(
+    scripts["bilateral:supervisor"],
+    "node bin/handshake-supervisor.mjs",
+  );
+  for (const value of [
+    scripts["bilateral:coordinator"],
+    scripts["bilateral:relay"],
+    scripts["bilateral:supervisor"],
+  ]) {
+    assert.doesNotMatch(value, /fake|test/i);
+  }
+});
+
 test("documentation checker rejects bilateral safety-contract drift", async (t) => {
   const directory = await temporaryDocumentationFixture(t);
   const path = join(

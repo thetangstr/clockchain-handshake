@@ -20,6 +20,68 @@ Only the operator's fresh aggregate-verifier process may issue the final
 anchors. Billy's local `ACKNOWLEDGED`, Iris's local `ACCEPTED`, watcher output,
 a submitted transaction, or a narrative is never that verdict.
 
+## Automated primary flow
+
+The operator freezes one clean 40-character repository SHA, prepares the
+operator key and TLS certificate, and starts the HTTPS relay and coordinator:
+
+```sh
+npm run bilateral:relay -- \
+  --host 127.0.0.1 \
+  --port 8443 \
+  --repository-sha "$BILATERAL_REPOSITORY_SHA" \
+  --state "$BILATERAL_RELEASE_ROOT/relay-state" \
+  --tls-certificate "$RELAY_TLS_CERTIFICATE" \
+  --tls-private-key "$RELAY_TLS_PRIVATE_KEY"
+
+npm run bilateral:coordinator -- \
+  --clockchain-token-file "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \
+  --operator-key-id "$OPERATOR_KEY_ID" \
+  --operator-private-key "$OPERATOR_PRIVATE_KEY_FILE" \
+  --release-root "$BILATERAL_RELEASE_ROOT" \
+  --relay-url "$RELAY_URL" \
+  --repository-sha "$BILATERAL_REPOSITORY_SHA" \
+  --rpc-url-file "$SEPOLIA_RPC_URL_FILE" \
+  --tls-certificate "$RELAY_TLS_CERTIFICATE" \
+  --tls-fingerprint "$RELAY_TLS_FINGERPRINT"
+```
+
+The user has exactly two kinds of demo-day action:
+
+1. Start exactly two supervisor sessions—Billy once with the payer launch
+   manifest and Iris once with the payee launch manifest.
+2. Fund the four displayed addresses with the documented Sepolia amount.
+
+The same Billy and Iris processes remain alive across both runs. Each supervisor
+creates two invitations and one token per role for both runs. After both
+authenticated enrollments, the coordinator displays exactly four signed public
+addresses and continuously checks their balances and nonce-zero status; there
+is no human “funding complete” signal.
+
+The coordinator then runs one signed physical-machine preflight for both runs,
+registers the rehearsal identities, creates the signed USD 100 descriptor,
+starts Iris before Billy, collects both marker-complete role packages, and
+launches a fresh aggregate verifier. Only that verifier's original terminal
+output can authorize. An exact rehearsal verifier pass unlocks the stakeholder
+run, which uses fresh registration, descriptor, result, and verdict directories
+but the same supervisor keys, tokens, preflight, prompts, release, and
+repository SHA.
+
+Physical separation is attested by the operator, not cryptographically proven.
+Any code or prompt change after preflight aborts the release. Any SHA, key,
+token, invitation, descriptor, output-path, event-chain, or evidence mismatch
+also aborts it.
+Relay, coordinator, watcher, and supervisor states are coordination only. They
+never replace independent verification of exactly three ordered Clockchain
+anchors, and `paymentMoved: false` remains invariant.
+
+## Operator-authorized recovery appendix
+
+The remainder of this document retains low-level preparation, artifact
+transfer, and same-input recovery commands for a diagnosed failure. It is not
+the primary happy path. Never use it to add human phase signals, create a fourth
+role session, or bypass the two-supervisor workflow.
+
 ## Authority boundary
 
 User/operator-only actions are funding the four public addresses, custody and

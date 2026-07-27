@@ -45,6 +45,20 @@ verifier may do so after independently refetching and validating all three
 Clockchain anchors. Missing, duplicate, reordered, expired, malformed, or
 mismatched evidence fails closed.
 
+The automated demo-day surface is CLI-first:
+
+```sh
+npm run bilateral:relay -- <operator relay paths and pinned release SHA>
+npm run bilateral:coordinator -- <operator-local paths and pinned release SHA>
+npm run bilateral:supervisor -- --launch-manifest <role manifest> --state <private state directory>
+```
+
+Run the supervisor command once on Billy and once on Iris. Those two processes
+span the rehearsal and stakeholder runs. After they enroll, the coordinator
+displays four signed public addresses; funding those four addresses is the
+user's only other action. Low-level preparation and exact-input recovery
+commands are confined to the runbook's operator-authorized recovery appendix.
+
 ## Operator-only clean-client acceptance
 
 The stakeholder `npm run demo` path is unaffected. Do not direct stakeholders to

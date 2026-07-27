@@ -7,6 +7,9 @@
     "node": ">=22"
   },
   "scripts": {
+    "bilateral:coordinator": "node bin/handshake-coordinator.mjs",
+    "bilateral:relay": "node bin/handshake-relay.mjs",
+    "bilateral:supervisor": "node bin/handshake-supervisor.mjs",
     "demo": "node bin/handshake-demo.mjs",
     "invitations:create": "node scripts/create-invitations.mjs",
     "invitations:check": "node scripts/check-invitations.mjs",

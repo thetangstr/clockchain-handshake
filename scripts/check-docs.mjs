@@ -369,6 +369,21 @@ function bilateralContractFailures(relativePath, contents) {
     "prompts/run-billy-bilateral-demo.md": [
       ["Billy payer machine role", /\bBilly machine[^.]*payer\b/i],
       [
+        "automated supervisor session",
+        /\bAutomated supervisor session\b/i,
+      ],
+      [
+        "exact supervisor command",
+        /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$BILLY_LAUNCH_MANIFEST" \\\n  --state "\$BILLY_SUPERVISOR_STATE"/,
+      ],
+      ["two-run supervisor lifetime", /\bstays alive\b[^.]*\bboth runs\b/i],
+      ["closed command policy", /\bmust not improvise commands\b/i],
+      ["non-authorizing role", /\bcannot declare authorization\b/i],
+      [
+        "recovery appendix",
+        /\bOperator-authorized recovery appendix\b/i,
+      ],
+      [
         "Billy command",
         /\bnode bin\/handshake-propose\.mjs\b/,
       ],
@@ -381,6 +396,21 @@ function bilateralContractFailures(relativePath, contents) {
     "prompts/run-iris-bilateral-demo.md": [
       ["Iris payee machine role", /\bIris machine[^.]*payee\b/i],
       [
+        "automated supervisor session",
+        /\bAutomated supervisor session\b/i,
+      ],
+      [
+        "exact supervisor command",
+        /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$IRIS_LAUNCH_MANIFEST" \\\n  --state "\$IRIS_SUPERVISOR_STATE"/,
+      ],
+      ["two-run supervisor lifetime", /\bstays alive\b[^.]*\bboth runs\b/i],
+      ["closed command policy", /\bmust not improvise commands\b/i],
+      ["non-authorizing role", /\bcannot declare authorization\b/i],
+      [
+        "recovery appendix",
+        /\bOperator-authorized recovery appendix\b/i,
+      ],
+      [
         "Iris command",
         /\bnode bin\/handshake-accept\.mjs\b/,
       ],
@@ -391,6 +421,34 @@ function bilateralContractFailures(relativePath, contents) {
       ],
     ],
     "docs/runbooks/bilateral-demo-day.md": [
+      ["automated primary flow", /\bAutomated primary flow\b/i],
+      [
+        "exact relay entrypoint",
+        /\bnpm run bilateral:relay -- \\/,
+      ],
+      [
+        "exact coordinator entrypoint",
+        /\bnpm run bilateral:coordinator -- \\/,
+      ],
+      [
+        "two supervisor sessions",
+        /\bstart exactly two supervisor sessions\b/i,
+      ],
+      [
+        "four-address funding action",
+        /\bfund the four displayed addresses\b/i,
+      ],
+      ["one preflight for both runs", /\bone\b[^.]*\bpreflight\b[^.]*\bboth runs\b/i],
+      ["one token per role", /\bone token per role\b[^.]*\bboth runs\b/i],
+      [
+        "physical attestation boundary",
+        /\bPhysical separation\b[^.]*\battested\b[^.]*\bnot cryptographically proven\b/i,
+      ],
+      ["change invalidation", /\bcode or prompt change\b[^.]*\baborts the release\b/i],
+      [
+        "recovery appendix",
+        /\bOperator-authorized recovery appendix\b/i,
+      ],
       ["Phase -1", /\bPhase -1\b/i],
       ["four funded addresses", /\bfour funded addresses\b/i],
       ["user/operator-only actions", /\buser\/operator-only\b/i],
@@ -516,6 +574,33 @@ function bilateralContractFailures(relativePath, contents) {
     );
   }
   return failures;
+}
+
+function packageContractFailures(contents) {
+  try {
+    const value = JSON.parse(contents);
+    const expected = Object.freeze({
+      "bilateral:coordinator": "node bin/handshake-coordinator.mjs",
+      "bilateral:relay": "node bin/handshake-relay.mjs",
+      "bilateral:supervisor": "node bin/handshake-supervisor.mjs",
+    });
+    const failures = [];
+    for (const [name, command] of Object.entries(expected)) {
+      if (value?.scripts?.[name] !== command) {
+        failures.push(
+          `package.json: missing exact ${name} production entrypoint.`,
+        );
+      }
+      if (/fake|test/i.test(String(value?.scripts?.[name] ?? ""))) {
+        failures.push(
+          `package.json: ${name} must not select a fake adapter.`,
+        );
+      }
+    }
+    return failures;
+  } catch {
+    return ["package.json: must be valid JSON."];
+  }
 }
 
 function isPlainRoot(rootDirectory) {
@@ -1371,6 +1456,10 @@ export async function checkDocumentation({
 
   const readme = documents.get("README.md");
   const prompt = documents.get("prompts/run-turnkey-demo.md");
+  const packageDocument = documents.get("package.json");
+  if (packageDocument !== undefined) {
+    failures.push(...packageContractFailures(packageDocument));
+  }
   if (prompt !== undefined) {
     failures.push(...promptContractFailures(prompt));
   }

@@ -18,6 +18,35 @@ Only the operator's fresh aggregate verifier may emit the authorizing verdict.
 Never run Iris's role, the watcher, preflight aggregation, descriptor creation,
 or aggregate verification from this prompt.
 
+## Automated supervisor session
+
+The operator privately provides one role-specific launch-manifest path and one
+fresh private state directory. Start Billy's one long-lived supervisor exactly
+once:
+
+```sh
+npm run bilateral:supervisor -- \
+  --launch-manifest "$BILLY_LAUNCH_MANIFEST" \
+  --state "$BILLY_SUPERVISOR_STATE"
+```
+
+The supervisor stays alive across both runs: rehearsal first, then stakeholder.
+It creates and retains Billy's coordination key, preflight key, one token, and
+two invitation secrets locally. It follows only authenticated operator events
+and repository-owned command builders. It must not improvise commands, alter
+paths, or accept a replacement SHA, prompt, token, invitation, descriptor, or
+output directory. A fixed failure is terminal unless the authenticated
+same-input recovery protocol applies.
+
+Billy may report local progress and marker-complete public artifact digests, but
+cannot declare authorization. Only the fresh operator aggregate-verifier
+process can issue the authorizing verdict.
+
+## Operator-authorized recovery appendix
+
+The commands below are retained only for a diagnosed recovery explicitly
+authorized by the operator. They are not the primary demo-day flow.
+
 ## Fixed private inputs
 
 The operator privately sets:
