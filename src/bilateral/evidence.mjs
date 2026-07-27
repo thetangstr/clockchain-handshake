@@ -186,7 +186,10 @@ const ARRAY_INDEX_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 const MAX_SNAPSHOT_DEPTH = 32;
 const MAX_SNAPSHOT_OBJECTS = 256;
 const MAX_TRANSITIONS = 3;
-const MAX_CANARIES = 32;
+// Role builders preserve every accepted secret as <=256-character fragments:
+// a 1024-character invitation code (4), 8192-character ciphertext (32),
+// private key (1), and 4096-character token (16) require at most 53.
+const MAX_CANARIES = 64;
 const MAX_DIRECTORY_LENGTH = 4096;
 
 export class BilateralPartyResultValidationError extends Error {

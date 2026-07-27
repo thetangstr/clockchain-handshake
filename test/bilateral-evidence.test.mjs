@@ -1391,6 +1391,48 @@ test("writes and cross-checks deterministic JSON and Markdown artifacts", async 
   );
 });
 
+test("accepts the bounded role-canary ceiling without persisting canaries", async (t) => {
+  const canaries = Array.from(
+    { length: 65 },
+    (_value, index) =>
+      `${String(index).padStart(3, "0")}${"x".repeat(253)}`,
+  );
+
+  for (const count of [53, 64]) {
+    await t.test(`${count} canaries`, async (t) => {
+      const directory = await temporaryDirectory(t);
+      const paths = await writePartyResult({
+        canaries: canaries.slice(0, count),
+        directory,
+        result: buildFixture(),
+      });
+      const artifacts = await Promise.all(
+        Object.values(paths).map((path) => readFile(path, "utf8")),
+      );
+
+      assert.ok(canaries.slice(0, count).every(
+        (canary) => canary.length === 256,
+      ));
+      assert.ok(artifacts.every((artifact) =>
+        canaries.slice(0, count).every(
+          (canary) => artifact.includes(canary) === false,
+        ),
+      ));
+    });
+  }
+
+  const directory = await temporaryDirectory(t);
+  await assert.rejects(
+    writePartyResult({
+      canaries,
+      directory,
+      result: buildFixture(),
+    }),
+    BilateralEvidenceConfigurationError,
+  );
+  assert.deepEqual(await readdir(directory), []);
+});
+
 test("evidence publication cannot escape a pinned output directory", async (t) => {
   const root = await temporaryDirectory(t);
   const directory = join(root, "output");

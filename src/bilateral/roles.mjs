@@ -19,7 +19,10 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
-import { canonicalBytes } from "./canonical.mjs";
+import {
+  canonicalBytes,
+  MAX_CANONICAL_STRING_LENGTH,
+} from "./canonical.mjs";
 import {
   operatorPublicKeyPath,
   verifyDescriptorEnvelope,
@@ -128,6 +131,8 @@ const READ_FLAGS =
 const MAX_DESCRIPTOR_BYTES = 1024 * 1024;
 const MAX_PROMPT_BYTES = 1024 * 1024;
 const MAX_TOKEN_BYTES = 4096;
+const MAX_EVIDENCE_CANARY_LENGTH =
+  MAX_CANONICAL_STRING_LENGTH;
 const TOKEN_PATTERN = /^[!-~]{1,4096}$/;
 const ROLE_PROMPT_PATHS = Object.freeze({
   payer: "prompts/run-billy-bilateral-demo.md",
@@ -1415,6 +1420,36 @@ function normalizedChainId(value) {
   throw terminal();
 }
 
+function evidenceCanaryFragments(secrets) {
+  const canaries = [];
+  for (const secret of secrets) {
+    if (secret.length <= MAX_EVIDENCE_CANARY_LENGTH) {
+      canaries.push(secret);
+      continue;
+    }
+    for (
+      let offset = 0;
+      offset + MAX_EVIDENCE_CANARY_LENGTH <= secret.length;
+      offset += MAX_EVIDENCE_CANARY_LENGTH
+    ) {
+      canaries.push(
+        secret.slice(
+          offset,
+          offset + MAX_EVIDENCE_CANARY_LENGTH,
+        ),
+      );
+    }
+    if (
+      secret.length % MAX_EVIDENCE_CANARY_LENGTH !== 0
+    ) {
+      canaries.push(
+        secret.slice(-MAX_EVIDENCE_CANARY_LENGTH),
+      );
+    }
+  }
+  return canaries;
+}
+
 export async function buildDefaultRoleInput(
   values,
   role,
@@ -1580,12 +1615,12 @@ export async function buildDefaultRoleInput(
     throw terminal();
   }
   return {
-    canaries: [
+    canaries: evidenceCanaryFragments([
       invitation.code,
       invitation.bundle.crypto.ciphertext,
       privateKey,
       token,
-    ],
+    ]),
     client,
     descriptorEnvelope,
     outputDirectory: valueSnapshot.outputDirectory,

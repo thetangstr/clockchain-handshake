@@ -24,6 +24,7 @@ import {
   privateKeyToAccount,
 } from "viem/accounts";
 
+import { assertSecretFree } from "../src/redact.mjs";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import {
   createSignedEnvelope,
@@ -1096,6 +1097,121 @@ test("default builder safely reuses an existing intent directory without live ne
   );
   assert.ok(first.canaries.includes(fixture.privateKey));
   assert.ok(first.canaries.includes("clockchain-token-canary"));
+});
+
+test("default builder emits full-size overlapping canaries for long secrets", async (t) => {
+  const fragmentExpectation = (secret) => {
+    if (secret.length <= 256) {
+      return [secret];
+    }
+    const fragments = [];
+    for (let offset = 0; offset + 256 <= secret.length; offset += 256) {
+      fragments.push(secret.slice(offset, offset + 256));
+    }
+    if (secret.length % 256 !== 0) {
+      fragments.push(secret.slice(secret.length - 256));
+    }
+    return fragments;
+  };
+  const tokenForLength = (length) =>
+    length === 257
+      ? `${"a".repeat(256)}e`
+      : Array.from(
+        { length },
+        (_value, index) =>
+          String.fromCharCode(33 + (index % 90)),
+      ).join("");
+
+  for (const length of [256, 257, 4096]) {
+    await t.test(`token length ${length}`, async (t) => {
+      const fixture = await defaultBuilderFixture(t);
+      const invitation = JSON.parse(
+        await readFile(fixture.values.invitationPath, "utf8"),
+      );
+      assert.ok(
+        invitation.bundle.crypto.ciphertext.length > 256,
+      );
+      const token = tokenForLength(length);
+      await writeFile(
+        fixture.values.clockchainTokenPath,
+        length === 4096 ? token : `${token}\n`,
+        { mode: 0o600 },
+      );
+
+      const input = await buildDefaultRoleInput(
+        fixture.values,
+        "payer",
+        fixture.dependencies,
+      );
+      const expected = [
+        invitation.code,
+        invitation.bundle.crypto.ciphertext,
+        fixture.privateKey,
+        token,
+      ].flatMap(fragmentExpectation);
+      const tokenFragments = input.canaries.slice(
+        -fragmentExpectation(token).length,
+      );
+
+      assert.deepEqual(input.canaries, expected);
+      assert.ok(tokenFragments.every(
+        (fragment) => fragment.length === 256,
+      ));
+      assert.equal(
+        tokenFragments[0], token.slice(0, 256),
+      );
+      assert.equal(
+        tokenFragments.at(-1), token.slice(-256));
+      assert.throws(() => assertSecretFree(token, tokenFragments));
+      assert.doesNotThrow(() =>
+        assertSecretFree("ordinary rendered evidence", tokenFragments),
+      );
+    });
+  }
+
+  await t.test("accepted maximum credential sizes stay within the evidence ceiling", async (t) => {
+    const fixture = await defaultBuilderFixture(t);
+    const code = "c".repeat(1024);
+    const ciphertext = "d".repeat(8192);
+    const token = tokenForLength(4096);
+    await writeFile(
+      fixture.values.clockchainTokenPath,
+      token,
+      { mode: 0o600 },
+    );
+
+    const input = await buildDefaultRoleInput(
+      fixture.values,
+      "payer",
+      {
+        ...fixture.dependencies,
+        async decryptInvitation() {
+          return {
+            address: PAYER_ADDRESS,
+            privateKey: fixture.privateKey,
+          };
+        },
+        async loadInvitation() {
+          return {
+            bundle: { crypto: { ciphertext } },
+            code,
+          };
+        },
+      },
+    );
+    const expected = [
+      code,
+      ciphertext,
+      fixture.privateKey,
+      token,
+    ].flatMap(fragmentExpectation);
+
+    assert.equal(input.canaries.length, 53);
+    assert.ok(input.canaries.every(
+      (canary) => canary.length > 0 && canary.length <= 256,
+    ));
+    assert.deepEqual(input.canaries, expected);
+  });
 });
 
 test("default role builder bounds descriptor and token reads at max plus one", async (t) => {
