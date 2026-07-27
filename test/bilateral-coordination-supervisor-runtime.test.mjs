@@ -1,19 +1,148 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, stat } from "node:fs/promises";
+import { createHash, generateKeyPairSync, sign, X509Certificate } from "node:crypto";
+import { chmod, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { mkdir } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createGitInspector, createPrivateRoot, createPrivateSupervisorStateStore, createSupervisorLauncher, createVerifierPublicationVerifier, scanSupervisorCheckpointDirectories } from "../src/bilateral/coordination/supervisor-runtime.mjs";
+import { createGitInspector, createPrivateRoot, createPrivateSupervisorStateStore, createProductionSupervisorDependencies, createSupervisorLauncher, createVerifierPublicationVerifier, scanSupervisorCheckpointDirectories } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { verifyRepositoryState } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { ensureToken } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { ensureInvitations } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { writeFile } from "node:fs/promises";
 import { unlink } from "node:fs/promises";
 import { recoverMessageAddress } from "viem";
-import { invitationProofPreimage } from "../src/bilateral/coordination/enrollment.mjs";
+import { coordinationEnrollmentSignaturePreimage, invitationProofPreimage } from "../src/bilateral/coordination/enrollment.mjs";
 import { createProductionSepoliaRpc } from "../src/bilateral/coordination/supervisor-runtime.mjs";
+import { canonicalBytes } from "../src/bilateral/canonical.mjs";
+import { createSignedEnvelope } from "../src/bilateral/descriptor.mjs";
+import { createLaunchManifest, writeLaunchManifest } from "../src/bilateral/coordination/manifest.mjs";
+
+const DESCRIPTOR_SESSION_DOMAIN =
+  "clockchain.bilateral-descriptor-session/v1\n";
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function rawPublicKey(pair) {
+  return pair.publicKey
+    .export({ format: "der", type: "spki" })
+    .subarray(-32)
+    .toString("base64");
+}
+
+function privateKeyPem(pair) {
+  return pair.privateKey.export({
+    format: "pem",
+    type: "pkcs8",
+  });
+}
+
+function expectedDescriptorSessionId({
+  releaseId,
+  repositorySha,
+  sessionId,
+  subjectRun,
+}) {
+  return createHash("sha256")
+    .update(DESCRIPTOR_SESSION_DOMAIN, "ascii")
+    .update(
+      canonicalBytes({
+        releaseId,
+        repositorySha,
+        sessionId,
+        subjectRun,
+      }),
+    )
+    .digest("hex")
+    .slice(0, 32);
+}
+
+async function repositoryCommitWithOperatorKey(
+  root,
+  keyId,
+  publicKey,
+) {
+  const git = (...arguments_) => execFileSync(
+    "/usr/bin/git",
+    arguments_,
+    { cwd: root, encoding: "utf8" },
+  );
+  git("init");
+  git("config", "user.email", "session-fixture@example.invalid");
+  git("config", "user.name", "session fixture");
+  await mkdir(join(root, "docs", "operator-keys"), {
+    recursive: true,
+  });
+  await writeFile(
+    join(root, "docs", "operator-keys", `${keyId}.pub`),
+    `${publicKey}\n`,
+  );
+  git("add", ".");
+  git("commit", "-m", "session binding fixture");
+  return git("rev-parse", "HEAD").trim();
+}
+
+function enrollmentFixture({
+  addresses,
+  releaseId,
+  repositorySha,
+  role,
+  sessionId,
+}) {
+  const coordination = generateKeyPairSync("ed25519");
+  const preflight = generateKeyPairSync("ed25519");
+  const unsigned = {
+    capabilityDigest: (role === "payer" ? "1" : "2").repeat(64),
+    coordinationKey: {
+      algorithm: "ed25519",
+      keyId: `${role}-coordination`,
+      publicKey: rawPublicKey(coordination),
+    },
+    invitations: {
+      rehearsal: {
+        address: addresses.rehearsal,
+        algorithm: "eip191",
+        signature: `0x${"1".repeat(130)}`,
+      },
+      stakeholder: {
+        address: addresses.stakeholder,
+        algorithm: "eip191",
+        signature: `0x${"2".repeat(130)}`,
+      },
+    },
+    paymentMoved: false,
+    preflightKey: {
+      algorithm: "ed25519",
+      keyId: `${role}-preflight`,
+      publicKey: rawPublicKey(preflight),
+    },
+    releaseId,
+    repositorySha,
+    role,
+    schema: "clockchain.bilateral-coordination-enrollment/v1",
+    sessionId,
+  };
+  return {
+    ...unsigned,
+    signature: sign(
+      null,
+      coordinationEnrollmentSignaturePreimage(unsigned),
+      privateKeyPem(coordination),
+    ).toString("base64"),
+  };
+}
+
+function enrollmentEntry(enrollment) {
+  const bytes = canonicalBytes(enrollment);
+  return {
+    enrollmentBase64: bytes.toString("base64"),
+    enrollmentDigest: sha256(bytes),
+    receiptBase64: Buffer.from("receipt", "utf8").toString("base64"),
+  };
+}
 
 test("creates private state and round-trips a canonical checkpoint", async () => {
   const root = await mkdtemp(join(tmpdir(), "supervisor-runtime-"));
@@ -33,6 +162,196 @@ test("reads verifier publication through the context-bound client route", async 
     return { paymentMoved: false, publicationDigest: context.event.artifactDigest, releaseId: context.releaseId, repositorySha: context.repositorySha, schema: "clockchain.bilateral-verifier-publication/v1", sessionId: context.sessionId, status: "VERIFICATION_PASSED", subjectRun: "rehearsal" };
   } }));
   assert.deepEqual(request, { subjectRun: "rehearsal" });
+});
+
+test("production supervisor binds each descriptor to its derived run session instead of the coordination UUID", async (t) => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "supervisor-session-state-"));
+  const manifestRoot = await mkdtemp(join(tmpdir(), "supervisor-session-manifest-"));
+  t.after(() => Promise.all([
+    rm(stateRoot, { force: true, recursive: true }),
+    rm(manifestRoot, { force: true, recursive: true }),
+  ]));
+  await Promise.all([chmod(stateRoot, 0o700), chmod(manifestRoot, 0o700)]);
+
+  const operator = generateKeyPairSync("ed25519");
+  const operatorKeyId = "session-fixture";
+  const repositorySha = await repositoryCommitWithOperatorKey(
+    manifestRoot,
+    operatorKeyId,
+    rawPublicKey(operator),
+  );
+  const releaseId = "release-session-binding";
+  const coordinationSessionId =
+    "8f953393-86d0-4f99-9d6a-102f525fbecd";
+  const subjectRun = "rehearsal";
+  const payerAddresses = {
+    rehearsal: `0x${"1".repeat(40)}`,
+    stakeholder: `0x${"2".repeat(40)}`,
+  };
+  const payeeAddresses = {
+    rehearsal: `0x${"3".repeat(40)}`,
+    stakeholder: `0x${"4".repeat(40)}`,
+  };
+
+  const certificatePath = join(manifestRoot, "tls-cert.pem");
+  const privateKeyPath = join(manifestRoot, "tls-key.pem");
+  execFileSync("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "ed25519",
+    "-keyout",
+    privateKeyPath,
+    "-out",
+    certificatePath,
+    "-nodes",
+    "-days",
+    "1",
+    "-subj",
+    "/CN=127.0.0.1",
+    "-addext",
+    "subjectAltName=IP:127.0.0.1",
+  ], { stdio: "ignore" });
+  const tlsCertificatePem = await readFile(certificatePath, "utf8");
+  const expectedTlsFingerprint = sha256(
+    new X509Certificate(tlsCertificatePem).raw,
+  );
+  const manifestPath = join(manifestRoot, "launch-manifest.json");
+  const { manifest } = createLaunchManifest({
+    expectedTlsFingerprint,
+    nowMs: 0,
+    operatorKeyId,
+    randomBytes: () => Buffer.alloc(32, 7),
+    relayUrl: "https://127.0.0.1:8443",
+    releaseId,
+    repositorySha,
+    role: "payer",
+    sessionId: coordinationSessionId,
+    tlsCertificatePem,
+  });
+  await writeLaunchManifest(manifestPath, manifest);
+  const dependencies = await createProductionSupervisorDependencies({
+    launchManifestPath: manifestPath,
+    repositoryRoot: manifestRoot,
+    sepoliaRpc: async () => "0x0",
+    stateRoot,
+  });
+
+  const payer = enrollmentFixture({
+    addresses: payerAddresses,
+    releaseId,
+    repositorySha,
+    role: "payer",
+    sessionId: coordinationSessionId,
+  });
+  const payee = enrollmentFixture({
+    addresses: payeeAddresses,
+    releaseId,
+    repositorySha,
+    role: "payee",
+    sessionId: coordinationSessionId,
+  });
+  const enrollmentSet = {
+    enrollments: {
+      payee: enrollmentEntry(payee),
+      payer: enrollmentEntry(payer),
+    },
+    paymentMoved: false,
+    releaseId,
+    repositorySha,
+    schema: "clockchain.bilateral-coordination-enrollment-set/v1",
+    sessionId: coordinationSessionId,
+  };
+  const context = {
+    enrollmentSet,
+    releaseId,
+    repositorySha,
+    sessionId: coordinationSessionId,
+    subjectRun,
+  };
+  const signedDescriptor = (sessionId) => canonicalBytes(
+    createSignedEnvelope({
+      amountOptions: [
+        { currency: "USD", value: "100" },
+        { currency: "USD", value: "250" },
+      ],
+      chainId: "11155111",
+      expirySeconds: "600",
+      namespace: "cbv1",
+      payee: {
+        address: payeeAddresses.rehearsal,
+        agentId: "8678",
+        displayName: "Iris",
+        role: "payee",
+      },
+      payer: {
+        address: payerAddresses.rehearsal,
+        agentId: "8677",
+        displayName: "Billy",
+        role: "payer",
+      },
+      paymentMoved: false,
+      promptSha256: "5".repeat(64),
+      protocol: "clockchain.bilateral-authorization/v1",
+      protocolVersion: "1",
+      registry: "0x8004a818bfb912233c491871b3d84c89a494bd9e",
+      repositorySha,
+      schema: "clockchain.bilateral-session-descriptor/v1",
+      sessionId,
+      settlement: "not-executed",
+    }, {
+      keyId: operatorKeyId,
+      privateKeyPem: privateKeyPem(operator),
+    }),
+  );
+  const expectedSessionId = expectedDescriptorSessionId({
+    releaseId,
+    repositorySha,
+    sessionId: coordinationSessionId,
+    subjectRun,
+  });
+
+  await assert.doesNotReject(
+    dependencies.verifyDescriptor(
+      signedDescriptor(expectedSessionId),
+      context,
+    ),
+  );
+
+  for (const mismatchedSessionId of [
+    expectedDescriptorSessionId({
+      releaseId: "release-other",
+      repositorySha,
+      sessionId: coordinationSessionId,
+      subjectRun,
+    }),
+    expectedDescriptorSessionId({
+      releaseId,
+      repositorySha: "b".repeat(40),
+      sessionId: coordinationSessionId,
+      subjectRun,
+    }),
+    expectedDescriptorSessionId({
+      releaseId,
+      repositorySha,
+      sessionId: "9f953393-86d0-4f99-9d6a-102f525fbecd",
+      subjectRun,
+    }),
+    expectedDescriptorSessionId({
+      releaseId,
+      repositorySha,
+      sessionId: coordinationSessionId,
+      subjectRun: "stakeholder",
+    }),
+  ]) {
+    assert.notEqual(mismatchedSessionId, expectedSessionId);
+    await assert.rejects(
+      dependencies.verifyDescriptor(
+        signedDescriptor(mismatchedSessionId),
+        context,
+      ),
+    );
+  }
 });
 
 test("rejects every stale supervisor temporary file and noncanonical checkpoints", async () => {

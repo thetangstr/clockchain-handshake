@@ -236,7 +236,7 @@ export async function executeSupervisorTransition({ client, event, localState, d
     if (done) return Object.freeze({ artifactDigest: event.artifactDigest, kind: "DESCRIPTOR_ACCEPTED" });
     const bytes = await client.getArtifact({ digest: event.artifactDigest, artifactType: "signed-descriptor" });
     if (!Buffer.isBuffer(bytes) || sha256(bytes) !== event.artifactDigest) invalid();
-    await dependencies.verifyDescriptor(bytes, Object.freeze({ enrollmentSet: localState.enrollmentSet, repositorySha: localState.repositorySha, role: localState.role, sessionId: localState.sessionId, subjectRun: run }));
+    await dependencies.verifyDescriptor(bytes, Object.freeze({ enrollmentSet: localState.enrollmentSet, releaseId: localState.releaseId, repositorySha: localState.repositorySha, role: localState.role, sessionId: localState.sessionId, subjectRun: run }));
     if (!sameDescriptorJournal(localState.descriptorJournal, event, "ACCEPTED_STORED") && !sameDescriptorJournal(localState.descriptorJournal, event, "APPEND_ATTEMPTED")) {
       const pending = Object.freeze({ ...localState, descriptorJournal: descriptorJournal({ event, stage: "FILE_WRITING" }), phase: "DESCRIPTOR_WRITING", paymentMoved: false, eventDigest: event.eventDigest });
       await writeState(pending);

@@ -12,6 +12,7 @@ import { createLocalPreflightEnrollment, readAndSignTokenCommitment } from "./pr
 import { validateRelayArtifact, validateRelayArtifactWithFacts } from "./artifact.mjs";
 import { verifyDescriptorEnvelope } from "../descriptor.mjs";
 import { parseCoordinationEnrollment, parseCoordinationEnrollmentSet } from "./enrollment.mjs";
+import { deriveDescriptorSessionId } from "./run-session.mjs";
 import { createReceiptVerifierFromCertificate, verifyCoordinationReceipt } from "./receipt.mjs";
 import { main as mintBilateralToken } from "../../../scripts/mint-bilateral-token.mjs";
 import { decryptInvitation } from "../../invitation.mjs";
@@ -147,8 +148,6 @@ function createGitInspector(repositoryRoot = SUPERVISOR_REPOSITORY_ROOT) {
     async operatorKey(repositorySha, keyId) { if (!/^[0-9a-f]{40}$/.test(repositorySha) || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(keyId)) fail(); const { stdout } = await run(["show", `${repositorySha}:docs/operator-keys/${keyId}.pub`]); if (!/^[A-Za-z0-9+/]{43}=\n$/.test(stdout)) fail(); return stdout.slice(0, -1); },
   });
 }
-async function productionProbe() { return createGitInspector().probe(); }
-
 const childArgv = Object.freeze({
   "scripts/probe-bilateral-rendezvous.mjs": Object.freeze(["participant", "--role", "value", "--plan", "path", "--token-file", "path", "--participant-private-key", "path", "--output", "path"]),
   "scripts/register-bilateral-identity.mjs": Object.freeze(["--invitation", "path", "--output", "path", "--repository-sha", "sha", "--i-understand-this-writes-to-sepolia"]),
@@ -476,8 +475,9 @@ export async function ensureInvitations({ capabilityDigest, releaseId, repositor
   if (proofs[0].address === proofs[1].address || proofs[0].secretPath === proofs[1].secretPath || proofs[0].signature === proofs[1].signature) fail();
   return Object.freeze(proofs);
 }
-export async function createProductionSupervisorDependencies({ launchManifestPath, stateRoot, probe, sepoliaRpc, createSepoliaClient } = {}) {
+export async function createProductionSupervisorDependencies({ launchManifestPath, stateRoot, probe, repositoryRoot = SUPERVISOR_REPOSITORY_ROOT, sepoliaRpc, createSepoliaClient } = {}) {
   const store = await createPrivateSupervisorStateStore({ stateRoot });
+  const repositoryInspector = createGitInspector(repositoryRoot);
   const checkpoint = await store.readState();
   const resumed = checkpoint !== null && checkpoint?.phase !== "LOCAL_SECRETS_READY";
   const manifest = resumed ? null : await readLaunchManifest(launchManifestPath);
@@ -490,7 +490,7 @@ export async function createProductionSupervisorDependencies({ launchManifestPat
     ...store,
     scanCheckpointDirectories: scanSupervisorCheckpointDirectories,
     async readLaunchManifest(path) { if (!manifest || path !== launchManifestPath) fail(); return manifest; },
-    async verifyRepositoryState(repositorySha) { return verifyRepositoryState({ repositorySha, probe: probe ?? productionProbe }); },
+    async verifyRepositoryState(repositorySha) { return verifyRepositoryState({ repositorySha, probe: probe ?? (() => repositoryInspector.probe()) }); },
     async createCoordinationIdentity({ role }) { return createCoordinationIdentity({ role, stateRoot }); },
     async createLocalPreflightEnrollment({ role }) { return createPreflight({ role, repositorySha: scope.repositorySha, stateRoot }); },
     async createInvitations({ role }) { return ensureInvitations({ ...scope, role, stateRoot }); },
@@ -525,10 +525,11 @@ export async function createProductionSupervisorDependencies({ launchManifestPat
       const checked = await validateRelayArtifactWithFacts({ artifactType: "signed-descriptor", bytes, expectedDigest: createHash("sha256").update(bytes).digest("hex"), secretCanaries: [] });
       const envelope = checked.facts;
       const keyId = envelope?.operator?.keyId;
-      const operatorPublicKey = await createGitInspector().operatorKey(context.repositorySha, keyId);
+      const operatorPublicKey = await repositoryInspector.operatorKey(context.repositorySha, keyId);
       const verified = verifyDescriptorEnvelope(envelope, { repositoryPublicKey: operatorPublicKey });
       const descriptor = envelope?.descriptor;
-      if (!descriptor || descriptor.repositorySha !== context.repositorySha || descriptor.paymentMoved !== false || descriptor.sessionId !== context.sessionId || !["rehearsal", "stakeholder"].includes(context.subjectRun)) fail();
+      const expectedDescriptorSessionId = deriveDescriptorSessionId({ releaseId: context.releaseId, repositorySha: context.repositorySha, sessionId: context.sessionId, subjectRun: context.subjectRun });
+      if (!descriptor || descriptor.repositorySha !== context.repositorySha || descriptor.paymentMoved !== false || descriptor.sessionId !== expectedDescriptorSessionId || !["rehearsal", "stakeholder"].includes(context.subjectRun)) fail();
       const payer = context.enrollmentSet?.enrollments?.payer && parseCoordinationEnrollment(Buffer.from(context.enrollmentSet.enrollments.payer.enrollmentBase64, "base64"));
       const payee = context.enrollmentSet?.enrollments?.payee && parseCoordinationEnrollment(Buffer.from(context.enrollmentSet.enrollments.payee.enrollmentBase64, "base64"));
       if (!payer || !payee || descriptor.payer.address !== payer.invitations[context.subjectRun].address || descriptor.payee.address !== payee.invitations[context.subjectRun].address) fail();
@@ -547,7 +548,7 @@ export async function createProductionSupervisorDependencies({ launchManifestPat
     validateActiveLaunchState,
     async resolveOperatorPublicKey(active) {
       if (!active || active.repositorySha !== scope.repositorySha || typeof active.operatorKeyId !== 'string') fail();
-      return createGitInspector().operatorKey(scope.repositorySha, active.operatorKeyId);
+      return repositoryInspector.operatorKey(scope.repositorySha, active.operatorKeyId);
     },
   });
 }
