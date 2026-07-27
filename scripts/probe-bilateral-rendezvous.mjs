@@ -2,7 +2,6 @@ import {
   createHash,
   createPrivateKey,
   createPublicKey,
-  generateKeyPairSync,
   randomBytes as cryptoRandomBytes,
   sign,
   verify,
@@ -36,6 +35,10 @@ import {
   createMcpClient,
 } from "../src/mcp.mjs";
 import { assertSecretFree } from "../src/redact.mjs";
+import {
+  verifyPreflightKeyEnrollment,
+  verifyTokenCommitment,
+} from "../src/bilateral/coordination/preflight.mjs";
 
 export const PREFLIGHT_REPORT_SCHEMA =
   "clockchain.bilateral-preflight/v2";
@@ -765,7 +768,10 @@ export async function runBilateralPreflight(options) {
   });
 }
 
-function parseStageArguments(arguments_) {
+function parseStageArguments(
+  arguments_,
+  { allowPrepareArtifactsInjection = false } = {},
+) {
   if (
     !Array.isArray(arguments_) ||
     !["prepare", "participant", "aggregate"].includes(
@@ -780,6 +786,18 @@ function parseStageArguments(arguments_) {
       "--operator-private-key",
       "--operator-key-id",
       "--repository-sha",
+      ...(
+        allowPrepareArtifactsInjection
+          ? []
+          : [
+              "--payer-preflight-enrollment",
+              "--payee-preflight-enrollment",
+              "--payer-token-commitment",
+              "--payee-token-commitment",
+              "--payer-coordination-public-key",
+              "--payee-coordination-public-key",
+            ]
+      ),
       "--output",
     ],
     participant: [
@@ -1524,28 +1542,6 @@ async function repositoryPublicKey(
   return value.trim();
 }
 
-function participantKeyPair() {
-  try {
-    const { privateKey, publicKey } =
-      generateKeyPairSync("ed25519");
-    return {
-      privateKeyPem: privateKey.export({
-        format: "pem",
-        type: "pkcs8",
-      }),
-      publicKey:
-        rawPublicKeyBase64FromPem(
-          publicKey.export({
-            format: "pem",
-            type: "spki",
-          }),
-        ),
-    };
-  } catch {
-    fail();
-  }
-}
-
 function validatePlan(plan) {
   if (
     !exactKeys(plan, [
@@ -1579,8 +1575,15 @@ function validatePlan(plan) {
       plan.keys[role] !== probeKey(plan.nonce, role) ||
       !exactKeys(
         plan.participants[role],
-        ["publicKey"],
+        [
+          "coordinationPublicKey",
+          "publicKey",
+          "tokenCommitment",
+        ],
       ) ||
+      typeof
+        plan.participants[role]
+          .coordinationPublicKey !== "string" ||
       typeof plan.participants[role].publicKey !== "string"
     ) {
       fail();
@@ -1589,7 +1592,28 @@ function validatePlan(plan) {
       publicKeyPemFromRawBase64(
         plan.participants[role].publicKey,
       );
+      publicKeyPemFromRawBase64(
+        plan.participants[role]
+          .coordinationPublicKey,
+      );
+      verifyTokenCommitment(
+        plan.participants[role].tokenCommitment,
+        {
+          coordinationPublicKey:
+            plan.participants[role]
+              .coordinationPublicKey,
+          repositorySha: plan.repositorySha,
+          role,
+        },
+      );
     } catch {
+      fail();
+    }
+    if (
+      plan.participants[role].publicKey ===
+      plan.participants[role]
+        .coordinationPublicKey
+    ) {
       fail();
     }
   }
@@ -1597,7 +1621,9 @@ function validatePlan(plan) {
     plan.digests.payer === plan.digests.payee ||
     plan.keys.payer === plan.keys.payee ||
     plan.participants.payer.publicKey ===
-      plan.participants.payee.publicKey
+      plan.participants.payee.publicKey ||
+    plan.participants.payer.coordinationPublicKey ===
+      plan.participants.payee.coordinationPublicKey
   ) {
     fail();
   }
@@ -1670,6 +1696,143 @@ async function readCanonicalJson(path, fileSystem) {
   return value;
 }
 
+function verifiedPreparationParticipant(
+  value,
+  repositorySha,
+  role,
+) {
+  if (
+    !exactKeys(value, [
+      "coordinationPublicKey",
+      "preflightEnrollment",
+      "tokenCommitment",
+    ]) ||
+    typeof value.coordinationPublicKey !== "string"
+  ) {
+    fail();
+  }
+  let enrollment;
+  let tokenCommitment;
+  try {
+    enrollment = verifyPreflightKeyEnrollment(
+      value.preflightEnrollment,
+      { repositorySha, role },
+    );
+    tokenCommitment = verifyTokenCommitment(
+      value.tokenCommitment,
+      {
+        coordinationPublicKey:
+          value.coordinationPublicKey,
+        repositorySha,
+        role,
+      },
+    );
+    publicKeyPemFromRawBase64(
+      value.coordinationPublicKey,
+    );
+  } catch {
+    fail();
+  }
+  if (
+    enrollment.publicKey ===
+    value.coordinationPublicKey
+  ) {
+    fail();
+  }
+  return {
+    coordinationPublicKey:
+      value.coordinationPublicKey,
+    publicKey: enrollment.publicKey,
+    tokenCommitment,
+  };
+}
+
+async function preparationParticipants(
+  configuration,
+  dependencies,
+  fileSystem,
+  repositorySha,
+) {
+  let source;
+  const injected = dependencies.prepareArtifacts;
+  if (injected !== undefined) {
+    if (typeof injected !== "function") {
+      fail();
+    }
+    try {
+      source = await injected({ repositorySha });
+    } catch {
+      fail();
+    }
+  } else {
+    source = {
+      payee: {
+        coordinationPublicKey:
+          configuration.values.get(
+            "--payee-coordination-public-key",
+          ),
+        preflightEnrollment:
+          await readCanonicalJson(
+            configuration.values.get(
+              "--payee-preflight-enrollment",
+            ),
+            fileSystem,
+          ),
+        tokenCommitment: await readCanonicalJson(
+          configuration.values.get(
+            "--payee-token-commitment",
+          ),
+          fileSystem,
+        ),
+      },
+      payer: {
+        coordinationPublicKey:
+          configuration.values.get(
+            "--payer-coordination-public-key",
+          ),
+        preflightEnrollment:
+          await readCanonicalJson(
+            configuration.values.get(
+              "--payer-preflight-enrollment",
+            ),
+            fileSystem,
+          ),
+        tokenCommitment: await readCanonicalJson(
+          configuration.values.get(
+            "--payer-token-commitment",
+          ),
+          fileSystem,
+        ),
+      },
+    };
+  }
+  if (!exactKeys(source, ["payee", "payer"])) {
+    fail();
+  }
+  const participants = {
+    payee: verifiedPreparationParticipant(
+      source.payee,
+      repositorySha,
+      "payee",
+    ),
+    payer: verifiedPreparationParticipant(
+      source.payer,
+      repositorySha,
+      "payer",
+    ),
+  };
+  const publicKeys = [
+    participants.payee.coordinationPublicKey,
+    participants.payee.publicKey,
+    participants.payer.coordinationPublicKey,
+    participants.payer.publicKey,
+  ];
+  if (new Set(publicKeys).size !== publicKeys.length) {
+    fail();
+  }
+  return participants;
+}
+
 async function prepareStage(configuration, dependencies) {
   const randomBytes =
     dependencies.randomBytes ?? cryptoRandomBytes;
@@ -1702,6 +1865,12 @@ async function prepareStage(configuration, dependencies) {
     repositorySha,
     stateResolver,
   );
+  const participants = await preparationParticipants(
+    configuration,
+    dependencies,
+    fileSystem,
+    repositorySha,
+  );
   const operatorPrivateKeyPem = (
     await readBoundedFile(
       configuration.values.get(
@@ -1730,8 +1899,6 @@ async function prepareStage(configuration, dependencies) {
   ) {
     fail();
   }
-  const payer = participantKeyPair();
-  const payee = participantKeyPair();
   const nonce = bytesFrom(randomBytes, 16).toString("hex");
   const plan = {
     digests: {
@@ -1743,10 +1910,7 @@ async function prepareStage(configuration, dependencies) {
       payer: probeKey(nonce, "payer"),
     },
     nonce,
-    participants: {
-      payee: { publicKey: payee.publicKey },
-      payer: { publicKey: payer.publicKey },
-    },
+    participants,
     paymentMoved: false,
     protocol: PROTOCOL,
     protocolVersion: PROTOCOL_VERSION,
@@ -1777,16 +1941,6 @@ async function prepareStage(configuration, dependencies) {
         binding,
         PLAN_FILE,
         canonicalBytes(envelope),
-      );
-      await writeSyncedExclusive(
-        binding,
-        "payer-participant.ed25519.pem",
-        Buffer.from(payer.privateKeyPem, "utf8"),
-      );
-      await writeSyncedExclusive(
-        binding,
-        "payee-participant.ed25519.pem",
-        Buffer.from(payee.privateKeyPem, "utf8"),
       );
     },
   );
@@ -1940,7 +2094,10 @@ async function participantStage(
   if (
     Buffer.byteLength(token, "utf8") !==
       tokenBytes.length ||
-    !TOKEN_PATTERN.test(token)
+    !TOKEN_PATTERN.test(token) ||
+    sha256(tokenBytes) !==
+      plan.participants[role].tokenCommitment
+        .tokenSha256
   ) {
     fail();
   }
@@ -2084,6 +2241,8 @@ async function participantStage(
     ),
     sleeps,
     startedAtMs: String(startedAtMs),
+    tokenCommitment:
+      plan.participants[role].tokenCommitment,
     write: {
       ...write,
       digest: plan.digests[role],
@@ -2100,10 +2259,30 @@ async function participantStage(
     ),
   };
   try {
-    assertSecretFree(signed, [
-      token,
-      participantPrivateKeyPem,
-    ]);
+    const {
+      tokenCommitment,
+      ...publicReport
+    } = signed.report;
+    const {
+      tokenSha256,
+      ...publicCommitment
+    } = tokenCommitment;
+    assertSecretFree(
+      {
+        report: {
+          ...publicReport,
+          credentialCommitment: {
+            ...publicCommitment,
+            credentialSha256: tokenSha256,
+          },
+        },
+        signature: signed.signature,
+      },
+      [
+        token,
+        participantPrivateKeyPem,
+      ],
+    );
   } catch {
     fail();
   }
@@ -2199,6 +2378,7 @@ function validateParticipantReport(
       "serializedCadenceMs",
       "sleeps",
       "startedAtMs",
+      "tokenCommitment",
       "write",
     ]) ||
     report.schema !==
@@ -2223,6 +2403,33 @@ function validateParticipantReport(
       digest: plan.digests[role],
       referenceId: plan.keys[role],
     }) === null
+  ) {
+    fail();
+  }
+  let verifiedCommitment;
+  try {
+    verifiedCommitment = verifyTokenCommitment(
+      report.tokenCommitment,
+      {
+        coordinationPublicKey:
+          plan.participants[role]
+            .coordinationPublicKey,
+        repositorySha: plan.repositorySha,
+        role,
+        tokenSha256:
+          plan.participants[role].tokenCommitment
+            .tokenSha256,
+      },
+    );
+  } catch {
+    fail();
+  }
+  if (
+    !canonicalBytes(verifiedCommitment).equals(
+      canonicalBytes(
+        plan.participants[role].tokenCommitment,
+      ),
+    )
   ) {
     fail();
   }
@@ -2561,7 +2768,11 @@ export async function main(
   if (!isPlainObject(dependencies)) {
     fail();
   }
-  const configuration = parseStageArguments(arguments_);
+  const configuration = parseStageArguments(arguments_, {
+    allowPrepareArtifactsInjection:
+      typeof dependencies.prepareArtifacts ===
+      "function",
+  });
   if (configuration.stage === "prepare") {
     return prepareStage(configuration, dependencies);
   }

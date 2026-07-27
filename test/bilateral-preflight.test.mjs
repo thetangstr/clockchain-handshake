@@ -44,6 +44,10 @@ import {
 } from "../scripts/probe-bilateral-rendezvous.mjs";
 
 const SIGNATURE = Buffer.alloc(64, 1).toString("base64");
+const PREFLIGHT_KEY_ENROLLMENT_SIGNATURE_DOMAIN =
+  "clockchain.bilateral-preflight-key-enrollment-signature/v1\n";
+const TOKEN_COMMITMENT_SIGNATURE_DOMAIN =
+  "clockchain.bilateral-token-commitment-signature/v1\n";
 
 function deterministicRandom() {
   const values = [
@@ -425,6 +429,127 @@ async function writeSecret(path, value) {
   await chmod(path, 0o600);
 }
 
+function artifactSignaturePreimage(domain, artifact) {
+  return Buffer.concat([
+    Buffer.from(domain, "ascii"),
+    Buffer.from(
+      createHash("sha256")
+        .update(canonicalBytes(artifact))
+        .digest("hex"),
+      "ascii",
+    ),
+  ]);
+}
+
+async function rolePreparationArtifacts(fixture, role) {
+  const preflight = generateKeyPairSync("ed25519");
+  const coordination = generateKeyPairSync("ed25519");
+  const publicKey = rawPublicKeyBase64FromPem(
+    preflight.publicKey.export({
+      format: "pem",
+      type: "spki",
+    }),
+  );
+  const coordinationPublicKey =
+    rawPublicKeyBase64FromPem(
+      coordination.publicKey.export({
+        format: "pem",
+        type: "spki",
+      }),
+    );
+  const enrollmentUnsigned = {
+    algorithm: "ed25519",
+    paymentMoved: false,
+    publicKey,
+    repositorySha: fixture.repositorySha,
+    role,
+    schema:
+      "clockchain.bilateral-preflight-key-enrollment/v1",
+  };
+  const enrollment = {
+    ...enrollmentUnsigned,
+    signature: sign(
+      null,
+      artifactSignaturePreimage(
+        PREFLIGHT_KEY_ENROLLMENT_SIGNATURE_DOMAIN,
+        enrollmentUnsigned,
+      ),
+      preflight.privateKey,
+    ).toString("base64"),
+  };
+  const tokenPath =
+    role === "payer"
+      ? fixture.payerTokenPath
+      : fixture.payeeTokenPath;
+  const tokenBytes = await readFile(tokenPath);
+  const commitmentUnsigned = {
+    algorithm: "ed25519",
+    coordinationPublicKey,
+    paymentMoved: false,
+    repositorySha: fixture.repositorySha,
+    role,
+    schema:
+      "clockchain.bilateral-token-commitment/v1",
+    tokenSha256: createHash("sha256")
+      .update(tokenBytes)
+      .digest("hex"),
+  };
+  const tokenCommitment = {
+    ...commitmentUnsigned,
+    signature: sign(
+      null,
+      artifactSignaturePreimage(
+        TOKEN_COMMITMENT_SIGNATURE_DOMAIN,
+        commitmentUnsigned,
+      ),
+      coordination.privateKey,
+    ).toString("base64"),
+  };
+  const privateKeyPath = join(
+    fixture.root,
+    `${role}-local-preflight.ed25519.pem`,
+  );
+  const enrollmentPath = join(
+    fixture.root,
+    `${role}-preflight-key-enrollment.json`,
+  );
+  const tokenCommitmentPath = join(
+    fixture.root,
+    `${role}-token-commitment.json`,
+  );
+  await Promise.all([
+    writeSecret(
+      privateKeyPath,
+      preflight.privateKey.export({
+        format: "pem",
+        type: "pkcs8",
+      }),
+    ),
+    writeSecret(
+      enrollmentPath,
+      canonicalBytes(enrollment).toString("utf8"),
+    ),
+    writeSecret(
+      tokenCommitmentPath,
+      canonicalBytes(tokenCommitment).toString("utf8"),
+    ),
+  ]);
+  return {
+    coordinationPrivateKeyPem:
+      coordination.privateKey.export({
+        format: "pem",
+        type: "pkcs8",
+      }),
+    coordinationPublicKey,
+    enrollment,
+    enrollmentPath,
+    privateKeyPath,
+    publicKey,
+    tokenCommitment,
+    tokenCommitmentPath,
+  };
+}
+
 async function distributedFixture(t) {
   const root = await mkdtemp(
     join(tmpdir(), "bilateral-preflight-distributed-"),
@@ -450,7 +575,7 @@ async function distributedFixture(t) {
     writeSecret(payerTokenPath, "payer-token"),
     writeSecret(payeeTokenPath, "payee-token"),
   ]);
-  return {
+  const fixture = {
     operatorPrivateKeyPath,
     operatorPublicKey:
       rawPublicKeyBase64FromPem(
@@ -465,6 +590,11 @@ async function distributedFixture(t) {
       "0123456789abcdef0123456789abcdef01234567",
     root,
   };
+  fixture.payerPreparation =
+    await rolePreparationArtifacts(fixture, "payer");
+  fixture.payeePreparation =
+    await rolePreparationArtifacts(fixture, "payee");
+  return fixture;
 }
 
 function repositoryResolver(fixture) {
@@ -498,6 +628,29 @@ function repositoryStateResolver(
 
 function preflightDependencies(fixture, additions = {}) {
   return {
+    prepareArtifacts: async ({ repositorySha }) => {
+      assert.equal(repositorySha, fixture.repositorySha);
+      return {
+        payee: {
+          coordinationPublicKey:
+            fixture.payeePreparation
+              .coordinationPublicKey,
+          preflightEnrollment:
+            fixture.payeePreparation.enrollment,
+          tokenCommitment:
+            fixture.payeePreparation.tokenCommitment,
+        },
+        payer: {
+          coordinationPublicKey:
+            fixture.payerPreparation
+              .coordinationPublicKey,
+          preflightEnrollment:
+            fixture.payerPreparation.enrollment,
+          tokenCommitment:
+            fixture.payerPreparation.tokenCommitment,
+        },
+      };
+    },
     repositoryPublicKeyResolver:
       repositoryResolver(fixture),
     repositoryStateResolver:
@@ -527,17 +680,86 @@ async function prepareDistributedPlan(fixture) {
   return {
     envelope,
     output,
-    payeeKeyPath: join(
-      output,
-      "payee-participant.ed25519.pem",
-    ),
-    payerKeyPath: join(
-      output,
-      "payer-participant.ed25519.pem",
-    ),
+    payeeKeyPath:
+      fixture.payeePreparation.privateKeyPath,
+    payerKeyPath:
+      fixture.payerPreparation.privateKeyPath,
     planPath: join(output, "probe-plan.json"),
   };
 }
+
+test("prepare consumes only verified role public artifacts and writes no participant private keys", async (t) => {
+  const fixture = await distributedFixture(t);
+  const payer = await rolePreparationArtifacts(
+    fixture,
+    "payer",
+  );
+  const payee = await rolePreparationArtifacts(
+    fixture,
+    "payee",
+  );
+  const output = join(fixture.root, "public-only-prepare");
+  const envelope = await main(
+    [
+      "prepare",
+      "--operator-private-key",
+      fixture.operatorPrivateKeyPath,
+      "--operator-key-id",
+      "preflight-operator",
+      "--repository-sha",
+      fixture.repositorySha,
+      "--payer-preflight-enrollment",
+      payer.enrollmentPath,
+      "--payee-preflight-enrollment",
+      payee.enrollmentPath,
+      "--payer-token-commitment",
+      payer.tokenCommitmentPath,
+      "--payee-token-commitment",
+      payee.tokenCommitmentPath,
+      "--payer-coordination-public-key",
+      payer.coordinationPublicKey,
+      "--payee-coordination-public-key",
+      payee.coordinationPublicKey,
+      "--output",
+      output,
+    ],
+    preflightDependencies(fixture, {
+      prepareArtifacts: undefined,
+      randomBytes: deterministicRandom(),
+    }),
+  );
+
+  assert.deepEqual(
+    envelope.plan.participants.payer,
+    {
+      coordinationPublicKey:
+        payer.coordinationPublicKey,
+      publicKey: payer.publicKey,
+      tokenCommitment: payer.tokenCommitment,
+    },
+  );
+  assert.deepEqual(
+    envelope.plan.participants.payee,
+    {
+      coordinationPublicKey:
+        payee.coordinationPublicKey,
+      publicKey: payee.publicKey,
+      tokenCommitment: payee.tokenCommitment,
+    },
+  );
+  await assert.rejects(
+    lstat(
+      join(output, "payer-participant.ed25519.pem"),
+    ),
+    { code: "ENOENT" },
+  );
+  await assert.rejects(
+    lstat(
+      join(output, "payee-participant.ed25519.pem"),
+    ),
+    { code: "ENOENT" },
+  );
+});
 
 async function runParticipant({
   clock,
@@ -1018,6 +1240,9 @@ test("default provenance uses the module repository root, full HEAD, empty porce
       join(fixture.root, "default-provenance"),
     ],
     {
+      prepareArtifacts:
+        preflightDependencies(fixture)
+          .prepareArtifacts,
       randomBytes: deterministicRandom(),
       repositoryPublicKeyResolver:
         repositoryResolver(fixture),
@@ -1193,10 +1418,7 @@ test("plan and report reads use maximum-plus-one loops and reject growth or meta
 test("pinned output directories reject observed pathname swaps at every sensitive publication boundary", async (t) => {
   const fixture = await distributedFixture(t);
   const preparationCases = [];
-  for (const file of [
-    "probe-plan.json",
-    "payer-participant.ed25519.pem",
-  ]) {
+  for (const file of ["probe-plan.json"]) {
     for (const operation of [
       "open",
       "write",
@@ -1386,15 +1608,17 @@ test("pinned output directories reject observed pathname swaps at every sensitiv
 
 test("participant token input is exact printable ASCII bounded to 4096 UTF-8 bytes before output or client construction", async (t) => {
   const fixture = await distributedFixture(t);
+  const acceptedToken = "A".repeat(4096);
+  await writeSecret(
+    fixture.payerTokenPath,
+    acceptedToken,
+  );
+  fixture.payerPreparation =
+    await rolePreparationArtifacts(fixture, "payer");
   const prepared = await prepareDistributedPlan(
     fixture,
   );
-  const acceptedToken = "A".repeat(4096);
-  const acceptedPath = join(
-    fixture.root,
-    "accepted-4096.token",
-  );
-  await writeSecret(acceptedPath, acceptedToken);
+  const acceptedPath = fixture.payerTokenPath;
   const acceptedNetwork = fakeNetwork();
   let acceptedClientCalls = 0;
   const accepted = await main(
@@ -1430,6 +1654,7 @@ test("participant token input is exact printable ASCII bounded to 4096 UTF-8 byt
     ["control byte", "valid\u0007token"],
     ["trailing newline", "valid-token\n"],
     ["embedded newline", "valid\n token"],
+    ["committed token swap", "B".repeat(4096)],
   ]) {
     await t.test(name, async () => {
       const tokenPath = join(
@@ -1554,6 +1779,16 @@ test("three-stage distributed CLI performs one write per participant and authori
     );
     assert.equal(participant.report.role, role);
     assert.equal(participant.report.paymentMoved, false);
+    assert.equal(
+      participant.report.tokenCommitment?.schema,
+      "clockchain.bilateral-token-commitment/v1",
+    );
+    assert.deepEqual(
+      participant.report.tokenCommitment,
+      scenario.prepared.envelope.plan.participants[
+        role
+      ].tokenCommitment,
+    );
     assert.equal(
       participant.report.peerObservation
         .referenceResolved,
@@ -1865,6 +2100,66 @@ test("aggregate rejects participant report tampering and missing physical attest
   const report = JSON.parse(await readFile(path, "utf8"));
   report.report.write.digest = "f".repeat(64);
   await writeFile(path, `${JSON.stringify(report)}\n`);
+  await assert.rejects(
+    () => aggregateDistributed(scenario),
+    /preflight/i,
+  );
+});
+
+test("aggregate revalidates the commitment signature and exact plan equality inside a valid participant signature", async (t) => {
+  const scenario = await runDistributedScenario(
+    t,
+    fakeNetwork({
+      digestVisibility: {
+        payer: ["payee"],
+        payee: ["payer"],
+      },
+      referenceVisibility: {
+        payer: ["payee"],
+        payee: ["payer"],
+      },
+    }),
+  );
+
+  await rewriteSignedParticipantReport(
+    scenario,
+    "payer",
+    (report) => {
+      report.tokenCommitment = {
+        ...report.tokenCommitment,
+        signature: Buffer.alloc(64, 4).toString("base64"),
+      };
+    },
+  );
+  await assert.rejects(
+    () => aggregateDistributed(scenario),
+    /preflight/i,
+  );
+
+  await rewriteSignedParticipantReport(
+    scenario,
+    "payer",
+    (report) => {
+      const unsigned = {
+        ...scenario.prepared.envelope.plan.participants
+          .payer.tokenCommitment,
+        tokenSha256: "e".repeat(64),
+      };
+      delete unsigned.signature;
+      report.tokenCommitment = {
+        ...unsigned,
+        signature: sign(
+          null,
+          artifactSignaturePreimage(
+            TOKEN_COMMITMENT_SIGNATURE_DOMAIN,
+            unsigned,
+          ),
+          scenario.fixture.payerPreparation
+            .coordinationPrivateKeyPem,
+        ).toString("base64"),
+      };
+    },
+  );
   await assert.rejects(
     () => aggregateDistributed(scenario),
     /preflight/i,

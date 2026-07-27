@@ -64,6 +64,10 @@ const NOW_MS = 1_785_120_000_000;
 const RAW_CAPABILITY = Buffer.alloc(32, 0x42);
 const RECEIPT_SCHEMA =
   "clockchain.bilateral-coordination-receipt/v1";
+const PREFLIGHT_KEY_ENROLLMENT_SIGNATURE_DOMAIN =
+  "clockchain.bilateral-preflight-key-enrollment-signature/v1\n";
+const TOKEN_COMMITMENT_SIGNATURE_DOMAIN =
+  "clockchain.bilateral-token-commitment-signature/v1\n";
 
 const keyPair = generateKeyPairSync("ed25519");
 const PRIVATE_KEY_PEM = keyPair.privateKey.export({
@@ -190,6 +194,64 @@ function stableBytes(value) {
     JSON.stringify(canonicalizeReceiptEventValue(value)),
     "utf8",
   );
+}
+
+function signedDigestPreimage(domain, value) {
+  return Buffer.concat([
+    Buffer.from(domain, "ascii"),
+    Buffer.from(sha256(canonicalBytes(value)), "ascii"),
+  ]);
+}
+
+function preflightPublicKeyArtifact(overrides = {}) {
+  const unsigned = {
+    algorithm: "ed25519",
+    paymentMoved: false,
+    publicKey: PREFLIGHT_PUBLIC_KEY,
+    repositorySha: REPOSITORY_SHA,
+    role: "payer",
+    schema:
+      "clockchain.bilateral-preflight-key-enrollment/v1",
+    ...overrides,
+  };
+  delete unsigned.privateKeyPem;
+  return {
+    ...unsigned,
+    signature: sign(
+      null,
+      signedDigestPreimage(
+        PREFLIGHT_KEY_ENROLLMENT_SIGNATURE_DOMAIN,
+        unsigned,
+      ),
+      overrides.privateKeyPem ??
+        preflightKeyPair.privateKey,
+    ).toString("base64"),
+  };
+}
+
+function tokenCommitmentArtifact(overrides = {}) {
+  const unsigned = {
+    algorithm: "ed25519",
+    coordinationPublicKey: PUBLIC_KEY,
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    role: "payer",
+    schema: "clockchain.bilateral-token-commitment/v1",
+    tokenSha256: "a".repeat(64),
+    ...overrides,
+  };
+  delete unsigned.privateKeyPem;
+  return {
+    ...unsigned,
+    signature: sign(
+      null,
+      signedDigestPreimage(
+        TOKEN_COMMITMENT_SIGNATURE_DOMAIN,
+        unsigned,
+      ),
+      overrides.privateKeyPem ?? PRIVATE_KEY_PEM,
+    ).toString("base64"),
+  };
 }
 
 function decodeJournal(bytes) {
@@ -864,24 +926,6 @@ test("accepts only exact coordination enrollments and signed descriptors while o
         },
       },
     ],
-    [
-      "preflight-public-key",
-      {
-        paymentMoved: false,
-        schema:
-          "clockchain.bilateral-preflight-key-enrollment/v1",
-        signature: "A".repeat(88),
-      },
-    ],
-    [
-      "token-commitment",
-      {
-        paymentMoved: false,
-        schema:
-          "clockchain.bilateral-token-commitment/v1",
-        signature: "A".repeat(88),
-      },
-    ],
   ]) {
     const extra = { ...candidate, extra: "untrusted" };
     const incomplete = structuredClone(candidate);
@@ -1050,23 +1094,111 @@ test("artifact validation and store opening convert hostile prototype traps into
   }
 });
 
-test("keeps token commitments fail-closed until their repository validator lands", () => {
-  const bytes = stableBytes({
-    coordinationPublicKey: PUBLIC_KEY,
-    paymentMoved: false,
-    repositorySha: REPOSITORY_SHA,
-    role: "payer",
-    schema: "clockchain.bilateral-token-commitment/v1",
-    signature: "A".repeat(86) + "==",
-    tokenSha256: "a".repeat(64),
-  });
+test("accepts exact signed preflight public keys and rejects wrong signature, key, SHA, role, extra keys, and canaries", () => {
+  const artifact = preflightPublicKeyArtifact();
+  const bytes = stableBytes(artifact);
+  assert.deepEqual(
+    validateRelayArtifact({
+      artifactType: "preflight-public-key",
+      bytes,
+      expectedDigest: sha256(bytes),
+      secretCanaries: [],
+    }),
+    {
+      artifactType: "preflight-public-key",
+      byteLength: String(bytes.length),
+      digest: sha256(bytes),
+    },
+  );
+
+  const wrongKey = generateKeyPairSync("ed25519")
+    .publicKey.export({ format: "der", type: "spki" })
+    .subarray(-32)
+    .toString("base64");
+  for (const hostile of [
+    {
+      ...artifact,
+      signature: Buffer.alloc(64, 9).toString("base64"),
+    },
+    { ...artifact, publicKey: wrongKey },
+    { ...artifact, repositorySha: "d".repeat(40) },
+    { ...artifact, role: "payee" },
+    { ...artifact, extra: "untrusted" },
+  ]) {
+    const hostileBytes = stableBytes(hostile);
+    assert.throws(
+      () =>
+        validateRelayArtifact({
+          artifactType: "preflight-public-key",
+          bytes: hostileBytes,
+          expectedDigest: sha256(hostileBytes),
+          secretCanaries: [],
+        }),
+      { code: "RELAY_ARTIFACT_INVALID" },
+    );
+  }
+  assert.throws(
+    () =>
+      validateRelayArtifact({
+        artifactType: "preflight-public-key",
+        bytes,
+        expectedDigest: sha256(bytes),
+        secretCanaries: [artifact.publicKey],
+      }),
+    { code: "RELAY_ARTIFACT_INVALID" },
+  );
+});
+
+test("accepts exact signed token commitments and rejects wrong signature, key, SHA, role, extra keys, and canaries", () => {
+  const artifact = tokenCommitmentArtifact();
+  const bytes = stableBytes(artifact);
+  assert.deepEqual(
+    validateRelayArtifact({
+      artifactType: "token-commitment",
+      bytes,
+      expectedDigest: sha256(bytes),
+      secretCanaries: [],
+    }),
+    {
+      artifactType: "token-commitment",
+      byteLength: String(bytes.length),
+      digest: sha256(bytes),
+    },
+  );
+
+  const wrongKey = generateKeyPairSync("ed25519")
+    .publicKey.export({ format: "der", type: "spki" })
+    .subarray(-32)
+    .toString("base64");
+  for (const hostile of [
+    {
+      ...artifact,
+      signature: Buffer.alloc(64, 9).toString("base64"),
+    },
+    { ...artifact, coordinationPublicKey: wrongKey },
+    { ...artifact, repositorySha: "d".repeat(40) },
+    { ...artifact, role: "payee" },
+    { ...artifact, extra: "untrusted" },
+  ]) {
+    const hostileBytes = stableBytes(hostile);
+    assert.throws(
+      () =>
+        validateRelayArtifact({
+          artifactType: "token-commitment",
+          bytes: hostileBytes,
+          expectedDigest: sha256(hostileBytes),
+          secretCanaries: [],
+        }),
+      { code: "RELAY_ARTIFACT_INVALID" },
+    );
+  }
   assert.throws(
     () =>
       validateRelayArtifact({
         artifactType: "token-commitment",
         bytes,
         expectedDigest: sha256(bytes),
-        secretCanaries: ["cc_actual_secret_1234567890"],
+        secretCanaries: [artifact.coordinationPublicKey],
       }),
     { code: "RELAY_ARTIFACT_INVALID" },
   );

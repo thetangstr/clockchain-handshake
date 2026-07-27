@@ -16,6 +16,10 @@ import {
 import {
   parseCoordinationEnrollment,
 } from "./enrollment.mjs";
+import {
+  verifyPreflightKeyEnrollment,
+  verifyTokenCommitment,
+} from "./preflight.mjs";
 
 export const MAX_RELAY_ARTIFACT_BYTES = 1_048_576;
 export const MAX_RELAY_PACKAGE_BYTES = 3_145_728;
@@ -349,6 +353,41 @@ function validateCoordinationEnrollment(
   }
 }
 
+function validatePreflightPublicKey(
+  bytes,
+  parsed,
+  canaries,
+) {
+  assertSafeBytes(bytes, parsed, canaries);
+  try {
+    verifyPreflightKeyEnrollment(parsed, {
+      repositorySha: parsed.repositorySha,
+      role: parsed.role,
+    });
+  } catch {
+    invalid();
+  }
+}
+
+function validateTokenCommitment(
+  bytes,
+  parsed,
+  canaries,
+) {
+  assertSafeBytes(bytes, parsed, canaries);
+  try {
+    verifyTokenCommitment(parsed, {
+      coordinationPublicKey:
+        parsed.coordinationPublicKey,
+      repositorySha: parsed.repositorySha,
+      role: parsed.role,
+      tokenSha256: parsed.tokenSha256,
+    });
+  } catch {
+    invalid();
+  }
+}
+
 export function validateRelayArtifact(input) {
   try {
     const data = readExactData(input, INPUT_KEYS);
@@ -381,6 +420,22 @@ export function validateRelayArtifact(input) {
       data.artifactType === "signed-descriptor"
     ) {
       validateSignedDescriptor(bytes, parsed, canaries);
+    } else if (
+      data.artifactType === "preflight-public-key"
+    ) {
+      validatePreflightPublicKey(
+        bytes,
+        parsed,
+        canaries,
+      );
+    } else if (
+      data.artifactType === "token-commitment"
+    ) {
+      validateTokenCommitment(
+        bytes,
+        parsed,
+        canaries,
+      );
     } else {
       // The allowlist reserves protocol artifact names and limits.
       // Publication remains disabled until a repository-owned exact
