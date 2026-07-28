@@ -19,6 +19,14 @@ import {
   canonicalBytes,
 } from "../canonical.mjs";
 import {
+  paymentRequestDigest,
+  validatePaymentRequest,
+} from "../payment-request.mjs";
+import {
+  payerMandateDigest,
+  validatePayerMandate,
+} from "../payer-mandate.mjs";
+import {
   KEY_ID_PATTERN,
 } from "../descriptor.mjs";
 import {
@@ -216,6 +224,8 @@ const ARTIFACT_TYPE_PATTERN =
   /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const LOCALLY_SUPPORTED_ARTIFACT_TYPES = new Set([
   "coordination-enrollment",
+  "payer-mandate",
+  "payment-request",
   "failure-summary",
   "identity-package",
   "party-result-package",
@@ -447,8 +457,10 @@ function rawHeaderValues(rawHeaders, name) {
 }
 
 function expectedResponseType(method, path) {
-  return method === "GET" &&
-    /^\/v1\/artifacts\/[0-9a-f]{64}$/.test(path)
+  return method === "GET" && (
+    /^\/v1\/artifacts\/[0-9a-f]{64}$/.test(path) ||
+    /^\/v1\/sessions\/[0-9a-f-]{36}\/(?:mandate|payment-requests\/[0-9a-f-]{36})/.test(path)
+  )
     ? "application/octet-stream"
     : "application/json";
 }
@@ -520,7 +532,8 @@ function validateRequestInput(value) {
   if (method === "POST") {
     if (
       data.path !== "/v1/bootstrap" &&
-      data.path !== "/v1/events"
+      data.path !== "/v1/events" &&
+      !new RegExp(`^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/payment-requests$`).test(data.path)
     ) {
       invalid();
     }
@@ -564,12 +577,14 @@ function validateRequestInput(value) {
     const events = new RegExp(
       `^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/events\\?(?:after=[0-9a-f]{64}&)?waitMs=(?:0|[1-9][0-9]*)$`,
     ).test(data.path);
+    const mandate = new RegExp(`^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/mandate\\?subjectRun=(?:rehearsal|stakeholder)$`).test(data.path);
+    const paymentRequest = new RegExp(`^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/payment-requests/${UUID_PATTERN.source.slice(1, -1)}$`).test(data.path);
     if (
       (!artifact &&
         !view &&
         !events &&
         !enrollments &&
-        !verifierPublication) ||
+        !verifierPublication && !mandate && !paymentRequest) ||
       data.body !== null
     ) {
       invalid();
@@ -780,7 +795,7 @@ export function createPinnedHttpsTransport(input) {
           requestInput.body.length,
         );
         headers["content-type"] =
-          requestInput.method === "PUT"
+          requestInput.method === "PUT" || /\/payment-requests$/.test(requestInput.path)
             ? "application/octet-stream"
             : "application/json";
       }
@@ -1715,6 +1730,51 @@ function createCoordinationClientCore({
       }
     }
 
+    async function publishPayerMandate(value) {
+      const data = readExactData(value, ["bytes", "subjectRun"]);
+      if (context.role !== "payer" || !["rehearsal", "stakeholder"].includes(data.subjectRun) || !Buffer.isBuffer(data.bytes)) invalid();
+      const bytes = Buffer.from(data.bytes);
+      const envelope = parseCanonicalJson(bytes);
+      try { validatePayerMandate(envelope.mandate); } catch { invalid(); }
+      const metadata = await putArtifact({ artifactType: "payer-mandate", bytes, expectedDigest: sha256(bytes) });
+      await appendEvent({ artifactDigest: metadata.digest, kind: "PAYER_MANDATE_READY", subjectRun: data.subjectRun });
+      return metadata;
+    }
+
+    async function submitPaymentRequest(value) {
+      const data = readExactData(value, ["bytes"]);
+      if (context.role !== "payee" || !Buffer.isBuffer(data.bytes) || data.bytes.length === 0 || data.bytes.length > 65_536) invalid();
+      const bytes = Buffer.from(data.bytes);
+      const envelope = parseCanonicalJson(bytes);
+      try { validatePaymentRequest(envelope.request); } catch { invalid(); }
+      const subjectRun = envelope.request.subjectRun;
+      if (!["rehearsal", "stakeholder"].includes(subjectRun) || envelope.request.sessionId !== context.sessionId) invalid();
+      const response = validateInjectedResponse(await exactRequest(transport, { body: bytes, method: "POST", path: `/v1/sessions/${context.sessionId}/payment-requests` }), "application/json");
+      const receipt = readExactData(parseCanonicalJson(response), ["paymentMoved", "paymentRequestDigest", "rawEnvelopeDigest", "requestId", "sessionId", "subjectRun"]);
+      if (receipt.paymentMoved !== false || receipt.paymentRequestDigest !== paymentRequestDigest(envelope) || receipt.rawEnvelopeDigest !== sha256(bytes) || receipt.requestId !== envelope.request.requestId || receipt.sessionId !== context.sessionId || receipt.subjectRun !== subjectRun) invalid();
+      await appendEvent({ artifactDigest: receipt.rawEnvelopeDigest, kind: "PAYMENT_REQUEST_READY", subjectRun });
+      return Object.freeze(receipt);
+    }
+
+    async function readPayerMandate(value) {
+      const data = readExactData(value, ["subjectRun"]);
+      if (!["rehearsal", "stakeholder"].includes(data.subjectRun)) invalid();
+      const bytes = validateInjectedResponse(await exactRequest(transport, { body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/mandate?subjectRun=${data.subjectRun}` }), "application/octet-stream");
+      const envelope = parseCanonicalJson(bytes);
+      try { validatePayerMandate(envelope.mandate); } catch { invalid(); }
+      return Buffer.from(bytes);
+    }
+
+    async function readPaymentRequest(value) {
+      const data = readExactData(value, ["requestId"]);
+      if (typeof data.requestId !== "string" || !UUID_PATTERN.test(data.requestId)) invalid();
+      const bytes = validateInjectedResponse(await exactRequest(transport, { body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/payment-requests/${data.requestId}` }), "application/octet-stream");
+      const envelope = parseCanonicalJson(bytes);
+      try { validatePaymentRequest(envelope.request); } catch { invalid(); }
+      if (envelope.request.requestId !== data.requestId || envelope.request.sessionId !== context.sessionId) invalid();
+      return Buffer.from(bytes);
+    }
+
     async function readEvents(value) {
       try {
         const keys = keysWithOptionalSignal(
@@ -2063,11 +2123,15 @@ function createCoordinationClientCore({
       appendEvent,
       bootstrap,
       getArtifact,
+      publishPayerMandate,
       putArtifact,
       readEnrollmentSet,
+      readPayerMandate,
+      readPaymentRequest,
       readEvents,
       readSessionView,
       readVerifierPublication,
+      submitPaymentRequest,
     });
   } catch (error) {
     if (error instanceof CoordinationClientError) {

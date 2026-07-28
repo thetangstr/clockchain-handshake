@@ -1941,6 +1941,14 @@ async function resumedClientFixture(
   };
 }
 
+test("role clients expose only scoped commercial-intent methods", async (t) => {
+  const fixture = await resumedClientFixture(t, async () => injectedResponse({ body: Buffer.from("null", "utf8") }));
+  assert.equal(typeof fixture.client.publishPayerMandate, "function");
+  assert.equal(typeof fixture.client.submitPaymentRequest, "function");
+  assert.equal(typeof fixture.client.readPayerMandate, "function");
+  assert.equal(typeof fixture.client.readPaymentRequest, "function");
+});
+
 async function enrollmentSetFixture({
   activeLaunchState,
   tls,
@@ -2083,11 +2091,15 @@ test("gates enrollment-set authority until bootstrap and returns one exact verif
       "appendEvent",
       "bootstrap",
       "getArtifact",
+      "publishPayerMandate",
       "putArtifact",
       "readEnrollmentSet",
       "readEvents",
+      "readPayerMandate",
+      "readPaymentRequest",
       "readSessionView",
       "readVerifierPublication",
+      "submitPaymentRequest",
     ],
   );
 });
@@ -2442,11 +2454,15 @@ test("bootstraps with one raw capability, retries only identical bytes, verifies
       "appendEvent",
       "bootstrap",
       "getArtifact",
+      "publishPayerMandate",
       "putArtifact",
       "readEnrollmentSet",
       "readEvents",
+      "readPayerMandate",
+      "readPaymentRequest",
       "readSessionView",
       "readVerifierPublication",
+      "submitPaymentRequest",
     ],
   );
   assert.equal(
@@ -3692,6 +3708,9 @@ test("readSessionView returns only a canonical context-bound advisory lifecycle 
         rehearsal: { payee: false, payer: false },
         stakeholder: { payee: false, payer: false },
       },
+      payerMandateReady: { rehearsal: false, stakeholder: false },
+      paymentRequestReady: { rehearsal: false, stakeholder: false },
+      paymentRequestMatched: { rehearsal: false, stakeholder: false },
       preflightParticipantReady: {
         payee: false,
         payer: false,
