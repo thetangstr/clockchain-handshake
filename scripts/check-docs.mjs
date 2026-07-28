@@ -29,6 +29,9 @@ const BILATERAL_PUBLIC_DOCUMENTS = Object.freeze([
   "docs/runbooks/bilateral-demo-quick-start.md",
   "docs/runbooks/bilateral-demo-day.md",
 ]);
+const BILATERAL_COMPATIBILITY_DOCUMENTS = Object.freeze([
+  "prompts/run-billy-bilateral-demo.md",
+]);
 const SUPPORTING_DOCUMENTS = Object.freeze([
   "invites/README.md",
 ]);
@@ -47,6 +50,7 @@ const REQUIRED_LINKS = Object.freeze({
     "docs/runbooks/bilateral-demo-quick-start.md",
     "docs/runbooks/bilateral-demo-day.md",
     "invites/README.md",
+    "https://clockchain-research.vercel.app/handshake/run",
   ]),
   "DEMO.md": Object.freeze([
     "README.md",
@@ -55,17 +59,22 @@ const REQUIRED_LINKS = Object.freeze({
   ]),
   "prompts/run-billie-bilateral-demo.md": Object.freeze([]),
   "prompts/run-iris-bilateral-demo.md": Object.freeze([]),
+  "prompts/run-billy-bilateral-demo.md": Object.freeze([
+    "run-billie-bilateral-demo.md",
+  ]),
   "docs/runbooks/bilateral-demo-quick-start.md": Object.freeze([
     "../../README.md",
     "../../docs/runbooks/bilateral-demo-day.md",
     "../../prompts/run-billie-bilateral-demo.md",
     "../../prompts/run-iris-bilateral-demo.md",
+    "https://clockchain-research.vercel.app/handshake/run",
   ]),
   "docs/runbooks/bilateral-demo-day.md": Object.freeze([
     "../../README.md",
     "./bilateral-demo-quick-start.md",
     "../../prompts/run-billie-bilateral-demo.md",
     "../../prompts/run-iris-bilateral-demo.md",
+    "https://clockchain-research.vercel.app/handshake/run",
   ]),
 });
 const FAILURE_CODE_DOCUMENT = "DEMO.md";
@@ -390,10 +399,14 @@ function bilateralContractFailures(relativePath, contents) {
     "prompts/run-billie-bilateral-demo.md": [
       [
         "Stakeholder 2 role card",
-        /\bYou are Stakeholder 2, Billie, the payee\. Start only the payee supervisor\./,
+        /\bYou are Stakeholder 2, Billie, the vendor and payee\. Start only the payee\s+supervisor\./,
       ],
       ["Billie payee machine role", /\bBillie\b[^.]*\bpayee\b/i],
-      ["Billie receiver role", /\bpayment receiver\b/i],
+      ["Billie vendor role", /\bBillie\b[^.]*\bvendor\b/i],
+      [
+        "automatic signed request",
+        /\bautomatically\b[^.]*\bIris's signed mandate\b[^.]*\bBillie's matching signed\s+payment\s+request\b/i,
+      ],
       [
         "automated supervisor session",
         /\bAutomated supervisor session\b/i,
@@ -426,6 +439,10 @@ function bilateralContractFailures(relativePath, contents) {
         "60-minute launch manifests",
         /\blaunch manifest expires after 60 minutes\b/i,
       ],
+      [
+        "TLS certificate fingerprint pin",
+        /\bTLS certificate fingerprint\b[\s\S]{0,160}\bpins that fingerprint\b/i,
+      ],
       ["secret-byte prohibition", /\bdo not inspect secret bytes\b/i],
       ["role-switch prohibition", /\bdo not switch roles\b/i],
       ["extra-session prohibition", /\bdo not create extra sessions\b/i],
@@ -436,10 +453,14 @@ function bilateralContractFailures(relativePath, contents) {
     "prompts/run-iris-bilateral-demo.md": [
       [
         "Stakeholder 1 role card",
-        /\bYou are Stakeholder 1, Iris, the payer\. Start only the payer supervisor\./,
+        /\bYou are Stakeholder 1, Iris, the payer and mandate owner\. Start only the payer\s+supervisor\./,
       ],
       ["Iris payer machine role", /\bIris\b[^.]*\bpayer\b/i],
       ["Iris mandate ownership", /\bmandate owner\b/i],
+      [
+        "automatic signed mandate",
+        /\bautomatically creates\b[^.]*\bIris's signed\s+payment mandate\b[^.]*\bBillie's signed payment request\b/i,
+      ],
       [
         "automated supervisor session",
         /\bAutomated supervisor session\b/i,
@@ -472,6 +493,10 @@ function bilateralContractFailures(relativePath, contents) {
         "60-minute launch manifests",
         /\blaunch manifest expires after 60 minutes\b/i,
       ],
+      [
+        "TLS certificate fingerprint pin",
+        /\bTLS certificate fingerprint\b[\s\S]{0,160}\bpins that fingerprint\b/i,
+      ],
       ["secret-byte prohibition", /\bdo not inspect secret bytes\b/i],
       ["role-switch prohibition", /\bdo not switch roles\b/i],
       ["extra-session prohibition", /\bdo not create extra sessions\b/i],
@@ -490,7 +515,15 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "operator role mapping",
-        /\bOperator\s+[—-]\s+relay,\s+coordinator,\s+watcher,\s+funding wallet,\s+fresh aggregate verifier\b/i,
+        /\bOperator\s+[—-]\s+relay,\s+coordinator,\s+read-only console,\s+watcher,\s+funding wallet,\s+fresh aggregate verifier\b/i,
+      ],
+      [
+        "public live-demo helper",
+        /\bhttps:\/\/clockchain-research\.vercel\.app\/handshake\/run\b/,
+      ],
+      [
+        "exact startup order",
+        /\brelay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor\b/,
       ],
       ["automated primary flow", /\bAutomated primary flow\b/i],
       [
@@ -500,6 +533,18 @@ function bilateralContractFailures(relativePath, contents) {
       [
         "exact coordinator entrypoint",
         /\bnpm run bilateral:coordinator -- \\/,
+      ],
+      [
+        "exact console entrypoint",
+        /\bnpm run bilateral:console -- \\/,
+      ],
+      [
+        "read-only advisory console",
+        /\boperator console is\s+read-only and advisory\b/i,
+      ],
+      [
+        "automatic mandate and request",
+        /\bautomatically create\b[^.]*\bIris-signed mandate\b[^.]*\bBillie-signed request\b/i,
       ],
       [
         "two supervisor sessions",
@@ -594,7 +639,7 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "funding budget",
-        /\b0\.05 Sepolia ETH\b[^.\n]*\bfour `0\.01 ETH` allocations\b/i,
+        /\b0\.05 Sepolia ETH\b[^.\n]*\bexactly four `0\.01 Sepolia ETH` allocations\b/i,
       ],
       [
         "participant gas boundary",
@@ -610,7 +655,11 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "verifier-only authorization",
-        /\baccept `AUTHORIZED` only from each fresh aggregate verifier\b/i,
+        /\bonly a fresh aggregate verifier may output\s+`AUTHORIZED`/i,
+      ],
+      [
+        "rehearsal-ready versus live-validated",
+        /\brehearsal-ready\b[^.]*\blive-validated\b/i,
       ],
       [
         "stable operator key ID",
@@ -726,7 +775,31 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "fixed operator role",
-        /\bOperator\b[^.\n]*\brelay\b[^.\n]*\bcoordinator\b[^.\n]*\bfunding\b[^.\n]*\bwatcher\b[^.\n]*\bfresh aggregate verifier\b/i,
+        /\bOperator\b[^.\n]*\brelay\b[^.\n]*\bcoordinator\b[^.\n]*\bread-only console\b[^.\n]*\bfunding\b[^.\n]*\bwatcher\b[^.\n]*\bfresh aggregate verifier\b/i,
+      ],
+      [
+        "public live-demo helper",
+        /\bhttps:\/\/clockchain-research\.vercel\.app\/handshake\/run\b/,
+      ],
+      [
+        "exact startup order",
+        /\brelay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor\b/,
+      ],
+      [
+        "read-only advisory console",
+        /\bread-only advisory\s+operator console\b/i,
+      ],
+      [
+        "automatic mandate and request",
+        /\bautomatically create\b[^.]*\bIris-signed mandate\b[^.]*\bBillie-signed request\b/i,
+      ],
+      [
+        "four exact allocations",
+        /\bexactly four\s+`0\.01 Sepolia ETH` allocations\b/i,
+      ],
+      [
+        "rehearsal-ready versus live-validated",
+        /\brehearsal-ready\b[^.]*\blive-validated\b/i,
       ],
       [
         "fixed Iris role",
@@ -959,6 +1032,72 @@ function bilateralContractFailures(relativePath, contents) {
   return failures;
 }
 
+function bilateralNamingAndMovementFailures(
+  relativePath,
+  contents,
+) {
+  const failures = [];
+  if (
+    /\bBilly(?:,|\s+is|\s+as|\s+[—-])[^.\n]*\bpayer\b/i.test(
+      contents,
+    )
+  ) {
+    failures.push(
+      `${relativePath}: contains legacy Billy payer role mapping.`,
+    );
+  }
+  if (
+    /\bIris(?:,|\s+is|\s+as|\s+[—-])[^.\n]*\bpayee\b/i.test(
+      contents,
+    )
+  ) {
+    failures.push(
+      `${relativePath}: contains legacy Iris payee role mapping.`,
+    );
+  }
+  const movementPattern =
+    /\bauthorization\b[^.]{0,120}\b(?:move|moves|moved|send|sends|sent|settle|settles|settled|transfer|transfers|transferred)\b[^.]{0,120}\bpayment\b/gi;
+  if (
+    claimSegments(contents).some((segment) =>
+      [...segment.matchAll(movementPattern)].some(
+        (match) =>
+          !EXPLICIT_LIMITATION_PATTERN.test(match[0]),
+      ),
+    )
+  ) {
+    failures.push(
+      `${relativePath}: claims authorization moved payment.`,
+    );
+  }
+  return failures;
+}
+
+function bilateralCompatibilityFailures(
+  relativePath,
+  contents,
+) {
+  const failures = bilateralNamingAndMovementFailures(
+    relativePath,
+    contents,
+  );
+  if (!/\bcompatibility only\b/i.test(contents)) {
+    failures.push(
+      `${relativePath}: missing compatibility-only boundary.`,
+    );
+  }
+  if (!/\brun-billie-bilateral-demo\.md\b/.test(contents)) {
+    failures.push(
+      `${relativePath}: missing canonical Billie prompt migration target.`,
+    );
+  }
+  if (/\b(?:npm|node)\s+run\b|\bnode\s+(?:bin|scripts)\//.test(contents)) {
+    failures.push(
+      `${relativePath}: compatibility path must not contain executable role commands.`,
+    );
+  }
+  return failures;
+}
+
 function packageContractFailures(contents) {
   try {
     const value = JSON.parse(contents);
@@ -1002,16 +1141,59 @@ function readmeRoleplayFailures(contents) {
       "README.md: missing reusable Sepolia treasury boundary.",
     );
   }
-  if (!/\bStakeholder 1\b[^.\n]*\bIris\b[^.\n]*\bpayer\b/i.test(contents)) {
+  if (!/\bStakeholder 1\b[^.]*\bIris\b[^.]*\bpayer\b/i.test(contents)) {
     failures.push(
       "README.md: missing Stakeholder 1 Iris payer role mapping.",
     );
   }
-  if (!/\bStakeholder 2\b[^.\n]*\bBillie\b[^.\n]*\bpayee\b/i.test(contents)) {
+  if (!/\bStakeholder 2\b[^.]*\bBillie\b[^.]*\bpayee\b/i.test(contents)) {
     failures.push(
       "README.md: missing Stakeholder 2 Billie payee role mapping.",
     );
   }
+  if (
+    !contents.includes(
+      "relay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor",
+    )
+  ) {
+    failures.push(
+      "README.md: missing exact bilateral startup control order.",
+    );
+  }
+  if (!/\bnpm run bilateral:console --/.test(contents)) {
+    failures.push(
+      "README.md: missing bilateral console entrypoint.",
+    );
+  }
+  if (
+    !contents.includes(
+      "https://clockchain-research.vercel.app/handshake/run",
+    )
+  ) {
+    failures.push(
+      "README.md: missing public live-demo helper URL.",
+    );
+  }
+  if (!/\brehearsal-ready\b[^.]*\blive-validated\b/i.test(contents)) {
+    failures.push(
+      "README.md: missing rehearsal-ready versus live-validated boundary.",
+    );
+  }
+  if (
+    !/\bexactly four\s+`0\.01 Sepolia ETH` allocations\b/i.test(
+      contents,
+    )
+  ) {
+    failures.push(
+      "README.md: missing exact four-address Sepolia allocation.",
+    );
+  }
+  failures.push(
+    ...bilateralNamingAndMovementFailures(
+      "README.md",
+      contents,
+    ),
+  );
   return failures;
 }
 
@@ -1759,6 +1941,7 @@ export async function checkDocumentation({
   for (const relativePath of [
     ...PUBLIC_DOCUMENTS,
     ...BILATERAL_PUBLIC_DOCUMENTS,
+    ...BILATERAL_COMPATIBILITY_DOCUMENTS,
   ]) {
     const path = await canonicalRegularFile(
       root,
@@ -1831,6 +2014,22 @@ export async function checkDocumentation({
     if (BILATERAL_PUBLIC_DOCUMENTS.includes(relativePath)) {
       failures.push(
         ...bilateralContractFailures(relativePath, contents),
+        ...bilateralNamingAndMovementFailures(
+          relativePath,
+          contents,
+        ),
+      );
+    }
+    if (
+      BILATERAL_COMPATIBILITY_DOCUMENTS.includes(
+        relativePath,
+      )
+    ) {
+      failures.push(
+        ...bilateralCompatibilityFailures(
+          relativePath,
+          contents,
+        ),
       );
     }
     failures.push(
@@ -1911,6 +2110,7 @@ export async function main({
     `Documentation checks passed (${
       PUBLIC_DOCUMENTS.length +
       BILATERAL_PUBLIC_DOCUMENTS.length +
+      BILATERAL_COMPATIBILITY_DOCUMENTS.length +
       SUPPORTING_DOCUMENTS.length
     } gated documents).\n`,
   );

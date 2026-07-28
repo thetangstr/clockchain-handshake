@@ -4,7 +4,9 @@ Use this start-here checklist with the [repository overview](../../README.md),
 the [full runbook](../../docs/runbooks/bilateral-demo-day.md), the
 [Iris prompt](../../prompts/run-iris-bilateral-demo.md), and the
 [Billie prompt](../../prompts/run-billie-bilateral-demo.md). The full runbook is
-authoritative for recovery and low-level commands.
+authoritative for recovery and low-level commands. The public
+[live-demo helper](https://clockchain-research.vercel.app/handshake/run)
+explains these steps without receiving live session evidence.
 
 This is an Ethereum Sepolia and Clockchain® single-validator testnet exercise.
 No money moves. Do not install or use AgentDash. Do not invent success states.
@@ -24,10 +26,13 @@ Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and
 - Confirm the operator Mac can reach both role computers over the advertised relay IP.
 - Publish no secrets, live evidence, or manifest contents.
 - Do not claim physical rehearsal passed; report only fresh verifier output and public status words.
+- Treat passing deterministic checks as rehearsal-ready, not live-validated.
+  Only a funded physical run with fresh independently re-verifiable evidence is
+  live-validated.
 
 ## Fixed role assignment
 
-- Operator = relay, coordinator, funding, watcher, and fresh aggregate verifier.
+- Operator = relay, coordinator, read-only console, funding, watcher, and fresh aggregate verifier.
 - Stakeholder 1 = Iris, payer.
 - Stakeholder 2 = Billie, payee.
 - Do not swap roles, share launch manifests across roles, or add extra role sessions.
@@ -35,7 +40,8 @@ Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and
 ## Operator checklist
 
 - Open the full runbook and keep this quick-start beside it.
-- Start the relay before the coordinator, and keep both terminals attached.
+- Start the relay before the coordinator, then start the read-only advisory
+  operator console. Keep all three terminals attached.
 - Wait until both role computers are ready because launch manifests expire after 60 minutes.
 - Deliver `payer.launch.json` only Iris through Iris's private channel.
 - Deliver `payee.launch.json` only Billie through Billie's private channel.
@@ -59,14 +65,23 @@ Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and
 
 ## Funding and execution order
 
+The startup control order is exactly:
+`relay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor`.
+Funding at this point means validating and arming the reusable Sepolia
+treasury lane; transfers wait for the coordinator's signed address record.
+
 1. Operator starts relay.
 2. Operator starts coordinator after relay readiness.
-3. Operator waits until both role computers are ready because manifests expire after 60 minutes.
-4. Operator separately delivers `payer.launch.json` only Iris and `payee.launch.json` only Billie.
-5. Iris and Billie start their supervisors from the clean exact SHA checkouts.
-6. Coordinator writes coordinator-owned `funding-addresses.json`.
-7. Operator runs `npm run bilateral:fund` with coordinator-owned `funding-addresses.json`.
-8. The protocol order is `PROPOSED` -> `ACCEPTED` -> `ACKNOWLEDGED` -> operator verification -> `AUTHORIZED`.
+3. Operator starts the loopback-default read-only advisory console.
+4. Operator validates and arms the reusable Sepolia treasury funding lane.
+5. Operator delivers `payer.launch.json` only to Iris. Iris starts the payer supervisor.
+6. Operator delivers `payee.launch.json` only to Billie. Billie starts the payee supervisor.
+7. The supervisors automatically create the Iris-signed mandate and matching
+   Billie-signed request; no operator-authored terms or manual artifact copy is allowed.
+8. Coordinator writes coordinator-owned `funding-addresses.json`.
+9. Operator runs `npm run bilateral:fund` once to make exactly four
+   `0.01 Sepolia ETH` allocations from the reusable treasury.
+10. The protocol order is `PROPOSED` -> `ACCEPTED` -> `ACKNOWLEDGED` -> operator verification -> `AUTHORIZED`.
 
 ## What counts as success
 

@@ -36,6 +36,9 @@ const BILATERAL_PUBLIC_DOCUMENTS = Object.freeze([
   "docs/runbooks/bilateral-demo-quick-start.md",
   "docs/runbooks/bilateral-demo-day.md",
 ]);
+const BILATERAL_COMPATIBILITY_DOCUMENTS = Object.freeze([
+  "prompts/run-billy-bilateral-demo.md",
+]);
 const SUPPORT_FILES = Object.freeze([
   "package.json",
   "bin/handshake-demo.mjs",
@@ -81,6 +84,7 @@ async function temporaryDocumentationFixture(t) {
   for (const relativePath of [
     ...PUBLIC_DOCUMENTS,
     ...BILATERAL_PUBLIC_DOCUMENTS,
+    ...BILATERAL_COMPATIBILITY_DOCUMENTS,
     ...SUPPORT_FILES,
   ]) {
     const destination = join(directory, relativePath);
@@ -381,7 +385,7 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.doesNotMatch(readme, /\b(?:roughly|about|approximately)\s+\d+\s*(?:-|–|to)\s*\d+\s+seconds\b/i);
   assert.match(primaryRunbook, /Stakeholder 1\s+[—-]\s+Iris\s+[—-]\s+payer/);
   assert.match(primaryRunbook, /Stakeholder 2\s+[—-]\s+Billie\s+[—-]\s+payee/);
-  assert.match(primaryRunbook, /Operator\s+[—-]\s+relay,\s+coordinator,\s+watcher,\s+funding wallet,\s+fresh aggregate verifier/i);
+  assert.match(primaryRunbook, /Operator\s+[—-]\s+relay,\s+coordinator,\s+read-only console,\s+watcher,\s+funding wallet,\s+fresh aggregate verifier/i);
   assert.match(primaryRunbook, /RELAY_ADVERTISED_IP[^.\n]*numeric IP[^.\n]*reachable by both role computers/i);
   assert.match(primaryRunbook, /subjectAltName=IP:\$RELAY_ADVERTISED_IP/);
   assert.match(primaryRunbook, /RELAY_TLS_FINGERPRINT=.*openssl x509/i);
@@ -400,12 +404,12 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /--journal-directory "\$FUNDING_JOURNAL_DIR"/);
   assert.match(primaryRunbook, /--keystore "\$SEPOLIA_TREASURY_KEYSTORE"/);
   assert.match(primaryRunbook, /--rpc-url-file "\$SEPOLIA_RPC_URL_FILE"/);
-  assert.match(primaryRunbook, /0\.05 Sepolia ETH[^.\n]*four `0\.01 ETH` allocations/i);
+  assert.match(primaryRunbook, /0\.05 Sepolia ETH[^.\n]*exactly four `0\.01 Sepolia ETH` allocations/i);
   assert.match(primaryRunbook, /second `0\.05` drip[^.\n]*recovery reserve/i);
   assert.match(primaryRunbook, /fresh invitations and a newly reviewed release/i);
   assert.match(primaryRunbook, /demo transactions spend gas from participant balances[^.\n]*never move the represented USD payment/i);
   assert.match(primaryRunbook, /paymentMoved: false/);
-  assert.match(primaryRunbook, /accept `AUTHORIZED` only from each fresh aggregate verifier/i);
+  assert.match(primaryRunbook, /only a fresh aggregate verifier may output\s+`AUTHORIZED`/i);
   assert.match(primaryRunbook, /export OPERATOR_KEY_ID="bilateral-demo-2026-07-28"/);
   assert.match(primaryRunbook, /Commit only `docs\/operator-keys\/\$OPERATOR_KEY_ID\.pub`/);
   assert.match(primaryRunbook, /run `npm run verify`, then freeze `BILATERAL_REPOSITORY_SHA`/i);
@@ -431,8 +435,8 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /test "\$\(stat -f '%Lp' "\$SEPOLIA_RPC_URL_FILE"\)" = "600"/);
   assert.match(primaryRunbook, /already prepared repo-private `\$REPOSITORY_ROOT\/\.context\/bilateral-live-2026-07-28\/sepolia-rpc\.url`/);
   assert.doesNotMatch(primaryRunbook, /printf '%s\\n' "\$SEPOLIA_RPC_URL" > "\$SEPOLIA_RPC_URL_FILE"/);
-  assert.match(billie, /You are Stakeholder 2, Billie, the payee\. Start only the payee supervisor\./);
-  assert.match(iris, /You are Stakeholder 1, Iris, the payer\. Start only the payer supervisor\./);
+  assert.match(billie, /You are Stakeholder 2, Billie, the vendor and payee\. Start only the payee\s+supervisor\./);
+  assert.match(iris, /You are Stakeholder 1, Iris, the payer and mandate owner\. Start only the payer\s+supervisor\./);
   for (const prompt of [billie, iris]) {
     assert.match(prompt, /do not inspect secret bytes/i);
     assert.match(prompt, /do not switch roles/i);
@@ -472,7 +476,7 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
   );
   assert.match(
     quickStart,
-    /Operator[^.\n]*relay[^.\n]*coordinator[^.\n]*funding[^.\n]*watcher[^.\n]*fresh aggregate verifier/i,
+    /Operator[^.\n]*relay[^.\n]*coordinator[^.\n]*read-only console[^.\n]*funding[^.\n]*watcher[^.\n]*fresh aggregate verifier/i,
   );
   assert.match(
     quickStart,
@@ -519,6 +523,122 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
     /no secrets[^.\n]*live evidence[^.\n]*manifest contents/i,
   );
   assert.match(quickStart, /do not claim physical rehearsal passed/i);
+});
+
+test("turnkey bilateral docs pin the mandate, console, funding, and readiness contract", async () => {
+  const [
+    readme,
+    runbook,
+    quickStart,
+    irisPrompt,
+    billiePrompt,
+    billyCompatibility,
+    promptHasher,
+  ] = await Promise.all([
+    readFile(join(ROOT_DIRECTORY, "README.md"), "utf8"),
+    readFile(
+      join(ROOT_DIRECTORY, "docs/runbooks/bilateral-demo-day.md"),
+      "utf8",
+    ),
+    readFile(
+      join(
+        ROOT_DIRECTORY,
+        "docs/runbooks/bilateral-demo-quick-start.md",
+      ),
+      "utf8",
+    ),
+    readFile(
+      join(ROOT_DIRECTORY, "prompts/run-iris-bilateral-demo.md"),
+      "utf8",
+    ),
+    readFile(
+      join(ROOT_DIRECTORY, "prompts/run-billie-bilateral-demo.md"),
+      "utf8",
+    ),
+    readFile(
+      join(ROOT_DIRECTORY, "prompts/run-billy-bilateral-demo.md"),
+      "utf8",
+    ),
+    readFile(
+      join(ROOT_DIRECTORY, "scripts/hash-bilateral-prompts.mjs"),
+      "utf8",
+    ),
+  ]);
+  const helperUrl =
+    "https://clockchain-research.vercel.app/handshake/run";
+  const startupOrder =
+    "relay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor";
+
+  assert.match(
+    irisPrompt,
+    /Iris, the payer and mandate owner/,
+  );
+  assert.match(
+    billiePrompt,
+    /Billie, the vendor and payee/,
+  );
+  assert.match(
+    runbook,
+    /Billie request[\s\S]*Iris mandate[\s\S]*PROPOSED[\s\S]*ACCEPTED[\s\S]*ACKNOWLEDGED/,
+  );
+  assert.match(
+    runbook,
+    /operator console[^.]*read-only[^.]*advisory/i,
+  );
+  assert.match(readme, /npm run bilateral:console --/);
+  assert.match(
+    runbook,
+    /only a fresh aggregate verifier may output `AUTHORIZED`/i,
+  );
+  assert.match(runbook, /paymentMoved:false/);
+  assert.match(
+    runbook,
+    /automatically[^.]*Iris-signed mandate[^.]*Billie-signed request/i,
+  );
+  assert.match(
+    runbook,
+    /exactly four[^.]*`0\.01 Sepolia ETH` allocations/i,
+  );
+  for (const document of [readme, runbook, quickStart]) {
+    assert.ok(document.includes(`](${helperUrl})`));
+    assert.ok(document.includes(startupOrder));
+    assert.match(document, /reusable Sepolia treasury/i);
+    assert.match(document, /rehearsal-ready[^.]*live-validated/i);
+  }
+  for (const document of [
+    readme,
+    runbook,
+    quickStart,
+    irisPrompt,
+    billiePrompt,
+    billyCompatibility,
+  ]) {
+    assert.doesNotMatch(
+      document,
+      /\bBilly(?:,|\s+is|\s+as|\s+[—-])[^.\n]*\bpayer\b/i,
+    );
+    assert.doesNotMatch(
+      document,
+      /\bIris(?:,|\s+is|\s+as|\s+[—-])[^.\n]*\bpayee\b/i,
+    );
+    assert.doesNotMatch(
+      document,
+      /\bauthorization\b[^.\n]*(?:moved|moves|sent|sends|settled|settles|transferred|transfers)\b[^.\n]*\bpayment\b/i,
+    );
+  }
+  assert.match(billyCompatibility, /compatibility only/i);
+  assert.match(
+    billyCompatibility,
+    /run-billie-bilateral-demo\.md/,
+  );
+  assert.match(
+    promptHasher,
+    /payee:\s*"prompts\/run-billie-bilateral-demo\.md"/,
+  );
+  assert.doesNotMatch(
+    promptHasher,
+    /prompts\/run-billy-bilateral-demo\.md/,
+  );
 });
 
 test("bilateral operator runbook orders key publication before release freeze", async () => {
@@ -2218,6 +2338,6 @@ test("reports the true gated document count", async () => {
   assert.equal(exitCode, 0);
   assert.equal(
     stdout.text(),
-    "Documentation checks passed (8 gated documents).\n",
+    "Documentation checks passed (9 gated documents).\n",
   );
 });

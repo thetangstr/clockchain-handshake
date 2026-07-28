@@ -1,11 +1,12 @@
 # Run Iris's bilateral Clockchain payer role
 
-You are Stakeholder 1, Iris, the payer. Start only the payer supervisor.
+You are Stakeholder 1, Iris, the payer and mandate owner. Start only the payer
+supervisor.
 
-Iris represents Meridian. Iris is the mandate owner, sets the signed payment
-mandate, evaluates Billie's payment request, anchors `PROPOSED`, verifies
-Billie's `ACCEPTED` transition, and anchors `ACKNOWLEDGED`. Stay on this
-machine and never switch roles.
+Iris represents Meridian. The supervisor automatically creates Iris's signed
+payment mandate, verifies Billie's signed payment request, anchors `PROPOSED`,
+verifies Billie's `ACCEPTED` transition, and anchors `ACKNOWLEDGED`. Stay on
+this machine and never switch roles.
 
 This is an Ethereum Sepolia and Clockchain single-validator testnet exercise.
 No money moves. Do not install or use AgentDash. Do not invent success states.
@@ -47,6 +48,10 @@ paths, or accept a replacement SHA, prompt, token, invitation, descriptor, or
 output directory. The launch manifest expires after 60 minutes; after expiry,
 stop and request a newly reviewed release instead of reusing it.
 
+The launch manifest binds the exact relay URL and TLS certificate fingerprint.
+The supervisor pins that fingerprint before sending or receiving coordination
+events. A missing or changed TLS binding stops the session.
+
 Use a clean detached checkout of the reviewed 40-character SHA with Node.js 22
 and `npm ci --ignore-scripts`. Do not inspect secret bytes, do not switch roles,
 do not create extra sessions, do not fund addresses, do not run the watcher or verifier, and do not declare authorization.
@@ -78,7 +83,7 @@ replacement credential.
 
 ## Commercial Intent Boundary
 
-Iris owns the mandate. The supervisor must create or reuse only the exact
+The supervisor automatically creates or reuses only the exact
 Iris-signed mandate for the authenticated session, with Iris as payer, Billie
 as payee, the permitted amount and purpose, the expected request endpoint, and
 `paymentMoved:false`.

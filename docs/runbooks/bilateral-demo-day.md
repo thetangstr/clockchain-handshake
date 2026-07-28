@@ -6,7 +6,9 @@ the [Billie payee prompt](../../prompts/run-billie-bilateral-demo.md), and the
 stakeholder execution; it does not replace deterministic verification.
 For the three-computer operator path, start with the
 [three-computer quick-start](./bilateral-demo-quick-start.md), then return here
-for full command detail and recovery boundaries.
+for full command detail and recovery boundaries. The public
+[live-demo helper](https://clockchain-research.vercel.app/handshake/run)
+provides a shareable start surface but never receives live session evidence.
 
 This is an Ethereum Sepolia and Clockchain® single-validator testnet exercise.
 No money moves. Do not install or use AgentDash. Do not invent success states.
@@ -29,7 +31,17 @@ Role cards are fixed for the whole release:
 
 - Stakeholder 1 — Iris — payer.
 - Stakeholder 2 — Billie — payee.
-- Operator — relay, coordinator, watcher, funding wallet, fresh aggregate verifier.
+- Operator — relay, coordinator, read-only console, watcher, funding wallet, fresh aggregate verifier.
+
+Passing repository checks makes this release rehearsal-ready, not
+live-validated. Only a funded physical run whose fresh aggregate verifier
+publishes independently re-verifiable evidence is live-validated.
+
+The startup control order is exactly:
+`relay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor`.
+The funding stage validates and arms the reusable Sepolia treasury lane before
+either role starts; the transfers wait for the coordinator's signed four-address
+record.
 
 All three computers use Node.js 22, `npm ci --ignore-scripts`, and a clean
 detached checkout of one reviewed 40-character SHA. Stop if any worktree is
@@ -154,9 +166,32 @@ npm run bilateral:coordinator -- \
   --tls-fingerprint "$RELAY_TLS_FINGERPRINT"
 ```
 
+Terminal 3 - read-only operator console:
+
+```sh
+npm run bilateral:console -- \
+  --state-root "$BILATERAL_RELEASE_ROOT"
+```
+
+Open `http://127.0.0.1:8787` only on the operator Mac. The operator console is
+read-only and advisory: it projects sanitized validated state but cannot
+control the relay, change commercial terms, or authorize a session. Relay and
+watcher observations remain advisory even when displayed there.
+
+Before either role supervisor starts, validate the already configured reusable
+Sepolia treasury paths and keep the funding command staged. Do not send a
+transfer until the coordinator publishes the signed address record:
+
+```sh
+test -f "$SEPOLIA_TREASURY_KEYSTORE"
+test -f "$SEPOLIA_TREASURY_PUBLIC_METADATA"
+test -f "$SEPOLIA_RPC_URL_FILE"
+```
+
 The coordinator publishes two private launch manifests under the release root.
-Launch manifests expire after 60 minutes. Privately transfer payer.launch.json only to Iris and payee.launch.json only to Billie through separate private
-channels; never transfer the other role's manifest, an invitation, a token, a
+Launch manifests expire after 60 minutes. Privately transfer payer.launch.json only to Iris.
+Privately transfer payee.launch.json only to Billie through a separate private
+channel. Never transfer the other role's manifest, an invitation, a token, a
 private key, the Sepolia RPC URL, or the treasury keystore. Each role machine
 uses its prompt, one manifest, one private state directory, and the same clean
 detached checkout of the reviewed 40-character SHA.
@@ -167,7 +202,7 @@ The user has exactly two kinds of demo-day action:
    manifest and Billie once with the payee launch manifest.
 2. Fund the four displayed addresses with the reusable Sepolia treasury command.
 
-Iris machine:
+Start the role supervisors in this order. Iris machine:
 
 ```sh
 npm run bilateral:supervisor -- \
@@ -175,7 +210,7 @@ npm run bilateral:supervisor -- \
   --state "$IRIS_SUPERVISOR_STATE"
 ```
 
-Billie machine:
+Then Billie machine:
 
 ```sh
 npm run bilateral:supervisor -- \
@@ -188,6 +223,12 @@ creates two invitations and one token per role for both runs. After both
 authenticated enrollments, the coordinator displays exactly four signed public
 addresses and continuously checks their balances and nonce-zero status; there
 is no human “funding complete” signal.
+
+The long-lived supervisors automatically create the Iris-signed mandate and
+the matching Billie-signed request. No operator-authored commercial terms,
+manual intent-artifact copy, or extra role session belongs in the primary flow.
+The Billie request must match the Iris mandate before the sequence may continue:
+`PROPOSED` -> `ACCEPTED` -> `ACKNOWLEDGED`.
 
 Use the coordinator-owned `$BILATERAL_RELEASE_ROOT/funding-addresses.json` file
 directly; do not copy or rewrite the funding record. Save the coordinator-owned `$BILATERAL_RELEASE_ROOT/funding-addresses.json` as the mode-`0600` record file for the funding command, then run one treasury funding batch:
@@ -203,14 +244,16 @@ npm run bilateral:fund -- \
   --rpc-url-file "$SEPOLIA_RPC_URL_FILE"
 ```
 
-0.05 Sepolia ETH covers four `0.01 ETH` allocations plus ordinary treasury
+0.05 Sepolia ETH covers exactly four `0.01 Sepolia ETH` allocations plus ordinary treasury
 transfer gas for one clean rehearsal-plus-stakeholder release. The demo transactions spend gas from participant balances but never move the represented USD payment, so every protocol and verdict artifact remains `paymentMoved: false`. A second `0.05` drip is a recovery reserve because an ambiguous or
 consumed invitation cannot be reused. Fresh invitations and a newly reviewed release are required after an unrecoverable write.
 
 The coordinator then runs one signed physical-machine preflight for both runs,
 registers the rehearsal identities, creates the signed USD 100 descriptor,
 starts Billie before Iris, collects both marker-complete role packages, and
-launches a fresh aggregate verifier. Accept `AUTHORIZED` only from each fresh aggregate verifier. An exact rehearsal verifier pass unlocks the stakeholder
+launches a fresh aggregate verifier. Only a fresh aggregate verifier may output `AUTHORIZED`;
+no role, relay, watcher, coordinator, console, or narrative may do so. An exact
+rehearsal verifier pass unlocks the stakeholder
 run, which uses fresh registration, descriptor, result, and verdict directories
 but the same supervisor keys, tokens, preflight, prompts, release, and
 repository SHA. The coordinator completes rehearsal before it starts the
@@ -222,7 +265,7 @@ token, invitation, descriptor, output-path, event-chain, or evidence mismatch
 also aborts it.
 Relay, coordinator, watcher, and supervisor states are coordination only. They
 never replace independent verification of exactly three ordered Clockchain
-anchors, and `paymentMoved: false` remains invariant.
+anchors, and `paymentMoved:false` remains invariant.
 
 ## Operator-authorized recovery appendix
 

@@ -25,22 +25,28 @@ the exit it produces, and the next action for the operator.
 
 ## Bilateral payment-authorization demo
 
-The operator-led bilateral flow uses separate Iris payer and Billie payee
-machines. Start with the
+The operator-led bilateral flow uses separate role computers. Iris is the
+payer. Billie is the payee. Start with the
 [three-computer quick-start](docs/runbooks/bilateral-demo-quick-start.md), then
 use the [bilateral demo-day runbook](docs/runbooks/bilateral-demo-day.md) and
 deliver the machine-specific [Iris prompt](prompts/run-iris-bilateral-demo.md)
 and [Billie prompt](prompts/run-billie-bilateral-demo.md) from one reviewed
-immutable repository SHA.
+immutable repository SHA. The public
+[live-demo helper](https://clockchain-research.vercel.app/handshake/run)
+explains the same workflow but never receives live evidence.
 
-Demo-day role mapping is fixed: Stakeholder 1 is Iris, the payer; Stakeholder 2 is Billie, the payee; the operator runs the relay, coordinator, watcher,
-reusable Sepolia treasury, and fresh aggregate verifier from this Mac. The
+Demo-day role mapping is fixed. Stakeholder 1 is Iris, the payer. Stakeholder 2
+is Billie, the payee. The operator runs the relay, coordinator, watcher,
+read-only console, reusable Sepolia treasury, and fresh aggregate verifier from this Mac. The
 reusable Sepolia treasury is funding authority only for deterministic testnet
 gas top-ups through `npm run bilateral:fund`; it never signs participant
 registration, role, watcher, or verifier actions.
 
-Iris anchors an exact USD 100 proposal, Billie anchors an acceptance bound to
-that proposal, and Iris anchors the final acknowledgment. For a session that
+The long-lived supervisors automatically create the Iris-signed mandate and
+the matching Billie-signed request without operator-authored commercial terms
+or manual artifact copying. Iris anchors an exact USD 100 proposal, Billie
+anchors an acceptance bound to that proposal, and Iris anchors the final
+acknowledgment. For a session that
 the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence
 establishes that Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and
 `ACKNOWLEDGED`, and Billie anchored `ACCEPTED`. The protocol does not download message
@@ -58,14 +64,25 @@ The automated demo-day surface is CLI-first:
 ```sh
 npm run bilateral:relay -- <operator relay paths and pinned release SHA>
 npm run bilateral:coordinator -- <operator-local paths and pinned release SHA>
+npm run bilateral:console -- --state-root <operator release root>
 npm run bilateral:supervisor -- --launch-manifest <role manifest> --state <private state directory>
 ```
+
+The startup control order is:
+`relay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor`.
+Here, funding means validating and arming the reusable Sepolia treasury lane
+before either role starts. After enrollment reveals the four fresh addresses,
+the operator executes exactly four `0.01 Sepolia ETH` allocations.
 
 Run the supervisor command once on Iris and once on Billie. Those two processes
 span the rehearsal and stakeholder runs. After they enroll, the coordinator
 displays four signed public addresses; funding those four addresses is the
 user's only other action. Low-level preparation and exact-input recovery
 commands are confined to the runbook's operator-authorized recovery appendix.
+
+Passing deterministic checks makes this release rehearsal-ready, not
+live-validated. Only a funded physical rehearsal whose fresh aggregate
+verifier publishes independently re-verifiable evidence is live-validated.
 
 ## Operator-only clean-client acceptance
 
