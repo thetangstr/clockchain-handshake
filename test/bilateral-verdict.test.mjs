@@ -482,15 +482,16 @@ async function completeFixture(t) {
   const sessionDigest = dSession(descriptor);
   const { privateKey, publicKey } =
     generateKeyPairSync("ed25519");
+  const repositoryPrivateKeyPem = privateKey.export({
+    format: "pem",
+    type: "pkcs8",
+  });
   const repositoryPublicKey = rawPublicKeyBase64FromPem(
     publicKey.export({ format: "pem", type: "spki" }),
   );
   const descriptorEnvelope = createSignedEnvelope(descriptor, {
     keyId: "verdict-test-operator",
-    privateKeyPem: privateKey.export({
-      format: "pem",
-      type: "pkcs8",
-    }),
+    privateKeyPem: repositoryPrivateKeyPem,
   });
   const clockchain = createFakeBilateralClockchain();
   for (const role of ["payer", "payee"]) {
@@ -624,6 +625,7 @@ async function completeFixture(t) {
     payer,
     payerDirectory,
     repositoryPublicKey,
+    repositoryPrivateKeyPem,
     requestEnvelope,
     root,
     sessionDigest,
@@ -633,6 +635,59 @@ async function completeFixture(t) {
 
 function cloned(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+async function signedIntentVariant(
+  fixture,
+  { mandateOverrides = {}, requestOverrides = {} } = {},
+) {
+  const mandateEnvelope = await signPayerMandate({
+    mandate: {
+      ...fixture.mandateEnvelope.mandate,
+      ...mandateOverrides,
+    },
+    signMessage: (raw) => PAYER.signMessage({ message: { raw } }),
+  });
+  const requestEnvelope = await signPaymentRequest({
+    request: {
+      ...fixture.requestEnvelope.request,
+      ...requestOverrides,
+      mandateDigest: payerMandateDigest(mandateEnvelope),
+    },
+    signMessage: (raw) => PAYEE.signMessage({ message: { raw } }),
+  });
+  return { mandateEnvelope, requestEnvelope };
+}
+
+function descriptorBoundIntentInput(
+  fixture,
+  mandateEnvelope,
+  requestEnvelope,
+) {
+  const descriptor = {
+    ...fixture.descriptor,
+    mandateDigest: payerMandateDigest(mandateEnvelope),
+    requestDigest: paymentRequestDigest(requestEnvelope),
+  };
+  return {
+    descriptorEnvelope: createSignedEnvelope(descriptor, {
+      keyId: fixture.descriptorEnvelope.operator.keyId,
+      privateKeyPem: fixture.repositoryPrivateKeyPem,
+    }),
+    mandateEnvelope,
+    requestEnvelope,
+  };
+}
+
+function corruptedIntentSignature(envelope) {
+  const value = envelope.signature.value;
+  return {
+    ...envelope,
+    signature: {
+      ...envelope.signature,
+      value: `${value.slice(0, -1)}${value.endsWith("0") ? "1" : "0"}`,
+    },
+  };
 }
 
 function clockchainWith(clockchain, overrides = {}) {
@@ -883,6 +938,55 @@ test("rejects unbound descriptor and intent envelopes before package or Clockcha
       const { calls, input } = countingVerifierInput(
         fixture,
         scenario.overrides,
+      );
+      await assertVerdictFailure(input, "FAILED");
+      assert.equal(calls.files, 0);
+      assert.equal(calls.clockchain, 0);
+    });
+  }
+});
+
+test("rejects descriptor-bound invalid intent signatures and windows before I/O", async (t) => {
+  const fixture = await completeFixture(t);
+  const requestBeforeMandate = await signedIntentVariant(fixture, {
+    requestOverrides: { createdAtMs: "1784923000000" },
+  });
+  const requestPastMandate = await signedIntentVariant(fixture, {
+    requestOverrides: { expiresAtMs: "1784923900000" },
+  });
+  const scenarios = [
+    {
+      mandateEnvelope: corruptedIntentSignature(
+        fixture.mandateEnvelope,
+      ),
+      name: "invalid payer mandate signature",
+      requestEnvelope: fixture.requestEnvelope,
+    },
+    {
+      mandateEnvelope: fixture.mandateEnvelope,
+      name: "invalid payment request signature",
+      requestEnvelope: corruptedIntentSignature(
+        fixture.requestEnvelope,
+      ),
+    },
+    {
+      ...requestBeforeMandate,
+      name: "request begins before mandate",
+    },
+    {
+      ...requestPastMandate,
+      name: "request ends after mandate",
+    },
+  ];
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const { calls, input } = countingVerifierInput(
+        fixture,
+        descriptorBoundIntentInput(
+          fixture,
+          scenario.mandateEnvelope,
+          scenario.requestEnvelope,
+        ),
       );
       await assertVerdictFailure(input, "FAILED");
       assert.equal(calls.files, 0);

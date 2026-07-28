@@ -21,7 +21,6 @@ import {
 } from "./descriptor.mjs";
 import {
   payerMandateDigest,
-  verifyPayerMandate,
 } from "./payer-mandate.mjs";
 import {
   paymentRequestDigest,
@@ -1041,7 +1040,22 @@ function selectedIntentAmount(proposal) {
   });
 }
 
-function mandateExpectedContext(descriptor, mandateEnvelope, amount) {
+function descriptorIntentAmount(descriptor, mandate) {
+  const matches = descriptor.amountOptions.filter(
+    (amount) =>
+      amount.currency === mandate.amount.currency &&
+      amount.value === mandate.amount.value,
+  );
+  if (matches.length !== 1) {
+    fail();
+  }
+  return Object.freeze({
+    currency: matches[0].currency,
+    value: matches[0].value,
+  });
+}
+
+function mandateExpectedContext(descriptor, mandateEnvelope) {
   const mandate = mandateEnvelope.mandate;
   if (
     mandate.payer.address !== descriptor.payer.address ||
@@ -1053,7 +1067,7 @@ function mandateExpectedContext(descriptor, mandateEnvelope, amount) {
     fail();
   }
   return Object.freeze({
-    amount,
+    amount: descriptorIntentAmount(descriptor, mandate),
     invoiceReferencePrefix: mandate.invoiceReferencePrefix,
     payee: Object.freeze({
       address: descriptor.payee.address,
@@ -1072,31 +1086,51 @@ function mandateExpectedContext(descriptor, mandateEnvelope, amount) {
   });
 }
 
-async function verifyCommercialIntent(
+async function verifyCommercialIntentPolicy(
   descriptor,
   mandateEnvelope,
   requestEnvelope,
-  proposal,
-  nowMs,
 ) {
   const expected = mandateExpectedContext(
     descriptor,
     mandateEnvelope,
-    selectedIntentAmount(proposal),
   );
-  await verifyPayerMandate({
-    envelope: mandateEnvelope,
-    expected,
-    nowMs,
-  });
   const { requestEndpoint: _requestEndpoint, ...requestExpected } =
     expected;
-  await verifyPaymentRequest({
+  const verifiedRequest = await verifyPaymentRequest({
     envelope: requestEnvelope,
     mandateEnvelope,
     expected: requestExpected,
-    nowMs,
+    nowMs: Number(requestEnvelope.request.createdAtMs),
   });
+  return Object.freeze({
+    amount: expected.amount,
+    mandateExpiresAtMs: mandateEnvelope.mandate.expiresAtMs,
+    mandateIssuedAtMs: mandateEnvelope.mandate.issuedAtMs,
+    requestCreatedAtMs: verifiedRequest.request.createdAtMs,
+    requestExpiresAtMs: verifiedRequest.request.expiresAtMs,
+  });
+}
+
+function verifyCommercialIntentAtAnchor(policy, proposal, nowMs) {
+  const amount = selectedIntentAmount(proposal);
+  if (
+    amount.currency !== policy.amount.currency ||
+    amount.value !== policy.amount.value ||
+    !Number.isSafeInteger(nowMs) ||
+    nowMs < 0
+  ) {
+    fail();
+  }
+  const anchorTime = BigInt(nowMs);
+  if (
+    anchorTime < BigInt(policy.mandateIssuedAtMs) ||
+    anchorTime >= BigInt(policy.mandateExpiresAtMs) ||
+    anchorTime < BigInt(policy.requestCreatedAtMs) ||
+    anchorTime >= BigInt(policy.requestExpiresAtMs)
+  ) {
+    fail("EXPIRED");
+  }
 }
 
 function createVerdict(descriptor, sessionDigest, live, bounds) {
@@ -1163,6 +1197,11 @@ export async function verifyBilateralAuthorization(input) {
     ) {
       fail();
     }
+    const commercialIntent = await verifyCommercialIntentPolicy(
+      descriptor,
+      snapshot.mandateEnvelope,
+      snapshot.requestEnvelope,
+    );
 
     const [payer, payee] = await loadPartyPackages(
       snapshot.fileSystem,
@@ -1175,10 +1214,8 @@ export async function verifyBilateralAuthorization(input) {
       snapshot.clockchain,
       descriptor,
     );
-    await verifyCommercialIntent(
-      descriptor,
-      snapshot.mandateEnvelope,
-      snapshot.requestEnvelope,
+    verifyCommercialIntentAtAnchor(
+      commercialIntent,
       live[0].message,
       live[0].verified.blockTimeMs,
     );
