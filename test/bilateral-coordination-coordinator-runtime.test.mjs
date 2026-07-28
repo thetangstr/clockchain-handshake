@@ -119,7 +119,7 @@ test("production runtime exposes real bridges and relay START remains the role a
   const client = Object.freeze({
     appendOperatorEvent: async () => {}, appendVerifiedEvent: async () => {}, createVerifiedEvent: async () => {},
     getArtifact: async () => Buffer.from("{}"), putArtifact: async () => ({ digest: "c".repeat(64) }),
-    readEnrollmentSet: async () => Buffer.from("{}"), readEvents: async () => [], readSessionView: async () => ({ paymentMoved: false }), readVerifierPublication: async () => null,
+    readEnrollmentSet: async () => Buffer.from("{}"), readEvents: async () => [], readSessionView: async () => ({ facts: { enrollmentConfirmed: { payee: true, payer: true } }, paymentMoved: false }), readVerifierPublication: async () => null,
   });
   const runtime = createCoordinatorRuntimeDependencies(config, {
     createClient: () => client,
@@ -131,6 +131,77 @@ test("production runtime exposes real bridges and relay START remains the role a
   assert.equal(bridges, runtime.runDependencies({ releaseId: "release-a", sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }));
   for (const name of ["createPreflightPlan", "runAggregatePreflight", "validateArtifact", "waitForPreflightParticipant", "waitForIdentityPackage", "createDescriptor", "launchVerifier", "startRole", "startWatcher", "validatePublishedBilateralVerdict", "waitForDescriptorAcceptance", "validateRehearsalPackage", "waitForRolePackage", "waitForRoleStarted"]) assert.notEqual(bridges[name], undefined);
   await bridges.startRole({ role: "payee", subjectRun: "rehearsal" });
+});
+
+test("runtime publishes one canonical private funding address file and validates it on restart", async (t) => {
+  const rootPath = await mkdtemp(join(tmpdir(), "coordinator-runtime-funding-"));
+  await chmod(rootPath, 0o700);
+  const before = await lstat(rootPath);
+  const handle = await open(rootPath, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0));
+  t.after(() => handle.close());
+  t.after(() => rm(rootPath, { recursive: true, force: true }));
+  const config = Object.freeze({
+    clockchainToken: "token",
+    operatorIdentity: Object.freeze({ keyId: "clockchain-demo-2026", privateKeyPem: "private", publicKey: "public" }),
+    operatorPublicKey: "public",
+    releaseRoot: Object.freeze({ before, handle, path: rootPath }),
+    repositorySha: "a".repeat(40),
+    relayUrl: "https://127.0.0.1:8443",
+    rpcUrl: "https://127.0.0.1/",
+    tlsCertificatePem: "certificate",
+    tlsFingerprint: "b".repeat(64),
+  });
+  const addresses = [
+    "0x1111111111111111111111111111111111111111",
+    "0x2222222222222222222222222222222222222222",
+    "0x3333333333333333333333333333333333333333",
+    "0x4444444444444444444444444444444444444444",
+  ];
+  const output = [];
+  const runtime = createCoordinatorRuntimeDependencies(config, { createClient: () => ({}), createTransport: () => ({}), output: (line) => output.push(line) });
+  await runtime.runDependencies({ releaseId: "release-a", repositorySha: config.repositorySha, sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }).displayAddresses(addresses);
+  const path = join(rootPath, "funding-addresses.json");
+  const bytes = await readFile(path);
+  assert.equal((await lstat(path)).mode & 0o777, 0o600);
+  assert.equal(bytes.toString("utf8"), `${JSON.stringify({ addresses, paymentMoved: false, schema: "clockchain.bilateral-funding-addresses/v1" })}\n`);
+  assert.deepEqual(output, [bytes.toString("utf8")]);
+
+  const restartOutput = [];
+  const restarted = createCoordinatorRuntimeDependencies(config, { createClient: () => ({}), createTransport: () => ({}), output: (line) => restartOutput.push(line) });
+  await restarted.runDependencies({ releaseId: "release-a", repositorySha: config.repositorySha, sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }).displayAddresses(addresses);
+  assert.equal((await readFile(path)).equals(bytes), true);
+  assert.deepEqual(restartOutput, [bytes.toString("utf8")]);
+
+  const hostile = createCoordinatorRuntimeDependencies(config, { createClient: () => ({}), createTransport: () => ({}) });
+  await assert.rejects(hostile.runDependencies({ releaseId: "release-a", repositorySha: config.repositorySha, sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }).displayAddresses([...addresses].reverse()));
+});
+
+test("runtime rejects stale funding address temporaries before publishing", async (t) => {
+  const rootPath = await mkdtemp(join(tmpdir(), "coordinator-runtime-funding-stale-"));
+  await chmod(rootPath, 0o700);
+  await writeFile(join(rootPath, ".funding-addresses-stale.tmp"), "{}", { mode: 0o600 });
+  const before = await lstat(rootPath);
+  const handle = await open(rootPath, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0));
+  t.after(() => handle.close());
+  t.after(() => rm(rootPath, { recursive: true, force: true }));
+  const config = {
+    clockchainToken: "token",
+    operatorIdentity: { keyId: "clockchain-demo-2026", privateKeyPem: "private", publicKey: "public" },
+    operatorPublicKey: "public",
+    releaseRoot: { before, handle, path: rootPath },
+    repositorySha: "a".repeat(40),
+    relayUrl: "https://127.0.0.1:8443",
+    rpcUrl: "https://127.0.0.1/",
+    tlsCertificatePem: "certificate",
+    tlsFingerprint: "b".repeat(64),
+  };
+  const runtime = createCoordinatorRuntimeDependencies(config, { createClient: () => ({}), createTransport: () => ({}) });
+  await assert.rejects(async () => runtime.runDependencies({ releaseId: "release-a", repositorySha: config.repositorySha, sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }).displayAddresses([
+    "0x1111111111111111111111111111111111111111",
+    "0x2222222222222222222222222222222222222222",
+    "0x3333333333333333333333333333333333333333",
+    "0x4444444444444444444444444444444444444444",
+  ]));
 });
 
 test("runtime release dependencies satisfy the coordinator release contract", async (t) => {
@@ -208,7 +279,7 @@ test("runtime run dependencies cross the coordinator's exact validation boundary
   const runtime = createCoordinatorRuntimeDependencies(config, {
     createClient: () => ({
       appendOperatorEvent: async () => {}, appendVerifiedEvent: async () => {}, createVerifiedEvent: async () => {}, getArtifact: async () => Buffer.from("{}"), putArtifact: async () => ({ digest: "c".repeat(64) }),
-      readEnrollmentSet: async () => { enrollmentReads += 1; return Buffer.from("{}"); }, readEvents: async () => [], readSessionView: async () => ({ paymentMoved: false }), readVerifierPublication: async () => null,
+      readEnrollmentSet: async () => { enrollmentReads += 1; return Buffer.from("{}"); }, readEvents: async () => [], readSessionView: async () => ({ facts: { enrollmentConfirmed: { payee: true, payer: true } }, paymentMoved: false }), readVerifierPublication: async () => null,
       registerCapabilitySet: async ({ registration }) => ({ capabilities: registration.capabilities, paymentMoved: false, registrationDigest: "c".repeat(64), releaseId: registration.releaseId, repositorySha: registration.repositorySha, requestDigest: "d".repeat(64), schema: "clockchain.bilateral-capability-registration-receipt/v1", sessionId: registration.sessionId }),
     }),
     createTransport: () => ({}),

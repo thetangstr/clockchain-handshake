@@ -1462,6 +1462,28 @@ async function assertRoleFundingReadiness({ dependencies, release }) {
   }
 }
 
+async function waitForAdvisoryEnrollmentReadiness({ dependencies }) {
+  if (typeof dependencies.now !== "function" || typeof dependencies.readSessionView !== "function" || typeof dependencies.sleeper !== "function") invalid();
+  let attempts = 0;
+  let deadline;
+  let previous;
+  for (;;) {
+    const current = dependencies.now();
+    if (!Number.isSafeInteger(current) || current < 0 || (previous !== undefined && current < previous)) invalid();
+    previous = current;
+    deadline ??= current + FUNDING_READINESS_DEADLINE_MS;
+    const view = await dependencies.readSessionView();
+    if (!isPlainObject(view) || view.paymentMoved !== false || !isPlainObject(view.facts) || !isPlainObject(view.facts.enrollmentConfirmed)) invalid();
+    const confirmed = view.facts.enrollmentConfirmed;
+    if (confirmed.payee === true && confirmed.payer === true) return;
+    if (confirmed.payee !== false && confirmed.payee !== true) invalid();
+    if (confirmed.payer !== false && confirmed.payer !== true) invalid();
+    if (current >= deadline || attempts >= FUNDING_READINESS_DEADLINE_MS / FUNDING_READINESS_INTERVAL_MS) invalid();
+    attempts += 1;
+    await dependencies.sleeper(Math.min(FUNDING_READINESS_INTERVAL_MS, Math.max(1, deadline - current)));
+  }
+}
+
 export async function createCoordinatorRelease(input) {
   const keys = isPlainObject(input) && Reflect.ownKeys(input).includes("dependencies")
     ? RELEASE_INPUT_KEYS_WITH_DEPENDENCIES
@@ -1617,7 +1639,8 @@ export async function runCoordinator(input) {
     ) invalid();
   }
   const events = await dependencies.readEvents({ after: null, waitMs: 0 });
-  if (!Array.isArray(events) || (await dependencies.readSessionView())?.paymentMoved !== false) invalid();
+  if (!Array.isArray(events)) invalid();
+  await waitForAdvisoryEnrollmentReadiness({ dependencies });
   const enrollmentSetBytes = await dependencies.readEnrollmentSet();
   let enrollmentSet;
   try {
@@ -1664,7 +1687,7 @@ export async function runCoordinator(input) {
     persisted = replayAdopted;
     return deepFreeze({ capabilityDigests: release.capabilityDigests, checkpoints: persisted.checkpoints, events: events.length, paymentMoved: false, releaseId: release.releaseId, repositorySha: release.repositorySha, schema: COORDINATOR_STATE_SCHEMA, sessionId: release.sessionId, state: persisted.state });
   }
-  const addresses = [payee.invitations.rehearsal.address, payee.invitations.stakeholder.address, payer.invitations.rehearsal.address, payer.invitations.stakeholder.address];
+  const addresses = [payer.invitations.rehearsal.address, payee.invitations.rehearsal.address, payer.invitations.stakeholder.address, payee.invitations.stakeholder.address];
   if (
     addresses.some((address) => typeof address !== "string" || !/^0x[0-9a-f]{40}$/.test(address)) ||
     new Set(addresses).size !== 4

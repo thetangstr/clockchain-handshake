@@ -37,6 +37,8 @@ const MAX_PRIVATE_BYTES = 64 * 1024;
 const MAX_CERTIFICATE_BYTES = 1024 * 1024;
 const STATE_MAX_BYTES = 64 * 1024;
 const MAX_WATCHER_BYTES = 16 * 1024;
+const FUNDING_ADDRESSES_FILE_NAME = "funding-addresses.json";
+const FUNDING_ADDRESSES_SCHEMA = "clockchain.bilateral-funding-addresses/v1";
 const VERIFIER_CONTEXT_SCHEMA = "clockchain.bilateral-coordinator-verifier-context/v1";
 const VERIFIER_PUBLICATION_SCHEMA = "clockchain.bilateral-verifier-publication/v1";
 const SHA40 = /^[0-9a-f]{40}$/;
@@ -51,6 +53,10 @@ const privateFile = (s) => s.isFile() && !s.isSymbolicLink() && s.uid === proces
 const publicFile = (s) => s.isFile() && !s.isSymbolicLink() && s.nlink === 1;
 const privateRoot = (s) => s.isDirectory() && !s.isSymbolicLink() && s.uid === process.getuid() && (s.mode & 0o777) === 0o700;
 const relayPackageBytes = (value) => Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(value)), "utf8");
+function fundingAddressBytes(addresses) {
+  if (!Array.isArray(addresses) || addresses.length !== 4 || new Set(addresses).size !== 4 || addresses.some((address) => !ADDRESS.test(address))) fail();
+  return Buffer.from(`${JSON.stringify({ addresses, paymentMoved: false, schema: FUNDING_ADDRESSES_SCHEMA })}\n`, "utf8");
+}
 function tokenText(bytes) { const text = bytes.toString("utf8"); const value = text.endsWith("\n") ? text.slice(0, -1) : text; if (!/^[!-~]{1,4096}$/.test(value) || value.includes("\r") || value.includes("\n")) fail(); return value; }
 function abortableSleep(delay, signal) {
   if (!Number.isSafeInteger(delay) || delay < 0) fail();
@@ -67,6 +73,33 @@ async function writePrivate(path, bytes) {
   if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > 3_145_728) fail();
   const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
   try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+}
+async function publishFundingAddresses(root, addresses) {
+  const bytes = fundingAddressBytes(addresses);
+  const path = join(root.path, FUNDING_ADDRESSES_FILE_NAME);
+  await assertRoot(root);
+  const names = await readdir(root.path);
+  if (!Array.isArray(names) || names.some((name) => typeof name !== "string" || name.startsWith(".funding-addresses") && name.endsWith(".tmp"))) fail();
+  let existing = null;
+  try { existing = await readStable(path, bytes.length + 1, privateFile); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  if (existing !== null) {
+    if (!existing.equals(bytes)) fail();
+    await assertRoot(root);
+    return bytes;
+  }
+  const temporary = join(root.path, `.${FUNDING_ADDRESSES_FILE_NAME}.${randomUUID()}.tmp`);
+  try {
+    await writePrivate(temporary, bytes);
+    await assertRoot(root);
+    try { await readStable(path, bytes.length + 1, privateFile); fail(); } catch (error) { if (error?.message === "Coordinator startup failed safely.") throw error; if (error?.code !== "ENOENT") fail(); }
+    await rename(temporary, path);
+    await root.handle.sync();
+    await assertRoot(root);
+    if (!(await readStable(path, bytes.length + 1, privateFile)).equals(bytes)) fail();
+    return bytes;
+  } finally {
+    await unlink(temporary).catch(() => {});
+  }
 }
 async function privateStage(root, name) {
   await assertRoot(root); const path = join(root.path, name); await mkdir(path, { mode: 0o700, recursive: true }); await assertRoot(root); const metadata = await lstat(path); if (!privateRoot(metadata)) fail(); return path;
@@ -337,7 +370,7 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
       };
       const runtimeDependencies = Object.freeze({
         appendOperatorEvent: client.appendOperatorEvent, appendVerifiedEvent: client.appendVerifiedEvent, createVerifiedEvent: client.createVerifiedEvent, getArtifact: client.getArtifact, putArtifact: client.putArtifact, readEnrollmentSet: client.readEnrollmentSet, readEvents: client.readEvents, readSessionView: client.readSessionView, readVerifierPublication: client.readVerifierPublication,
-        readState: state.readState, writeState: state.writeState, resolveOperatorPublicKey: async () => config.operatorPublicKey, waitForFunding: dependencies.waitForFunding ?? createProductionFundingWaiter({ now, rpcUrl: config.rpcUrl, sleeper }), now, sleeper, displayAddresses: (addresses) => { if (displayedFunding || !Array.isArray(addresses) || addresses.length !== 4 || new Set(addresses).size !== 4 || addresses.some((address) => !ADDRESS.test(address))) fail(); displayedFunding = true; (dependencies.output ?? ((line) => process.stdout.write(line)))(`${JSON.stringify({ addresses, paymentMoved: false, schema: "clockchain.bilateral-funding-addresses/v1" })}\n`); }, createTransport: () => transport,
+        readState: state.readState, writeState: state.writeState, resolveOperatorPublicKey: async () => config.operatorPublicKey, waitForFunding: dependencies.waitForFunding ?? createProductionFundingWaiter({ now, rpcUrl: config.rpcUrl, sleeper }), now, sleeper, displayAddresses: async (addresses) => { if (displayedFunding) fail(); displayedFunding = true; const bytes = await publishFundingAddresses(config.releaseRoot, addresses); (dependencies.output ?? ((line) => process.stdout.write(line)))(bytes.toString("utf8")); }, createTransport: () => transport,
         launcher: async () => fail(), verifyMarkerCompleteVerdict: async () => fail(),
         // The coordinator owns lifecycle ordering; this runtime only validates a
         // bounded artifact snapshot and observes authenticated relay effects.

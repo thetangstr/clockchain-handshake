@@ -193,7 +193,7 @@ async function signedFundingReplay() {
 function rawReplayDependencies({ fixture, set, verifierPublication = null }) {
   return {
     appendOperatorEvent: () => {}, createTransport: () => {}, displayAddresses: () => {}, launcher: () => {}, now: () => 0, putArtifact: () => {},
-    readEnrollmentSet: async () => set, readEvents: async () => fixture.events, readSessionView: async () => ({ paymentMoved: false }), readState: async () => null,
+    readEnrollmentSet: async () => set, readEvents: async () => fixture.events, readSessionView: async () => ({ facts: { enrollmentConfirmed: { payee: true, payer: true } }, paymentMoved: false }), readState: async () => null,
     readVerifierPublication: async () => verifierPublication,
     resolveOperatorPublicKey: async () => rawPublicKey(fixture.keys.operator),
     sleeper: () => {}, verifyMarkerCompleteVerdict: () => {}, writeState: () => {}, waitForFunding: () => {},
@@ -807,6 +807,9 @@ test("rejects arbitrary step injection instead of treating it as coordination", 
 
 test("derives stable funding addresses from a signed canonical enrollment set", async () => {
   const calls = [];
+  const payee = await enrollment("payee", 1);
+  const payer = await enrollment("payer", 3);
+  const set = await enrollmentSetBytes({ payee, payer });
   const release = {
     capabilityDigests: ["a".repeat(64), "b".repeat(64)],
     paymentMoved: false,
@@ -822,11 +825,11 @@ test("derives stable funding addresses from a signed canonical enrollment set", 
       createTransport: dependency,
       displayAddresses: async (addresses) => calls.push(["display", addresses]),
       launcher: dependency,
-      now: dependency,
+      now: () => 0,
       putArtifact: dependency,
-      readEnrollmentSet: enrollmentSetBytes,
+      readEnrollmentSet: async () => set,
       readEvents: async () => [],
-      readSessionView: async () => ({ paymentMoved: false }),
+      readSessionView: async () => ({ facts: { enrollmentConfirmed: { payee: true, payer: true } }, paymentMoved: false }),
       legacyEvents: async () => fundingReplay(),
       readState: async () => null,
       sleeper: dependency,
@@ -841,7 +844,88 @@ test("derives stable funding addresses from a signed canonical enrollment set", 
     releaseRoot: "/private/release",
   });
   assert.equal(calls[0][0], "display");
-  assert.equal(calls[0][1].length, 4);
+  assert.deepEqual(calls[0][1], [
+    payer.invitations.rehearsal.address,
+    payee.invitations.rehearsal.address,
+    payer.invitations.stakeholder.address,
+    payee.invitations.stakeholder.address,
+  ]);
+});
+
+test("waits for advisory enrollment readiness before reading the authoritative enrollment set", async () => {
+  const fixture = signedReplayFixture();
+  const payee = await enrollment("payee", 1, fixture.keys.payee);
+  const payer = await enrollment("payer", 3, fixture.keys.payer);
+  const set = await enrollmentSetBytes({ payee, payer });
+  const release = { capabilityDigests: ["a".repeat(64), "b".repeat(64)], paymentMoved: false, releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, schema: COORDINATOR_STATE_SCHEMA, sessionId: SESSION_ID };
+  let views = 0;
+  let enrollmentReads = 0;
+  let sleeps = 0;
+  const result = await runCoordinatorCore({
+    dependencies: {
+      ...rawReplayDependencies({ fixture, set }),
+      appendOperatorEvent: async ({ artifactDigest, kind, subjectRun }) => fixture.append({ artifactDigest, kind, role: "operator", subjectRun }),
+      readEnrollmentSet: async () => {
+        enrollmentReads += 1;
+        assert.equal(views, 3);
+        fixture.append({ role: "payer", kind: "ENROLLMENT_CONFIRMED" });
+        fixture.append({ role: "payee", kind: "ENROLLMENT_CONFIRMED" });
+        return set;
+      },
+      readEvents: async () => fixture.events,
+      readSessionView: async () => {
+        views += 1;
+        if (views === 1) return { facts: { enrollmentConfirmed: { payee: false, payer: false } }, paymentMoved: false };
+        if (views === 2) return { facts: { enrollmentConfirmed: { payee: false, payer: true } }, paymentMoved: false };
+        return { facts: { enrollmentConfirmed: { payee: true, payer: true } }, paymentMoved: false };
+      },
+      sleeper: async () => { sleeps += 1; },
+      waitForFunding: async (addresses) => {
+        fixture.append({ kind: "FUNDING_INPUTS_READY", role: "payer" });
+        fixture.append({ kind: "FUNDING_INPUTS_READY", role: "payee" });
+        fixture.append({ artifactDigest: "1".repeat(64), kind: "TOKEN_READY", role: "payer" });
+        fixture.append({ artifactDigest: "2".repeat(64), kind: "TOKEN_READY", role: "payee" });
+        return addresses.map((address) => ({ address, balanceWei: "5000000000000000", nonce: "0", paymentMoved: false }));
+      },
+    },
+    release,
+    releaseRoot: "/private/release",
+  });
+  assert.equal(result.state, "FUNDING_READY");
+  assert.equal(enrollmentReads, 1);
+  assert.equal(sleeps, 2);
+});
+
+test("fails closed when advisory enrollment readiness is malformed, regresses, or times out", async () => {
+  const release = { capabilityDigests: ["a".repeat(64), "b".repeat(64)], paymentMoved: false, releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, schema: COORDINATOR_STATE_SCHEMA, sessionId: SESSION_ID };
+  const set = await enrollmentSetBytes();
+  const makeInput = (views, now = (() => 0)) => {
+    let viewIndex = 0;
+    let enrollmentReads = 0;
+    return {
+      input: {
+        dependencies: {
+          ...rawReplayDependencies({ fixture: signedReplayFixture(), set }),
+          now,
+          readEnrollmentSet: async () => { enrollmentReads += 1; return set; },
+          readSessionView: async () => views[Math.min(viewIndex++, views.length - 1)],
+          sleeper: async () => {},
+        },
+        release,
+        releaseRoot: "/private/release",
+      },
+      enrollmentReads: () => enrollmentReads,
+    };
+  };
+  for (const { input, enrollmentReads } of [
+    makeInput([{ paymentMoved: false }]),
+    makeInput([{ facts: { enrollmentConfirmed: { payee: true, payer: "yes" } }, paymentMoved: false }]),
+    makeInput([{ facts: { enrollmentConfirmed: { payee: false, payer: false } }, paymentMoved: false }], (() => { const values = [10, 9]; return () => values.shift() ?? 9; })()),
+    makeInput([{ facts: { enrollmentConfirmed: { payee: false, payer: false } }, paymentMoved: false }], (() => { let value = 0; return () => { value += 480001; return value; }; })()),
+  ]) {
+    await assert.rejects(runCoordinatorCore(input), { code: "COORDINATION_COORDINATOR_INVALID" });
+    assert.equal(enrollmentReads(), 0);
+  }
 });
 
 test("derives funding readiness from fresh signed raw replay without trusting an authenticated-event shortcut", async () => {
@@ -863,7 +947,7 @@ test("derives funding readiness from fresh signed raw replay without trusting an
     dependencies: {
       appendOperatorEvent: async ({ kind }) => coordinationEvent({ eventDigest: kind === "ENROLLMENT_RECEIPT" ? "a".repeat(64) : "b".repeat(64), kind }),
       createTransport: () => {}, displayAddresses: () => {}, launcher: () => {}, now: () => 0, putArtifact: () => {},
-      readEnrollmentSet: async () => set, readEvents: async () => fixture.events, readSessionView: async () => ({ paymentMoved: false }), readState: async () => null,
+      readEnrollmentSet: async () => set, readEvents: async () => fixture.events, readSessionView: async () => ({ facts: { enrollmentConfirmed: { payee: true, payer: true } }, paymentMoved: false }), readState: async () => null,
       readVerifierPublication: async () => null,
       resolveOperatorPublicKey: async () => rawPublicKey(fixture.keys.operator),
       sleeper: () => {}, verifyMarkerCompleteVerdict: () => {}, writeState: () => {},
@@ -1237,7 +1321,7 @@ test("rejects every malformed funding result before FUNDING_READY", async () => 
   const makeInput = (funding, states) => ({
     dependencies: {
       appendOperatorEvent: async ({ kind }) => coordinationEvent({ eventDigest: kind === "ENROLLMENT_RECEIPT" ? "a".repeat(64) : "b".repeat(64), kind }), createTransport: () => {}, displayAddresses: () => {}, launcher: () => {}, now: () => 0, putArtifact: () => {},
-      readEnrollmentSet: async () => set, readEvents: async () => [], readSessionView: async () => ({ paymentMoved: false }), readState: async () => null,
+      readEnrollmentSet: async () => set, readEvents: async () => [], readSessionView: async () => ({ facts: { enrollmentConfirmed: { payee: true, payer: true } }, paymentMoved: false }), readState: async () => null,
       legacyEvents: async () => fundingReplay(),
       sleeper: () => {}, verifyMarkerCompleteVerdict: () => {}, waitForFunding: async (actual) => funding(actual), writeState: async ({ state }) => states.push(state.state),
     },
