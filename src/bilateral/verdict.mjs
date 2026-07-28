@@ -306,7 +306,7 @@ function callableDataMethod(value, key) {
     fail();
   }
   const method = ownData(value, key);
-  if (typeof method !== "function") {
+  if (typeof method !== "function" || types.isProxy(method)) {
     fail();
   }
   return method;
@@ -326,10 +326,15 @@ function validateInput(input) {
   ) {
     fail();
   }
-  const clockchain = ownData(input, "clockchain");
+  const suppliedClockchain = ownData(input, "clockchain");
+  const clockchainMethods = {};
   for (const method of CLOCKCHAIN_METHODS) {
-    callableDataMethod(clockchain, method);
+    clockchainMethods[method] = callableDataMethod(
+      suppliedClockchain,
+      method,
+    ).bind(suppliedClockchain);
   }
+  const clockchain = Object.freeze(clockchainMethods);
   const ownerOf = ownData(input, "ownerOf");
   const repositoryPublicKeyResolver = ownData(
     input,

@@ -662,6 +662,46 @@ function clockchainWith(clockchain, overrides = {}) {
   return adapted;
 }
 
+function countingVerifierInput(fixture, overrides = {}) {
+  const calls = { clockchain: 0, files: 0 };
+  const clockchain = clockchainWith(fixture.input.clockchain, {
+    async generateAuditTrail(args) {
+      calls.clockchain += 1;
+      return fixture.input.clockchain.generateAuditTrail(args);
+    },
+    async getBlock(args) {
+      calls.clockchain += 1;
+      return fixture.input.clockchain.getBlock(args);
+    },
+    async resolveAgent(args) {
+      calls.clockchain += 1;
+      return fixture.input.clockchain.resolveAgent(args);
+    },
+    async searchActions(args) {
+      calls.clockchain += 1;
+      return fixture.input.clockchain.searchActions(args);
+    },
+    async verifyCrossParty(args) {
+      calls.clockchain += 1;
+      return fixture.input.clockchain.verifyCrossParty(args);
+    },
+  });
+  return {
+    calls,
+    input: {
+      ...fixture.input,
+      ...overrides,
+      clockchain,
+      fileSystem: {
+        async open(path, flags) {
+          calls.files += 1;
+          return open(path, flags);
+        },
+      },
+    },
+  };
+}
+
 async function writeVariant(fixture, name, result) {
   const directory = join(fixture.root, name);
   await writePartyResult({ directory, result });
@@ -716,6 +756,139 @@ test("emits only the exact independently verified bilateral authorization verdic
       "",
     ].join("\n"),
   );
+});
+
+test("snapshots Clockchain method receivers before an earlier await", async (t) => {
+  const fixture = await completeFixture(t);
+  const calls = { replacement: 0 };
+  const clockchain = {
+    delegate: fixture.input.clockchain,
+    async generateAuditTrail(args) {
+      return this.delegate.generateAuditTrail(args);
+    },
+    async getBlock(args) {
+      return this.delegate.getBlock(args);
+    },
+    async resolveAgent(args) {
+      return this.delegate.resolveAgent(args);
+    },
+    async searchActions(args) {
+      return this.delegate.searchActions(args);
+    },
+    async verifyCrossParty(args) {
+      return this.delegate.verifyCrossParty(args);
+    },
+  };
+  const verdict = await verifyBilateralAuthorization({
+    ...fixture.input,
+    clockchain,
+    async repositoryPublicKeyResolver() {
+      await Promise.resolve();
+      clockchain.searchActions = async () => {
+        calls.replacement += 1;
+        return [];
+      };
+      return fixture.repositoryPublicKey;
+    },
+  });
+  assert.equal(verdict.outcome, "AUTHORIZED");
+  assert.equal(calls.replacement, 0);
+});
+
+test("rejects accessor, proxy, and non-function Clockchain methods before I/O", async (t) => {
+  const fixture = await completeFixture(t);
+  for (const scenario of [
+    {
+      mutate(clockchain, counters) {
+        Object.defineProperty(clockchain, "searchActions", {
+          enumerable: true,
+          get() {
+            counters.getter += 1;
+            return async () => [];
+          },
+        });
+      },
+      name: "accessor",
+    },
+    {
+      mutate(clockchain) {
+        clockchain.searchActions = new Proxy(
+          async () => [],
+          {},
+        );
+      },
+      name: "proxy",
+    },
+    {
+      mutate(clockchain) {
+        clockchain.searchActions = "not-a-function";
+      },
+      name: "non-function",
+    },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const { calls, input } = countingVerifierInput(fixture);
+      const counters = { getter: 0 };
+      scenario.mutate(input.clockchain, counters);
+      await assertVerdictFailure(input, "FAILED");
+      assert.equal(counters.getter, 0);
+      assert.equal(calls.files, 0);
+      assert.equal(calls.clockchain, 0);
+    });
+  }
+});
+
+test("rejects unbound descriptor and intent envelopes before package or Clockchain I/O", async (t) => {
+  const fixture = await completeFixture(t);
+  const scenarios = [
+    {
+      name: "mutated mandate digest",
+      overrides: {
+        descriptorEnvelope: {
+          ...fixture.descriptorEnvelope,
+          descriptor: {
+            ...fixture.descriptor,
+            mandateDigest: "f".repeat(64),
+          },
+        },
+      },
+    },
+    {
+      name: "mutated request digest",
+      overrides: {
+        descriptorEnvelope: {
+          ...fixture.descriptorEnvelope,
+          descriptor: {
+            ...fixture.descriptor,
+            requestDigest: "f".repeat(64),
+          },
+        },
+      },
+    },
+    {
+      name: "malformed descriptor envelope",
+      overrides: { descriptorEnvelope: {} },
+    },
+    {
+      name: "malformed payer mandate envelope",
+      overrides: { mandateEnvelope: {} },
+    },
+    {
+      name: "malformed payment request envelope",
+      overrides: { requestEnvelope: {} },
+    },
+  ];
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const { calls, input } = countingVerifierInput(
+        fixture,
+        scenario.overrides,
+      );
+      await assertVerdictFailure(input, "FAILED");
+      assert.equal(calls.files, 0);
+      assert.equal(calls.clockchain, 0);
+    });
+  }
 });
 
 test("requires both valid completion markers before any live verification", async (t) => {
@@ -784,6 +957,7 @@ function adversarialVerdictReadHandle(
     metadataField,
     onRead,
     overflow = false,
+    truncate = false,
   } = {},
 ) {
   let statCalls = 0;
@@ -794,6 +968,9 @@ function adversarialVerdictReadHandle(
       if (overflow) {
         buffer.fill(0x78, offset, offset + length);
         return { buffer, bytesRead: length };
+      }
+      if (truncate) {
+        return { buffer, bytesRead: 0 };
       }
       return handle.read(buffer, offset, length, position);
     },
@@ -811,6 +988,17 @@ function adversarialVerdictReadHandle(
         [metadataField]: metadata[metadataField] + 1,
         isFile: () => true,
       };
+    },
+  };
+}
+
+function adversarialBuilderFileSystem(targetPath, options) {
+  return {
+    async open(path, flags) {
+      const handle = await open(path, flags);
+      return path === targetPath
+        ? adversarialVerdictReadHandle(handle, options)
+        : handle;
     },
   };
 }
@@ -1546,22 +1734,38 @@ test("a 4096-byte token survives the default builder-to-verifier contract", asyn
   assert.equal(verdict.outcome, "AUTHORIZED");
 });
 
-test("default verifier builder bounds descriptor and token reads and rejects metadata races", async (t) => {
+test("default verifier builder bounds descriptor, token, and intent reads and rejects races", async (t) => {
   const { buildDefaultVerifierInput } =
     await import("../scripts/verify-bilateral-results.mjs");
-  for (const target of ["descriptor", "token"]) {
+  for (const target of [
+    "descriptor",
+    "token",
+    "payer mandate",
+    "payment request",
+  ]) {
     for (const scenario of [
       { metadataField: undefined, overflow: true },
       { metadataField: "ctimeMs", overflow: false },
+      { truncate: true },
     ]) {
       await t.test(
-        `${target} ${scenario.overflow ? "growth" : "metadata"}`,
+        `${target} ${
+          scenario.overflow
+            ? "growth"
+            : scenario.truncate
+              ? "truncation"
+              : "metadata"
+        }`,
         async (t) => {
           const harness = await defaultBuilderHarness(t);
           const targetPath =
             target === "descriptor"
               ? harness.descriptorPath
-              : harness.tokenPath;
+              : target === "token"
+                ? harness.tokenPath
+                : target === "payer mandate"
+                  ? harness.mandatePath
+                  : harness.requestPath;
           let readLength = 0;
           await assert.rejects(
             buildDefaultVerifierInput(
@@ -1591,7 +1795,9 @@ test("default verifier builder bounds descriptor and token reads and rejects met
             readLength,
             target === "descriptor"
               ? (1024 * 1024) + 1
-              : 4097,
+              : target === "token"
+                ? 4097
+                : 65_537,
           );
         },
       );
@@ -1630,10 +1836,60 @@ test("default verifier CLI rejects unsafe local state and wrong chain before Clo
     },
     {
       async setup(harness) {
+        const target = join(harness.fixture.root, "mandate-target.json");
+        await writeFile(target, await readFile(harness.mandatePath), {
+          mode: 0o600,
+        });
+        await rm(harness.mandatePath);
+        await symlink(target, harness.mandatePath);
+      },
+      name: "symlinked payer mandate",
+    },
+    {
+      async setup(harness) {
+        const target = join(harness.fixture.root, "request-target.json");
+        await writeFile(target, await readFile(harness.requestPath), {
+          mode: 0o600,
+        });
+        await rm(harness.requestPath);
+        await symlink(target, harness.requestPath);
+      },
+      name: "symlinked payment request",
+    },
+    {
+      async setup(harness) {
         await rm(harness.tokenPath);
         await execFileAsync("mkfifo", [harness.tokenPath]);
       },
       name: "FIFO token",
+    },
+    {
+      async setup(harness) {
+        await rm(harness.mandatePath);
+        await execFileAsync("mkfifo", [harness.mandatePath]);
+      },
+      name: "FIFO payer mandate",
+    },
+    {
+      async setup(harness) {
+        await rm(harness.requestPath);
+        await execFileAsync("mkfifo", [harness.requestPath]);
+      },
+      name: "FIFO payment request",
+    },
+    {
+      async setup(harness) {
+        await rm(harness.mandatePath);
+        await mkdir(harness.mandatePath, { mode: 0o700 });
+      },
+      name: "directory payer mandate path",
+    },
+    {
+      async setup(harness) {
+        await rm(harness.requestPath);
+        await mkdir(harness.requestPath, { mode: 0o700 });
+      },
+      name: "directory payment request path",
     },
     {
       async setup(harness) {
@@ -1674,6 +1930,66 @@ test("default verifier CLI rejects unsafe local state and wrong chain before Clo
       },
       name: "changed descriptor metadata",
     },
+    {
+      async setup(harness) {
+        harness.overrides = {
+          fileSystem: adversarialBuilderFileSystem(
+            harness.mandatePath,
+            { metadataField: "ctimeMs" },
+          ),
+        };
+      },
+      name: "changed payer mandate metadata",
+    },
+    {
+      async setup(harness) {
+        harness.overrides = {
+          fileSystem: adversarialBuilderFileSystem(
+            harness.requestPath,
+            { truncate: true },
+          ),
+        };
+      },
+      name: "truncated payment request",
+    },
+    {
+      async setup(harness) {
+        await writeFile(harness.mandatePath, "{", { mode: 0o600 });
+      },
+      name: "malformed payer mandate JSON",
+    },
+    {
+      async setup(harness) {
+        await writeFile(harness.requestPath, "{", { mode: 0o600 });
+      },
+      name: "malformed payment request JSON",
+    },
+    {
+      async setup(harness) {
+        await writeFile(
+          harness.mandatePath,
+          Buffer.concat([
+            canonicalBytes(harness.fixture.mandateEnvelope),
+            Buffer.from("\n", "utf8"),
+          ]),
+          { mode: 0o600 },
+        );
+      },
+      name: "noncanonical payer mandate JSON",
+    },
+    {
+      async setup(harness) {
+        await writeFile(
+          harness.requestPath,
+          Buffer.concat([
+            canonicalBytes(harness.fixture.requestEnvelope),
+            Buffer.from("\n", "utf8"),
+          ]),
+          { mode: 0o600 },
+        );
+      },
+      name: "noncanonical payment request JSON",
+    },
   ];
 
   for (const scenario of scenarios) {
@@ -1709,6 +2025,9 @@ test("default verifier CLI rejects unsafe local state and wrong chain before Clo
       assert.equal(stderr.value, "BILATERAL_VERDICT_FAILED\n");
       assert.equal(stdout.value.includes(harness.token), false);
       assert.equal(stderr.value.includes(harness.token), false);
+      await assert.rejects(() => lstat(harness.output), {
+        code: "ENOENT",
+      });
     });
   }
 });
