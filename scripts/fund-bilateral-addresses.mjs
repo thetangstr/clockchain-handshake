@@ -2,8 +2,8 @@
 
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { lstat, open, rename, unlink } from "node:fs/promises";
+import { dirname, isAbsolute, join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -54,6 +54,15 @@ const READ_FLAGS =
 
 function fail(code = "BILATERAL_FUNDING_INVALID_CLI") {
   throw new BilateralFundingError(code);
+}
+
+async function safely(operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof BilateralFundingError) throw error;
+    fail("BILATERAL_FUNDING_RPC_FAILED");
+  }
 }
 
 function canonicalJson(value) {
@@ -237,8 +246,8 @@ async function participantFacts(publicClient, addresses) {
   const facts = [];
   for (const address of addresses) {
     const [balanceWei, nonce] = await Promise.all([
-      publicClient.getBalance({ address }),
-      publicClient.getTransactionCount({ address, blockTag: "latest" }),
+      safely(() => publicClient.getBalance({ address })),
+      safely(() => publicClient.getTransactionCount({ address, blockTag: "latest" })),
     ]);
     facts.push(Object.freeze({
       address,
@@ -251,11 +260,13 @@ async function participantFacts(publicClient, addresses) {
 
 async function fundingFacts(publicClient, fundingAddress) {
   const [fundingBalanceWei, fundingNonce] = await Promise.all([
-    publicClient.getBalance({ address: fundingAddress }),
-    publicClient.getTransactionCount({
-      address: fundingAddress,
-      blockTag: "pending",
-    }),
+    safely(() => publicClient.getBalance({ address: fundingAddress })),
+    safely(() =>
+      publicClient.getTransactionCount({
+        address: fundingAddress,
+        blockTag: "pending",
+      }),
+    ),
   ]);
   return Object.freeze({
     fundingBalanceWei: normalizeQuantity(fundingBalanceWei),
@@ -266,12 +277,14 @@ async function fundingFacts(publicClient, fundingAddress) {
 async function feeEnvelope(publicClient, account, firstTransfer) {
   if (!firstTransfer) return null;
   const [gasResult, fees] = await Promise.all([
-    publicClient.estimateGas({
-      account,
-      to: firstTransfer.address,
-      value: firstTransfer.valueWei,
-    }),
-    publicClient.estimateFeesPerGas(),
+    safely(() =>
+      publicClient.estimateGas({
+        account,
+        to: firstTransfer.address,
+        value: firstTransfer.valueWei,
+      }),
+    ),
+    safely(() => publicClient.estimateFeesPerGas()),
   ]);
   const gas = normalizeQuantity(gasResult, "BILATERAL_FUNDING_UNBOUNDED_FEE");
   const maxFeePerGas = normalizeQuantity(
@@ -333,14 +346,22 @@ function bindingFor({ fundingAddress, record, repositorySha, rpcEndpointSha256 }
 
 async function findNonceTransaction(publicClient, transfer, fundingAddress) {
   if (transfer.transactionHash !== null) {
-    return publicClient.getTransaction({ hash: transfer.transactionHash });
+    return normalizeTransaction(
+      await safely(() => publicClient.getTransaction({ hash: transfer.transactionHash })),
+      fundingAddress,
+    );
   }
   if (typeof publicClient.getTransactionBySenderNonce === "function") {
-    return publicClient.getTransactionBySenderNonce({
-      from: fundingAddress,
-      nonce: Number(transfer.fundingNonce),
-      to: transfer.address,
-    });
+    return normalizeTransaction(
+      await safely(() =>
+        publicClient.getTransactionBySenderNonce({
+          from: fundingAddress,
+          nonce: Number(transfer.fundingNonce),
+          to: transfer.address,
+        }),
+      ),
+      fundingAddress,
+    );
   }
   return null;
 }
@@ -348,9 +369,11 @@ async function findNonceTransaction(publicClient, transfer, fundingAddress) {
 async function readReceipt(publicClient, transfer) {
   if (transfer.transactionHash === null) return null;
   if (typeof publicClient.getTransactionReceipt === "function") {
-    const receipt = await publicClient.getTransactionReceipt({
-      hash: transfer.transactionHash,
-    });
+    const receipt = await safely(() =>
+      publicClient.getTransactionReceipt({
+        hash: transfer.transactionHash,
+      }),
+    );
     if (receipt === null || receipt === undefined) return null;
     return {
       chainId: 11155111,
@@ -363,6 +386,34 @@ async function readReceipt(publicClient, transfer) {
     };
   }
   return null;
+}
+
+function normalizeTransaction(value) {
+  if (value === null || value === undefined) return null;
+  if (value === null || typeof value !== "object") {
+    fail("BILATERAL_FUNDING_INVALID_CLIENT");
+  }
+  return Object.freeze({
+    chainId: value.chainId,
+    from: normalizeAddress(value.from),
+    hash: value.hash,
+    nonce: normalizeQuantity(value.nonce).toString(),
+    to: normalizeAddress(value.to),
+    valueWei: normalizeQuantity(value.valueWei ?? value.value).toString(),
+  });
+}
+
+function normalizeReceipt(value) {
+  if (value === null || typeof value !== "object") {
+    fail("BILATERAL_FUNDING_INVALID_CLIENT");
+  }
+  return Object.freeze({
+    chainId: value.chainId,
+    from: normalizeAddress(value.from),
+    status: value.status,
+    to: normalizeAddress(value.to),
+    transactionHash: value.transactionHash,
+  });
 }
 
 async function recoverJournal({
@@ -416,20 +467,95 @@ function transferKey(transfer) {
   return `${transfer.address}:${transfer.fundingNonce}`;
 }
 
+function validateFundingNonceAgainstJournal(journal, fundingNonce) {
+  const maximumRecordedNonce = journal.document.transfers.reduce(
+    (maximum, transfer) =>
+      BigInt(transfer.fundingNonce) > maximum
+        ? BigInt(transfer.fundingNonce)
+        : maximum,
+    -1n,
+  );
+  if (maximumRecordedNonce >= 0n && fundingNonce <= maximumRecordedNonce) {
+    fail("BILATERAL_FUNDING_NONCE_CONFLICT");
+  }
+}
+
 function validatedReceipt(receipt, transaction) {
+  const normalizedReceipt = normalizeReceipt(receipt);
+  const normalizedTransaction = normalizeTransaction(transaction, transaction.from);
   if (
-    receipt === null ||
-    typeof receipt !== "object" ||
-    receipt.status !== "success" ||
-    receipt.transactionHash !== transaction.hash ||
-    normalizeAddress(receipt.from) !== transaction.from ||
-    normalizeAddress(receipt.to) !== transaction.to ||
-    normalizeQuantity(receipt.nonce).toString() !== transaction.nonce.toString() ||
-    normalizeQuantity(receipt.valueWei).toString() !== transaction.value.toString() ||
-    receipt.chainId !== 11155111
+    normalizedReceipt.status !== "success" ||
+    normalizedReceipt.transactionHash !== normalizedTransaction.hash ||
+    normalizedReceipt.from !== normalizedTransaction.from ||
+    normalizedReceipt.to !== normalizedTransaction.to ||
+    normalizedReceipt.chainId !== 11155111 ||
+    normalizedTransaction.chainId !== 11155111
   ) {
     fail("BILATERAL_FUNDING_REVERTED_TRANSACTION");
   }
+  return normalizedTransaction;
+}
+
+async function persistJournalDocument(path, document) {
+  const directory = dirname(path);
+  const temporary = join(
+    directory,
+    `.funding-journal.tmp-${process.pid}-${Date.now()}-${Math.random()
+      .toString(16)
+      .slice(2)}`,
+  );
+  let handle;
+  try {
+    handle = await open(
+      temporary,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_EXCL |
+        (fsConstants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    await handle.writeFile(canonicalJson(document));
+    await handle.chmod(0o600);
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await rename(temporary, path);
+    const directoryHandle = await open(
+      directory,
+      fsConstants.O_RDONLY |
+        fsConstants.O_DIRECTORY |
+        (fsConstants.O_NOFOLLOW ?? 0),
+    );
+    try {
+      await directoryHandle.sync();
+    } finally {
+      await directoryHandle.close();
+    }
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    await unlink(temporary).catch(() => {});
+    if (error instanceof BilateralFundingError) throw error;
+    fail("BILATERAL_FUNDING_WRITE_FAILED");
+  }
+  return document;
+}
+
+async function appendBroadcastIntent(journal, transfer) {
+  const state = journal.document.transfers.some(
+    (candidate) => candidate.state === "FUNDED",
+  )
+    ? "FUNDED"
+    : "BROADCAST_INTENT";
+  const document = {
+    ...journal.document,
+    state,
+    transfers: [...journal.document.transfers, transfer],
+  };
+  await persistJournalDocument(journal.path, document);
+  return openFundingJournal({
+    binding: journal.document.binding,
+    journalDirectory: dirname(journal.path),
+  });
 }
 
 async function sendPlannedTransfers({
@@ -442,15 +568,16 @@ async function sendPlannedTransfers({
   envelope,
 }) {
   let current = journal;
-  const existing = new Map(
-    current.document.transfers.map((transfer) => [transferKey(transfer), transfer]),
-  );
   for (const planned of plan.transfers) {
     const key = transferKey({
       address: planned.address,
       fundingNonce: planned.fundingNonce.toString(),
     });
-    if (existing.has(key)) continue;
+    const existing = current.document.transfers.find(
+      (transfer) => transferKey(transfer) === key,
+    );
+    if (existing?.state === "FUNDED") continue;
+    if (existing && existing.state !== "BROADCAST_INTENT") continue;
     const transaction = {
       account,
       chain: sepolia,
@@ -462,7 +589,7 @@ async function sendPlannedTransfers({
       to: planned.address,
       value: planned.valueWei,
     };
-    current = await current.recordBroadcastIntent({
+    const intent = {
       address: planned.address,
       feeWei: envelope.feePerTransferWei.toString(),
       fundingNonce: planned.fundingNonce.toString(),
@@ -470,48 +597,42 @@ async function sendPlannedTransfers({
       transactionDigest: transactionDigest(transaction),
       transactionHash: null,
       valueWei: planned.valueWei.toString(),
-    });
-    existing.set(key, current.document.transfers.at(-1));
-  }
-
-  for (const planned of plan.transfers) {
-    const key = transferKey({
-      address: planned.address,
-      fundingNonce: planned.fundingNonce.toString(),
-    });
-    const durable = current.document.transfers.find(
-      (transfer) => transferKey(transfer) === key,
-    );
-    if (!durable || durable.state === "FUNDED") continue;
-    if (durable.state !== "BROADCAST_INTENT" || durable.transactionHash !== null) {
-      continue;
-    }
-    const transaction = {
-      account,
-      chain: sepolia,
-      from: binding.fundingAddress,
-      gas: envelope.gas,
-      maxFeePerGas: envelope.maxFeePerGas,
-      maxPriorityFeePerGas: envelope.maxPriorityFeePerGas,
-      nonce: Number(planned.fundingNonce),
-      to: planned.address,
-      value: planned.valueWei,
     };
-    const hash = await walletClient.sendTransaction(transaction);
+    current = existing
+      ? current
+      : await appendBroadcastIntent(current, intent);
+    const hash = await safely(() => walletClient.sendTransaction(transaction));
     if (!HASH_PATTERN.test(hash)) fail("BILATERAL_FUNDING_INVALID_CLIENT");
     current = await current.recordTransactionObserved({
       address: planned.address,
       fundingNonce: planned.fundingNonce.toString(),
       transactionHash: hash,
     });
-    const receipt = await publicClient.waitForTransactionReceipt({ hash });
-    validatedReceipt(receipt, {
+    const receipt = await safely(() => publicClient.waitForTransactionReceipt({ hash }));
+    const observedTransaction = await safely(() => publicClient.getTransaction({ hash }));
+    const transactionFacts = validatedReceipt(receipt, {
+      chainId: 11155111,
       from: binding.fundingAddress,
       hash,
-      nonce: planned.fundingNonce,
+      nonce: planned.fundingNonce.toString(),
       to: planned.address,
-      value: planned.valueWei,
+      valueWei: planned.valueWei.toString(),
     });
+    if (
+      transactionFacts.nonce !== planned.fundingNonce.toString() ||
+      transactionFacts.valueWei !== planned.valueWei.toString()
+    ) {
+      fail("BILATERAL_FUNDING_REVERTED_TRANSACTION");
+    }
+    validatedReceipt(receipt, observedTransaction);
+    const [recipient] = await participantFacts(publicClient, [planned.address]);
+    if (
+      recipient.balanceWei < PARTICIPANT_MINIMUM_WEI ||
+      recipient.balanceWei > PARTICIPANT_MAXIMUM_WEI ||
+      recipient.nonce !== 0n
+    ) {
+      fail("BILATERAL_FUNDING_FINAL_VALIDATION_FAILED");
+    }
     current = await current.recordFunded({
       address: planned.address,
       fundingNonce: planned.fundingNonce.toString(),
@@ -551,7 +672,7 @@ async function finalSummary({ binding, journal, plan, publicClient }) {
   });
 }
 
-export async function main(arguments_ = process.argv.slice(2), dependencies = {}) {
+async function runMain(arguments_ = process.argv.slice(2), dependencies = {}) {
   const parsed = parseArguments(arguments_);
   const getRepositorySha = dependencies.getRepositorySha ?? defaultRepositorySha;
   const repositorySha = await getRepositorySha();
@@ -612,6 +733,7 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
     participantFacts(publicClient, record.addresses),
     fundingFacts(publicClient, fundingAddress),
   ]);
+  validateFundingNonceAgainstJournal(journal, funding.fundingNonce);
   const initialPlan = planFundingTransfers({
     feePerTransferWei: 0n,
     fundingBalanceWei: funding.fundingBalanceWei,
@@ -650,9 +772,21 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
   return summary;
 }
 
+export async function main(arguments_ = process.argv.slice(2), dependencies = {}) {
+  try {
+    return await runMain(arguments_, dependencies);
+  } catch (error) {
+    if (error instanceof BilateralFundingError) throw error;
+    fail("BILATERAL_FUNDING_RPC_FAILED");
+  }
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((error) => {
-    process.stderr.write(`${error.message}\n`);
+    const message = error instanceof BilateralFundingError
+      ? error.message
+      : "Bilateral funding failed safely.";
+    process.stderr.write(`${message}\n`);
     process.exitCode = 1;
   });
 }

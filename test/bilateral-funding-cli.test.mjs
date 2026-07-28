@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import { BilateralFundingError } from "../src/bilateral/funding/record.mjs";
 import {
@@ -21,6 +23,7 @@ const REPOSITORY_SHA = "abcdef0123456789abcdef0123456789abcdef01";
 const RPC_URL = "https://sepolia.example.invalid/rpc";
 const RPC_DIGEST =
   "1d308186f1aab99d82ee000a298dabe1f21555d26fef32d6514f1e89fff7d4c7";
+const execFileAsync = promisify(execFile);
 
 function canonicalJson(value) {
   if (Array.isArray(value)) {
@@ -92,6 +95,7 @@ function makeClients({
   fundingBalance = 100_000_000_000_000_000n,
   fundingNonce = 7,
   receiptStatus = "success",
+  viemReceipt = false,
 } = {}) {
   const calls = [];
   const mutableBalances = [...balances];
@@ -132,7 +136,18 @@ function makeClients({
     },
     async getTransaction({ hash }) {
       calls.push(["getTransaction", hash]);
-      return transactions.get(hash) ?? null;
+      const transaction = transactions.get(hash);
+      if (!transaction) return null;
+      return viemReceipt
+        ? {
+            chainId: transaction.chainId,
+            from: transaction.from,
+            hash: transaction.hash,
+            nonce: transaction.nonce,
+            to: transaction.to,
+            value: transaction.valueWei,
+          }
+        : transaction;
     },
     async waitForTransactionReceipt({ hash }) {
       calls.push(["waitForTransactionReceipt", hash]);
@@ -142,6 +157,15 @@ function makeClients({
         mutableBalances[recipientIndex] += transaction.valueWei;
         mutableFundingBalance -= transaction.valueWei;
         mutableFundingNonce = Math.max(mutableFundingNonce, transaction.nonce + 1);
+      }
+      if (viemReceipt) {
+        return {
+          chainId: 11155111,
+          from: FUNDING_ADDRESS,
+          status: receiptStatus,
+          to: transaction.to,
+          transactionHash: hash,
+        };
       }
       return {
         chainId: 11155111,
@@ -170,6 +194,20 @@ function makeClients({
     },
   };
   return { calls, publicClient, walletClient };
+}
+
+function sendCrashClients() {
+  const clients = makeClients();
+  return {
+    calls: clients.calls,
+    publicClient: clients.publicClient,
+    walletClient: {
+      async sendTransaction() {
+        clients.calls.push(["sendTransaction", RECIPIENTS[0], 7]);
+        throw new Error("crash after first intent");
+      },
+    },
+  };
 }
 
 async function runFixture(fixture_, clients, overrides = {}) {
@@ -287,12 +325,14 @@ test("tops up below-floor recipients sequentially with durable intent before eac
   const journal = JSON.parse(await readFile(join(fixture_.journalDirectory, "funding-journal.json"), "utf8"));
 
   assert.deepEqual(
-    clients.calls.filter(([method]) => ["sendTransaction", "waitForTransactionReceipt"].includes(method)),
+    clients.calls.filter(([method]) => ["sendTransaction", "waitForTransactionReceipt", "getTransaction"].includes(method)),
     [
       ["sendTransaction", RECIPIENTS[0], 7],
       ["waitForTransactionReceipt", `0x${"1".repeat(64)}`],
+      ["getTransaction", `0x${"1".repeat(64)}`],
       ["sendTransaction", RECIPIENTS[2], 8],
       ["waitForTransactionReceipt", `0x${"2".repeat(64)}`],
+      ["getTransaction", `0x${"2".repeat(64)}`],
     ],
   );
   assert.deepEqual(journal.transfers.map(({ address, fundingNonce, state, transactionHash, valueWei }) => ({
@@ -332,9 +372,57 @@ test("tops up below-floor recipients sequentially with durable intent before eac
     },
   ]);
 
-  const firstIntentIndex = clients.calls.findIndex(([method]) => method === "sendTransaction");
-  assert.notEqual(firstIntentIndex, -1);
   assert.equal(journal.state, "FUNDED");
+});
+
+test("uses viem-shaped receipts plus fetched transactions for exact nonce value and chain validation", async () => {
+  const fixture_ = await fixture();
+  const clients = makeClients({
+    balances: [
+      0n,
+      6_000_000_000_000_000n,
+      4_000_000_000_000_000n,
+      20_000_000_000_000_000n,
+    ],
+    viemReceipt: true,
+  });
+
+  await runFixture(fixture_, clients);
+
+  assert.deepEqual(
+    clients.calls.filter(([method]) => ["waitForTransactionReceipt", "getTransaction"].includes(method)),
+    [
+      ["waitForTransactionReceipt", `0x${"1".repeat(64)}`],
+      ["getTransaction", `0x${"1".repeat(64)}`],
+      ["waitForTransactionReceipt", `0x${"2".repeat(64)}`],
+      ["getTransaction", `0x${"2".repeat(64)}`],
+    ],
+  );
+});
+
+test("persists only the active recipient intent when the first send fails", async () => {
+  const fixture_ = await fixture();
+  const clients = sendCrashClients();
+
+  await assert.rejects(
+    runFixture(fixture_, clients),
+    BilateralFundingError,
+  );
+
+  const journal = JSON.parse(await readFile(join(fixture_.journalDirectory, "funding-journal.json"), "utf8"));
+  assert.deepEqual(journal.transfers.map(({ address, fundingNonce, state, transactionHash }) => ({
+    address,
+    fundingNonce,
+    state,
+    transactionHash,
+  })), [
+    {
+      address: RECIPIENTS[0],
+      fundingNonce: "7",
+      state: "BROADCAST_INTENT",
+      transactionHash: null,
+    },
+  ]);
 });
 
 test("discovers durable journal state before recovery and never broadcasts twice for one intent", async () => {
@@ -351,7 +439,7 @@ test("discovers durable journal state before recovery and never broadcasts twice
         },
       }),
     }),
-    /crash after durable intent/u,
+    BilateralFundingError,
   );
 
   const secondClients = makeClients();
@@ -361,6 +449,16 @@ test("discovers durable journal state before recovery and never broadcasts twice
     secondClients.calls.some(([method]) => method === "getTransactionBySenderNonce"),
     true,
   );
+});
+
+test("top-level CLI output never includes arbitrary thrown RPC or client messages", async () => {
+  const { stderr } = await execFileAsync(
+    process.execPath,
+    ["scripts/fund-bilateral-addresses.mjs", "--funding-record", "/tmp/not-present"],
+    { encoding: "utf8" },
+  ).catch((error) => error);
+
+  assert.equal(stderr, "Bilateral funding failed safely.\n");
 });
 
 test("aborts on wrong chain, insufficient balance, funding nonce conflicts, changed RPC binding, and failed receipts", async () => {
