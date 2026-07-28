@@ -9,7 +9,7 @@ const base = () => ({
   mandate: { mandate: { amount: { currency: "USD", value: "100" }, expiresAtMs: "1785297600000", purpose: "freight-services", paymentMoved: false }, mandateDigest: digest("e"), privatePath: "console-canary" },
   request: { request: { amount: { currency: "USD", value: "100" }, expiresAtMs: "1785297000000", invoiceReference: "TREL-2026-0001", paymentMoved: false }, requestDigest: digest("f"), tls: "console-canary" },
   nowMs: 1785294300000,
-  watcherSnapshot: { health: "ok", environment: "console-canary", anchors: [
+  watcherSnapshot: { descriptorDigest: digest("d"), packageDigests: { payer: digest("b"), payee: digest("c") }, health: "ok", environment: "console-canary", anchors: [
     { digest: digest("1"), kind: "PROPOSED", block: "10", verified: true },
     { digest: digest("2"), kind: "ACCEPTED", block: "11", verified: true },
     { digest: digest("3"), kind: "ACKNOWLEDGED", block: "12", verified: true },
@@ -34,9 +34,20 @@ test("projection fails closed and never emits authorization from advisory or mis
     (input) => { input.verifierPublication.anchorDigests[1] = digest("x"); },
     (input) => { input.verifierPublication.markerComplete = false; },
     (input) => { input.verifierPublication.paymentMoved = true; },
+    (input) => { input.watcherSnapshot.descriptorDigest = digest("9"); },
+    (input) => { input.watcherSnapshot.packageDigests.payer = digest("9"); },
+    (input) => { input.watcherSnapshot.packageDigests.payee = digest("9"); },
+    (input) => { input.nowMs = 1785298000000; },
+    (input) => { input.watcherSnapshot.anchors.push({ digest: digest("4"), kind: "ACKNOWLEDGED", block: "13", verified: true }); },
+    (input) => { input.watcherSnapshot.anchors[1].block = "10"; },
   ]) {
     const input = base(); mutate(input);
     const value = buildConsoleProjection(input);
     assert.notEqual(value.verifier.status, "AUTH" + "ORIZED");
   }
+});
+
+test("projection exposes only closed failure summary", () => {
+  const input = base(); input.lifecycleView.failure = { active: true, code: "RECOVERY_REQUIRED", run: "stakeholder", cause: { path: "console-canary" }, message: "console-canary" };
+  const value = buildConsoleProjection(input); assert.deepEqual(value.failure, { active: true, code: "RECOVERY_REQUIRED", run: "stakeholder" }); assert.equal(JSON.stringify(value).includes("console-canary"), false);
 });

@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import { lstatSync, openSync, readFileSync, closeSync } from "node:fs";
+import { lstatSync, fstatSync, openSync, readFileSync, closeSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -13,11 +13,11 @@ function fail() { throw new Error("Console server failed safely."); }
 function privateFile(stat) { return stat.isFile() && !stat.isSymbolicLink() && stat.uid === process.getuid() && (stat.mode & 0o777) === 0o600 && stat.size > 0 && stat.size <= 65536; }
 export function createStateRootProjection({ stateRoot }) {
   if (typeof stateRoot !== "string" || stateRoot.length === 0) fail();
-  const root = lstatSync(stateRoot); if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== process.getuid() || (root.mode & 0o777) !== 0o700) fail();
+  const root = lstatSync(stateRoot); if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== process.getuid() || (root.mode & 0o777) !== 0o700) fail(); const sameRoot = (next) => next.isDirectory() && !next.isSymbolicLink() && next.dev === root.dev && next.ino === root.ino && next.uid === root.uid && next.mode === root.mode;
   const path = join(stateRoot, "console-state.json");
   return () => {
-    const before = lstatSync(path); if (!privateFile(before)) fail(); const fd = openSync(path, "r"); let bytes; try { bytes = readFileSync(fd); } finally { closeSync(fd); }
-    const after = lstatSync(path); if (!privateFile(after) || before.ino !== after.ino || before.size !== after.size || !bytes.equals(Buffer.from(`${JSON.stringify(JSON.parse(bytes.toString("utf8")))}\n`))) fail();
+    if (!sameRoot(lstatSync(stateRoot))) fail(); const before = lstatSync(path); if (!privateFile(before)) fail(); const fd = openSync(path, 0 | (process.platform === "win32" ? 0 : 0x20000)); let bytes; let opened; try { opened = fstatSync(fd); bytes = readFileSync(fd); } finally { closeSync(fd); }
+    const after = lstatSync(path); if (!sameRoot(lstatSync(stateRoot)) || !privateFile(after) || !privateFile(opened) || before.dev !== opened.dev || before.ino !== opened.ino || before.size !== opened.size || before.mtimeMs !== opened.mtimeMs || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || !bytes.equals(Buffer.from(`${JSON.stringify(JSON.parse(bytes.toString("utf8")))}\n`))) fail();
     let value; try { value = JSON.parse(bytes.toString("utf8")); } catch { fail(); }
     const keys = ["lifecycleView", "mandate", "nowMs", "request", "verifierPublication", "watcherSnapshot"];
     if (!value || Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) fail();
@@ -27,7 +27,7 @@ export function createStateRootProjection({ stateRoot }) {
 export function createConsoleServer({ projection, tls = null }) {
   if (typeof projection !== "function") throw new Error("Console server failed safely.");
   const handler = async (request, response) => {
-    const method = request.method; const path = new URL(request.url, "http://localhost").pathname;
+    const method = request.method; let path; try { if (typeof request.url !== "string" || request.url.length > 2048) { response.writeHead(414, headers).end(); return; } path = new URL(request.url, "http://localhost").pathname; } catch { response.writeHead(400, headers).end(); return; }
     if (!Number.isSafeInteger(request.rawHeaders.join("").length) || request.rawHeaders.join("").length > 8192) { response.writeHead(431, headers).end(); return; }
     if (!["GET", "HEAD"].includes(method)) { response.writeHead(405, { ...headers, Allow: "GET, HEAD" }).end(); return; }
     if (path === "/v1/console/session") { let body; try { body = Buffer.from(JSON.stringify(projection())); } catch { response.writeHead(500, headers).end(); return; } response.writeHead(200, { ...headers, "Content-Type": "application/json; charset=utf-8" }); if (method === "GET") response.end(body); else response.end(); return; }
