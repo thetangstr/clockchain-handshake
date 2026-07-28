@@ -44,6 +44,7 @@ const PUBLIC_METADATA_KEYS = Object.freeze([
   "keystoreSha256",
   "createdAt",
 ]);
+const passwordCalls = new WeakMap();
 
 function hexBuffer(value) {
   return Buffer.from(value.replace(/^0x/u, ""), "hex");
@@ -113,13 +114,34 @@ async function writeFixture(t, {
 
 function passwordReader(password = PASSWORD_CANARY) {
   const calls = [];
-  return {
-    calls,
+  const reader = {
     readKeychainPassword: async (service, account) => {
       calls.push({ account, service });
       return password;
     },
   };
+  passwordCalls.set(reader, calls);
+  return reader;
+}
+
+async function captureBoundaryFailure(options) {
+  return openFundingWallet(options).then(
+    () => assert.fail("hostile boundary input must fail"),
+    (error) => error,
+  );
+}
+
+function assertSanitizedBoundaryError(error) {
+  assert.equal(error.message, "Bilateral funding failed safely.");
+  for (const canary of [
+    PASSWORD_CANARY,
+    PRIVATE_KEY_CANARY.slice(2),
+    "option-getter-canary",
+    "dependency-getter-canary",
+    "revoked",
+  ]) {
+    assert.doesNotMatch(error.message, new RegExp(canary, "u"));
+  }
 }
 
 async function assertFails(t, mutator) {
@@ -135,6 +157,71 @@ async function assertFails(t, mutator) {
   );
 }
 
+test("openFundingWallet normalizes missing and hostile option boundary errors", async () => {
+  const hostileOptions = {};
+  Object.defineProperty(hostileOptions, "keystorePath", {
+    enumerable: true,
+    get() {
+      throw new Error("option-getter-canary");
+    },
+  });
+  const hostileMetadata = { keystorePath: "funding-wallet.json" };
+  Object.defineProperty(hostileMetadata, "metadataPath", {
+    enumerable: true,
+    get() {
+      throw new Error("option-getter-canary");
+    },
+  });
+  const { proxy: revokedProxy, revoke } = Proxy.revocable({}, {});
+  revoke();
+
+  for (const options of [
+    undefined,
+    {},
+    hostileOptions,
+    hostileMetadata,
+    new Proxy({}, {
+      ownKeys() {
+        throw new Error("option-getter-canary");
+      },
+    }),
+    revokedProxy,
+  ]) {
+    assertSanitizedBoundaryError(await captureBoundaryFailure(options));
+  }
+});
+
+test("openFundingWallet snapshots dependencies before use and rejects hostile dependency objects", async (t) => {
+  const fixture = await writeFixture(t);
+  const dependencyAccessor = {};
+  Object.defineProperty(dependencyAccessor, "fs", {
+    enumerable: true,
+    get() {
+      throw new Error("dependency-getter-canary");
+    },
+  });
+  const { proxy: revokedDependencies, revoke } = Proxy.revocable({}, {});
+  revoke();
+
+  for (const dependencies of [
+    dependencyAccessor,
+    new Proxy({}, {
+      ownKeys() {
+        throw new Error("dependency-getter-canary");
+      },
+    }),
+    revokedDependencies,
+  ]) {
+    assertSanitizedBoundaryError(
+      await captureBoundaryFailure({
+        keystorePath: fixture.keystorePath,
+        metadataPath: fixture.metadataPath,
+        dependencies,
+      }),
+    );
+  }
+});
+
 test("openFundingWallet decrypts a strict Web3 v3 treasury and returns only public data plus a viem account", async (t) => {
   const fixture = await writeFixture(t);
   const reader = passwordReader();
@@ -145,7 +232,7 @@ test("openFundingWallet decrypts a strict Web3 v3 treasury and returns only publ
     dependencies: reader,
   });
 
-  assert.deepEqual(reader.calls, [{
+  assert.deepEqual(passwordCalls.get(reader), [{
     account: FUNDING_KEYCHAIN_ACCOUNT,
     service: FUNDING_KEYCHAIN_SERVICE,
   }]);

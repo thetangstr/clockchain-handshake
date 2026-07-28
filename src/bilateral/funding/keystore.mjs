@@ -43,6 +43,21 @@ const CRYPTO_KEYS = Object.freeze([
 ]);
 const CIPHERPARAM_KEYS = Object.freeze(["iv"]);
 const SCRYPT_KEYS = Object.freeze(["dklen", "salt", "n", "r", "p"]);
+const OPTION_KEYS = Object.freeze([
+  "keystorePath",
+  "metadataPath",
+  "dependencies",
+]);
+const DEPENDENCY_KEYS = Object.freeze([
+  "readKeychainPassword",
+  "execFile",
+  "fs",
+  "scrypt",
+  "stdout",
+  "stderr",
+]);
+const FILE_SYSTEM_KEYS = Object.freeze(["lstat", "open"]);
+const EXEC_FILE_RESULT_KEYS = Object.freeze(["stdout", "stderr"]);
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/u;
 const ADDRESS_NO_PREFIX_PATTERN = /^[0-9a-f]{40}$/u;
 const HEX_32_PATTERN = /^[0-9a-f]{64}$/u;
@@ -160,6 +175,105 @@ function snapshotObject(value, keys) {
   return snapshot;
 }
 
+function snapshotAllowedObject(value, allowedKeys, requiredKeys = []) {
+  if (value === null || typeof value !== "object") fail();
+  const prototype = sanitize(() => Object.getPrototypeOf(value));
+  if (prototype !== Object.prototype && prototype !== null) fail();
+  const ownKeys = sanitize(() => Reflect.ownKeys(value));
+  if (
+    ownKeys.some(
+      (key) => typeof key !== "string" || !allowedKeys.includes(key),
+    ) ||
+    requiredKeys.some((key) => !ownKeys.includes(key))
+  ) {
+    fail();
+  }
+  const snapshot = {};
+  for (const key of ownKeys) {
+    const descriptor = sanitize(() =>
+      Object.getOwnPropertyDescriptor(value, key),
+    );
+    if (
+      !descriptor ||
+      !descriptor.enumerable ||
+      !Object.hasOwn(descriptor, "value")
+    ) {
+      fail();
+    }
+    snapshot[key] = descriptor.value;
+  }
+  return Object.freeze(snapshot);
+}
+
+function snapshotOptions(options) {
+  const snapshot = snapshotAllowedObject(options, OPTION_KEYS, ["keystorePath"]);
+  if (
+    typeof snapshot.keystorePath !== "string" ||
+    snapshot.keystorePath.length === 0 ||
+    (Object.hasOwn(snapshot, "metadataPath") &&
+      (typeof snapshot.metadataPath !== "string" ||
+        snapshot.metadataPath.length === 0)) ||
+    (Object.hasOwn(snapshot, "dependencies") &&
+      (snapshot.dependencies === null ||
+        typeof snapshot.dependencies !== "object"))
+  ) {
+    fail();
+  }
+  return Object.freeze({
+    keystorePath: snapshot.keystorePath,
+    metadataPath: Object.hasOwn(snapshot, "metadataPath")
+      ? snapshot.metadataPath
+      : `${snapshot.keystorePath.slice(0, -5)}.public.json`,
+    dependencies: Object.hasOwn(snapshot, "dependencies")
+      ? snapshotDependencyBag(snapshot.dependencies)
+      : Object.freeze({}),
+  });
+}
+
+function snapshotDependencyBag(dependencies) {
+  const snapshot = snapshotAllowedObject(dependencies, DEPENDENCY_KEYS);
+  if (
+    (Object.hasOwn(snapshot, "readKeychainPassword") &&
+      typeof snapshot.readKeychainPassword !== "function") ||
+    (Object.hasOwn(snapshot, "execFile") &&
+      typeof snapshot.execFile !== "function") ||
+    (Object.hasOwn(snapshot, "scrypt") &&
+      typeof snapshot.scrypt !== "function")
+  ) {
+    fail();
+  }
+  return snapshot;
+}
+
+function snapshotFileSystem(fileSystem) {
+  const snapshot = snapshotAllowedObject(
+    fileSystem,
+    FILE_SYSTEM_KEYS,
+    FILE_SYSTEM_KEYS,
+  );
+  if (
+    typeof snapshot.lstat !== "function" ||
+    typeof snapshot.open !== "function"
+  ) {
+    fail();
+  }
+  return snapshot;
+}
+
+function snapshotExecFileResult(value) {
+  const snapshot = snapshotAllowedObject(value, EXEC_FILE_RESULT_KEYS);
+  if (
+    (Object.hasOwn(snapshot, "stdout") && typeof snapshot.stdout !== "string") ||
+    (Object.hasOwn(snapshot, "stderr") && typeof snapshot.stderr !== "string")
+  ) {
+    fail();
+  }
+  return Object.freeze({
+    stdout: snapshot.stdout ?? "",
+    stderr: snapshot.stderr ?? "",
+  });
+}
+
 function isHex(value, bytes) {
   return (
     typeof value === "string" &&
@@ -247,7 +361,7 @@ async function defaultReadKeychainPassword(service, account, dependencies) {
       { encoding: "utf8", maxBuffer: 4096 },
     ),
   );
-  return result.stdout;
+  return snapshotExecFileResult(result).stdout;
 }
 
 async function readPassword(dependencies) {
@@ -310,44 +424,36 @@ function validateAccount(privateKey, expectedAddress) {
   });
 }
 
-export async function openFundingWallet({
-  keystorePath,
-  metadataPath = `${keystorePath.slice(0, -5)}.public.json`,
-  dependencies = {},
-}) {
-  if (
-    typeof keystorePath !== "string" ||
-    keystorePath.length === 0 ||
-    typeof metadataPath !== "string" ||
-    metadataPath.length === 0 ||
-    dependencies === null ||
-    typeof dependencies !== "object"
-  ) {
-    fail();
-  }
-  const fileSystem = dependencies.fs ?? Object.freeze({ lstat, open });
-  if (
-    typeof fileSystem.lstat !== "function" ||
-    typeof fileSystem.open !== "function"
-  ) {
-    fail();
-  }
+export async function openFundingWallet(options) {
+  return sanitizeAsync(async () => {
+    const { keystorePath, metadataPath, dependencies } =
+      snapshotOptions(options);
+    const fileSystem = Object.hasOwn(dependencies, "fs")
+      ? snapshotFileSystem(dependencies.fs)
+      : Object.freeze({ lstat, open });
 
-  const [keystoreBytes, metadataBytes] = await Promise.all([
-    readPinnedFile(keystorePath, MAX_KEYSTORE_BYTES, fileSystem),
-    readPinnedFile(metadataPath, MAX_METADATA_BYTES, fileSystem),
-  ]);
-  const metadata = validateMetadata(parseJson(metadataBytes));
-  const keystoreSha256 = createHash("sha256").update(keystoreBytes).digest("hex");
-  if (keystoreSha256 !== metadata.keystoreSha256) fail();
-  const keystore = validateKeystore(parseJson(keystoreBytes));
-  if (`0x${keystore.address}` !== metadata.fundingAddress) fail();
+    const [keystoreBytes, metadataBytes] = await Promise.all([
+      readPinnedFile(keystorePath, MAX_KEYSTORE_BYTES, fileSystem),
+      readPinnedFile(metadataPath, MAX_METADATA_BYTES, fileSystem),
+    ]);
+    const metadata = validateMetadata(parseJson(metadataBytes));
+    const keystoreSha256 = createHash("sha256")
+      .update(keystoreBytes)
+      .digest("hex");
+    if (keystoreSha256 !== metadata.keystoreSha256) fail();
+    const keystore = validateKeystore(parseJson(keystoreBytes));
+    if (`0x${keystore.address}` !== metadata.fundingAddress) fail();
 
-  const password = await readPassword(dependencies);
-  const key = await deriveKey(password, keystore.crypto.kdfparams, dependencies);
-  if (key.length !== 32) fail();
-  const privateKey = decryptPrivateKey(keystore, key);
-  const account = validateAccount(privateKey, metadata.fundingAddress);
+    const password = await readPassword(dependencies);
+    const key = await deriveKey(
+      password,
+      keystore.crypto.kdfparams,
+      dependencies,
+    );
+    if (key.length !== 32) fail();
+    const privateKey = decryptPrivateKey(keystore, key);
+    const account = validateAccount(privateKey, metadata.fundingAddress);
 
-  return Object.freeze({ account, metadata });
+    return Object.freeze({ account, metadata });
+  });
 }
