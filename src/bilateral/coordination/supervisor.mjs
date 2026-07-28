@@ -8,7 +8,10 @@ import { initialReleaseView, reduceReleaseEvent } from "./lifecycle.mjs";
 import { canonicalBytes } from "../canonical.mjs";
 import { canonicalizeReceiptEventValue } from "../../canonical.mjs";
 import { validateRelayArtifact as defaultValidateRelayArtifact } from "./artifact.mjs";
+import { validateRelayArtifactWithFacts as defaultValidateRelayArtifactWithFacts } from "./artifact.mjs";
 import { readAndSignTokenCommitment as defaultReadAndSignTokenCommitment, verifyTokenCommitment } from "./preflight.mjs";
+import { payerMandateDigest, verifyPayerMandate } from "../payer-mandate.mjs";
+import { paymentRequestDigest, verifyPaymentRequest } from "../payment-request.mjs";
 
 export const SUPERVISOR_STATE_SCHEMA = "clockchain.bilateral-supervisor-state/v1";
 export const SUPERVISOR_COMMAND_POLICY = Object.freeze({
@@ -23,7 +26,7 @@ export const SUPERVISOR_COMMAND_POLICY = Object.freeze({
   TERMINAL_ABORT: "abort",
 });
 const FULL_CHECKPOINT_PHASES = new Set(["BOOTSTRAPPED_ACTIVE", "ENROLLMENT_CONFIRMING", "VERIFYING_FUNDING_INPUTS", "TOKEN_COMMITMENT_PREPARING", "TOKEN_READY", "DESCRIPTOR_WRITING", "DESCRIPTOR_ACCEPTED", "BEFORE_CHILD", "CHILD_COMPLETE", "ARTIFACT_STORED", "EVENT_APPENDED", "RECOVERY_REQUIRED", "TERMINAL_FAILURE", "EVENT_PROCESSED", "TRANSITION_COMPLETE", "ABORTED"]);
-const DURABLE_CHECKPOINT_KEYS = new Set(["activeLaunchState", "authenticatedEvents", "childJournal", "coordinationIdentity", "descriptorJournal", "enrollmentBase64", "enrollmentSet", "events", "eventDigest", "failureSummaryDigest", "invitations", "operatorPublicKey", "paymentMoved", "phase", "preflight", "processedEventDigests", "receipt", "recovery", "rehearsal", "releaseId", "repositorySha", "role", "schema", "senderState", "sessionId", "stateRoot", "stakeholder", "tokenCommitment", "tokenPath", "view"]);
+const DURABLE_CHECKPOINT_KEYS = new Set(["activeLaunchState", "authenticatedEvents", "childJournal", "coordinationIdentity", "descriptorJournal", "enrollmentBase64", "enrollmentSet", "events", "eventDigest", "failureSummaryDigest", "intentJournal", "invitations", "operatorPublicKey", "paymentMoved", "phase", "preflight", "processedEventDigests", "receipt", "recovery", "rehearsal", "releaseId", "repositorySha", "role", "schema", "senderState", "sessionId", "stateRoot", "stakeholder", "tokenCommitment", "tokenPath", "view"]);
 const CHILD_JOURNAL_PHASES = new Set(["BEFORE_CHILD", "CHILD_COMPLETE", "ARTIFACT_STORED", "EVENT_APPENDED", "TRANSITION_COMPLETE"]);
 const TOKEN_BOUND_PHASES = new Set(["TOKEN_READY", "DESCRIPTOR_WRITING", "DESCRIPTOR_ACCEPTED", "BEFORE_CHILD", "CHILD_COMPLETE", "ARTIFACT_STORED", "EVENT_APPENDED", "RECOVERY_REQUIRED", "TRANSITION_COMPLETE"]);
 
@@ -76,6 +79,220 @@ function descriptorJournal({ event, stage }) {
 }
 function sameDescriptorJournal(value, event, stage) {
   return value && value.artifactDigest === event.artifactDigest && value.eventDigest === event.eventDigest && value.stage === stage && value.subjectRun === event.subjectRun;
+}
+const DEMO_INTENT_POLICY = Object.freeze({
+  amount: Object.freeze({ currency: "USD", value: "100" }),
+  invoiceReferencePrefix: "invoice-",
+  purpose: "Handshake demo",
+});
+function partyFromIdentity(identity) {
+  if (!identity || typeof identity.address !== "string" || typeof identity.agentId !== "string") invalid();
+  return Object.freeze({ address: identity.address, agentId: identity.agentId });
+}
+function runArtifactPath(runState, fileName) {
+  if (!runState || typeof runState.descriptorPath !== "string") invalid();
+  return `${dirname(runState.descriptorPath)}/${fileName}`;
+}
+function requestIdForRun(localState, dependencies, subjectRun) {
+  const journal = localState.intentJournal;
+  if (journal?.subjectRun === subjectRun && typeof journal.requestId === "string") return journal.requestId;
+  const configured = localState[subjectRun]?.requestId;
+  if (configured !== undefined) return configured;
+  if (typeof dependencies.requestId === "function") return dependencies.requestId({ localState, subjectRun });
+  const digest = sha256(Buffer.from(`${localState.sessionId}:${subjectRun}`, "utf8"));
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+function eventFor(events, role, kind, subjectRun) {
+  return events.find((event) => event?.role === role && event.kind === kind && event.subjectRun === subjectRun);
+}
+async function resolveRunParties({ client, dependencies, enrollmentSet, events, localState, subjectRun }) {
+  if (typeof client?.getArtifact !== "function" || !enrollmentSet?.enrollments || !Array.isArray(events)) invalid();
+  const validate = dependencies.validateRelayArtifactWithFacts ?? defaultValidateRelayArtifactWithFacts;
+  if (typeof validate !== "function") invalid();
+  const parties = Object.create(null);
+  for (const role of ["payer", "payee"]) {
+    const event = eventFor(events, role, "IDENTITY_PACKAGE_READY", subjectRun);
+    const entry = enrollmentSet.enrollments[role];
+    if (!event || !/^[0-9a-f]{64}$/.test(event.artifactDigest) || !entry?.enrollmentBase64) invalid();
+    const bytes = await client.getArtifact({ artifactType: "identity-package", digest: event.artifactDigest });
+    if (!Buffer.isBuffer(bytes) || sha256(bytes) !== event.artifactDigest) invalid();
+    const checked = await validate({ artifactType: "identity-package", bytes, expectedDigest: event.artifactDigest, secretCanaries: [] });
+    const identity = checked?.facts?.identity ?? checked?.parsed;
+    const enrollment = parseCoordinationEnrollment(Buffer.from(entry.enrollmentBase64, "base64"));
+    if (!identity || identity.repositorySha !== localState.repositorySha || identity.paymentMoved !== false || identity.address !== enrollment.invitations[subjectRun]?.address) invalid();
+    parties[role] = partyFromIdentity(identity);
+  }
+  return Object.freeze({ payer: parties.payer, payee: parties.payee });
+}
+function intentPolicy(localState, subjectRun) {
+  const override = localState[subjectRun]?.intentPolicy;
+  if (override === undefined) return DEMO_INTENT_POLICY;
+  if (!dataExact(override, ["amount", "invoiceReferencePrefix", "purpose"])) invalid();
+  return Object.freeze({ amount: Object.freeze({ ...override.amount }), invoiceReferencePrefix: override.invoiceReferencePrefix, purpose: override.purpose });
+}
+function nowMs(dependencies) {
+  const value = typeof dependencies.nowMs === "function" ? dependencies.nowMs() : Date.now();
+  if (!Number.isSafeInteger(value) || value < 0) invalid();
+  return value;
+}
+function mandateFor({ localState, parties, policy, subjectRun, timeMs }) {
+  return Object.freeze({
+    amount: policy.amount,
+    expiresAtMs: String(timeMs + 3_600_000),
+    invoiceReferencePrefix: policy.invoiceReferencePrefix,
+    issuedAtMs: String(Math.max(0, timeMs - 1)),
+    payee: parties.payee,
+    payer: parties.payer,
+    paymentMoved: false,
+    protocol: "clockchain.bilateral-authorization/v1",
+    purpose: policy.purpose,
+    releaseId: localState.releaseId,
+    repositorySha: localState.repositorySha,
+    requestEndpoint: `/v1/sessions/${localState.sessionId}/payment-requests`,
+    schema: "clockchain.bilateral-payer-mandate/v1",
+    sessionId: localState.sessionId,
+    subjectRun,
+  });
+}
+function requestFor({ localState, mandateEnvelope, parties, policy, requestId, subjectRun, timeMs }) {
+  return Object.freeze({
+    amount: policy.amount,
+    createdAtMs: String(timeMs),
+    expiresAtMs: String(timeMs + 1_800_000),
+    invoiceReference: `${policy.invoiceReferencePrefix}001`,
+    mandateDigest: payerMandateDigest(mandateEnvelope),
+    payee: parties.payee,
+    payer: parties.payer,
+    paymentMoved: false,
+    protocol: "clockchain.bilateral-authorization/v1",
+    purpose: policy.purpose,
+    releaseId: localState.releaseId,
+    repositorySha: localState.repositorySha,
+    requestId,
+    schema: "clockchain.bilateral-payment-request/v1",
+    sessionId: localState.sessionId,
+    subjectRun,
+  });
+}
+function exactIntentJournal({ mandateBytes, mandateEnvelope, requestBytes = undefined, requestEnvelope = undefined, requestId = undefined, stage, subjectRun }) {
+  const value = { mandateDigest: payerMandateDigest(mandateEnvelope), mandateRawDigest: sha256(mandateBytes), stage, subjectRun };
+  if (requestBytes !== undefined && requestEnvelope !== undefined) {
+    value.requestDigest = paymentRequestDigest(requestEnvelope);
+    value.requestRawDigest = sha256(requestBytes);
+  }
+  if (requestId !== undefined) value.requestId = requestId;
+  return Object.freeze(value);
+}
+function parseCanonicalEnvelope(bytes, expectedRawDigest) {
+  if (!Buffer.isBuffer(bytes) || sha256(bytes) !== expectedRawDigest) invalid();
+  let parsed;
+  try { parsed = JSON.parse(bytes.toString("utf8")); } catch { invalid(); }
+  if (!canonicalBytes(parsed).equals(bytes)) invalid();
+  return parsed;
+}
+async function writeIntentEnvelope({ bytes, dependencies, localState, path }) {
+  if (typeof dependencies.writeArtifactFile !== "function") invalid();
+  await dependencies.writeArtifactFile({ bytes, path });
+  return Object.freeze({ path });
+}
+async function retryPayerMandatePublication({ client, dependencies, localState, subjectRun }) {
+  if (typeof client?.publishPayerMandate !== "function" || typeof dependencies.readArtifactFile !== "function") invalid();
+  const path = localState[subjectRun]?.mandatePath ?? runArtifactPath(localState[subjectRun], "payer-mandate.json");
+  const bytes = await dependencies.readArtifactFile({ path });
+  const envelope = parseCanonicalEnvelope(bytes, localState.intentJournal.mandateRawDigest);
+  if (payerMandateDigest(envelope) !== localState.intentJournal.mandateDigest) invalid();
+  const acknowledgement = await client.publishPayerMandate({ bytes, subjectRun });
+  if (!acknowledgement || acknowledgement.digest !== localState.intentJournal.mandateRawDigest) invalid();
+  return Object.freeze({ ...localState, intentJournal: Object.freeze({ ...localState.intentJournal, stage: "PAYER_MANDATE_PUBLISHED" }), paymentMoved: false, phase: "EVENT_PROCESSED" });
+}
+async function retryPaymentRequestSubmission({ client, dependencies, localState, subjectRun }) {
+  if (typeof client?.submitPaymentRequest !== "function" || typeof dependencies.readArtifactFile !== "function") invalid();
+  const path = localState[subjectRun]?.requestPath ?? runArtifactPath(localState[subjectRun], "payment-request.json");
+  const bytes = await dependencies.readArtifactFile({ path });
+  const envelope = parseCanonicalEnvelope(bytes, localState.intentJournal.requestRawDigest);
+  if (paymentRequestDigest(envelope) !== localState.intentJournal.requestDigest || envelope.request.requestId !== localState.intentJournal.requestId) invalid();
+  const receipt = await client.submitPaymentRequest({ bytes });
+  if (!receipt || receipt.paymentMoved !== false || receipt.rawEnvelopeDigest !== localState.intentJournal.requestRawDigest || receipt.paymentRequestDigest !== localState.intentJournal.requestDigest || receipt.requestId !== localState.intentJournal.requestId || receipt.sessionId !== localState.sessionId || receipt.subjectRun !== subjectRun) invalid();
+  return Object.freeze({ ...localState, intentJournal: Object.freeze({ ...localState.intentJournal, stage: "PAYMENT_REQUEST_SUBMITTED" }), paymentMoved: false, phase: "EVENT_PROCESSED" });
+}
+async function publishPayerMandatePhase({ client, dependencies, localState, replay, subjectRun }) {
+  if (typeof client?.publishPayerMandate !== "function" || typeof dependencies.signPayerMandate !== "function") invalid();
+  const parties = await resolveRunParties({ client, dependencies, enrollmentSet: replay.enrollmentSet, events: replay.events, localState, subjectRun });
+  const timeMs = nowMs(dependencies);
+  const mandate = mandateFor({ localState, parties, policy: intentPolicy(localState, subjectRun), subjectRun, timeMs });
+  const envelope = await dependencies.signPayerMandate({ invitationPath: localState[subjectRun]?.invitationPath, localState, mandate, subjectRun });
+  const bytes = canonicalBytes(envelope);
+  const readyJournal = exactIntentJournal({ mandateBytes: bytes, mandateEnvelope: envelope, stage: "PAYER_MANDATE_READY_TO_PUBLISH", subjectRun });
+  await writeIntentEnvelope({ bytes, dependencies, localState, path: localState[subjectRun]?.mandatePath ?? runArtifactPath(localState[subjectRun], "payer-mandate.json") });
+  if (typeof dependencies.writeState === "function") await dependencies.writeState(Object.freeze({ ...localState, intentJournal: readyJournal, paymentMoved: false, phase: "EVENT_PROCESSED" }));
+  const acknowledgement = await client.publishPayerMandate({ bytes, subjectRun });
+  if (!acknowledgement || acknowledgement.digest !== readyJournal.mandateRawDigest) invalid();
+  const state = Object.freeze({ ...localState, intentJournal: Object.freeze({ ...readyJournal, stage: "PAYER_MANDATE_PUBLISHED" }), paymentMoved: false, phase: "EVENT_PROCESSED" });
+  if (typeof dependencies.writeState === "function") await dependencies.writeState(state);
+  return state;
+}
+async function submitPaymentRequestPhase({ client, dependencies, localState, replay, subjectRun }) {
+  if (typeof client?.readPayerMandate !== "function" || typeof client?.submitPaymentRequest !== "function" || typeof dependencies.signPaymentRequest !== "function") invalid();
+  const parties = await resolveRunParties({ client, dependencies, enrollmentSet: replay.enrollmentSet, events: replay.events, localState, subjectRun });
+  const timeMs = nowMs(dependencies);
+  const policy = intentPolicy(localState, subjectRun);
+  const mandateBytes = await client.readPayerMandate({ payer: parties.payer, payee: parties.payee, subjectRun });
+  if (!Buffer.isBuffer(mandateBytes)) invalid();
+  const mandateEvent = eventFor(replay.events, "payer", "PAYER_MANDATE_READY", subjectRun);
+  const mandateEnvelope = await verifyPayerMandate({ envelope: parseCanonicalEnvelope(mandateBytes, mandateEvent.artifactDigest), expected: { ...policy, payer: parties.payer, payee: parties.payee, releaseId: localState.releaseId, repositorySha: localState.repositorySha, requestEndpoint: `/v1/sessions/${localState.sessionId}/payment-requests`, sessionId: localState.sessionId, subjectRun }, nowMs: timeMs });
+  const requestId = requestIdForRun(localState, dependencies, subjectRun);
+  const request = requestFor({ localState, mandateEnvelope, parties, policy, requestId, subjectRun, timeMs });
+  const envelope = await dependencies.signPaymentRequest({ invitationPath: localState[subjectRun]?.invitationPath, localState, request, subjectRun });
+  const bytes = canonicalBytes(envelope);
+  const readyJournal = exactIntentJournal({ mandateBytes, mandateEnvelope, requestBytes: bytes, requestEnvelope: envelope, requestId, stage: "PAYMENT_REQUEST_READY_TO_SUBMIT", subjectRun });
+  await writeIntentEnvelope({ bytes, dependencies, localState, path: localState[subjectRun]?.requestPath ?? runArtifactPath(localState[subjectRun], "payment-request.json") });
+  if (typeof dependencies.writeState === "function") await dependencies.writeState(Object.freeze({ ...localState, intentJournal: readyJournal, paymentMoved: false, phase: "EVENT_PROCESSED" }));
+  const receipt = await client.submitPaymentRequest({ bytes });
+  if (!receipt || receipt.paymentMoved !== false || receipt.rawEnvelopeDigest !== readyJournal.requestRawDigest || receipt.paymentRequestDigest !== readyJournal.requestDigest || receipt.requestId !== requestId || receipt.sessionId !== localState.sessionId || receipt.subjectRun !== subjectRun) invalid();
+  const state = Object.freeze({ ...localState, intentJournal: Object.freeze({ ...readyJournal, stage: "PAYMENT_REQUEST_SUBMITTED" }), paymentMoved: false, phase: "EVENT_PROCESSED" });
+  if (typeof dependencies.writeState === "function") await dependencies.writeState(state);
+  return state;
+}
+async function matchPaymentRequestPhase({ client, dependencies, localState, replay, subjectRun }) {
+  if (typeof client?.readPayerMandate !== "function" || typeof client?.readPaymentRequest !== "function" || typeof client?.appendEvent !== "function") invalid();
+  const parties = await resolveRunParties({ client, dependencies, enrollmentSet: replay.enrollmentSet, events: replay.events, localState, subjectRun });
+  const timeMs = nowMs(dependencies);
+  const policy = intentPolicy(localState, subjectRun);
+  const requestId = requestIdForRun(localState, dependencies, subjectRun);
+  const mandateBytes = await client.readPayerMandate({ payer: parties.payer, payee: parties.payee, subjectRun });
+  const requestBytes = await client.readPaymentRequest({ payer: parties.payer, payee: parties.payee, requestId, subjectRun });
+  if (!Buffer.isBuffer(mandateBytes) || !Buffer.isBuffer(requestBytes)) invalid();
+  const mandateEvent = eventFor(replay.events, "payer", "PAYER_MANDATE_READY", subjectRun);
+  const requestEvent = eventFor(replay.events, "payee", "PAYMENT_REQUEST_READY", subjectRun);
+  const mandateEnvelope = parseCanonicalEnvelope(mandateBytes, mandateEvent.artifactDigest);
+  const requestEnvelope = await verifyPaymentRequest({ envelope: parseCanonicalEnvelope(requestBytes, requestEvent.artifactDigest), mandateEnvelope, expected: { ...policy, payer: parties.payer, payee: parties.payee, releaseId: localState.releaseId, repositorySha: localState.repositorySha, sessionId: localState.sessionId, subjectRun }, nowMs: timeMs });
+  const journal = exactIntentJournal({ mandateBytes, mandateEnvelope, requestBytes, requestEnvelope, requestId, stage: "PAYMENT_REQUEST_MATCHED", subjectRun });
+  await client.appendEvent({ artifactDigest: null, kind: "PAYMENT_REQUEST_MATCHED", subjectRun });
+  const state = Object.freeze({ ...localState, intentJournal: journal, paymentMoved: false, phase: "EVENT_PROCESSED" });
+  if (typeof dependencies.writeState === "function") await dependencies.writeState(state);
+  return state;
+}
+async function runCommercialIntentPhase({ client, dependencies, localState, replay }) {
+  const journal = localState.intentJournal;
+  if (journal?.stage === "PAYER_MANDATE_READY_TO_PUBLISH") {
+    if (localState.role !== "payer" || eventFor(replay.events, "payer", "PAYER_MANDATE_READY", journal.subjectRun)) return null;
+    return retryPayerMandatePublication({ client, dependencies, localState, subjectRun: journal.subjectRun });
+  }
+  if (journal?.stage === "PAYMENT_REQUEST_READY_TO_SUBMIT") {
+    if (localState.role !== "payee" || eventFor(replay.events, "payee", "PAYMENT_REQUEST_READY", journal.subjectRun)) return null;
+    return retryPaymentRequestSubmission({ client, dependencies, localState, subjectRun: journal.subjectRun });
+  }
+  for (const subjectRun of ["rehearsal", "stakeholder"]) {
+    const identityReady = ["payer", "payee"].every((role) => eventFor(replay.events, role, "IDENTITY_PACKAGE_READY", subjectRun));
+    if (!identityReady) continue;
+    const mandateReady = eventFor(replay.events, "payer", "PAYER_MANDATE_READY", subjectRun);
+    const requestReady = eventFor(replay.events, "payee", "PAYMENT_REQUEST_READY", subjectRun);
+    const requestMatched = eventFor(replay.events, "payer", "PAYMENT_REQUEST_MATCHED", subjectRun);
+    if (localState.role === "payer" && !mandateReady) return publishPayerMandatePhase({ client, dependencies, localState, replay, subjectRun });
+    if (localState.role === "payee" && mandateReady && !requestReady) return submitPaymentRequestPhase({ client, dependencies, localState, replay, subjectRun });
+    if (localState.role === "payer" && mandateReady && requestReady && !requestMatched) return matchPaymentRequestPhase({ client, dependencies, localState, replay, subjectRun });
+  }
+  return null;
 }
 async function publishRecoveryRequired({ client, command, dependencies, event, localState }) {
   const bytes = canonicalBytes(recoveryManifest({ command, localState, subjectRun: event.subjectRun }));
@@ -146,6 +363,14 @@ function validateDurableCheckpointShape(checkpoint, activeLaunchState, stateRoot
     const event = checkpoint.events?.find((entry) => entry?.eventDigest === descriptor.eventDigest && entry.role === "operator");
     if (!event || !sameDescriptorJournal(descriptor, event, descriptor.stage)) invalid();
   } else if (["DESCRIPTOR_WRITING", "DESCRIPTOR_ACCEPTED"].includes(checkpoint.phase)) invalid();
+  const intent = checkpoint.intentJournal;
+  if (intent !== undefined) {
+    const keys = intent.requestDigest === undefined
+      ? ["mandateDigest", "mandateRawDigest", "stage", "subjectRun"]
+      : ["mandateDigest", "mandateRawDigest", "requestDigest", "requestId", "requestRawDigest", "stage", "subjectRun"];
+    if (!dataExact(intent, keys) || !/^[0-9a-f]{64}$/.test(intent.mandateDigest) || !/^[0-9a-f]{64}$/.test(intent.mandateRawDigest) || !["PAYER_MANDATE_READY_TO_PUBLISH", "PAYER_MANDATE_PUBLISHED", "PAYMENT_REQUEST_READY_TO_SUBMIT", "PAYMENT_REQUEST_SUBMITTED", "PAYMENT_REQUEST_MATCHED"].includes(intent.stage) || !["rehearsal", "stakeholder"].includes(intent.subjectRun)) invalid();
+    if (intent.requestDigest !== undefined && (!/^[0-9a-f]{64}$/.test(intent.requestDigest) || !/^[0-9a-f]{64}$/.test(intent.requestRawDigest) || typeof intent.requestId !== "string")) invalid();
+  }
   if (checkpoint.recovery !== undefined) {
     const recovery = checkpoint.recovery;
     if (checkpoint.phase !== "RECOVERY_REQUIRED" || !dataExact(recovery, ["authorizationUsed", "commandEvent", "manifestBytes", "manifestDigest", "stage", "subjectRun"]) || typeof recovery.authorizationUsed !== "boolean" || !["MANIFEST_STORED", "EVENT_APPEND_ATTEMPTED", "EVENT_APPENDED"].includes(recovery.stage) || !/^[0-9a-f]{64}$/.test(recovery.manifestDigest) || !["release", "rehearsal", "stakeholder"].includes(recovery.subjectRun) || typeof recovery.manifestBytes !== "string") invalid();
@@ -498,6 +723,11 @@ export async function runSupervisor(input) {
           await persist("RECOVERY_REQUIRED");
           continue;
         }
+      }
+      const intentState = await runCommercialIntentPhase({ client, dependencies, localState: checkpoint(localState.phase), replay });
+      if (intentState) {
+        localState = intentState;
+        continue;
       }
       const completionKind = Object.freeze({ PREFLIGHT_PLAN_READY: "PREFLIGHT_PARTICIPANT_READY", REGISTER_REHEARSAL: "IDENTITY_PACKAGE_READY", REGISTER_STAKEHOLDER: "IDENTITY_PACKAGE_READY", REHEARSAL_DESCRIPTOR_READY: "DESCRIPTOR_ACCEPTED", STAKEHOLDER_DESCRIPTOR_READY: "DESCRIPTOR_ACCEPTED", START_REHEARSAL: "ROLE_PACKAGE_READY", START_STAKEHOLDER: "ROLE_PACKAGE_READY" });
       const completionFor = (entry) => completionKind[entry.kind] && replay.events.some((candidate) => candidate.role === localState.role && candidate.kind === completionKind[entry.kind] && candidate.subjectRun === entry.subjectRun);

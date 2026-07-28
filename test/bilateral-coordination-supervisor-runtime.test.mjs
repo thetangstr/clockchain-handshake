@@ -244,6 +244,22 @@ test("production supervisor verifies valid enrollment receipts and binds each de
     sepoliaRpc: async () => "0x0",
     stateRoot,
   });
+  const rehearsalRequestId = dependencies.requestId({ subjectRun: "rehearsal" });
+  const stakeholderRequestId = dependencies.requestId({ subjectRun: "stakeholder" });
+  assert.match(rehearsalRequestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.match(stakeholderRequestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.notEqual(rehearsalRequestId, stakeholderRequestId);
+  const mandatePath = join(stateRoot, "rehearsal", "payer-mandate.json");
+  const originalMandateBytes = canonicalBytes({ paymentMoved: false, schema: "test-intent-artifact/v1", value: "original" });
+  await dependencies.writeArtifactFile({ bytes: originalMandateBytes, path: mandatePath });
+  await dependencies.writeArtifactFile({ bytes: originalMandateBytes, path: mandatePath });
+  await assert.rejects(
+    dependencies.writeArtifactFile({
+      bytes: canonicalBytes({ paymentMoved: false, schema: "test-intent-artifact/v1", value: "changed" }),
+      path: mandatePath,
+    }),
+  );
+  assert.deepEqual(await readFile(mandatePath), originalMandateBytes);
   for (const run of ["rehearsal", "stakeholder"]) {
     const info = await stat(join(stateRoot, run));
     assert.equal(info.isDirectory(), true);

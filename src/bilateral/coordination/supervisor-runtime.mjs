@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
@@ -13,6 +13,8 @@ import { readLaunchManifest } from "./manifest.mjs";
 import { createLocalPreflightEnrollment, readAndSignTokenCommitment } from "./preflight.mjs";
 import { validateRelayArtifact, validateRelayArtifactWithFacts } from "./artifact.mjs";
 import { verifyDescriptorEnvelope } from "../descriptor.mjs";
+import { signPayerMandate } from "../payer-mandate.mjs";
+import { signPaymentRequest } from "../payment-request.mjs";
 import { parseCoordinationEnrollment, parseCoordinationEnrollmentSet } from "./enrollment.mjs";
 import { deriveDescriptorSessionId } from "./run-session.mjs";
 import { createReceiptVerifierFromCertificate, verifyCoordinationReceipt } from "./receipt.mjs";
@@ -346,8 +348,24 @@ export function createVerifierPublicationVerifier() {
 }
 
 function fixedArtifactPath(stateRoot, path) {
-  if (typeof path !== "string" || ![join(stateRoot, "preflight", "plan.json"), join(stateRoot, "rehearsal", "descriptor.json"), join(stateRoot, "stakeholder", "descriptor.json")].includes(path)) fail();
+  if (typeof path !== "string" || ![
+    join(stateRoot, "preflight", "plan.json"),
+    join(stateRoot, "rehearsal", "descriptor.json"),
+    join(stateRoot, "rehearsal", "payer-mandate.json"),
+    join(stateRoot, "rehearsal", "payment-request.json"),
+    join(stateRoot, "stakeholder", "descriptor.json"),
+    join(stateRoot, "stakeholder", "payer-mandate.json"),
+    join(stateRoot, "stakeholder", "payment-request.json"),
+  ].includes(path)) fail();
   return path;
+}
+function isIntentArtifactPath(stateRoot, path) {
+  return [
+    join(stateRoot, "rehearsal", "payer-mandate.json"),
+    join(stateRoot, "rehearsal", "payment-request.json"),
+    join(stateRoot, "stakeholder", "payer-mandate.json"),
+    join(stateRoot, "stakeholder", "payment-request.json"),
+  ].includes(path);
 }
 const stateFile = (root) => join(root, "supervisor-state.json");
 export async function createPrivateSupervisorStateStore({ stateRoot }) {
@@ -476,6 +494,16 @@ export async function loadInvitationProof({ capabilityDigest, releaseId, reposit
   const signature = await account.signMessage({ message: { raw: invitationProofPreimage({ address, capabilityDigest, releaseId, repositorySha, role, run, sessionId }) } });
   return Object.freeze({ address, algorithm: 'eip191', secretPath, signature, subjectRun: run });
 }
+async function loadInvitationAccount({ expectedAddress, secretPath }) {
+  if (typeof secretPath !== "string" || typeof expectedAddress !== "string") fail();
+  const secret = await readRegular(secretPath);
+  if (!secret || Object.keys(secret).length !== 2 || !Object.hasOwn(secret, "bundle") || !Object.hasOwn(secret, "code") || typeof secret.code !== "string") fail();
+  const payload = await decryptInvitation(secret.bundle, secret.code);
+  if (!payload || Object.keys(payload).length !== 3 || typeof payload.privateKey !== "string" || typeof payload.address !== "string" || typeof payload.displayName !== "string") fail();
+  const account = privateKeyToAccount(payload.privateKey);
+  if (account.address.toLowerCase() !== payload.address.toLowerCase() || account.address.toLowerCase() !== expectedAddress) fail();
+  return account;
+}
 export async function ensureInvitations({ capabilityDigest, releaseId, repositorySha, role, sessionId, stateRoot, create }) {
   await privateDirectory(stateRoot);
   const publicDirectory = join(stateRoot, 'invitation-public'), secretDirectory = join(stateRoot, 'invitation-secret');
@@ -513,6 +541,7 @@ export async function createProductionSupervisorDependencies({ launchManifestPat
     async createLocalPreflightEnrollment({ role }) { return createPreflight({ role, repositorySha: scope.repositorySha, stateRoot }); },
     async createInvitations({ role }) { return ensureInvitations({ ...scope, role, stateRoot }); },
     async ensureToken({ role }) { return ensureToken({ role, repositorySha: scope.repositorySha, stateRoot }); },
+    requestId() { return randomUUID(); },
     async readAndSignTokenCommitment(input) { return readAndSignTokenCommitment(input); },
     verifyEnrollmentSet: enrollmentVerifier({ tlsCertificatePem }),
     verifyFundingInputs: fundingVerifier(sepoliaRpc ?? createProductionSepoliaRpc({ createClient: createSepoliaClient })),
@@ -522,7 +551,35 @@ export async function createProductionSupervisorDependencies({ launchManifestPat
       fixedArtifactPath(stateRoot, path);
       if (!Buffer.isBuffer(bytes) || !canonicalBytes(JSON.parse(bytes.toString("utf8"))).equals(bytes)) fail();
       const root = await createPrivateRoot(dirname(path));
-      try { await writePrivateBytes(root, path, bytes); } finally { await root.handle.close(); }
+      try {
+        if (isIntentArtifactPath(stateRoot, path)) {
+          try {
+            const existing = await readPrivateBytes(root, path);
+            if (!existing.equals(bytes)) fail();
+            return;
+          } catch (error) {
+            if (error?.code !== "ENOENT") throw error;
+          }
+        }
+        await writePrivateBytes(root, path, bytes);
+      } finally { await root.handle.close(); }
+    },
+    async readArtifactFile({ path }) {
+      fixedArtifactPath(stateRoot, path);
+      const root = await createPrivateRoot(dirname(path));
+      try {
+        const bytes = await readPrivateBytes(root, path);
+        if (!canonicalBytes(JSON.parse(bytes.toString("utf8"))).equals(bytes)) fail();
+        return bytes;
+      } finally { await root.handle.close(); }
+    },
+    async signPayerMandate({ invitationPath, mandate }) {
+      const account = await loadInvitationAccount({ expectedAddress: mandate?.payer?.address, secretPath: invitationPath });
+      return signPayerMandate({ mandate, signMessage: (bytes) => account.signMessage({ message: { raw: bytes } }) });
+    },
+    async signPaymentRequest({ invitationPath, request }) {
+      const account = await loadInvitationAccount({ expectedAddress: request?.payee?.address, secretPath: invitationPath });
+      return signPaymentRequest({ request, signMessage: (bytes) => account.signMessage({ message: { raw: bytes } }) });
     },
     async readArtifactPackage({ artifactType, event, localState }) {
       const directory = artifactType === "preflight-participant-report"
