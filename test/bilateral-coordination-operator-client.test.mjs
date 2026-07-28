@@ -587,7 +587,7 @@ test("operator client exposes only the coordinator relay boundary", () => {
   assert.deepEqual(Object.keys(client).sort(), [
     "appendOperatorEvent", "appendVerifiedEvent", "createVerifiedEvent",
     "getArtifact", "prepareCapabilityRegistration", "putArtifact", "readEnrollmentSet", "readEvents",
-    "readSessionView", "readVerifierPublication", "registerCapabilitySet",
+    "readPayerMandate", "readPaymentRequest", "readSessionView", "readVerifierPublication", "registerCapabilitySet",
   ]);
 });
 
@@ -760,4 +760,12 @@ test("appendVerifiedEvent fails closed on a competing chain head, duplicate publ
     );
     assert.equal(verifiedPosts, 1, mode);
   }
+});
+
+test("operator client exposes only contextual commercial-intent reads", async () => {
+  const { client } = fixture(async () => response(Buffer.from("null", "utf8")));
+  assert.equal(typeof client.readPayerMandate, "function");
+  assert.equal(typeof client.readPaymentRequest, "function");
+  assert.equal("publishPayerMandate" in client, false);
+  assert.equal("submitPaymentRequest" in client, false);
 });

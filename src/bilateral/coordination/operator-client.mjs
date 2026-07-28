@@ -54,6 +54,7 @@ const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const EVENT_KINDS = new Set(COORDINATION_EVENT_KINDS);
 const ARTIFACT_TYPES = new Set([
   "coordination-enrollment", "failure-summary", "identity-package", "party-result-package",
+  "payer-mandate", "payment-request",
   "preflight-aggregate-report", "preflight-participant-report", "preflight-plan",
   "preflight-public-key", "recovery-command-manifest", "signed-descriptor", "token-commitment",
 ]);
@@ -236,13 +237,15 @@ function assertOperatorRoute(request) {
   const view = new RegExp(`^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/view$`).test(data.path);
   const enrollments = new RegExp(`^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/enrollments$`).test(data.path);
   const publication = new RegExp(`^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/verifier-publications/(?:rehearsal|stakeholder)$`).test(data.path);
+  const mandate = new RegExp(`^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/mandate\\?subjectRun=(?:rehearsal|stakeholder)$`).test(data.path);
+  const paymentRequest = new RegExp(`^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/payment-requests/${UUID_PATTERN.source.slice(1, -1)}$`).test(data.path);
   const post = new Set(["/v1/capabilities", "/v1/events", "/v1/verified-events"]);
   if (data.method === "POST") {
     if (!post.has(data.path) || !Buffer.isBuffer(data.body) || data.body.length === 0 || data.body.length > 65_536 || data.artifactType !== undefined) invalid();
   } else if (data.method === "PUT") {
     if (!artifact || typeof data.artifactType !== "string" || !ARTIFACT_TYPE_PATTERN.test(data.artifactType) || !ARTIFACT_TYPES.has(data.artifactType) || !Buffer.isBuffer(data.body) || data.body.length === 0 || data.body.length > OPERATOR_CLIENT_MAX_RESPONSE_BYTES) invalid();
   } else if (data.method === "GET") {
-    if ((!artifact && !events && !view && !enrollments && !publication) || data.body !== null || (artifact && (!ARTIFACT_TYPES.has(data.artifactType) || typeof data.artifactType !== "string"))) invalid();
+    if ((!artifact && !events && !view && !enrollments && !publication && !mandate && !paymentRequest) || data.body !== null || (artifact && (!ARTIFACT_TYPES.has(data.artifactType) || typeof data.artifactType !== "string"))) invalid();
   } else invalid();
   return Object.freeze({ artifactType: data.artifactType, body: data.body === null ? null : Buffer.from(data.body), method: data.method, path: data.path, signal: data.signal });
 }
@@ -424,6 +427,20 @@ export function createOperatorRelayClient(input) {
       if (!["rehearsal", "stakeholder"].includes(inputValue.subjectRun)) invalid();
       const parsed = canonicalJson(await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/verifier-publications/${inputValue.subjectRun}` }, "application/json"));
       return parsed === null ? null : validatePublication(parsed, context, inputValue.subjectRun);
+    },
+    async readPayerMandate(value) {
+      const inputValue = exact(value, ["subjectRun"]);
+      if (!["rehearsal", "stakeholder"].includes(inputValue.subjectRun)) invalid();
+      const bytes = await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/mandate?subjectRun=${inputValue.subjectRun}` }, "application/octet-stream");
+      try { await validateRelayArtifact({ artifactType: "payer-mandate", bytes, expectedDigest: sha256(bytes), secretCanaries: [] }); } catch { invalid(); }
+      return Buffer.from(bytes);
+    },
+    async readPaymentRequest(value) {
+      const inputValue = exact(value, ["requestId"]);
+      if (typeof inputValue.requestId !== "string" || !UUID_PATTERN.test(inputValue.requestId)) invalid();
+      const bytes = await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/payment-requests/${inputValue.requestId}` }, "application/octet-stream");
+      try { await validateRelayArtifact({ artifactType: "payment-request", bytes, expectedDigest: sha256(bytes), secretCanaries: [] }); } catch { invalid(); }
+      return Buffer.from(bytes);
     },
     prepareCapabilityRegistration(value) {
       const inputValue = exact(value, ["capabilities"]);
