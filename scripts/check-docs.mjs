@@ -575,6 +575,54 @@ function bilateralContractFailures(relativePath, contents) {
         /\baccept `AUTHORIZED` only from each fresh aggregate verifier\b/i,
       ],
       [
+        "stable operator key ID",
+        /\bexport OPERATOR_KEY_ID="bilateral-demo-2026-07-28"/,
+      ],
+      [
+        "public operator key commit",
+        /\bCommit only `docs\/operator-keys\/\$OPERATOR_KEY_ID\.pub`/,
+      ],
+      [
+        "verify before release freeze",
+        /\brun `npm run verify`, then freeze `BILATERAL_REPOSITORY_SHA`/i,
+      ],
+      [
+        "relay terminal",
+        /\bTerminal 1 - relay\b/i,
+      ],
+      [
+        "coordinator terminal",
+        /\bTerminal 2 - coordinator\b/i,
+      ],
+      [
+        "relay readiness before coordinator",
+        /\bStart Terminal 2 only after Terminal 1 prints relay readiness\b/i,
+      ],
+      [
+        "coordinator-owned funding record",
+        /\bexport FUNDING_RECORD_FILE="\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json"/,
+      ],
+      [
+        "coordinator-owned funding record",
+        /\bcoordinator-owned `\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json`/,
+      ],
+      [
+        "repository root",
+        /\bexport REPOSITORY_ROOT="\$\(pwd\)"/,
+      ],
+      [
+        "repo-private treasury keystore",
+        /\bexport SEPOLIA_TREASURY_KEYSTORE="\$REPOSITORY_ROOT\/\.context\/sepolia-funding\/funding-wallet\.json"/,
+      ],
+      [
+        "repo-private treasury public metadata",
+        /\bexport SEPOLIA_TREASURY_PUBLIC_METADATA="\$REPOSITORY_ROOT\/\.context\/sepolia-funding\/funding-wallet\.public\.json"/,
+      ],
+      [
+        "strict private treasury files",
+        /\bstrict private files\b/i,
+      ],
+      [
         "recovery appendix",
         /\bOperator-authorized recovery appendix\b/i,
       ],
@@ -736,6 +784,51 @@ function bilateralContractFailures(relativePath, contents) {
     ) {
       failures.push(
         `${relativePath}: primary flow must not advertise localhost as the two-machine relay endpoint.`,
+      );
+    }
+    if (
+      /\bOPERATOR_KEY_ID="bilateral-demo-\$BILATERAL_REPOSITORY_SHA"/.test(
+        primary,
+      )
+    ) {
+      failures.push(
+        `${relativePath}: primary flow must use a stable operator key ID before freezing the release SHA.`,
+      );
+    }
+    const ordered = [
+      [
+        "stable operator key ID",
+        'export OPERATOR_KEY_ID="bilateral-demo-2026-07-28"',
+      ],
+      [
+        "operator keygen",
+        "node scripts/create-session.mjs keygen",
+      ],
+      [
+        "public operator key commit",
+        "Commit only `docs/operator-keys/$OPERATOR_KEY_ID.pub`",
+      ],
+      [
+        "verify before release freeze",
+        "run `npm run verify`, then freeze `BILATERAL_REPOSITORY_SHA`",
+      ],
+      [
+        "release SHA freeze",
+        'export BILATERAL_REPOSITORY_SHA="$(git rev-parse HEAD)"',
+      ],
+    ];
+    const positions = ordered.map(([label, marker]) => [
+      label,
+      primary.indexOf(marker),
+    ]);
+    if (
+      positions.some(([, index]) => index === -1) ||
+      positions.some(([, index], offset) =>
+        offset > 0 && index <= positions[offset - 1][1],
+      )
+    ) {
+      failures.push(
+        `${relativePath}: primary flow must keygen, commit the public key, verify, then freeze the release SHA in that order.`,
       );
     }
   }

@@ -34,27 +34,41 @@ dirty, if `git rev-parse HEAD` differs, if the relay IP is not reachable by both
 role computers, or if any private input is missing, readable by the wrong user,
 or delivered to the wrong role.
 
-On this Mac, record the reviewed release SHA, create owner-controlled operator
-and release roots, create the Ed25519 operator key, and prepare private runtime
-files:
+On this Mac, create the stable Ed25519 operator key before freezing the live
+release. Use the existing stable public key pattern and a dated explicit key ID;
+do not derive the key ID from the release SHA.
+
+```sh
+export OPERATOR_KEY_ID="bilateral-demo-2026-07-28"
+node scripts/create-session.mjs keygen --key-id "$OPERATOR_KEY_ID"
+export OPERATOR_PRIVATE_KEY_FILE=".context/operator-keys/$OPERATOR_KEY_ID.ed25519.pem"
+```
+
+Commit only `docs/operator-keys/$OPERATOR_KEY_ID.pub`. Review that public-key
+commit, run `npm run verify`, then freeze `BILATERAL_REPOSITORY_SHA` from the
+reviewed commit:
 
 ```sh
 export BILATERAL_REPOSITORY_SHA="$(git rev-parse HEAD)"
 printf '%s\n' "$BILATERAL_REPOSITORY_SHA" | grep -Eq '^[0-9a-f]{40}$'
 
+export REPOSITORY_ROOT="$(pwd)"
 export BILATERAL_OPERATOR_ROOT="$HOME/.clockchain/bilateral/$BILATERAL_REPOSITORY_SHA"
 export BILATERAL_RELEASE_ROOT="$BILATERAL_OPERATOR_ROOT/release"
 mkdir -p "$BILATERAL_OPERATOR_ROOT" "$BILATERAL_RELEASE_ROOT" "$BILATERAL_RELEASE_ROOT/relay-state"
 chmod 0700 "$BILATERAL_OPERATOR_ROOT" "$BILATERAL_RELEASE_ROOT"
 chmod 0700 "$BILATERAL_RELEASE_ROOT/relay-state"
 
-export OPERATOR_KEY_ID="bilateral-demo-$BILATERAL_REPOSITORY_SHA"
-node scripts/create-session.mjs keygen --key-id "$OPERATOR_KEY_ID"
-export OPERATOR_PRIVATE_KEY_FILE=".context/operator-keys/$OPERATOR_KEY_ID.ed25519.pem"
-
 export SEPOLIA_RPC_URL_FILE="$BILATERAL_OPERATOR_ROOT/sepolia-rpc-url.txt"
 printf '%s\n' "$SEPOLIA_RPC_URL" > "$SEPOLIA_RPC_URL_FILE"
 chmod 0600 "$SEPOLIA_RPC_URL_FILE"
+
+export SEPOLIA_TREASURY_KEYSTORE="$REPOSITORY_ROOT/.context/sepolia-funding/funding-wallet.json"
+export SEPOLIA_TREASURY_PUBLIC_METADATA="$REPOSITORY_ROOT/.context/sepolia-funding/funding-wallet.public.json"
+test -f "$SEPOLIA_TREASURY_KEYSTORE"
+test -f "$SEPOLIA_TREASURY_PUBLIC_METADATA"
+test "$(stat -f '%Lp' "$SEPOLIA_TREASURY_KEYSTORE")" = "600"
+test "$(stat -f '%Lp' "$SEPOLIA_TREASURY_PUBLIC_METADATA")" = "600"
 
 export OPERATOR_CLOCKCHAIN_TOKEN_FILE="$BILATERAL_OPERATOR_ROOT/operator.clockchain-token"
 node scripts/mint-bilateral-token.mjs \
@@ -62,6 +76,11 @@ node scripts/mint-bilateral-token.mjs \
   --output "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \
   --repository-sha "$BILATERAL_REPOSITORY_SHA"
 ```
+
+The treasury keystore and adjacent public metadata are strict private files:
+`.context/sepolia-funding/funding-wallet.json` and
+`.context/sepolia-funding/funding-wallet.public.json` both stay mode `0600`,
+under the repo-root absolute path derived from `pwd`, and out of Git.
 
 Choose one advertised numeric relay endpoint for the two role computers.
 `RELAY_ADVERTISED_IP` must be a numeric IP reachable by both role computers;
@@ -88,8 +107,10 @@ chmod 0600 "$RELAY_TLS_PRIVATE_KEY"
 RELAY_TLS_FINGERPRINT="$(openssl x509 -in "$RELAY_TLS_CERTIFICATE" -outform DER | openssl dgst -sha256 -binary | xxd -p -c 256)"
 ```
 
-Start the relay and coordinator from the operator Mac. Keep both processes
-attached and stop on any nonzero exit:
+Start the relay and coordinator from the operator Mac in separate terminals.
+Keep both processes attached and stop on any nonzero exit.
+
+Terminal 1 - relay:
 
 ```sh
 npm run bilateral:relay -- \
@@ -99,7 +120,14 @@ npm run bilateral:relay -- \
   --state "$BILATERAL_RELEASE_ROOT/relay-state" \
   --tls-certificate "$RELAY_TLS_CERTIFICATE" \
   --tls-private-key "$RELAY_TLS_PRIVATE_KEY"
+```
 
+Start Terminal 2 only after Terminal 1 prints relay readiness with the expected
+host, port, repository SHA, and `paymentMoved: false`.
+
+Terminal 2 - coordinator:
+
+```sh
 npm run bilateral:coordinator -- \
   --clockchain-token-file "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \
   --operator-key-id "$OPERATOR_KEY_ID" \
@@ -147,12 +175,12 @@ authenticated enrollments, the coordinator displays exactly four signed public
 addresses and continuously checks their balances and nonce-zero status; there
 is no human “funding complete” signal.
 
-Save the coordinator's single canonical funding-addresses.json line to a mode-`0600` record file, then run one treasury funding batch:
+Use the coordinator-owned `$BILATERAL_RELEASE_ROOT/funding-addresses.json` file
+directly; do not copy or rewrite the funding record. Save the coordinator-owned `$BILATERAL_RELEASE_ROOT/funding-addresses.json` as the mode-`0600` record file for the funding command, then run one treasury funding batch:
 
 ```sh
-export FUNDING_RECORD_FILE="$BILATERAL_OPERATOR_ROOT/funding-addresses.json"
+export FUNDING_RECORD_FILE="$BILATERAL_RELEASE_ROOT/funding-addresses.json"
 export FUNDING_JOURNAL_DIR="$BILATERAL_OPERATOR_ROOT/funding-journal"
-export SEPOLIA_TREASURY_KEYSTORE="$BILATERAL_OPERATOR_ROOT/sepolia-treasury.json"
 
 npm run bilateral:fund -- \
   --funding-record "$FUNDING_RECORD_FILE" \

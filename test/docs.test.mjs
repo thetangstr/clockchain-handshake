@@ -398,6 +398,19 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /demo transactions spend gas from participant balances[^.\n]*never move the represented USD payment/i);
   assert.match(primaryRunbook, /paymentMoved: false/);
   assert.match(primaryRunbook, /accept `AUTHORIZED` only from each fresh aggregate verifier/i);
+  assert.match(primaryRunbook, /export OPERATOR_KEY_ID="bilateral-demo-2026-07-28"/);
+  assert.match(primaryRunbook, /Commit only `docs\/operator-keys\/\$OPERATOR_KEY_ID\.pub`/);
+  assert.match(primaryRunbook, /run `npm run verify`, then freeze `BILATERAL_REPOSITORY_SHA`/i);
+  assert.doesNotMatch(primaryRunbook, /OPERATOR_KEY_ID="bilateral-demo-\$BILATERAL_REPOSITORY_SHA"/);
+  assert.match(primaryRunbook, /Terminal 1 - relay/i);
+  assert.match(primaryRunbook, /Terminal 2 - coordinator/i);
+  assert.match(primaryRunbook, /Start Terminal 2 only after Terminal 1 prints relay readiness/i);
+  assert.match(primaryRunbook, /export FUNDING_RECORD_FILE="\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json"/);
+  assert.match(primaryRunbook, /coordinator-owned `\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json`/);
+  assert.match(primaryRunbook, /export REPOSITORY_ROOT="\$\(pwd\)"/);
+  assert.match(primaryRunbook, /export SEPOLIA_TREASURY_KEYSTORE="\$REPOSITORY_ROOT\/\.context\/sepolia-funding\/funding-wallet\.json"/);
+  assert.match(primaryRunbook, /export SEPOLIA_TREASURY_PUBLIC_METADATA="\$REPOSITORY_ROOT\/\.context\/sepolia-funding\/funding-wallet\.public\.json"/);
+  assert.match(primaryRunbook, /strict private files/i);
   assert.match(billy, /You are Stakeholder 2, Billy, the payer\. Start only the payer supervisor\./);
   assert.match(iris, /You are Stakeholder 1, Iris, the payee\. Start only the payee supervisor\./);
   for (const prompt of [billy, iris]) {
@@ -410,6 +423,33 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
     assert.match(prompt, /clean detached checkout[^.]*reviewed 40-character SHA/i);
     assert.match(prompt, /launch manifest expires after 60 minutes/i);
   }
+});
+
+test("bilateral operator runbook orders key publication before release freeze", async () => {
+  const primaryRunbook = (
+    await readFile(
+      join(ROOT_DIRECTORY, "docs/runbooks/bilateral-demo-day.md"),
+      "utf8",
+    )
+  ).split(/^## Operator-authorized recovery appendix$/m, 1)[0];
+  const keyId = primaryRunbook.indexOf('export OPERATOR_KEY_ID="bilateral-demo-2026-07-28"');
+  const keygen = primaryRunbook.indexOf("node scripts/create-session.mjs keygen");
+  const commitPublic = primaryRunbook.indexOf("Commit only `docs/operator-keys/$OPERATOR_KEY_ID.pub`");
+  const verify = primaryRunbook.indexOf("run `npm run verify`, then freeze `BILATERAL_REPOSITORY_SHA`");
+  const freeze = primaryRunbook.indexOf('export BILATERAL_REPOSITORY_SHA="$(git rev-parse HEAD)"');
+  for (const [label, index] of [
+    ["stable key ID", keyId],
+    ["keygen", keygen],
+    ["public-key commit", commitPublic],
+    ["verify-before-freeze", verify],
+    ["release SHA freeze", freeze],
+  ]) {
+    assert.notEqual(index, -1, label);
+  }
+  assert.ok(keyId < keygen);
+  assert.ok(keygen < commitPublic);
+  assert.ok(commitPublic < verify);
+  assert.ok(verify < freeze);
 });
 
 test("documentation checker rejects non-reachable bilateral relay drift", async (t) => {
@@ -444,6 +484,16 @@ test("documentation checker rejects non-reachable bilateral relay drift", async 
 test("documentation checker rejects bilateral manifest and funding drift", async (t) => {
   const cases = [
     [
+      'export OPERATOR_KEY_ID="bilateral-demo-2026-07-28"',
+      'export OPERATOR_KEY_ID="bilateral-demo-$BILATERAL_REPOSITORY_SHA"',
+      "stable operator key ID",
+    ],
+    [
+      "Start Terminal 2 only after Terminal 1 prints relay readiness",
+      "Start Terminal 2 whenever convenient",
+      "relay readiness before coordinator",
+    ],
+    [
       "payee.launch.json only to Iris",
       "payee.launch.json to both stakeholders",
       "private launch manifest delivery",
@@ -457,6 +507,16 @@ test("documentation checker rejects bilateral manifest and funding drift", async
       "npm run bilateral:fund --",
       "node scripts/fund-bilateral-addresses.mjs",
       "reusable bilateral funding command",
+    ],
+    [
+      'export FUNDING_RECORD_FILE="$BILATERAL_RELEASE_ROOT/funding-addresses.json"',
+      'export FUNDING_RECORD_FILE="$BILATERAL_OPERATOR_ROOT/funding-addresses.json"',
+      "coordinator-owned funding record",
+    ],
+    [
+      'export SEPOLIA_TREASURY_KEYSTORE="$REPOSITORY_ROOT/.context/sepolia-funding/funding-wallet.json"',
+      'export SEPOLIA_TREASURY_KEYSTORE="$BILATERAL_OPERATOR_ROOT/sepolia-treasury.json"',
+      "repo-private treasury keystore",
     ],
   ];
 
