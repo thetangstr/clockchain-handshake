@@ -3,7 +3,7 @@
 import { pathToFileURL } from "node:url";
 
 import {
-  runBillyRole,
+  runPayerRole,
   runRoleCli,
 } from "../src/bilateral/roles.mjs";
 
@@ -13,7 +13,7 @@ export async function main(
 ) {
   return runRoleCli("payer", arguments_, {
     ...dependencies,
-    runRole: dependencies.runRole ?? runBillyRole,
+    runRole: dependencies.runRole ?? runPayerRole,
   });
 }
 

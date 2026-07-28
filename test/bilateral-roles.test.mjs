@@ -50,14 +50,15 @@ import {
   ROLE_RESULT_KEYS,
   ROLE_CLI_ARGUMENTS,
   ROLE_RISK_FLAG,
-  runBillyRole,
-  runIrisRole,
+  runPayerRole,
+  runPayeeRole,
 } from "../src/bilateral/roles.mjs";
 import { main as proposeMain } from "../bin/handshake-propose.mjs";
 import { main as acceptMain } from "../bin/handshake-accept.mjs";
 import {
   createFakeBilateralClockchain,
 } from "./helpers/fake-bilateral-clockchain.mjs";
+import * as roleModule from "../src/bilateral/roles.mjs";
 
 const PAYER_PRIVATE_KEY = generatePrivateKey();
 const PAYEE_PRIVATE_KEY = generatePrivateKey();
@@ -68,8 +69,8 @@ const PAYEE_ACCOUNT =
 const PAYER_ADDRESS = PAYER_ACCOUNT.address.toLowerCase();
 const PAYEE_ADDRESS = PAYEE_ACCOUNT.address.toLowerCase();
 const REPOSITORY_PROMPTS = Object.freeze({
-  payer: "# Billy role prompt\nUse the signed session.\n",
-  payee: "# Iris role prompt\nUse the signed session.\n",
+  payer: "# Iris role prompt\nUse the signed session.\n",
+  payee: "# Billie role prompt\nUse the signed session.\n",
 });
 const REPOSITORY_PROMPT_DIGESTS = Object.freeze({
   payer: createHash("sha256")
@@ -96,13 +97,13 @@ function descriptor() {
     payee: {
       address: PAYEE_ADDRESS,
       agentId: "8678",
-      displayName: "Iris",
+      displayName: "Billie",
       role: "payee",
     },
     payer: {
       address: PAYER_ADDRESS,
       agentId: "8677",
-      displayName: "Billy",
+      displayName: "Iris",
       role: "payer",
     },
     paymentMoved: false,
@@ -208,7 +209,34 @@ function triple(kind, record) {
   });
 }
 
-test("Billy publishes USD 100, verifies Iris, acknowledges, signs, and emits payer evidence", async (t) => {
+test("role module exposes generic protocol-role runners without persona exports", () => {
+  assert.equal(typeof roleModule.runPayerRole, "function");
+  assert.equal(typeof roleModule.runPayeeRole, "function");
+  assert.equal("runBillyRole" in roleModule, false);
+  assert.equal("runIrisRole" in roleModule, false);
+});
+
+test("role CLIs dispatch through generic protocol runners", async () => {
+  const files = [
+    ["../bin/handshake-propose.mjs", "runPayerRole", "runBillyRole"],
+    ["../bin/handshake-accept.mjs", "runPayeeRole", "runIrisRole"],
+  ];
+  for (const [relative, expected, rejected] of files) {
+    const source = await readFile(
+      new URL(relative, import.meta.url),
+      "utf8",
+    );
+    assert.match(source, new RegExp(`\\b${expected}\\b`), relative);
+    assert.doesNotMatch(source, new RegExp(`\\b${rejected}\\b`), relative);
+  }
+});
+
+test("descriptor fixtures use Iris payer and Billie payee personas", () => {
+  assert.equal(descriptor().payer.displayName, "Iris");
+  assert.equal(descriptor().payee.displayName, "Billie");
+});
+
+test("payer publishes USD 100, verifies payee acceptance, acknowledges, signs, and emits payer evidence", async (t) => {
   const directory = await outputDirectory(t);
   const {
     descriptor: sessionDescriptor,
@@ -226,7 +254,7 @@ test("Billy publishes USD 100, verifies Iris, acknowledges, signs, and emits pay
   let monotonicMs = 0;
   let acceptanceWritten = false;
 
-  const result = await runBillyRole({
+  const result = await runPayerRole({
     canaries: ["role-secret-canary"],
     client: fake,
     descriptorEnvelope: envelope,
@@ -300,7 +328,7 @@ test("Billy publishes USD 100, verifies Iris, acknowledges, signs, and emits pay
   );
 });
 
-test("Iris uniquely recovers Billy's proposal and preserves acceptance when acknowledgment is absent", async (t) => {
+test("payee uniquely recovers payer proposal and preserves acceptance when acknowledgment is absent", async (t) => {
   const directory = await outputDirectory(t);
   const {
     descriptor: sessionDescriptor,
@@ -318,7 +346,7 @@ test("Iris uniquely recovers Billy's proposal and preserves acceptance when ackn
   const published = [];
   let monotonicMs = 0;
 
-  const result = await runIrisRole({
+  const result = await runPayeeRole({
     acknowledgmentPollDurationMs: 20000,
     client: fake,
     descriptorEnvelope: envelope,
@@ -366,7 +394,7 @@ test("both identity sources must match before either role can write", async (t) 
   let published = false;
 
   await assert.rejects(
-    runBillyRole({
+    runPayerRole({
       client: fake,
       descriptorEnvelope: envelope,
       outputDirectory: directory,
@@ -411,7 +439,7 @@ test("one pinned output identity spans every role write and evidence publication
   let published = false;
 
   await assert.rejects(
-    runBillyRole({
+    runPayerRole({
       client: fake,
       descriptorEnvelope: envelope,
       fileSystem: {
@@ -494,7 +522,7 @@ test("role identity binding ignores non-authoritative resolveAgent status data",
 
       let monotonicMs = 0;
       await assert.rejects(
-        runIrisRole({
+        runPayeeRole({
           client: fake,
           descriptorEnvelope: envelope,
           jitter: () => 0,
@@ -522,7 +550,7 @@ test("role identity binding ignores non-authoritative resolveAgent status data",
   }
 });
 
-test("Iris never converts a rate-limited proposal window into absence", async (t) => {
+test("payee never converts a rate-limited proposal window into absence", async (t) => {
   const directory = await outputDirectory(t);
   const {
     envelope,
@@ -544,7 +572,7 @@ test("Iris never converts a rate-limited proposal window into absence", async (t
   let monotonicMs = 0;
 
   await assert.rejects(
-    runIrisRole({
+    runPayeeRole({
       client: fake,
       descriptorEnvelope: envelope,
       jitter: () => 0,
@@ -773,7 +801,7 @@ async function defaultBuilderFixture(t) {
   const bundle = await encryptInvitation(
     {
       address: PAYER_ADDRESS,
-      displayName: "Billy",
+      displayName: "Iris",
       privateKey,
     },
     code,
@@ -816,13 +844,13 @@ async function defaultBuilderFixture(t) {
         );
         if (
           request.repositoryPath ===
-          "prompts/run-billy-bilateral-demo.md"
+          "prompts/run-iris-bilateral-demo.md"
         ) {
           return Buffer.from(REPOSITORY_PROMPTS.payer);
         }
         if (
           request.repositoryPath ===
-          "prompts/run-iris-bilateral-demo.md"
+          "prompts/run-billie-bilateral-demo.md"
         ) {
           return Buffer.from(REPOSITORY_PROMPTS.payee);
         }
@@ -941,7 +969,7 @@ test("default builder fails provenance closed before secrets, clients, or tokens
           repositoryPath,
         }) =>
           Buffer.from(
-            repositoryPath.includes("billy")
+            repositoryPath.includes("iris")
               ? `${REPOSITORY_PROMPTS.payer}mutated\n`
               : REPOSITORY_PROMPTS.payee,
           ),

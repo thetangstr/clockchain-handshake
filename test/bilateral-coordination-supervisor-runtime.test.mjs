@@ -327,13 +327,13 @@ test("production supervisor verifies valid enrollment receipts and binds each de
       payee: {
         address: payeeAddresses.rehearsal,
         agentId: "8678",
-        displayName: "Iris",
+        displayName: "Billie",
         role: "payee",
       },
       payer: {
         address: payerAddresses.rehearsal,
         agentId: "8677",
-        displayName: "Billy",
+        displayName: "Iris",
         role: "payer",
       },
       paymentMoved: false,

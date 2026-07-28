@@ -135,8 +135,8 @@ const MAX_EVIDENCE_CANARY_LENGTH =
   MAX_CANONICAL_STRING_LENGTH;
 const TOKEN_PATTERN = /^[!-~]{1,4096}$/;
 const ROLE_PROMPT_PATHS = Object.freeze({
-  payer: "prompts/run-billy-bilateral-demo.md",
-  payee: "prompts/run-iris-bilateral-demo.md",
+  payer: "prompts/run-iris-bilateral-demo.md",
+  payee: "prompts/run-billie-bilateral-demo.md",
 });
 const BUILDER_VALUE_KEYS = Object.freeze([
   "clockchainTokenPath",
@@ -522,7 +522,7 @@ function announceReady(snapshot) {
   }
 }
 
-export async function runBillyRole(input) {
+export async function runPayerRole(input) {
   let directoryPin;
   let primaryFailure;
   try {
@@ -793,7 +793,7 @@ async function discoverProposal(
   }
 }
 
-export async function runIrisRole(input) {
+export async function runPayeeRole(input) {
   let directoryPin;
   let primaryFailure;
   try {
@@ -1658,7 +1658,7 @@ export async function runRoleCli(
       buildDefaultRoleInput;
     const runRole =
       dependencies.runRole ??
-      (role === "payer" ? runBillyRole : runIrisRole);
+      (role === "payer" ? runPayerRole : runPayeeRole);
     if (
       typeof stdout?.write !== "function" ||
       typeof stderr?.write !== "function" ||
