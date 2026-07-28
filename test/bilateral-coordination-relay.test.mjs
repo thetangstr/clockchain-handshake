@@ -81,6 +81,12 @@ import {
   validateRelayArtifactWithFacts,
 } from "../src/bilateral/coordination/artifact.mjs";
 import {
+  signPayerMandate,
+} from "../src/bilateral/payer-mandate.mjs";
+import {
+  signPaymentRequest,
+} from "../src/bilateral/payment-request.mjs";
+import {
   RELAY_BODY_TIMEOUT_MS,
   RELAY_HEADER_TIMEOUT_MS,
   RELAY_REPOSITORY_ROOT,
@@ -101,14 +107,14 @@ const PAYER_CAPABILITY = Buffer.alloc(32, 0x41);
 const PAYEE_CAPABILITY = Buffer.alloc(32, 0x42);
 const execFile = promisify(execFileCallback);
 
-async function invokeRelayHandler(handler, { body = Buffer.alloc(0), method = "POST", url }) {
+async function invokeRelayHandler(handler, { body = Buffer.alloc(0), contentType = "application/json", method = "POST", url }) {
   const request = new PassThrough();
   request.headers = method === "GET"
     ? { host: "127.0.0.1:8443" }
-    : { host: "127.0.0.1:8443", "content-type": "application/json" };
+    : { host: "127.0.0.1:8443", "content-type": contentType };
   request.rawHeaders = method === "GET"
     ? ["host", "127.0.0.1:8443"]
-    : ["host", "127.0.0.1:8443", "content-type", "application/json"];
+    : ["host", "127.0.0.1:8443", "content-type", contentType];
   request.method = method;
   request.url = url;
   const response = new EventEmitter();
@@ -140,6 +146,33 @@ test("routes only exact verified-event posts to the verified service seam", asyn
   assert.deepEqual(JSON.parse(result.body), event);
   const rejected = await invokeRelayHandler(handler, { body, url: "/v1/verified-events?x=1" });
   assert.equal(rejected.status, 400);
+});
+
+test("routes the exact payer-owned inbox endpoints with canonical bytes", async () => {
+  const calls = [];
+  const mandate = Buffer.from('{"mandate":true}', "utf8");
+  const request = Buffer.from('{"request":true}', "utf8");
+  const handler = createRelayRequestHandler({
+    appendEvent: async () => ({}), appendVerifiedEvent: async () => ({}), bootstrap: async () => ({}), getArtifact: async () => Buffer.alloc(0), putArtifact: async () => ({}), readEnrollmentSet: async () => ({}), readEvents: async () => [], readSessionView: async () => ({}),
+    readPayerMandate: async (input) => { calls.push(["mandate", input]); return mandate; },
+    readPaymentRequest: async (input) => { calls.push(["request", input]); return request; },
+    submitPaymentRequest: async (input) => { calls.push(["submit", input]); return { paymentMoved: false, rawEnvelopeDigest: "a".repeat(64) }; },
+  }, "127.0.0.1", 8443);
+  const mandateUrl = `/v1/sessions/${SESSION_ID}/mandate?subjectRun=rehearsal`;
+  const requestUrl = `/v1/sessions/${SESSION_ID}/payment-requests/${SESSION_ID}`;
+  const mandateResult = await invokeRelayHandler(handler, { method: "GET", url: mandateUrl });
+  assert.equal(mandateResult.status, 200);
+  assert.deepEqual(mandateResult.body, mandate);
+  const submitted = await invokeRelayHandler(handler, { body: request, contentType: "application/octet-stream", url: `/v1/sessions/${SESSION_ID}/payment-requests` });
+  assert.equal(submitted.status, 200);
+  const requestResult = await invokeRelayHandler(handler, { method: "GET", url: requestUrl });
+  assert.equal(requestResult.status, 200);
+  assert.deepEqual(requestResult.body, request);
+  assert.deepEqual(calls, [
+    ["mandate", { sessionId: SESSION_ID, subjectRun: "rehearsal" }],
+    ["submit", { body: request, sessionId: SESSION_ID }],
+    ["request", { requestId: SESSION_ID, sessionId: SESSION_ID }],
+  ]);
 });
 
 test("routes only an exact verifier-publication read to the durable service seam", async () => {
@@ -686,8 +719,12 @@ function storeFacade(store, overrides = {}) {
     appendVerifiedEvent: store.appendVerifiedEvent,
     consumeCapability: store.consumeCapability,
     getArtifact: store.getArtifact,
+    putPayerMandate: store.putPayerMandate,
+    putPaymentRequest: store.putPaymentRequest,
     putArtifact: store.putArtifact,
     readEnrollment: store.readEnrollment,
+    readPayerMandate: store.readPayerMandate,
+    readPaymentRequest: store.readPaymentRequest,
     readCapabilitySet: store.readCapabilitySet,
     readEvents: store.readEvents,
     readReleaseView: store.readReleaseView,
@@ -1576,6 +1613,18 @@ async function rehearsalReadyForVerification(t) {
     payee: { address: privateKeyToAccount(invitationKeys.payee.rehearsal).address.toLowerCase(), agentId: "8678", displayName: "Iris" },
   };
   const descriptor = enrolledDescriptor(identities);
+  const payerAccount = privateKeyToAccount(invitationKeys.payer.rehearsal);
+  const payeeAccount = privateKeyToAccount(invitationKeys.payee.rehearsal);
+  const mandate = await signPayerMandate({
+    mandate: { amount: { currency: "USD", value: "100" }, expiresAtMs: String(NOW_MS + 60_000), invoiceReferencePrefix: "invoice-", issuedAtMs: String(NOW_MS - 1), payer: { address: payerAccount.address.toLowerCase(), agentId: identities.payer.agentId }, payee: { address: payeeAccount.address.toLowerCase(), agentId: identities.payee.agentId }, paymentMoved: false, protocol: "clockchain.bilateral-authorization/v1", purpose: "Handshake demo", releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, requestEndpoint: `/v1/sessions/${SESSION_ID}/payment-requests`, schema: "clockchain.bilateral-payer-mandate/v1", sessionId: SESSION_ID, subjectRun: "rehearsal" },
+    signMessage: (bytes) => payerAccount.signMessage({ message: { raw: toHex(bytes) } }),
+  });
+  const mandateBytes = canonicalBytes(mandate);
+  const request = await signPaymentRequest({
+    request: { amount: { currency: "USD", value: "100" }, createdAtMs: String(NOW_MS), expiresAtMs: String(NOW_MS + 30_000), invoiceReference: "invoice-001", mandateDigest: sha256(canonicalBytes(mandate.mandate)), payer: { address: payerAccount.address.toLowerCase(), agentId: identities.payer.agentId }, payee: { address: payeeAccount.address.toLowerCase(), agentId: identities.payee.agentId }, paymentMoved: false, protocol: "clockchain.bilateral-authorization/v1", purpose: "Handshake demo", releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, requestId: "9f953393-86d0-4f99-9d6a-102f525fbecd", schema: "clockchain.bilateral-payment-request/v1", sessionId: SESSION_ID, subjectRun: "rehearsal" },
+    signMessage: (bytes) => payeeAccount.signMessage({ message: { raw: toHex(bytes) } }),
+  });
+  const requestBytes = canonicalBytes(request);
   const payerPackage = await partyResultPackage(t, { descriptor, role: "payer" });
   const payeePackage = await partyResultPackage(t, { descriptor, role: "payee" });
   const uploads = [
@@ -1583,23 +1632,54 @@ async function rehearsalReadyForVerification(t) {
     ["preflight-plan", artifacts.plan], ["preflight-participant-report", artifacts.participants.payer], ["preflight-participant-report", artifacts.participants.payee], ["preflight-aggregate-report", artifacts.aggregate],
     ["identity-package", identityPackage(identities.payer)], ["identity-package", identityPackage(identities.payee)],
     ["signed-descriptor", canonicalBytes(descriptor)], ["party-result-package", payerPackage], ["party-result-package", payeePackage],
+    ["payer-mandate", mandateBytes], ["payment-request", requestBytes],
   ];
   for (const [artifactType, body] of uploads) await relay.putArtifact({ artifactType, body, expectedDigest: sha256(body) });
   const build = eventBuilder();
+  let requestReceipt;
   const append = async (role, kind, artifactDigest = null, subjectRun = "release") => relay.appendEvent({ body: canonicalBytes(build({ role, kind, artifactDigest, subjectRun })) });
   for (const [role, kind, artifactDigest, subjectRun] of [
     ["payer", "ENROLLMENT_CONFIRMED"], ["payee", "ENROLLMENT_CONFIRMED"], ["operator", "ENROLLMENT_RECEIPT"], ["operator", "WAIT_FOR_FUNDING"], ["payer", "FUNDING_INPUTS_READY"], ["payee", "FUNDING_INPUTS_READY"],
     ["payer", "TOKEN_READY", sha256(stableBytes(artifacts.tokens.payer))], ["payee", "TOKEN_READY", sha256(stableBytes(artifacts.tokens.payee))], ["operator", "PREFLIGHT_PLAN_READY", sha256(artifacts.plan)], ["payer", "PREFLIGHT_PARTICIPANT_READY", sha256(artifacts.participants.payer)], ["payee", "PREFLIGHT_PARTICIPANT_READY", sha256(artifacts.participants.payee)], ["operator", "REGISTER_REHEARSAL", sha256(artifacts.aggregate), "rehearsal"],
-    ["payer", "IDENTITY_PACKAGE_READY", sha256(identityPackage(identities.payer)), "rehearsal"], ["payee", "IDENTITY_PACKAGE_READY", sha256(identityPackage(identities.payee)), "rehearsal"], ["operator", "REHEARSAL_DESCRIPTOR_READY", sha256(canonicalBytes(descriptor)), "rehearsal"], ["payer", "DESCRIPTOR_ACCEPTED", sha256(canonicalBytes(descriptor)), "rehearsal"], ["payee", "DESCRIPTOR_ACCEPTED", sha256(canonicalBytes(descriptor)), "rehearsal"], ["operator", "START_REHEARSAL", null, "rehearsal"], ["payee", "ROLE_STARTED", null, "rehearsal"], ["payer", "ROLE_STARTED", null, "rehearsal"], ["payer", "ROLE_PACKAGE_READY", sha256(payerPackage), "rehearsal"], ["payee", "ROLE_PACKAGE_READY", sha256(payeePackage), "rehearsal"],
+    ["payer", "IDENTITY_PACKAGE_READY", sha256(identityPackage(identities.payer)), "rehearsal"], ["payee", "IDENTITY_PACKAGE_READY", sha256(identityPackage(identities.payee)), "rehearsal"], ["payer", "PAYER_MANDATE_READY", sha256(mandateBytes), "rehearsal"], ["payee", "PAYMENT_REQUEST_READY", sha256(requestBytes), "rehearsal"], ["payer", "PAYMENT_REQUEST_MATCHED", null, "rehearsal"], ["operator", "REHEARSAL_DESCRIPTOR_READY", sha256(canonicalBytes(descriptor)), "rehearsal"], ["payer", "DESCRIPTOR_ACCEPTED", sha256(canonicalBytes(descriptor)), "rehearsal"], ["payee", "DESCRIPTOR_ACCEPTED", sha256(canonicalBytes(descriptor)), "rehearsal"], ["operator", "START_REHEARSAL", null, "rehearsal"], ["payee", "ROLE_STARTED", null, "rehearsal"], ["payer", "ROLE_STARTED", null, "rehearsal"], ["payer", "ROLE_PACKAGE_READY", sha256(payerPackage), "rehearsal"], ["payee", "ROLE_PACKAGE_READY", sha256(payeePackage), "rehearsal"],
   ]) {
     try {
       await append(role, kind, artifactDigest, subjectRun);
+      if (kind === "PAYER_MANDATE_READY") {
+        requestReceipt = await relay.submitPaymentRequest({ body: requestBytes, sessionId: SESSION_ID });
+      }
     } catch (error) {
-      throw new Error(`rehearsal setup rejected ${kind} for ${role}`, { cause: error });
+      throw new Error(`rehearsal setup rejected ${kind} for ${role}: ${error}`, { cause: error });
     }
   }
-  return { build, receipt, relay, root, store };
+  return { build, mandateBytes, receipt, relay, request, requestBytes, requestReceipt, root, store };
 }
+
+test("persists fully verified signed inbox artifacts and returns exact bytes", async (t) => {
+  const { mandateBytes, receipt, relay, request, requestBytes, requestReceipt, store } = await rehearsalReadyForVerification(t);
+  assert.deepEqual(await relay.readPayerMandate({ sessionId: SESSION_ID, subjectRun: "rehearsal" }), mandateBytes);
+  assert.deepEqual(await relay.readPaymentRequest({ requestId: request.request.requestId, sessionId: SESSION_ID }), requestBytes);
+  assert.equal(requestReceipt.rawEnvelopeDigest, sha256(requestBytes));
+  assert.notEqual(requestReceipt.rawEnvelopeDigest, requestReceipt.paymentRequestDigest);
+  const forged = canonicalBytes({ ...request, signature: { ...request.signature, value: `0x${"0".repeat(130)}` } });
+  await assert.rejects(relay.submitPaymentRequest({ body: forged, sessionId: SESSION_ID }), { code: "COORDINATION_RELAY_INVALID" });
+  const payeeAccount = privateKeyToAccount(invitationKeys.payee.rehearsal);
+  const expired = await signPaymentRequest({ request: { ...request.request, createdAtMs: String(NOW_MS - 2), expiresAtMs: String(NOW_MS - 1) }, signMessage: (bytes) => payeeAccount.signMessage({ message: { raw: toHex(bytes) } }) });
+  await assert.rejects(relay.submitPaymentRequest({ body: canonicalBytes(expired), sessionId: SESSION_ID }), { code: "COORDINATION_RELAY_INVALID" });
+  const wrongMandate = await signPaymentRequest({ request: { ...request.request, mandateDigest: "f".repeat(64) }, signMessage: (bytes) => payeeAccount.signMessage({ message: { raw: toHex(bytes) } }) });
+  await assert.rejects(relay.submitPaymentRequest({ body: canonicalBytes(wrongMandate), sessionId: SESSION_ID }), { code: "COORDINATION_RELAY_INVALID" });
+  const wrongRun = await signPaymentRequest({ request: { ...request.request, subjectRun: "stakeholder" }, signMessage: (bytes) => payeeAccount.signMessage({ message: { raw: toHex(bytes) } }) });
+  await assert.rejects(relay.submitPaymentRequest({ body: canonicalBytes(wrongRun), sessionId: SESSION_ID }), { code: "COORDINATION_RELAY_INVALID" });
+  await assert.rejects(relay.submitPaymentRequest({ body: requestBytes, sessionId: "9f953393-86d0-4f99-9d6a-102f525fbecd" }), { code: "COORDINATION_SESSION_NOT_FOUND" });
+  const noReadyStore = storeFacade(store, {
+    readReleaseView: async (input) => {
+      const view = await store.readReleaseView(input);
+      return { ...view, events: view.events.filter((event) => event.kind !== "PAYER_MANDATE_READY") };
+    },
+  });
+  const noReadyRelay = createRelayService({ frozenRepositorySha: REPOSITORY_SHA, now: () => NOW_MS, receiptSigner: receipt.signer, repositoryPublicKeyResolver: repositoryResolver(), store: noReadyStore });
+  await assert.rejects(noReadyRelay.readPayerMandate({ sessionId: SESSION_ID, subjectRun: "rehearsal" }), { code: "COORDINATION_RELAY_INVALID" });
+});
 
 test("creates the exact transport-independent service and requires every authority dependency", async (t) => {
   const { store } = await storeFixture(t);
@@ -1621,11 +1701,14 @@ test("creates the exact transport-independent service and requires every authori
     "bootstrap",
     "getArtifact",
     "putArtifact",
+    "readPayerMandate",
+    "readPaymentRequest",
     "registerCapabilities",
     "readEnrollmentSet",
     "readEvents",
     "readSessionView",
     "readVerifierPublication",
+    "submitPaymentRequest",
   ]);
   assert.equal(Object.isFrozen(relay), true);
 });
@@ -1701,7 +1784,7 @@ test("trusted verifier seam completes the exact rehearsal lifecycle and is idemp
   assert.deepEqual(await relay.appendVerifiedEvent({ body }), event);
   assert.equal((await relay.readSessionView({ sessionId: SESSION_ID })).state, "REHEARSAL_VERIFIED");
   assert.deepEqual(await relay.appendVerifiedEvent({ body }), event);
-  assert.equal((await store.readEvents({ after: null, sessionId: SESSION_ID })).length, 23);
+  assert.equal((await store.readEvents({ after: null, sessionId: SESSION_ID })).length, 26);
   const journal = await readFile(join(root, "journal.log"), "utf8");
   assert.equal(journal.includes("VERIFIED_EVENT_APPENDED"), true);
 });
@@ -1719,7 +1802,7 @@ test("trusted verifier seam fails closed when its durable claim disagrees with t
   for (const [label, publication] of cases) {
     await assert.rejects(relay.appendVerifiedEvent({ body: verifiedEventBody(event, publication) }), { code: "COORDINATION_RELAY_INVALID" }, label);
   }
-  await assert.equal((await store.readEvents({ after: null, sessionId: SESSION_ID })).length, 22);
+  await assert.equal((await store.readEvents({ after: null, sessionId: SESSION_ID })).length, 25);
   assert.equal(await store.readVerifierPublication({ sessionId: SESSION_ID, subjectRun: "rehearsal" }), null);
 });
 

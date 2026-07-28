@@ -868,6 +868,35 @@ export function createRelayRequestHandler(service, host, port) {
         return;
       }
 
+      const mandateMatch = path.match(
+        /^\/v1\/sessions\/([0-9a-f-]{36})\/mandate$/,
+      );
+      if (request.method === "GET" && mandateMatch !== null) {
+        const queryValues = parseRawQuery(query, ["subjectRun"]);
+        const subjectRun = queryValues.get("subjectRun");
+        if (!UUID_PATTERN.test(mandateMatch[1]) || !["rehearsal", "stakeholder"].includes(subjectRun)) throw new Error();
+        sendBytes(response, await service.readPayerMandate({ sessionId: mandateMatch[1], subjectRun }));
+        return;
+      }
+      const paymentRequestCollectionMatch = path.match(
+        /^\/v1\/sessions\/([0-9a-f-]{36})\/payment-requests$/,
+      );
+      if (request.method === "POST" && paymentRequestCollectionMatch !== null) {
+        if (query !== null || !UUID_PATTERN.test(paymentRequestCollectionMatch[1])) throw new Error();
+        requireContentType(request, "application/octet-stream");
+        const body = await readBody(request, 65_536);
+        sendJson(response, 200, await service.submitPaymentRequest({ body, sessionId: paymentRequestCollectionMatch[1] }));
+        return;
+      }
+      const paymentRequestMatch = path.match(
+        /^\/v1\/sessions\/([0-9a-f-]{36})\/payment-requests\/([0-9a-f-]{36})$/,
+      );
+      if (request.method === "GET" && paymentRequestMatch !== null) {
+        if (query !== null || !UUID_PATTERN.test(paymentRequestMatch[1]) || !UUID_PATTERN.test(paymentRequestMatch[2])) throw new Error();
+        sendBytes(response, await service.readPaymentRequest({ requestId: paymentRequestMatch[2], sessionId: paymentRequestMatch[1] }));
+        return;
+      }
+
       const eventsMatch = path.match(
         /^\/v1\/sessions\/([0-9a-f-]{36})\/events$/,
       );

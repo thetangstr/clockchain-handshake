@@ -17,6 +17,14 @@ import {
   canonicalBytes,
 } from "../canonical.mjs";
 import {
+  payerMandateDigest,
+  verifyPayerMandate,
+} from "../payer-mandate.mjs";
+import {
+  paymentRequestDigest,
+  verifyPaymentRequest,
+} from "../payment-request.mjs";
+import {
   operatorPublicKeyPath,
   dSession,
   publicKeyPemFromRawBase64,
@@ -65,11 +73,14 @@ const SERVICE_KEYS = Object.freeze([
   "bootstrap",
   "getArtifact",
   "putArtifact",
+  "readPayerMandate",
+  "readPaymentRequest",
   "registerCapabilities",
   "readEnrollmentSet",
   "readEvents",
   "readSessionView",
   "readVerifierPublication",
+  "submitPaymentRequest",
 ]);
 const DEPENDENCY_KEYS = Object.freeze([
   "frozenRepositorySha",
@@ -87,7 +98,11 @@ const STORE_METHODS = Object.freeze([
   "consumeCapability",
   "getArtifact",
   "putArtifact",
+  "putPayerMandate",
+  "putPaymentRequest",
   "readEnrollment",
+  "readPayerMandate",
+  "readPaymentRequest",
   "readCapabilitySet",
   "readEvents",
   "readReleaseView",
@@ -112,6 +127,9 @@ const PUT_ARTIFACT_KEYS = Object.freeze([
   "body",
   "expectedDigest",
 ]);
+const READ_PAYER_MANDATE_KEYS = Object.freeze(["sessionId", "subjectRun"]);
+const READ_PAYMENT_REQUEST_KEYS = Object.freeze(["requestId", "sessionId"]);
+const SUBMIT_PAYMENT_REQUEST_KEYS = Object.freeze(["body", "sessionId"]);
 
 function verifierPublicationMatchesEvent(publication, event) {
   const claim = readExactData(publication, PUBLICATION_KEYS);
@@ -228,6 +246,8 @@ const ARTIFACT_EVENT_TYPES = Object.freeze({
   IDENTITY_PACKAGE_READY: "identity-package",
   PREFLIGHT_PARTICIPANT_READY: "preflight-participant-report",
   PREFLIGHT_PLAN_READY: "preflight-plan",
+  PAYER_MANDATE_READY: "payer-mandate",
+  PAYMENT_REQUEST_READY: "payment-request",
   RECOVERY_REQUIRED: "recovery-command-manifest",
   REGISTER_REHEARSAL: "preflight-aggregate-report",
   ROLE_PACKAGE_READY: "party-result-package",
@@ -1026,7 +1046,22 @@ export function createRelayArtifactTransitionValidator(input) {
       return result;
       });
     }
-    return Object.freeze({ validate });
+    function readIdentityContext(value) {
+      const data = readExactData(value, ["subjectRun"]);
+      if (!Object.hasOwn(identities, data.subjectRun)) invalid();
+      const context = identities[data.subjectRun];
+      if (context.payer === undefined || context.payee === undefined) {
+        invalid();
+      }
+      // Return a new deeply immutable snapshot; this is intentionally only a
+      // validator capability, never a service or HTTP authority surface.
+      return Object.freeze({
+        payer: Object.freeze({ ...context.payer }),
+        payee: Object.freeze({ ...context.payee }),
+        subjectRun: data.subjectRun,
+      });
+    }
+    return Object.freeze({ readIdentityContext, validate });
   });
 }
 
@@ -1233,6 +1268,16 @@ export function createRelayService(input) {
         const expectedPublicKey =
           await eventAuthority(event);
         if (envelope.kind !== "VERIFICATION_PASSED") await descriptorArtifacts.validate(event);
+        if (
+          envelope.kind === "PAYER_MANDATE_READY" ||
+          envelope.kind === "PAYMENT_REQUEST_READY"
+        ) {
+          await validateIntentReadyEvent(event, {
+            descriptorArtifacts,
+            events: stored.events,
+            view,
+          });
+        }
         try {
           const options = { expectedPublicKey };
           if (envelope.kind === "VERIFICATION_PASSED") {
@@ -1254,6 +1299,101 @@ export function createRelayService(input) {
         events: stored.events,
         view,
       };
+    }
+
+    async function verifiedMandate({
+      bytes,
+      identityContext,
+      releaseId,
+      sessionId,
+      subjectRun,
+    }) {
+      const metadata = await validateRelayArtifactWithFacts({
+        artifactType: "payer-mandate",
+        bytes,
+        expectedDigest: sha256(bytes),
+        secretCanaries: [],
+      });
+      const mandate = metadata.facts.mandate;
+      await verifyPayerMandate({
+        envelope: metadata.facts,
+        expected: {
+          amount: mandate.amount,
+          invoiceReferencePrefix: mandate.invoiceReferencePrefix,
+          payer: { address: identityContext.payer.address.toLowerCase(), agentId: identityContext.payer.agentId },
+          payee: { address: identityContext.payee.address.toLowerCase(), agentId: identityContext.payee.agentId },
+          purpose: mandate.purpose,
+          releaseId,
+          repositorySha: frozenRepositorySha,
+          sessionId,
+          subjectRun,
+          requestEndpoint: `/v1/sessions/${sessionId}/payment-requests`,
+        },
+        nowMs: now(),
+      });
+      return Object.freeze({
+        envelope: metadata.facts,
+        rawEnvelopeDigest: metadata.digest,
+        semanticDigest: payerMandateDigest(metadata.facts),
+      });
+    }
+
+    async function mandateForRun(replayed, sessionId, subjectRun, requireReadyEvent) {
+      const binding = await store.readPayerMandate({ sessionId, subjectRun });
+      if (binding === null) invalid();
+      const identityContext = replayed.descriptorArtifacts.readIdentityContext({ subjectRun });
+      const mandate = await verifiedMandate({
+        bytes: binding.bytes,
+        identityContext,
+        releaseId: replayed.view.releaseId,
+        sessionId,
+        subjectRun,
+      });
+      if (binding.digest !== mandate.rawEnvelopeDigest) invalid();
+      if (requireReadyEvent && !replayed.events.some((event) => {
+        const envelope = readEnvelope(event);
+        return envelope.kind === "PAYER_MANDATE_READY" && envelope.subjectRun === subjectRun && envelope.artifactDigest === binding.digest;
+      })) invalid();
+      return Object.freeze({ binding, identityContext, mandate });
+    }
+
+    async function validateIntentReadyEvent(event, replayed) {
+      const envelope = readEnvelope(event);
+      if (![
+        "PAYER_MANDATE_READY",
+        "PAYMENT_REQUEST_READY",
+      ].includes(envelope.kind)) return null;
+      if (!["rehearsal", "stakeholder"].includes(envelope.subjectRun) || envelope.artifactDigest === null) invalid();
+      if (envelope.kind === "PAYER_MANDATE_READY") {
+        const bytes = await store.getArtifact(envelope.artifactDigest);
+        const identityContext = replayed.descriptorArtifacts.readIdentityContext({ subjectRun: envelope.subjectRun });
+        const mandate = await verifiedMandate({ bytes, identityContext, releaseId: replayed.view.releaseId, sessionId: envelope.sessionId, subjectRun: envelope.subjectRun });
+        if (mandate.rawEnvelopeDigest !== envelope.artifactDigest) invalid();
+        return Object.freeze({ bytes, mandate, type: "mandate" });
+      }
+      const bytes = await store.getArtifact(envelope.artifactDigest);
+      const parsed = parseCanonicalBody(bytes, MAX_RELAY_REQUEST_BYTES);
+      const requestId = parsed?.request?.requestId;
+      const matching = await store.readPaymentRequest({ requestId, sessionId: envelope.sessionId });
+      if (matching === null || matching.digest !== envelope.artifactDigest || !matching.bytes.equals(bytes) || matching.subjectRun !== envelope.subjectRun) invalid();
+      const context = await mandateForRun(replayed, envelope.sessionId, envelope.subjectRun, true);
+      const verified = await verifyPaymentRequest({
+        envelope: parsed,
+        mandateEnvelope: context.mandate.envelope,
+        expected: {
+          amount: context.mandate.envelope.mandate.amount,
+          invoiceReferencePrefix: context.mandate.envelope.mandate.invoiceReferencePrefix,
+          payer: { address: context.identityContext.payer.address.toLowerCase(), agentId: context.identityContext.payer.agentId },
+          payee: { address: context.identityContext.payee.address.toLowerCase(), agentId: context.identityContext.payee.agentId },
+          purpose: context.mandate.envelope.mandate.purpose,
+          releaseId: replayed.view.releaseId,
+          repositorySha: frozenRepositorySha,
+          sessionId: envelope.sessionId,
+          subjectRun: envelope.subjectRun,
+        }, nowMs: now(),
+      });
+      if (paymentRequestDigest(parsed) === null || verified.request.requestId !== requestId) invalid();
+      return Object.freeze({ type: "request" });
     }
 
     async function registerCapabilities(value) {
@@ -1511,6 +1651,16 @@ export function createRelayService(input) {
         await replayed.descriptorArtifacts.validate(
           event,
         );
+        let mandateToPersist = null;
+        if (envelope.kind === "PAYER_MANDATE_READY") {
+          const bytes = await store.getArtifact(envelope.artifactDigest);
+          const identityContext = replayed.descriptorArtifacts.readIdentityContext({ subjectRun: envelope.subjectRun });
+          const mandate = await verifiedMandate({ bytes, identityContext, releaseId: replayed.view.releaseId, sessionId: envelope.sessionId, subjectRun: envelope.subjectRun });
+          if (mandate.rawEnvelopeDigest !== envelope.artifactDigest) invalid();
+          mandateToPersist = Object.freeze({ bytes, digest: mandate.rawEnvelopeDigest });
+        } else if (envelope.kind === "PAYMENT_REQUEST_READY") {
+          await validateIntentReadyEvent(event, replayed);
+        }
         try {
           reduceReleaseEvent(
             replayed.view,
@@ -1519,6 +1669,14 @@ export function createRelayService(input) {
           );
         } catch {
           invalid();
+        }
+        if (mandateToPersist !== null) {
+          await store.putPayerMandate({
+            bytes: mandateToPersist.bytes,
+            digest: mandateToPersist.digest,
+            sessionId: envelope.sessionId,
+            subjectRun: envelope.subjectRun,
+          });
         }
         let accepted;
         try {
@@ -1584,6 +1742,74 @@ export function createRelayService(input) {
         return store.getArtifact(
           assertSha256(data.digest),
         );
+      });
+    }
+
+    async function readPayerMandate(value) {
+      return guardedAsync(async () => {
+        const data = readExactData(value, READ_PAYER_MANDATE_KEYS);
+        const sessionId = assertSessionId(data.sessionId);
+        if (!["rehearsal", "stakeholder"].includes(data.subjectRun)) invalid();
+        const replayed = await replaySession(sessionId);
+        const context = await mandateForRun(replayed, sessionId, data.subjectRun, true);
+        return Buffer.from(context.binding.bytes);
+      });
+    }
+
+    async function submitPaymentRequest(value) {
+      return serializeMutation(async () => {
+        const data = readExactData(value, SUBMIT_PAYMENT_REQUEST_KEYS);
+        const sessionId = assertSessionId(data.sessionId);
+        const parsed = parseCanonicalBody(data.body, MAX_RELAY_REQUEST_BYTES);
+        const replayed = await replaySession(sessionId);
+        const subjectRun = parsed?.request?.subjectRun;
+        if (!["rehearsal", "stakeholder"].includes(subjectRun)) invalid();
+        const context = await mandateForRun(replayed, sessionId, subjectRun, true);
+        const verified = await verifyPaymentRequest({
+          envelope: parsed,
+          mandateEnvelope: context.mandate.envelope,
+          expected: {
+            amount: context.mandate.envelope.mandate.amount,
+            invoiceReferencePrefix: context.mandate.envelope.mandate.invoiceReferencePrefix,
+            payer: { address: context.identityContext.payer.address.toLowerCase(), agentId: context.identityContext.payer.agentId },
+            payee: { address: context.identityContext.payee.address.toLowerCase(), agentId: context.identityContext.payee.agentId },
+            purpose: context.mandate.envelope.mandate.purpose,
+            releaseId: replayed.view.releaseId,
+            repositorySha: frozenRepositorySha,
+            sessionId,
+            subjectRun,
+          }, nowMs: now(),
+        });
+        const bytes = Buffer.from(data.body);
+        const rawEnvelopeDigest = sha256(bytes);
+        await store.putPaymentRequest({
+          bytes,
+          digest: rawEnvelopeDigest,
+          requestId: verified.request.requestId,
+          sessionId,
+          subjectRun,
+        });
+        return Object.freeze({
+          paymentMoved: false,
+          paymentRequestDigest: paymentRequestDigest(parsed),
+          rawEnvelopeDigest,
+          requestId: verified.request.requestId,
+          sessionId,
+          subjectRun,
+        });
+      });
+    }
+
+    async function readPaymentRequest(value) {
+      return guardedAsync(async () => {
+        const data = readExactData(value, READ_PAYMENT_REQUEST_KEYS);
+        const sessionId = assertSessionId(data.sessionId);
+        const requestId = assertSessionId(data.requestId);
+        const replayed = await replaySession(sessionId);
+        const stored = await store.readPaymentRequest({ requestId, sessionId });
+        if (stored === null) invalid("COORDINATION_SESSION_NOT_FOUND");
+        await mandateForRun(replayed, sessionId, stored.subjectRun, true);
+        return Buffer.from(stored.bytes);
       });
     }
 
@@ -1824,11 +2050,14 @@ export function createRelayService(input) {
       bootstrap,
       getArtifact,
       putArtifact,
+      readPayerMandate,
+      readPaymentRequest,
       registerCapabilities,
       readEnrollmentSet,
       readEvents,
       readSessionView,
       readVerifierPublication,
+      submitPaymentRequest,
     };
     if (
       Object.keys(service).length !==
