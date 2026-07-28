@@ -238,6 +238,9 @@ Not-tested: Relay transport and live identities are covered by later tasks.
 - Modify: `src/bilateral/messages.mjs`
 - Modify: `src/bilateral/evidence.mjs`
 - Modify: `src/bilateral/verdict.mjs`
+- Modify `createCoordinatorDescriptor` only:
+  `src/bilateral/coordination/coordinator-runtime.mjs`
+- Modify: `scripts/create-session.mjs`
 - Modify: `scripts/verify-bilateral-results.mjs`
 - Modify: `test/bilateral-descriptor.test.mjs`
 - Modify: `test/bilateral-messages.test.mjs`
@@ -335,6 +338,17 @@ Add exact flags:
 Read both as bounded, no-follow public files. Do not accept raw JSON, signatures,
 keys, or digests on argv. Extend verifier context/publication bindings with
 `mandateDigest` and `requestDigest`.
+
+Keep the low-level descriptor recovery script usable with schema v2 by adding
+exact public `--mandate-digest` and `--request-digest` inputs to
+`scripts/create-session.mjs`. It must require lowercase 64-hex values and bind
+them into the descriptor. This diagnostic surface may accept public digests;
+the verifier still requires and independently verifies the signed envelope
+files.
+
+Update `createCoordinatorDescriptor` to require the same two digests and bind
+them into schema-v2 descriptors. Do not change coordinator orchestration in
+this task.
 
 - [ ] **Step 5: Make the descriptor/verdict chain GREEN**
 
