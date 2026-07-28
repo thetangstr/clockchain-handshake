@@ -42,7 +42,8 @@ const PROCESS_SCENARIOS = new Set([
   "wrong-billie-signer",
   "invoice-prefix-mismatch",
   "request-replay-changed-bytes",
-  "expired-intent",
+  "expired-mandate",
+  "expired-request",
   "descriptor-swap",
   "fourth-write",
   "relay-restart-after-mandate",
@@ -433,15 +434,21 @@ async function runSupervisorRole(value, role) {
     async verifyFundingInputs() { return Object.freeze({ paymentMoved: false }); },
     launcher: supervisorLauncher(configuration, role, owners, inspector),
   };
-  if (configuration.scenario === "forged-iris-signature" && role === "payer") {
+  if (["forged-iris-signature", "expired-mandate"].includes(configuration.scenario) && role === "payer") {
     dependencies.signPayerMandate = async (input) => {
-      const envelope = structuredClone(await production.signPayerMandate(input));
+      const changed = structuredClone(input);
+      if (configuration.scenario === "expired-mandate") {
+        changed.mandate = structuredClone(input.mandate);
+        changed.mandate.expiresAtMs = String(Number(changed.mandate.createdAtMs) + 1);
+        return production.signPayerMandate(changed);
+      }
+      const envelope = structuredClone(await production.signPayerMandate(changed));
       const last = envelope.signature.value.at(-1);
       envelope.signature.value = `${envelope.signature.value.slice(0, -1)}${last === "0" ? "1" : "0"}`;
       return envelope;
     };
   }
-  if (["wrong-billie-signer", "invoice-prefix-mismatch", "expired-intent", "request-replay-changed-bytes"].includes(configuration.scenario) && role === "payee") {
+  if (["wrong-billie-signer", "invoice-prefix-mismatch", "expired-request", "request-replay-changed-bytes"].includes(configuration.scenario) && role === "payee") {
     dependencies.signPaymentRequest = async (input) => {
       if (configuration.scenario === "wrong-billie-signer") {
         const other = privateKeyToAccount(`0x${"42".repeat(32)}`);
@@ -460,7 +467,7 @@ async function runSupervisorRole(value, role) {
       changed.request = structuredClone(input.request);
       if (configuration.scenario === "invoice-prefix-mismatch") {
         changed.request.invoiceReference = `WRONG-${changed.request.invoiceReference}`;
-      } else if (configuration.scenario === "expired-intent") {
+      } else if (configuration.scenario === "expired-request") {
         changed.request.expiresAtMs = String(Number(changed.request.createdAtMs) + 1);
       } else {
         const replay = structuredClone(input);
@@ -867,7 +874,8 @@ async function runProductionCoordinatorChild(input) {
       "wrong-billie-signer",
       "invoice-prefix-mismatch",
       "request-replay-changed-bytes",
-      "expired-intent",
+      "expired-mandate",
+      "expired-request",
     ]).has(value.scenario);
     runtime = createCoordinatorRuntimeDependencies(config, {
       repositoryRoot: value.repositoryRoot,
