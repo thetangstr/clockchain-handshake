@@ -2059,6 +2059,10 @@ test("role client rejects hostile payer-mandate reads across envelope and party 
       { ...valid, signature: { ...valid.signature, value: `0x${"0".repeat(130)}` } },
     ],
     [
+      "extra signature key",
+      { ...valid, signature: { ...valid.signature, extra: "unsigned-context" } },
+    ],
+    [
       "wrong releaseId",
       await signedIntentMandate({ releaseId: "release-other" }),
     ],
@@ -2132,6 +2136,10 @@ test("role client rejects hostile payment-request reads across envelope and part
     [
       "forged signature",
       { ...valid, signature: { ...valid.signature, value: `0x${"0".repeat(130)}` } },
+    ],
+    [
+      "extra signature key",
+      { ...valid, signature: { ...valid.signature, extra: "unsigned-context" } },
     ],
     [
       "wrong releaseId",
@@ -2275,6 +2283,48 @@ test("role client rejects forged commercial-intent publication input before tran
   await assert.rejects(
     payee.client.submitPaymentRequest({
       bytes: canonicalBytes(wrongEnvelopeRequest),
+    }),
+    { code: "COORDINATION_CLIENT_INVALID" },
+  );
+  assert.equal(requests, 0);
+});
+
+test("role client rejects extra payer-mandate signature keys before transport", async (t) => {
+  const validMandate = await signedIntentMandate();
+  const unsignedSignatureKeyMandate = {
+    ...validMandate,
+    signature: { ...validMandate.signature, extra: "unsigned-context" },
+  };
+  let requests = 0;
+  const payer = await resumedClientFixture(t, async () => {
+    requests += 1;
+    throw new Error("transport must not be reached");
+  });
+  await assert.rejects(
+    payer.client.publishPayerMandate({
+      bytes: canonicalBytes(unsignedSignatureKeyMandate),
+      subjectRun: "rehearsal",
+    }),
+    { code: "COORDINATION_CLIENT_INVALID" },
+  );
+  assert.equal(requests, 0);
+});
+
+test("role client rejects extra payment-request signature keys before transport", async (t) => {
+  const mandate = await signedIntentMandate();
+  const validRequest = await signedIntentRequest(mandate);
+  const unsignedSignatureKeyRequest = {
+    ...validRequest,
+    signature: { ...validRequest.signature, extra: "unsigned-context" },
+  };
+  let requests = 0;
+  const payee = await resumedClientFixture(t, async () => {
+    requests += 1;
+    throw new Error("transport must not be reached");
+  }, { role: "payee" });
+  await assert.rejects(
+    payee.client.submitPaymentRequest({
+      bytes: canonicalBytes(unsignedSignatureKeyRequest),
     }),
     { code: "COORDINATION_CLIENT_INVALID" },
   );

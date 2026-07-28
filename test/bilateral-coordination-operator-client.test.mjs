@@ -886,6 +886,7 @@ test("operator client rejects hostile payer-mandate reads across envelope and pa
   const cases = [
     ["wrong outer schema", { ...valid, schema: "clockchain.bilateral-payer-mandate-envelope/v2" }],
     ["forged signature", { ...valid, signature: { ...valid.signature, value: `0x${"0".repeat(130)}` } }],
+    ["extra signature key", { ...valid, signature: { ...valid.signature, extra: "unsigned-context" } }],
     ["wrong releaseId", await signedIntentMandate({ releaseId: "release-other" })],
     ["wrong repositorySha", await signedIntentMandate({ repositorySha: "e".repeat(40) })],
     ["wrong sessionId", await signedIntentMandate({ requestEndpoint: "/v1/sessions/9f953393-86d0-4f99-9d6a-102f525fbecd/payment-requests", sessionId: "9f953393-86d0-4f99-9d6a-102f525fbecd" })],
@@ -918,6 +919,7 @@ test("operator client rejects hostile payment-request reads across envelope and 
   const cases = [
     ["wrong outer schema", { ...valid, schema: "clockchain.bilateral-payment-request-envelope/v2" }],
     ["forged signature", { ...valid, signature: { ...valid.signature, value: `0x${"0".repeat(130)}` } }],
+    ["extra signature key", { ...valid, signature: { ...valid.signature, extra: "unsigned-context" } }],
     ["wrong releaseId", await signedIntentRequest(mandate, { releaseId: "release-other" })],
     ["wrong repositorySha", await signedIntentRequest(mandate, { repositorySha: "e".repeat(40) })],
     ["wrong sessionId", await signedIntentRequest(mandate, { sessionId: "9f953393-86d0-4f99-9d6a-102f525fbecd" })],
