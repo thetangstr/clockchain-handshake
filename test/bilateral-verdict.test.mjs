@@ -37,6 +37,7 @@ import {
   deadlineMs,
   liveUpperBoundMs,
 } from "../src/bilateral/blocktime.mjs";
+import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import {
   createSignedEnvelope,
   dSession,
@@ -54,6 +55,14 @@ import {
   buildProposal,
   transitionDigest,
 } from "../src/bilateral/messages.mjs";
+import {
+  payerMandateDigest,
+  signPayerMandate,
+} from "../src/bilateral/payer-mandate.mjs";
+import {
+  paymentRequestDigest,
+  signPaymentRequest,
+} from "../src/bilateral/payment-request.mjs";
 import { verifyTransition } from "../src/bilateral/protocol.mjs";
 import { sessionKey } from "../src/bilateral/refid.mjs";
 import {
@@ -93,7 +102,7 @@ async function writePublishedVerdict(directory, verdict, options = {}) {
       `${JSON.stringify({
         jsonSha256: createHash("sha256").update(json).digest("hex"),
         markdownSha256: createHash("sha256").update(markdown).digest("hex"),
-        schema: "clockchain.bilateral-authorization-verdict-completion/v1",
+        schema: "clockchain.bilateral-authorization-verdict-completion/v2",
         ...options.markerFields,
       })}\n`,
     "utf8",
@@ -109,8 +118,18 @@ function publicationMarker(json, markdown) {
   return `${JSON.stringify({
     jsonSha256: createHash("sha256").update(json).digest("hex"),
     markdownSha256: createHash("sha256").update(markdown).digest("hex"),
-    schema: "clockchain.bilateral-authorization-verdict-completion/v1",
+    schema: "clockchain.bilateral-authorization-verdict-completion/v2",
   })}\n`;
+}
+
+function publishedExpected(directory, verdict) {
+  return {
+    mandateDigest: verdict.mandateDigest,
+    outputDirectory: directory,
+    repositorySha: REPOSITORY_SHA,
+    requestDigest: verdict.requestDigest,
+    sessionDigest: verdict.sessionDigest,
+  };
 }
 
 test("validates an exact marker-complete published verdict", async (t) => {
@@ -119,11 +138,9 @@ test("validates an exact marker-complete published verdict", async (t) => {
   const directory = join(fixture.root, "published-verdict");
   const publication = await writePublishedVerdict(directory, verdict);
 
-  const result = await validatePublishedBilateralVerdict({
-    outputDirectory: directory,
-    repositorySha: REPOSITORY_SHA,
-    sessionDigest: verdict.sessionDigest,
-  });
+  const result = await validatePublishedBilateralVerdict(
+    publishedExpected(directory, verdict),
+  );
 
   assert.deepEqual(result, {
     publicationDigest: createHash("sha256")
@@ -150,11 +167,7 @@ test("rejects marker-incomplete, malformed, and hash-mismatched publications", a
   const fixture = await completeFixture(t);
   const verdict = await verifyBilateralAuthorization(fixture.input);
   const directory = join(fixture.root, "invalid-publication");
-  const expected = {
-    outputDirectory: directory,
-    repositorySha: REPOSITORY_SHA,
-    sessionDigest: verdict.sessionDigest,
-  };
+  const expected = publishedExpected(directory, verdict);
   await mkdir(directory, { mode: 0o700 });
   await assert.rejects(() => validatePublishedBilateralVerdict(expected), BilateralVerdictError);
 
@@ -182,7 +195,7 @@ test("rejects marker-incomplete, malformed, and hash-mismatched publications", a
       markdownSha256: createHash("sha256")
         .update(publication.markdown)
         .digest("hex"),
-      schema: "clockchain.bilateral-authorization-verdict-completion/v1",
+      schema: "clockchain.bilateral-authorization-verdict-completion/v2",
     })}\n`,
   );
   await assert.rejects(() => validatePublishedBilateralVerdict(expected), BilateralVerdictError);
@@ -192,11 +205,7 @@ test("rejects stale expected bindings and symlinked or replaced publication path
   const fixture = await completeFixture(t);
   const verdict = await verifyBilateralAuthorization(fixture.input);
   const directory = join(fixture.root, "published-verdict");
-  const expected = {
-    outputDirectory: directory,
-    repositorySha: REPOSITORY_SHA,
-    sessionDigest: verdict.sessionDigest,
-  };
+  const expected = publishedExpected(directory, verdict);
   await writePublishedVerdict(directory, verdict);
   await assert.rejects(
     () => validatePublishedBilateralVerdict({ ...expected, repositorySha: "f".repeat(40) }),
@@ -224,11 +233,7 @@ test("rejects non-private directories and publication files, including hardlinks
   const fixture = await completeFixture(t);
   const verdict = await verifyBilateralAuthorization(fixture.input);
   const directory = join(fixture.root, "private-publication");
-  const expected = {
-    outputDirectory: directory,
-    repositorySha: REPOSITORY_SHA,
-    sessionDigest: verdict.sessionDigest,
-  };
+  const expected = publishedExpected(directory, verdict);
 
   await writePublishedVerdict(directory, verdict);
   await chmod(directory, 0o755);
@@ -260,11 +265,9 @@ test("rejects alternate valid JSON bytes even with matching marker and markdown"
   );
 
   await assert.rejects(
-    () => validatePublishedBilateralVerdict({
-      outputDirectory: directory,
-      repositorySha: REPOSITORY_SHA,
-      sessionDigest: verdict.sessionDigest,
-    }),
+    () => validatePublishedBilateralVerdict(
+      publishedExpected(directory, verdict),
+    ),
     BilateralVerdictError,
   );
 
@@ -287,16 +290,17 @@ test("rejects alternate valid JSON bytes even with matching marker and markdown"
     { mode: 0o600 },
   );
   await assert.rejects(
-    () => validatePublishedBilateralVerdict({
-      outputDirectory: directory,
-      repositorySha: REPOSITORY_SHA,
-      sessionDigest: verdict.sessionDigest,
-    }),
+    () => validatePublishedBilateralVerdict(
+      publishedExpected(directory, verdict),
+    ),
     BilateralVerdictError,
   );
 });
 
-function descriptorFixture() {
+function descriptorFixture({
+  mandateDigest = "b".repeat(64),
+  requestDigest = "c".repeat(64),
+} = {}) {
   return {
     amountOptions: [
       { currency: "USD", value: "100" },
@@ -304,6 +308,7 @@ function descriptorFixture() {
     ],
     chainId: "11155111",
     expirySeconds: "600",
+    mandateDigest,
     namespace: "cbv1",
     payee: {
       address: PAYEE.address.toLowerCase(),
@@ -324,10 +329,58 @@ function descriptorFixture() {
     registry:
       "0x8004a818bfb912233c491871b3d84c89a494bd9e",
     repositorySha: REPOSITORY_SHA,
-    schema: "clockchain.bilateral-session-descriptor/v1",
+    requestDigest,
+    schema: "clockchain.bilateral-session-descriptor/v2",
     sessionId: "00112233445566778899aabbccddeeff",
     settlement: "not-executed",
   };
+}
+
+async function intentEnvelopes() {
+  const sessionId = "00112233-4455-6677-8899-aabbccddeeff";
+  const mandate = {
+    amount: { currency: "USD", value: "100" },
+    expiresAtMs: "1784923800000",
+    invoiceReferencePrefix: "INV-",
+    issuedAtMs: "1784923100000",
+    payee: { address: PAYEE.address.toLowerCase(), agentId: "8678" },
+    payer: { address: PAYER.address.toLowerCase(), agentId: "8677" },
+    paymentMoved: false,
+    protocol: "clockchain.bilateral-authorization/v1",
+    purpose: "Invoice settlement",
+    releaseId: "release-1",
+    repositorySha: REPOSITORY_SHA,
+    requestEndpoint: `/v1/sessions/${sessionId}/payment-requests`,
+    schema: "clockchain.bilateral-payer-mandate/v1",
+    sessionId,
+    subjectRun: "rehearsal",
+  };
+  const mandateEnvelope = await signPayerMandate({
+    mandate,
+    signMessage: (raw) => PAYER.signMessage({ message: { raw } }),
+  });
+  const requestEnvelope = await signPaymentRequest({
+    request: {
+      amount: mandate.amount,
+      createdAtMs: "1784923150000",
+      expiresAtMs: "1784923700000",
+      invoiceReference: "INV-0001",
+      mandateDigest: payerMandateDigest(mandateEnvelope),
+      payee: mandate.payee,
+      payer: mandate.payer,
+      paymentMoved: false,
+      protocol: mandate.protocol,
+      purpose: mandate.purpose,
+      releaseId: mandate.releaseId,
+      repositorySha: mandate.repositorySha,
+      requestId: "00000000-0000-4000-8000-000000000001",
+      schema: "clockchain.bilateral-payment-request/v1",
+      sessionId,
+      subjectRun: mandate.subjectRun,
+    },
+    signMessage: (raw) => PAYEE.signMessage({ message: { raw } }),
+  });
+  return Object.freeze({ mandateEnvelope, requestEnvelope });
 }
 
 function idempotencyKey(sessionDigest, kind) {
@@ -420,7 +473,12 @@ function partyResult({
 }
 
 async function completeFixture(t) {
-  const descriptor = descriptorFixture();
+  const { mandateEnvelope, requestEnvelope } =
+    await intentEnvelopes();
+  const descriptor = descriptorFixture({
+    mandateDigest: payerMandateDigest(mandateEnvelope),
+    requestDigest: paymentRequestDigest(requestEnvelope),
+  });
   const sessionDigest = dSession(descriptor);
   const { privateKey, publicKey } =
     generateKeyPairSync("ed25519");
@@ -545,16 +603,19 @@ async function completeFixture(t) {
   return {
     descriptor,
     descriptorEnvelope,
+    mandateEnvelope,
     input: {
       canaries: [],
       clockchain: verifierClockchain,
       descriptorEnvelope,
+      mandateEnvelope,
       ownerOf: async ({ agentId }) =>
         agentId === descriptor.payer.agentId
           ? descriptor.payer.address
           : descriptor.payee.address,
       payeeDirectory,
       payerDirectory,
+      requestEnvelope,
       repositoryPublicKeyResolver: async () =>
         repositoryPublicKey,
     },
@@ -563,6 +624,7 @@ async function completeFixture(t) {
     payer,
     payerDirectory,
     repositoryPublicKey,
+    requestEnvelope,
     root,
     sessionDigest,
     transitions,
@@ -628,7 +690,7 @@ test("emits only the exact independently verified bilateral authorization verdic
 
   assert.equal(
     VERDICT_SCHEMA,
-    "clockchain.bilateral-authorization-verdict/v1",
+    "clockchain.bilateral-authorization-verdict/v2",
   );
   assert.deepEqual(Object.keys(verdict), [...VERDICT_KEYS]);
   assert.equal(verdict.outcome, "AUTHORIZED");
@@ -642,6 +704,8 @@ test("emits only the exact independently verified bilateral authorization verdic
       "",
       "- Outcome: `AUTHORIZED`",
       "- Payment moved: no",
+      `- Payer mandate digest: \`${verdict.mandateDigest}\``,
+      `- Payment request digest: \`${verdict.requestDigest}\``,
       `- Session digest: \`${verdict.sessionDigest}\``,
       `- Repository SHA: \`${REPOSITORY_SHA}\``,
       `- Prompt SHA-256: \`${PROMPT_SHA256}\``,
@@ -1296,11 +1360,23 @@ async function defaultBuilderHarness(
 ) {
   const fixture = await completeFixture(t);
   const descriptorPath = join(fixture.root, "descriptor.json");
+  const mandatePath = join(fixture.root, "payer-mandate.json");
+  const requestPath = join(fixture.root, "payment-request.json");
   const tokenPath = join(fixture.root, "clockchain.token");
   const output = join(fixture.root, "builder-output");
   await writeFile(
     descriptorPath,
     `${JSON.stringify(fixture.descriptorEnvelope)}\n`,
+    { mode: 0o600 },
+  );
+  await writeFile(
+    mandatePath,
+    canonicalBytes(fixture.mandateEnvelope),
+    { mode: 0o600 },
+  );
+  await writeFile(
+    requestPath,
+    canonicalBytes(fixture.requestEnvelope),
     { mode: 0o600 },
   );
   await writeFile(
@@ -1312,8 +1388,10 @@ async function defaultBuilderHarness(
     clockchainTokenFile: tokenPath,
     descriptor: descriptorPath,
     output,
+    payerMandate: mandatePath,
     payeeResults: fixture.payeeDirectory,
     payerResults: fixture.payerDirectory,
+    paymentRequest: requestPath,
     rpcUrl: "https://rpc.example",
   });
   const arguments_ = [
@@ -1323,10 +1401,14 @@ async function defaultBuilderHarness(
     descriptorPath,
     "--output",
     output,
+    "--payer-mandate",
+    mandatePath,
     "--payee-results",
     fixture.payeeDirectory,
     "--payer-results",
     fixture.payerDirectory,
+    "--payment-request",
+    requestPath,
     "--rpc-url",
     values.rpcUrl,
   ];
@@ -1397,10 +1479,12 @@ async function defaultBuilderHarness(
     dependencies,
     descriptorPath,
     fixture,
+    mandatePath,
     metrics,
     output,
     token,
     tokenPath,
+    requestPath,
     values,
   };
 }
@@ -1620,7 +1704,7 @@ test("default verifier CLI rejects unsafe local state and wrong chain before Clo
       assert.equal(harness.metrics.clockchainCreates, 0);
       assert.equal(
         stdout.value,
-        '{"outcome":"FAILED","paymentMoved":false,"schema":"clockchain.bilateral-authorization-verdict/v1"}\n',
+        '{"outcome":"FAILED","paymentMoved":false,"schema":"clockchain.bilateral-authorization-verdict/v2"}\n',
       );
       assert.equal(stderr.value, "BILATERAL_VERDICT_FAILED\n");
       assert.equal(stdout.value.includes(harness.token), false);
@@ -1641,10 +1725,14 @@ test("pins the exact verifier CLI and publishes a hashed completion marker befor
     "descriptor.json",
     "--output",
     output,
+    "--payer-mandate",
+    "payer-mandate.json",
     "--payee-results",
     fixture.payeeDirectory,
     "--payer-results",
     fixture.payerDirectory,
+    "--payment-request",
+    "payment-request.json",
     "--rpc-url",
     "https://rpc.example",
   ];
@@ -1653,8 +1741,10 @@ test("pins the exact verifier CLI and publishes a hashed completion marker befor
     "--clockchain-token-file",
     "--descriptor",
     "--output",
+    "--payer-mandate",
     "--payee-results",
     "--payer-results",
+    "--payment-request",
     "--rpc-url",
   ]);
   const exitCode = await runVerifierCli(arguments_, {
@@ -1663,8 +1753,10 @@ test("pins the exact verifier CLI and publishes a hashed completion marker befor
         clockchainTokenFile: "clockchain.token",
         descriptor: "descriptor.json",
         output,
+        payerMandate: "payer-mandate.json",
         payeeResults: fixture.payeeDirectory,
         payerResults: fixture.payerDirectory,
+        paymentRequest: "payment-request.json",
         rpcUrl: "https://rpc.example",
       });
       return fixture.input;
@@ -1702,7 +1794,7 @@ test("pins the exact verifier CLI and publishes a hashed completion marker befor
       .update(markdown)
       .digest("hex"),
     schema:
-      "clockchain.bilateral-authorization-verdict-completion/v1",
+      "clockchain.bilateral-authorization-verdict-completion/v2",
   });
 });
 
@@ -1773,10 +1865,14 @@ test("every aggregate publication-step failure removes marker authority and supp
     "descriptor.json",
     "--output",
     output,
+    "--payer-mandate",
+    "payer-mandate.json",
     "--payee-results",
     fixture.payeeDirectory,
     "--payer-results",
     fixture.payerDirectory,
+    "--payment-request",
+    "payment-request.json",
     "--rpc-url",
     "https://rpc.example",
   ];
@@ -1897,10 +1993,14 @@ test("CLI failures emit only a fixed non-authorizing terminal result and no arti
     "descriptor.json",
     "--output",
     output,
+    "--payer-mandate",
+    "payer-mandate.json",
     "--payee-results",
     fixture.payeeDirectory,
     "--payer-results",
     fixture.payerDirectory,
+    "--payment-request",
+    "payment-request.json",
     "--rpc-url",
     "https://rpc.example",
   ];
@@ -1915,7 +2015,7 @@ test("CLI failures emit only a fixed non-authorizing terminal result and no arti
   assert.equal(exitCode, 1);
   assert.equal(
     stdout.value,
-    '{"outcome":"EXPIRED","paymentMoved":false,"schema":"clockchain.bilateral-authorization-verdict/v1"}\n',
+    '{"outcome":"EXPIRED","paymentMoved":false,"schema":"clockchain.bilateral-authorization-verdict/v2"}\n',
   );
   assert.equal(stderr.value, "BILATERAL_VERDICT_FAILED\n");
   await assert.rejects(() => readFile(output), {

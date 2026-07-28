@@ -20,6 +20,14 @@ import {
   verifyDescriptorEnvelope,
 } from "./descriptor.mjs";
 import {
+  payerMandateDigest,
+  verifyPayerMandate,
+} from "./payer-mandate.mjs";
+import {
+  paymentRequestDigest,
+  verifyPaymentRequest,
+} from "./payment-request.mjs";
+import {
   partySignatureBytes,
   renderPartyResultMarkdown,
   validatePartyResult,
@@ -43,13 +51,15 @@ import {
 import { assertSecretFree } from "../redact.mjs";
 
 export const VERDICT_SCHEMA =
-  "clockchain.bilateral-authorization-verdict/v1";
+  "clockchain.bilateral-authorization-verdict/v2";
 export const VERDICT_KEYS = Object.freeze([
+  "mandateDigest",
   "outcome",
   "paymentMoved",
   "promptSha256",
   "protocolVersion",
   "repositorySha",
+  "requestDigest",
   "schema",
   "sessionDigest",
   "transitions",
@@ -76,17 +86,21 @@ const INPUT_KEYS = new Set([
   "clockchain",
   "descriptorEnvelope",
   "fileSystem",
+  "mandateEnvelope",
   "ownerOf",
   "payeeDirectory",
   "payerDirectory",
+  "requestEnvelope",
   "repositoryPublicKeyResolver",
 ]);
 const REQUIRED_INPUT_KEYS = Object.freeze([
   "clockchain",
   "descriptorEnvelope",
+  "mandateEnvelope",
   "ownerOf",
   "payeeDirectory",
   "payerDirectory",
+  "requestEnvelope",
   "repositoryPublicKeyResolver",
 ]);
 const CLOCKCHAIN_METHODS = Object.freeze([
@@ -110,15 +124,17 @@ const PARTY_RESULT_FILES = Object.freeze({
   marker: ".party-result.complete.json",
 });
 const VERDICT_COMPLETION_MARKER_SCHEMA =
-  "clockchain.bilateral-authorization-verdict-completion/v1";
+  "clockchain.bilateral-authorization-verdict-completion/v2";
 const VERDICT_COMPLETION_MARKER_KEYS = Object.freeze([
   "jsonSha256",
   "markdownSha256",
   "schema",
 ]);
 const VERDICT_PUBLICATION_INPUT_KEYS = Object.freeze([
+  "mandateDigest",
   "outputDirectory",
   "repositorySha",
+  "requestDigest",
   "sessionDigest",
 ]);
 const VERDICT_PUBLICATION_FILES = Object.freeze({
@@ -357,9 +373,15 @@ function validateInput(input) {
       ownData(input, "descriptorEnvelope"),
     ),
     fileSystem,
+    mandateEnvelope: detachedSnapshot(
+      ownData(input, "mandateEnvelope"),
+    ),
     ownerOf,
     payeeDirectory,
     payerDirectory,
+    requestEnvelope: detachedSnapshot(
+      ownData(input, "requestEnvelope"),
+    ),
     repositoryPublicKeyResolver,
   });
 }
@@ -1000,6 +1022,78 @@ async function verifyIdentity(
   return expected;
 }
 
+function selectedIntentAmount(proposal) {
+  if (
+    proposal?.amount?.moved !== false ||
+    typeof proposal.amount.currency !== "string" ||
+    typeof proposal.amount.value !== "string"
+  ) {
+    fail();
+  }
+  return Object.freeze({
+    currency: proposal.amount.currency,
+    value: proposal.amount.value,
+  });
+}
+
+function mandateExpectedContext(descriptor, mandateEnvelope, amount) {
+  const mandate = mandateEnvelope.mandate;
+  if (
+    mandate.payer.address !== descriptor.payer.address ||
+    mandate.payer.agentId !== descriptor.payer.agentId ||
+    mandate.payee.address !== descriptor.payee.address ||
+    mandate.payee.agentId !== descriptor.payee.agentId ||
+    mandate.repositorySha !== descriptor.repositorySha
+  ) {
+    fail();
+  }
+  return Object.freeze({
+    amount,
+    invoiceReferencePrefix: mandate.invoiceReferencePrefix,
+    payee: Object.freeze({
+      address: descriptor.payee.address,
+      agentId: descriptor.payee.agentId,
+    }),
+    payer: Object.freeze({
+      address: descriptor.payer.address,
+      agentId: descriptor.payer.agentId,
+    }),
+    purpose: mandate.purpose,
+    releaseId: mandate.releaseId,
+    repositorySha: descriptor.repositorySha,
+    requestEndpoint: mandate.requestEndpoint,
+    sessionId: mandate.sessionId,
+    subjectRun: mandate.subjectRun,
+  });
+}
+
+async function verifyCommercialIntent(
+  descriptor,
+  mandateEnvelope,
+  requestEnvelope,
+  proposal,
+  nowMs,
+) {
+  const expected = mandateExpectedContext(
+    descriptor,
+    mandateEnvelope,
+    selectedIntentAmount(proposal),
+  );
+  await verifyPayerMandate({
+    envelope: mandateEnvelope,
+    expected,
+    nowMs,
+  });
+  const { requestEndpoint: _requestEndpoint, ...requestExpected } =
+    expected;
+  await verifyPaymentRequest({
+    envelope: requestEnvelope,
+    mandateEnvelope,
+    expected: requestExpected,
+    nowMs,
+  });
+}
+
 function createVerdict(descriptor, sessionDigest, live, bounds) {
   const transitions = live.map(
     ({ message, verified }, index) =>
@@ -1015,11 +1109,13 @@ function createVerdict(descriptor, sessionDigest, live, bounds) {
       }),
   );
   return Object.freeze({
+    mandateDigest: descriptor.mandateDigest,
     outcome: "AUTHORIZED",
     paymentMoved: false,
     promptSha256: descriptor.promptSha256,
     protocolVersion: descriptor.protocolVersion,
     repositorySha: descriptor.repositorySha,
+    requestDigest: descriptor.requestDigest,
     schema: VERDICT_SCHEMA,
     sessionDigest,
     transitions: Object.freeze(transitions),
@@ -1029,13 +1125,15 @@ function createVerdict(descriptor, sessionDigest, live, bounds) {
 export async function verifyBilateralAuthorization(input) {
   try {
     const snapshot = validateInput(input);
-    const [payer, payee] = await loadPartyPackages(
-      snapshot.fileSystem,
-      snapshot.payerDirectory,
-      snapshot.payeeDirectory,
-      snapshot.canaries,
-    );
     const descriptor = snapshot.descriptorEnvelope.descriptor;
+    if (
+      descriptor.mandateDigest !==
+        payerMandateDigest(snapshot.mandateEnvelope) ||
+      descriptor.requestDigest !==
+        paymentRequestDigest(snapshot.requestEnvelope)
+    ) {
+      fail();
+    }
     const operator = snapshot.descriptorEnvelope.operator;
     const repositoryPath = operatorPublicKeyPath(operator.keyId);
     const repositoryPublicKey =
@@ -1061,9 +1159,23 @@ export async function verifyBilateralAuthorization(input) {
       fail();
     }
 
+    const [payer, payee] = await loadPartyPackages(
+      snapshot.fileSystem,
+      snapshot.payerDirectory,
+      snapshot.payeeDirectory,
+      snapshot.canaries,
+    );
+
     const live = await verifyLiveTransitions(
       snapshot.clockchain,
       descriptor,
+    );
+    await verifyCommercialIntent(
+      descriptor,
+      snapshot.mandateEnvelope,
+      snapshot.requestEnvelope,
+      live[0].message,
+      live[0].verified.blockTimeMs,
     );
     assertPackagesMatch(
       payer,
@@ -1145,10 +1257,14 @@ function validateVerdict(verdict) {
     verdict.schema !== VERDICT_SCHEMA ||
     verdict.outcome !== "AUTHORIZED" ||
     verdict.paymentMoved !== false ||
+    typeof verdict.mandateDigest !== "string" ||
+    !HASH_PATTERN.test(verdict.mandateDigest) ||
     typeof verdict.promptSha256 !== "string" ||
     !HASH_PATTERN.test(verdict.promptSha256) ||
     typeof verdict.repositorySha !== "string" ||
     !/^[0-9a-f]{40}$/.test(verdict.repositorySha) ||
+    typeof verdict.requestDigest !== "string" ||
+    !HASH_PATTERN.test(verdict.requestDigest) ||
     verdict.protocolVersion !== "1" ||
     typeof verdict.sessionDigest !== "string" ||
     !HASH_PATTERN.test(verdict.sessionDigest) ||
@@ -1201,19 +1317,31 @@ function exactPublishedVerdictInput(input) {
     fail();
   }
   const outputDirectory = ownData(input, "outputDirectory");
+  const mandateDigest = ownData(input, "mandateDigest");
   const repositorySha = ownData(input, "repositorySha");
+  const requestDigest = ownData(input, "requestDigest");
   const sessionDigest = ownData(input, "sessionDigest");
   if (
     typeof outputDirectory !== "string" ||
     outputDirectory.length === 0 ||
+    typeof mandateDigest !== "string" ||
+    !HASH_PATTERN.test(mandateDigest) ||
     typeof repositorySha !== "string" ||
     !/^[0-9a-f]{40}$/.test(repositorySha) ||
+    typeof requestDigest !== "string" ||
+    !HASH_PATTERN.test(requestDigest) ||
     typeof sessionDigest !== "string" ||
     !HASH_PATTERN.test(sessionDigest)
   ) {
     fail();
   }
-  return { outputDirectory, repositorySha, sessionDigest };
+  return {
+    mandateDigest,
+    outputDirectory,
+    repositorySha,
+    requestDigest,
+    sessionDigest,
+  };
 }
 
 export async function validatePublishedBilateralVerdict(input) {
@@ -1258,7 +1386,9 @@ export async function validatePublishedBilateralVerdict(input) {
     validateVerdict(verdict);
     if (
       !publisherVerdictBytes(verdict).equals(json) ||
+      verdict.mandateDigest !== expected.mandateDigest ||
       verdict.repositorySha !== expected.repositorySha ||
+      verdict.requestDigest !== expected.requestDigest ||
       verdict.sessionDigest !== expected.sessionDigest ||
       verdict.paymentMoved !== false ||
       renderBilateralVerdictMarkdown(verdict) !== markdownText
@@ -1300,6 +1430,8 @@ export function renderBilateralVerdictMarkdown(verdict) {
     "",
     `- Outcome: \`${verdict.outcome}\``,
     "- Payment moved: no",
+    `- Payer mandate digest: \`${verdict.mandateDigest}\``,
+    `- Payment request digest: \`${verdict.requestDigest}\``,
     `- Session digest: \`${verdict.sessionDigest}\``,
     `- Repository SHA: \`${verdict.repositorySha}\``,
     `- Prompt SHA-256: \`${verdict.promptSha256}\``,

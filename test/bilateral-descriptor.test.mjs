@@ -94,7 +94,7 @@ const PROMPT_SHA256 =
   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const SESSION_ID = "00112233445566778899aabbccddeeff";
 const PINNED_D_SESSION =
-  "7797ccdccaa27014e3c578b3c442a464c815b664fcec0ef9a4e55c9420bd2891";
+  "04e932d5144bb18a12481657c5c351be3dc760927748c966fee64bc891bd3d73";
 
 const DESCRIPTOR = Object.freeze({
   amountOptions: [
@@ -103,6 +103,7 @@ const DESCRIPTOR = Object.freeze({
   ],
   chainId: "11155111",
   expirySeconds: "600",
+  mandateDigest: "b".repeat(64),
   namespace: "cbv1",
   payee: {
     address: PAYEE_ADDRESS,
@@ -122,7 +123,8 @@ const DESCRIPTOR = Object.freeze({
   protocolVersion: "1",
   registry: "0x8004a818bfb912233c491871b3d84c89a494bd9e",
   repositorySha: REPOSITORY_SHA,
-  schema: "clockchain.bilateral-session-descriptor/v1",
+  requestDigest: "c".repeat(64),
+  schema: "clockchain.bilateral-session-descriptor/v2",
   sessionId: SESSION_ID,
   settlement: "not-executed",
 });
@@ -152,7 +154,7 @@ function assertRejected(mutate, code) {
 test("schema, protocol, and policy constants are pinned exactly", () => {
   assert.equal(
     DESCRIPTOR_SCHEMA,
-    "clockchain.bilateral-session-descriptor/v1",
+    "clockchain.bilateral-session-descriptor/v2",
   );
   assert.equal(
     BILATERAL_PROTOCOL,
@@ -176,6 +178,7 @@ test("frozen exact-key lists match the spec descriptor block", () => {
     "amountOptions",
     "chainId",
     "expirySeconds",
+    "mandateDigest",
     "namespace",
     "payee",
     "payer",
@@ -185,6 +188,7 @@ test("frozen exact-key lists match the spec descriptor block", () => {
     "protocolVersion",
     "registry",
     "repositorySha",
+    "requestDigest",
     "schema",
     "sessionId",
     "settlement",
@@ -242,6 +246,50 @@ test("dSession validates before digesting", () => {
   assert.throws(() => dSession(descriptor), DescriptorValidationError);
 });
 
+test("both exact intent digests are mandatory signed descriptor commitments", () => {
+  const envelope = createSignedEnvelope(clone(), {
+    keyId: OPERATOR.keyId,
+    privateKeyPem: OPERATOR.privateKeyPem,
+  });
+  const originalBytes = canonicalBytes(envelope.descriptor);
+  const originalSession = dSession(envelope.descriptor);
+  for (const key of ["mandateDigest", "requestDigest"]) {
+    const deleted = clone();
+    delete deleted[key];
+    assert.throws(
+      () => validateDescriptor(deleted),
+      DescriptorValidationError,
+    );
+
+    const changed = clone();
+    changed[key] = "d".repeat(64);
+    assert.notDeepEqual(canonicalBytes(changed), originalBytes);
+    assert.notEqual(dSession(changed), originalSession);
+    assert.throws(
+      () => verifyDescriptorSignature(
+        changed,
+        envelope.operator.signature,
+        OPERATOR.publicKeyPem,
+      ),
+      DescriptorSignatureError,
+    );
+  }
+  const swapped = clone();
+  [swapped.mandateDigest, swapped.requestDigest] = [
+    swapped.requestDigest,
+    swapped.mandateDigest,
+  ];
+  assert.notEqual(dSession(swapped), originalSession);
+  assert.throws(
+    () => verifyDescriptorSignature(
+      swapped,
+      envelope.operator.signature,
+      OPERATOR.publicKeyPem,
+    ),
+    DescriptorSignatureError,
+  );
+});
+
 test("top-level shape: non-objects, missing keys, and extra keys are rejected", () => {
   for (const invalid of [null, undefined, 42, "descriptor", [], true]) {
     assert.throws(
@@ -270,7 +318,7 @@ test("every pinned constant field rejects any other value", () => {
     ["protocolVersion", "2"],
     ["registry", "0x8004A818BFB912233C491871B3D84C89A494BD9E"],
     ["registry", "0x8004a818bfb912233c491871b3d84c89a494bd9f"],
-    ["schema", "clockchain.bilateral-session-descriptor/v2"],
+    ["schema", "clockchain.bilateral-session-descriptor/v1"],
     ["settlement", "executed"],
     ["settlement", "Not-Executed"],
   ];
@@ -306,7 +354,7 @@ test("paymentMoved must be boolean false exactly", () => {
   }
 });
 
-test("repositorySha, promptSha256, and sessionId are strict lowercase hex", () => {
+test("repository and digest identifiers are strict lowercase hex", () => {
   const cases = [
     ["repositorySha", REPOSITORY_SHA.slice(0, 39)],
     ["repositorySha", `${REPOSITORY_SHA}0`],
@@ -315,6 +363,10 @@ test("repositorySha, promptSha256, and sessionId are strict lowercase hex", () =
     ["promptSha256", PROMPT_SHA256.slice(0, 63)],
     ["promptSha256", `${PROMPT_SHA256}0`],
     ["promptSha256", PROMPT_SHA256.toUpperCase()],
+    ["mandateDigest", "b".repeat(63)],
+    ["mandateDigest", "B".repeat(64)],
+    ["requestDigest", "c".repeat(63)],
+    ["requestDigest", "C".repeat(64)],
     ["sessionId", SESSION_ID.slice(0, 31)],
     ["sessionId", `${SESSION_ID}0`],
     ["sessionId", SESSION_ID.toUpperCase()],
@@ -1059,9 +1111,11 @@ function createArguments(root, overrides = {}) {
     "--payee-agent-id": "8678",
     "--payee-name": "Iris",
     "--amounts": "USD:250,USD:100",
+    "--mandate-digest": "b".repeat(64),
     "--repository-sha": SCRIPT_SHA,
     "--prompt-sha256": PROMPT_SHA256,
     "--output": join(root, "session-envelope.json"),
+    "--request-digest": "c".repeat(64),
     ...overrides,
   };
   return Object.entries(values)
@@ -1482,6 +1536,8 @@ test("create emits a pinned verifiable envelope without private metadata", async
   assert.equal(envelope.operator.keyId, "demo-operator-1");
   assert.equal(envelope.descriptor.repositorySha, SCRIPT_SHA);
   assert.equal(envelope.descriptor.promptSha256, PROMPT_SHA256);
+  assert.equal(envelope.descriptor.mandateDigest, "b".repeat(64));
+  assert.equal(envelope.descriptor.requestDigest, "c".repeat(64));
   assert.equal(envelope.descriptor.sessionId, SESSION_ID);
   assert.deepEqual(envelope.descriptor.amountOptions, [
     { currency: "USD", value: "100" },
@@ -1489,6 +1545,61 @@ test("create emits a pinned verifiable envelope without private metadata", async
   ]);
   assert.equal(envelope.descriptor.paymentMoved, false);
   assert.equal(envelope.descriptor.settlement, "not-executed");
+});
+
+test("create requires exact public intent digest flags", async () => {
+  const root = await makeRoot();
+  const keyReport = await keygen(root);
+  const repositoryPublicKeyFile = await readFile(
+    keyReport.publicKeyPath,
+    "utf8",
+  );
+  const options = {
+    repoRoot: root,
+    ...createOptions(root, repositoryPublicKeyFile),
+  };
+  const accepted = await createSession(
+    createArguments(root, {
+      "--output": join(root, "accepted.json"),
+    }),
+    options,
+  );
+  assert.equal(
+    accepted.envelope.descriptor.mandateDigest,
+    "b".repeat(64),
+  );
+  assert.equal(
+    accepted.envelope.descriptor.requestDigest, "c".repeat(64));
+  for (const [index, overrides] of [
+    { "--mandate-digest": undefined },
+    { "--request-digest": undefined },
+    { "--mandate-digest": "B".repeat(64) },
+    { "--request-digest": "c".repeat(63) },
+  ].entries()) {
+    await assert.rejects(
+      createSession(
+        createArguments(root, {
+          "--output": join(root, `reject-${index}.json`),
+          ...overrides,
+        }),
+        options,
+      ),
+      SessionCreationError,
+    );
+  }
+  await assert.rejects(
+    createSession(
+      [
+        ...createArguments(root, {
+          "--output": join(root, "duplicate.json"),
+        }),
+        "--mandate-digest",
+        "b".repeat(64),
+      ],
+      options,
+    ),
+    SessionCreationError,
+  );
 });
 
 test("create CLI accepts the payer reference boundary and rejects overflow", async () => {

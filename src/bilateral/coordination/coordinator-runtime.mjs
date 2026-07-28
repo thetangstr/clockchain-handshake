@@ -143,9 +143,9 @@ export function validatePinnedDescriptorEnvelope(envelope, { keyId, publicKey, r
   if (!envelope?.operator || envelope.operator.keyId !== keyId || envelope.operator.publicKey !== publicKey || envelope.descriptor?.repositorySha !== repositorySha || envelope.descriptor.paymentMoved !== false || envelope.descriptor.sessionId !== sessionId) fail();
   verifyDescriptorEnvelope(envelope, { repositoryPublicKey: publicKey });
 }
-export function createCoordinatorDescriptor({ parties, promptSha256, repositorySha, sessionId }) {
+export function createCoordinatorDescriptor({ mandateDigest, parties, promptSha256, repositorySha, requestDigest, sessionId }) {
   if (!parties?.payer || !parties?.payee || !SHA40.test(repositorySha) || !SHA64.test(promptSha256) || !/^[0-9a-f]{32}$/.test(sessionId)) fail();
-  const descriptor = { amountOptions: [{ currency: "USD", value: "100" }], chainId: DESCRIPTOR_CHAIN_ID, expirySeconds: DESCRIPTOR_EXPIRY_SECONDS, namespace: DESCRIPTOR_NAMESPACE, payee: parties.payee, payer: parties.payer, paymentMoved: false, promptSha256, protocol: BILATERAL_PROTOCOL, protocolVersion: PROTOCOL_VERSION, registry: REGISTRY_ADDRESS, repositorySha, schema: DESCRIPTOR_SCHEMA, sessionId, settlement: DESCRIPTOR_SETTLEMENT };
+  const descriptor = { amountOptions: [{ currency: "USD", value: "100" }], chainId: DESCRIPTOR_CHAIN_ID, expirySeconds: DESCRIPTOR_EXPIRY_SECONDS, mandateDigest, namespace: DESCRIPTOR_NAMESPACE, payee: parties.payee, payer: parties.payer, paymentMoved: false, promptSha256, protocol: BILATERAL_PROTOCOL, protocolVersion: PROTOCOL_VERSION, registry: REGISTRY_ADDRESS, repositorySha, requestDigest, schema: DESCRIPTOR_SCHEMA, sessionId, settlement: DESCRIPTOR_SETTLEMENT };
   validateDescriptor(descriptor); return descriptor;
 }
 export function createWatcherLifecycle({ run }) {

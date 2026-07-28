@@ -45,6 +45,10 @@ const VALUES = Object.freeze({
   "--tls-certificate": "/public/relay.pem",
   "--tls-fingerprint": "b".repeat(64),
 });
+const INTENT_DIGESTS = Object.freeze({
+  mandateDigest: "c".repeat(64),
+  requestDigest: "d".repeat(64),
+});
 
 test("coordinator runtime accepts each required flag exactly once and nothing else", () => {
   const argv = COORDINATOR_CLI_FLAGS.flatMap((flag) => [flag, VALUES[flag]]);
@@ -588,7 +592,7 @@ test("bundled watcher cancellation clears its referenced timer before a failing 
   const script = `
     import { createCoordinatorDescriptor, createCoordinatorRuntimeDependencies, runCoordinatorUntilComplete } from ${JSON.stringify(runtimeUrl)};
     const config = { clockchainToken: "timer-canary", operatorIdentity: { keyId: "clockchain-demo-2026", privateKeyPem: "private", publicKey: "public" }, operatorPublicKey: "public", releaseRoot: { path: "/release" }, repositorySha: "b".repeat(40), relayUrl: "https://127.0.0.1:8443", rpcUrl: "https://127.0.0.1/", tlsCertificatePem: "certificate", tlsFingerprint: "c".repeat(64) };
-    const descriptor = createCoordinatorDescriptor({ parties: { payer: { address: "0x00112233445566778899aabbccddeeff00112233", agentId: "8677", displayName: "Billy", role: "payer" }, payee: { address: "0xffeeddccbbaa99887766554433221100ffeeddcc", agentId: "8678", displayName: "Iris", role: "payee" } }, promptSha256: "a".repeat(64), repositorySha: config.repositorySha, sessionId: "00112233445566778899aabbccddeeff" });
+    const descriptor = createCoordinatorDescriptor({ parties: { payer: { address: "0x00112233445566778899aabbccddeeff00112233", agentId: "8677", displayName: "Billy", role: "payer" }, payee: { address: "0xffeeddccbbaa99887766554433221100ffeeddcc", agentId: "8678", displayName: "Iris", role: "payee" } }, mandateDigest: "c".repeat(64), promptSha256: "a".repeat(64), repositorySha: config.repositorySha, requestDigest: "d".repeat(64), sessionId: "00112233445566778899aabbccddeeff" });
     let emitted;
     const output = new Promise((resolve_) => { emitted = resolve_; });
     const runtime = createCoordinatorRuntimeDependencies(config, { validateArtifactWithFacts: async () => ({ facts: { descriptor } }), createClient: () => ({ getArtifact: async () => Buffer.from("descriptor") }), createTransport: () => ({}), createWatcherClient: ({ signal }) => ({ getBlock: async () => [], resolveAgent: async () => [], searchActions: async () => [], verifyCrossParty: async () => { if (signal.aborted) throw new Error("aborted"); return {}; } }), now: () => 0, watcherOutput: () => emitted() });
@@ -608,7 +612,7 @@ test("default MCP watcher fetch composes finalizer and timeout signals without r
   AbortSignal.any = (signals) => { capturedSignals = [...signals]; return originalAny(signals); };
   t.after(() => { AbortSignal.any = originalAny; });
   const config = { clockchainToken: "mcp-watch-token", operatorIdentity: { keyId: "clockchain-demo-2026", privateKeyPem: "private", publicKey: "public" }, operatorPublicKey: "public", releaseRoot: { path: "/release" }, repositorySha: "b".repeat(40), relayUrl: "https://127.0.0.1:8443", rpcUrl: "https://127.0.0.1/", tlsCertificatePem: "certificate", tlsFingerprint: "c".repeat(64) };
-  const descriptor = createCoordinatorDescriptor({ parties: { payer: { address: "0x00112233445566778899aabbccddeeff00112233", agentId: "8677", displayName: "Billy", role: "payer" }, payee: { address: "0xffeeddccbbaa99887766554433221100ffeeddcc", agentId: "8678", displayName: "Iris", role: "payee" } }, promptSha256: "a".repeat(64), repositorySha: config.repositorySha, sessionId: "00112233445566778899aabbccddeeff" });
+  const descriptor = createCoordinatorDescriptor({ parties: { payer: { address: "0x00112233445566778899aabbccddeeff00112233", agentId: "8677", displayName: "Billy", role: "payer" }, payee: { address: "0xffeeddccbbaa99887766554433221100ffeeddcc", agentId: "8678", displayName: "Iris", role: "payee" } }, ...INTENT_DIGESTS, promptSha256: "a".repeat(64), repositorySha: config.repositorySha, sessionId: "00112233445566778899aabbccddeeff" });
   const runtime = createCoordinatorRuntimeDependencies(config, {
     createClient: () => ({ getArtifact: async () => Buffer.from("descriptor") }), createTransport: () => ({}), validateArtifactWithFacts: async () => ({ facts: { descriptor } }), watcherOutput: () => { outputs += 1; },
     watcherFetch: async (_url, init) => {
@@ -637,7 +641,7 @@ test("pinned descriptor envelope requires the exact Git operator and derived run
   const privateKeyPem = pair.privateKey.export({ format: "pem", type: "pkcs8" });
   const publicKey = rawPublicKeyBase64FromPem(pair.publicKey.export({ format: "pem", type: "spki" }));
   const pins = { keyId: "clockchain-demo-2026", publicKey, repositorySha: "a".repeat(40), sessionId: "b".repeat(32) };
-  const descriptor = { amountOptions: [{ currency: "USD", value: "100" }, { currency: "USD", value: "250" }], chainId: "11155111", expirySeconds: "600", namespace: "cbv1", payee: { address: "0xffeeddccbbaa99887766554433221100ffeeddcc", agentId: "8678", displayName: "Iris", role: "payee" }, payer: { address: "0x00112233445566778899aabbccddeeff00112233", agentId: "8677", displayName: "Billy", role: "payer" }, paymentMoved: false, promptSha256: "c".repeat(64), protocol: "clockchain.bilateral-authorization/v1", protocolVersion: "1", registry: "0x8004a818bfb912233c491871b3d84c89a494bd9e", repositorySha: pins.repositorySha, schema: "clockchain.bilateral-session-descriptor/v1", sessionId: pins.sessionId, settlement: "not-executed" };
+  const descriptor = { amountOptions: [{ currency: "USD", value: "100" }, { currency: "USD", value: "250" }], chainId: "11155111", expirySeconds: "600", mandateDigest: "b".repeat(64), namespace: "cbv1", payee: { address: "0xffeeddccbbaa99887766554433221100ffeeddcc", agentId: "8678", displayName: "Iris", role: "payee" }, payer: { address: "0x00112233445566778899aabbccddeeff00112233", agentId: "8677", displayName: "Billy", role: "payer" }, paymentMoved: false, promptSha256: "c".repeat(64), protocol: "clockchain.bilateral-authorization/v1", protocolVersion: "1", registry: "0x8004a818bfb912233c491871b3d84c89a494bd9e", repositorySha: pins.repositorySha, requestDigest: "c".repeat(64), schema: "clockchain.bilateral-session-descriptor/v2", sessionId: pins.sessionId, settlement: "not-executed" };
   const signed = (overrides = {}, key = privateKeyPem, keyId = pins.keyId) => createSignedEnvelope({ ...descriptor, ...overrides }, { keyId, privateKeyPem: key });
   assert.doesNotThrow(() => validatePinnedDescriptorEnvelope(signed(), pins));
   const other = generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" });
@@ -646,7 +650,16 @@ test("pinned descriptor envelope requires the exact Git operator and derived run
 
 test("coordinator descriptor permits exactly the USD 100 option", () => {
   const parties = { payer: { address: "0x00112233445566778899aabbccddeeff00112233", agentId: "8677", displayName: "Billy", role: "payer" }, payee: { address: "0xffeeddccbbaa99887766554433221100ffeeddcc", agentId: "8678", displayName: "Iris", role: "payee" } };
-  const descriptor = createCoordinatorDescriptor({ parties, promptSha256: "a".repeat(64), repositorySha: "b".repeat(40), sessionId: "c".repeat(32) });
+  const input = { parties, ...INTENT_DIGESTS, promptSha256: "a".repeat(64), repositorySha: "b".repeat(40), sessionId: "c".repeat(32) };
+  const descriptor = createCoordinatorDescriptor(input);
   assert.deepEqual(descriptor.amountOptions, [{ currency: "USD", value: "100" }]);
-  assert.throws(() => createCoordinatorDescriptor({ parties: {}, promptSha256: "a".repeat(64), repositorySha: "b".repeat(40), sessionId: "c".repeat(32) }));
+  assert.equal(descriptor.mandateDigest, input.mandateDigest);
+  assert.equal(descriptor.requestDigest, input.requestDigest);
+  for (const hostile of [
+    { ...input, mandateDigest: undefined },
+    { ...input, mandateDigest: "C".repeat(64) },
+    { ...input, requestDigest: undefined },
+    { ...input, requestDigest: "d".repeat(63) },
+    { ...input, parties: {} },
+  ]) assert.throws(() => createCoordinatorDescriptor(hostile));
 });

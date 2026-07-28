@@ -13,7 +13,7 @@ import {
 } from "./canonical.mjs";
 
 export const DESCRIPTOR_SCHEMA =
-  "clockchain.bilateral-session-descriptor/v1";
+  "clockchain.bilateral-session-descriptor/v2";
 export const BILATERAL_PROTOCOL =
   "clockchain.bilateral-authorization/v1";
 export const PROTOCOL_VERSION = "1";
@@ -30,6 +30,7 @@ export const DESCRIPTOR_KEYS = Object.freeze([
   "amountOptions",
   "chainId",
   "expirySeconds",
+  "mandateDigest",
   "namespace",
   "payee",
   "payer",
@@ -39,6 +40,7 @@ export const DESCRIPTOR_KEYS = Object.freeze([
   "protocolVersion",
   "registry",
   "repositorySha",
+  "requestDigest",
   "schema",
   "sessionId",
   "settlement",
@@ -395,6 +397,8 @@ function validateDescriptorSnapshot(descriptor) {
     descriptor.chainId !== DESCRIPTOR_CHAIN_ID ||
     descriptor.expirySeconds !== DESCRIPTOR_EXPIRY_SECONDS ||
     descriptor.namespace !== DESCRIPTOR_NAMESPACE ||
+    typeof descriptor.mandateDigest !== "string" ||
+    !HASH_PATTERN.test(descriptor.mandateDigest) ||
     descriptor.paymentMoved !== false ||
     descriptor.protocol !== BILATERAL_PROTOCOL ||
     descriptor.protocolVersion !== PROTOCOL_VERSION ||
@@ -403,6 +407,8 @@ function validateDescriptorSnapshot(descriptor) {
     descriptor.settlement !== DESCRIPTOR_SETTLEMENT ||
     typeof descriptor.repositorySha !== "string" ||
     !REPOSITORY_SHA_PATTERN.test(descriptor.repositorySha) ||
+    typeof descriptor.requestDigest !== "string" ||
+    !HASH_PATTERN.test(descriptor.requestDigest) ||
     typeof descriptor.promptSha256 !== "string" ||
     !HASH_PATTERN.test(descriptor.promptSha256) ||
     typeof descriptor.sessionId !== "string" ||

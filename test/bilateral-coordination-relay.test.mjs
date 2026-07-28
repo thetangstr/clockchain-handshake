@@ -852,6 +852,7 @@ function descriptorFixture({
       ],
       chainId: "11155111",
       expirySeconds: "600",
+      mandateDigest: "b".repeat(64),
       namespace: "cbv1",
       payee: {
         address:
@@ -875,8 +876,9 @@ function descriptorFixture({
       registry:
         "0x8004a818bfb912233c491871b3d84c89a494bd9e",
       repositorySha,
+      requestDigest: "c".repeat(64),
       schema:
-        "clockchain.bilateral-session-descriptor/v1",
+        "clockchain.bilateral-session-descriptor/v2",
       sessionId,
       settlement: "not-executed",
     },
@@ -991,11 +993,11 @@ function failureSummary({ role = "payer", subjectRun = "rehearsal", ...scope } =
 
 function enrolledDescriptor(identities) {
   return createSignedEnvelope({
-    amountOptions: [{ currency: "USD", value: "100" }], chainId: "11155111", expirySeconds: "600", namespace: "cbv1",
+    amountOptions: [{ currency: "USD", value: "100" }], chainId: "11155111", expirySeconds: "600", mandateDigest: "b".repeat(64), namespace: "cbv1",
     payee: { ...identities.payee, role: "payee" }, payer: { ...identities.payer, role: "payer" },
     paymentMoved: false, promptSha256: "ef".repeat(32), protocol: "clockchain.bilateral-authorization/v1", protocolVersion: "1",
     registry: "0x8004a818bfb912233c491871b3d84c89a494bd9e", repositorySha: REPOSITORY_SHA,
-    schema: "clockchain.bilateral-session-descriptor/v1", sessionId: "00112233445566778899aabbccddeeff", settlement: "not-executed",
+    requestDigest: "c".repeat(64), schema: "clockchain.bilateral-session-descriptor/v2", sessionId: "00112233445566778899aabbccddeeff", settlement: "not-executed",
   }, { keyId: OPERATOR_KEY_ID, privateKeyPem: privateKeyPem(operator) });
 }
 

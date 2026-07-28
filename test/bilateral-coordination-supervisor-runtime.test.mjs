@@ -322,6 +322,7 @@ test("production supervisor verifies valid enrollment receipts and binds each de
       ],
       chainId: "11155111",
       expirySeconds: "600",
+      mandateDigest: "b".repeat(64),
       namespace: "cbv1",
       payee: {
         address: payeeAddresses.rehearsal,
@@ -341,7 +342,8 @@ test("production supervisor verifies valid enrollment receipts and binds each de
       protocolVersion: "1",
       registry: "0x8004a818bfb912233c491871b3d84c89a494bd9e",
       repositorySha,
-      schema: "clockchain.bilateral-session-descriptor/v1",
+      requestDigest: "c".repeat(64),
+      schema: "clockchain.bilateral-session-descriptor/v2",
       sessionId,
       settlement: "not-executed",
     }, {

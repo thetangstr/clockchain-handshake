@@ -96,6 +96,7 @@ const RECOVERY_DESCRIPTOR = Object.freeze({
   ]),
   chainId: "11155111",
   expirySeconds: "600",
+  mandateDigest: "b".repeat(64),
   namespace: "cbv1",
   payee: Object.freeze({
     address: PAYEE_ADDRESS,
@@ -116,7 +117,8 @@ const RECOVERY_DESCRIPTOR = Object.freeze({
   protocolVersion: "1",
   registry: "0x8004a818bfb912233c491871b3d84c89a494bd9e",
   repositorySha: "0123456789abcdef0123456789abcdef01234567",
-  schema: "clockchain.bilateral-session-descriptor/v1",
+  requestDigest: "c".repeat(64),
+  schema: "clockchain.bilateral-session-descriptor/v2",
   sessionId: "00112233445566778899aabbccddeeff",
   settlement: "not-executed",
 });

@@ -28,6 +28,7 @@ import {
   operatorPublicKeyPath,
   verifyDescriptorEnvelope,
 } from "../src/bilateral/descriptor.mjs";
+import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import {
   BilateralVerdictError,
   VERDICT_SCHEMA,
@@ -42,8 +43,10 @@ export const CLI_ARGUMENTS = Object.freeze([
   "--clockchain-token-file",
   "--descriptor",
   "--output",
+  "--payer-mandate",
   "--payee-results",
   "--payer-results",
+  "--payment-request",
   "--rpc-url",
 ]);
 
@@ -57,6 +60,7 @@ const DEFAULT_FILE_SYSTEM = Object.freeze({
 });
 const DEFAULT_BUILDER_FILE_SYSTEM = Object.freeze({ open });
 const MAX_DESCRIPTOR_BYTES = 1024 * 1024;
+const MAX_INTENT_BYTES = 65_536;
 const MAX_TOKEN_BYTES = 4096;
 const TOKEN_PATTERN = /^[!-~]{1,4096}$/;
 const READ_FLAGS =
@@ -65,7 +69,7 @@ const READ_FLAGS =
   (constants.O_NONBLOCK ?? 0);
 const REPOSITORY_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const VERDICT_COMPLETION_SCHEMA =
-  "clockchain.bilateral-authorization-verdict-completion/v1";
+  "clockchain.bilateral-authorization-verdict-completion/v2";
 const VERDICT_FILES = Object.freeze({
   json: "bilateral-verdict.json",
   markdown: "BILATERAL-VERDICT.md",
@@ -129,8 +133,10 @@ function parseArguments(arguments_) {
     ),
     descriptor: values.get("--descriptor"),
     output: values.get("--output"),
+    payerMandate: values.get("--payer-mandate"),
     payeeResults: values.get("--payee-results"),
     payerResults: values.get("--payer-results"),
+    paymentRequest: values.get("--payment-request"),
     rpcUrl: values.get("--rpc-url"),
   });
 }
@@ -274,6 +280,19 @@ async function readBoundedRegularFile(
   }
 }
 
+function parseExactCanonicalJson(bytes) {
+  let value;
+  try {
+    value = JSON.parse(bytes.toString("utf8"));
+    if (!canonicalBytes(value).equals(bytes)) {
+      throw new Error();
+    }
+  } catch {
+    throw new BilateralVerdictError();
+  }
+  return value;
+}
+
 async function defaultRunGit({ args, cwd, maxBuffer }) {
   return execFileAsync("git", args, {
     cwd,
@@ -353,6 +372,8 @@ export async function buildDefaultVerifierInput(
     Array.isArray(values) ||
     typeof values.descriptor !== "string" ||
     typeof values.clockchainTokenFile !== "string" ||
+    typeof values.payerMandate !== "string" ||
+    typeof values.paymentRequest !== "string" ||
     typeof values.rpcUrl !== "string"
   ) {
     throw new BilateralVerdictError();
@@ -370,6 +391,16 @@ export async function buildDefaultVerifierInput(
       secret: true,
     },
   );
+  const mandateBytes = await readBoundedRegularFile(
+    values.payerMandate,
+    MAX_INTENT_BYTES,
+    { fileSystem: active.fileSystem },
+  );
+  const requestBytes = await readBoundedRegularFile(
+    values.paymentRequest,
+    MAX_INTENT_BYTES,
+    { fileSystem: active.fileSystem },
+  );
   let descriptorEnvelope;
   try {
     descriptorEnvelope = JSON.parse(
@@ -378,6 +409,8 @@ export async function buildDefaultVerifierInput(
   } catch {
     throw new BilateralVerdictError();
   }
+  const mandateEnvelope = parseExactCanonicalJson(mandateBytes);
+  const requestEnvelope = parseExactCanonicalJson(requestBytes);
   const tokenText = tokenBytes.toString("utf8");
   const token = tokenText.endsWith("\n")
     ? tokenText.slice(0, -1)
@@ -478,6 +511,7 @@ export async function buildDefaultVerifierInput(
     canaries: [token],
     clockchain,
     descriptorEnvelope,
+    mandateEnvelope,
     ownerOf: async ({ agentId, registry }) =>
       publicClient.readContract({
         abi: ERC8004_ABI,
@@ -487,6 +521,7 @@ export async function buildDefaultVerifierInput(
       }),
     payeeDirectory: values.payeeResults,
     payerDirectory: values.payerResults,
+    requestEnvelope,
     repositoryPublicKeyResolver: async (request) => {
       if (
         request?.keyId !== operator.keyId ||

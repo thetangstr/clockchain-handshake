@@ -49,6 +49,14 @@ import {
   transitionDigest,
 } from "../src/bilateral/messages.mjs";
 import {
+  payerMandateDigest,
+  signPayerMandate,
+} from "../src/bilateral/payer-mandate.mjs";
+import {
+  paymentRequestDigest,
+  signPaymentRequest,
+} from "../src/bilateral/payment-request.mjs";
+import {
   ProtocolFailureError,
 } from "../src/bilateral/protocol.mjs";
 import {
@@ -91,7 +99,7 @@ const SLOTS = Object.freeze([
   "acknowledgment",
 ]);
 
-function descriptorFixture() {
+function descriptorFixture({ mandateDigest, requestDigest } = {}) {
   return {
     amountOptions: [
       { currency: "USD", value: "100" },
@@ -99,6 +107,7 @@ function descriptorFixture() {
     ],
     chainId: "11155111",
     expirySeconds: "600",
+    mandateDigest: mandateDigest ?? "b".repeat(64),
     namespace: "cbv1",
     payee: {
       address: PAYEE.address.toLowerCase(),
@@ -121,16 +130,69 @@ function descriptorFixture() {
       "0x8004a818bfb912233c491871b3d84c89a494bd9e",
     repositorySha:
       "0123456789abcdef0123456789abcdef01234567",
-    schema: "clockchain.bilateral-session-descriptor/v1",
+    requestDigest: requestDigest ?? "c".repeat(64),
+    schema: "clockchain.bilateral-session-descriptor/v2",
     sessionId: "00112233445566778899aabbccddeeff",
     settlement: "not-executed",
   };
 }
 
-function signedDescriptorFixture() {
+async function intentEnvelopes() {
+  const sessionId = "00112233-4455-6677-8899-aabbccddeeff";
+  const mandate = {
+    amount: { currency: "USD", value: "100" },
+    expiresAtMs: "1784923800000",
+    invoiceReferencePrefix: "INV-",
+    issuedAtMs: "1784923100000",
+    payee: { address: PAYEE.address.toLowerCase(), agentId: "8678" },
+    payer: { address: PAYER.address.toLowerCase(), agentId: "8677" },
+    paymentMoved: false,
+    protocol: "clockchain.bilateral-authorization/v1",
+    purpose: "Invoice settlement",
+    releaseId: "release-1",
+    repositorySha: "0123456789abcdef0123456789abcdef01234567",
+    requestEndpoint: `/v1/sessions/${sessionId}/payment-requests`,
+    schema: "clockchain.bilateral-payer-mandate/v1",
+    sessionId,
+    subjectRun: "rehearsal",
+  };
+  const mandateEnvelope = await signPayerMandate({
+    mandate,
+    signMessage: (raw) => PAYER.signMessage({ message: { raw } }),
+  });
+  const requestEnvelope = await signPaymentRequest({
+    request: {
+      amount: mandate.amount,
+      createdAtMs: "1784923150000",
+      expiresAtMs: "1784923700000",
+      invoiceReference: "INV-0001",
+      mandateDigest: payerMandateDigest(mandateEnvelope),
+      payee: mandate.payee,
+      payer: mandate.payer,
+      paymentMoved: false,
+      protocol: mandate.protocol,
+      purpose: mandate.purpose,
+      releaseId: mandate.releaseId,
+      repositorySha: mandate.repositorySha,
+      requestId: "00000000-0000-4000-8000-000000000001",
+      schema: "clockchain.bilateral-payment-request/v1",
+      sessionId,
+      subjectRun: mandate.subjectRun,
+    },
+    signMessage: (raw) => PAYEE.signMessage({ message: { raw } }),
+  });
+  return Object.freeze({ mandateEnvelope, requestEnvelope });
+}
+
+async function signedDescriptorFixture() {
   const { privateKey, publicKey } =
     generateKeyPairSync("ed25519");
-  const descriptor = descriptorFixture();
+  const { mandateEnvelope, requestEnvelope } =
+    await intentEnvelopes();
+  const descriptor = descriptorFixture({
+    mandateDigest: payerMandateDigest(mandateEnvelope),
+    requestDigest: paymentRequestDigest(requestEnvelope),
+  });
   return {
     descriptor,
     descriptorEnvelope: createSignedEnvelope(descriptor, {
@@ -140,12 +202,14 @@ function signedDescriptorFixture() {
         type: "pkcs8",
       }),
     }),
+    mandateEnvelope,
     repositoryPublicKey: rawPublicKeyBase64FromPem(
       publicKey.export({
         format: "pem",
         type: "spki",
       }),
     ),
+    requestEnvelope,
   };
 }
 
@@ -203,7 +267,7 @@ async function runIsolatedRoles(t, options = {}) {
     mkdir(payerDirectory, { mode: 0o700 }),
     mkdir(payeeDirectory, { mode: 0o700 }),
   ]);
-  const signed = signedDescriptorFixture();
+  const signed = await signedDescriptorFixture();
   const fake = configuredFake(options.fakeOptions);
   const payerClock = cooperativeClock();
   const payeeClock = cooperativeClock();
@@ -383,6 +447,8 @@ function aggregateInput(
     canaries: overrides.canaries ?? [],
     clockchain,
     descriptorEnvelope: fixture.descriptorEnvelope,
+    mandateEnvelope:
+      overrides.mandateEnvelope ?? fixture.mandateEnvelope,
     ownerOf: overrides.ownerOf ?? ownerOf,
     payeeDirectory:
       overrides.payeeDirectory ??
@@ -390,6 +456,8 @@ function aggregateInput(
     payerDirectory:
       overrides.payerDirectory ??
       fixture.payerDirectory,
+    requestEnvelope:
+      overrides.requestEnvelope ?? fixture.requestEnvelope,
     repositoryPublicKeyResolver:
       overrides.repositoryPublicKeyResolver ??
       (async () => fixture.repositoryPublicKey),
@@ -470,6 +538,7 @@ async function runProcessIsolatedAggregateVerifier(fixture) {
     inputPath,
     `${JSON.stringify({
       descriptorEnvelope: fixture.descriptorEnvelope,
+      mandateEnvelope: fixture.mandateEnvelope,
       owners: {
         "8677": PAYER.address.toLowerCase(),
         "8678": PAYEE.address.toLowerCase(),
@@ -478,6 +547,7 @@ async function runProcessIsolatedAggregateVerifier(fixture) {
       payerDirectory: fixture.payerDirectory,
       readModel,
       repositoryPublicKey: fixture.repositoryPublicKey,
+      requestEnvelope: fixture.requestEnvelope,
     })}\n`,
     "utf8",
   );
@@ -514,9 +584,11 @@ const verdict = await verifyBilateralAuthorization({
   canaries: [],
   clockchain,
   descriptorEnvelope: input.descriptorEnvelope,
+  mandateEnvelope: input.mandateEnvelope,
   ownerOf: async ({ agentId }) => input.owners[String(agentId)],
   payeeDirectory: input.payeeDirectory,
   payerDirectory: input.payerDirectory,
+  requestEnvelope: input.requestEnvelope,
   repositoryPublicKeyResolver: async () => input.repositoryPublicKey,
 });
 process.stdout.write(JSON.stringify({ pid: process.pid, verdict }));
@@ -1213,7 +1285,7 @@ function transitionClient(fake, overrides = {}) {
 
 test("writer crash recovery is discovery-only after one ambiguous dispatch", async (t) => {
   const root = await operationalRoot(t);
-  const signed = signedDescriptorFixture();
+  const signed = await signedDescriptorFixture();
   const proposal = buildProposal({
     amount: { currency: "USD", value: "100" },
     descriptor: signed.descriptor,
@@ -1255,7 +1327,7 @@ test("writer crash recovery is discovery-only after one ambiguous dispatch", asy
 
 test("a refused writer attempt fails closed after one dispatch", async (t) => {
   const root = await operationalRoot(t);
-  const signed = signedDescriptorFixture();
+  const signed = await signedDescriptorFixture();
   const proposal = buildProposal({
     amount: { currency: "USD", value: "100" },
     descriptor: signed.descriptor,
@@ -1282,7 +1354,7 @@ test("a refused writer attempt fails closed after one dispatch", async (t) => {
 });
 
 test("rate limits exhaust the operational poll budget without writing", async () => {
-  const signed = signedDescriptorFixture();
+  const signed = await signedDescriptorFixture();
   const proposal = buildProposal({
     amount: { currency: "USD", value: "100" },
     descriptor: signed.descriptor,

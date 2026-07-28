@@ -69,7 +69,7 @@ const RAW_TIMES = Object.freeze([
 ]);
 const HEIGHTS = Object.freeze(["1869000", "1869030", "1869060"]);
 
-function transitionHead() {
+function transitionHead(sessionDigest = SESSION_DIGEST) {
   return {
     amount: { currency: "USD", moved: false, value: "100" },
     expirySeconds: "600",
@@ -81,7 +81,7 @@ function transitionHead() {
     },
     protocol: "clockchain.bilateral-authorization/v1",
     schema: "clockchain.bilateral-transition/v1",
-    sessionDigest: SESSION_DIGEST,
+    sessionDigest,
   };
 }
 
@@ -94,11 +94,12 @@ function buildFixture({
   transitionsCount = 3,
   heights = HEIGHTS,
   rawTimes = RAW_TIMES,
+  sessionDigest = SESSION_DIGEST,
   messageExtras = {},
   tamperPredecessor = false,
 } = {}) {
   const m1 = {
-    ...transitionHead(),
+    ...transitionHead(sessionDigest),
     kind: "proposal",
     predecessor: null,
     sequence: "1",
@@ -113,7 +114,7 @@ function buildFixture({
   };
 
   const m2 = {
-    ...transitionHead(),
+    ...transitionHead(sessionDigest),
     decision: "ACCEPT",
     kind: "acceptance",
     predecessor: tamperPredecessor
@@ -131,7 +132,7 @@ function buildFixture({
   };
 
   const m3 = {
-    ...transitionHead(),
+    ...transitionHead(sessionDigest),
     kind: "acknowledgment",
     outcome: "ACKNOWLEDGED",
     paymentMoved: false,
@@ -181,7 +182,7 @@ function buildFixture({
     repositorySha: REPOSITORY_SHA,
     role,
     schema: PARTY_RESULT_SCHEMA,
-    sessionDigest: SESSION_DIGEST,
+    sessionDigest,
     signature: {
       address: role === "payer" ? PAYER_ADDRESS : PAYEE_ADDRESS,
       algorithm: "eip191",
@@ -476,6 +477,18 @@ test("builds the same payee M2 preimage from accepted and acknowledged prefixes"
     partySignatureBytes(signatureInput(acknowledged)).toString(
       "utf8",
     ),
+  );
+});
+
+test("party signature bytes commit transitively to the descriptor session digest", () => {
+  const baseline = buildFixture({ role: "payer" });
+  const intentBound = buildFixture({
+    role: "payer",
+    sessionDigest: "ab".repeat(32),
+  });
+  assert.notEqual(
+    partySignatureBytes(signatureInput(baseline)).toString("hex"),
+    partySignatureBytes(signatureInput(intentBound)).toString("hex"),
   );
 });
 

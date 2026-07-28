@@ -39,21 +39,21 @@ const PAYER_ADDRESS =
 const PAYEE_ADDRESS =
   "0xffeeddccbbaa99887766554433221100ffeeddcc";
 const SESSION_DIGEST =
-  "7797ccdccaa27014e3c578b3c442a464c815b664fcec0ef9a4e55c9420bd2891";
+  "04e932d5144bb18a12481657c5c351be3dc760927748c966fee64bc891bd3d73";
 const LEDGER_ID = "370c7672-3a78-4c17-853c-e3037799562c";
 const H1 =
-  "10cb7a50d5e884d0b62d478916fd4a6b450e66f2577f5ec71ed03432596ef803";
+  "b8fc5a5e8dca9126799f2780c198042989c78a2e6e871b9638bc144149f2ac47";
 const H2 =
-  "9b7df26e1e85b650ef7e8f8305420de04956cf45ce6768aefa18769ee903e9a7";
+  "16028a05a3707f8fc4701e5cd074ddd8a170416e054d1f1717b0c4400559e229";
 const H3 =
-  "2f23897b706a6187a46bc69fea3a9d33110cfb67b467114da1a5c457d624a7c7";
+  "b87bf37ab6ec96f355b883bb5bc80aba8f5a3c504bf790dcc0206a05a677ca61";
 
 const M1_BYTES =
-  '{"amount":{"currency":"USD","moved":false,"value":"100"},"expirySeconds":"600","kind":"proposal","payee":{"address":"0xffeeddccbbaa99887766554433221100ffeeddcc","agentId":"8678"},"payer":{"address":"0x00112233445566778899aabbccddeeff00112233","agentId":"8677","reference":"eip155:11155111:0x8004a818bfb912233c491871b3d84c89a494bd9e:8677"},"predecessor":null,"protocol":"clockchain.bilateral-authorization/v1","schema":"clockchain.bilateral-transition/v1","sequence":"1","sessionDigest":"7797ccdccaa27014e3c578b3c442a464c815b664fcec0ef9a4e55c9420bd2891"}';
+  '{"amount":{"currency":"USD","moved":false,"value":"100"},"expirySeconds":"600","kind":"proposal","payee":{"address":"0xffeeddccbbaa99887766554433221100ffeeddcc","agentId":"8678"},"payer":{"address":"0x00112233445566778899aabbccddeeff00112233","agentId":"8677","reference":"eip155:11155111:0x8004a818bfb912233c491871b3d84c89a494bd9e:8677"},"predecessor":null,"protocol":"clockchain.bilateral-authorization/v1","schema":"clockchain.bilateral-transition/v1","sequence":"1","sessionDigest":"04e932d5144bb18a12481657c5c351be3dc760927748c966fee64bc891bd3d73"}';
 const M2_BYTES =
-  '{"amount":{"currency":"USD","moved":false,"value":"100"},"decision":"ACCEPT","expirySeconds":"600","kind":"acceptance","payee":{"address":"0xffeeddccbbaa99887766554433221100ffeeddcc","agentId":"8678"},"payer":{"address":"0x00112233445566778899aabbccddeeff00112233","agentId":"8677","reference":"eip155:11155111:0x8004a818bfb912233c491871b3d84c89a494bd9e:8677"},"predecessor":{"anchoredHash":"10cb7a50d5e884d0b62d478916fd4a6b450e66f2577f5ec71ed03432596ef803","blockHeight":"3375636","kind":"proposal","ledgerId":"370c7672-3a78-4c17-853c-e3037799562c"},"protocol":"clockchain.bilateral-authorization/v1","schema":"clockchain.bilateral-transition/v1","sequence":"2","sessionDigest":"7797ccdccaa27014e3c578b3c442a464c815b664fcec0ef9a4e55c9420bd2891"}';
+  '{"amount":{"currency":"USD","moved":false,"value":"100"},"decision":"ACCEPT","expirySeconds":"600","kind":"acceptance","payee":{"address":"0xffeeddccbbaa99887766554433221100ffeeddcc","agentId":"8678"},"payer":{"address":"0x00112233445566778899aabbccddeeff00112233","agentId":"8677","reference":"eip155:11155111:0x8004a818bfb912233c491871b3d84c89a494bd9e:8677"},"predecessor":{"anchoredHash":"b8fc5a5e8dca9126799f2780c198042989c78a2e6e871b9638bc144149f2ac47","blockHeight":"3375636","kind":"proposal","ledgerId":"370c7672-3a78-4c17-853c-e3037799562c"},"protocol":"clockchain.bilateral-authorization/v1","schema":"clockchain.bilateral-transition/v1","sequence":"2","sessionDigest":"04e932d5144bb18a12481657c5c351be3dc760927748c966fee64bc891bd3d73"}';
 const M3_BYTES =
-  '{"amount":{"currency":"USD","moved":false,"value":"100"},"expirySeconds":"600","kind":"acknowledgment","outcome":"ACKNOWLEDGED","payee":{"address":"0xffeeddccbbaa99887766554433221100ffeeddcc","agentId":"8678"},"payer":{"address":"0x00112233445566778899aabbccddeeff00112233","agentId":"8677","reference":"eip155:11155111:0x8004a818bfb912233c491871b3d84c89a494bd9e:8677"},"paymentMoved":false,"predecessor":{"anchoredHash":"9b7df26e1e85b650ef7e8f8305420de04956cf45ce6768aefa18769ee903e9a7","blockHeight":"3375637","kind":"acceptance","ledgerId":"370c7672-3a78-4c17-853c-e3037799562c"},"proposal":{"anchoredHash":"10cb7a50d5e884d0b62d478916fd4a6b450e66f2577f5ec71ed03432596ef803","blockHeight":"3375636","kind":"proposal","ledgerId":"370c7672-3a78-4c17-853c-e3037799562c"},"protocol":"clockchain.bilateral-authorization/v1","schema":"clockchain.bilateral-transition/v1","sequence":"3","sessionDigest":"7797ccdccaa27014e3c578b3c442a464c815b664fcec0ef9a4e55c9420bd2891"}';
+  '{"amount":{"currency":"USD","moved":false,"value":"100"},"expirySeconds":"600","kind":"acknowledgment","outcome":"ACKNOWLEDGED","payee":{"address":"0xffeeddccbbaa99887766554433221100ffeeddcc","agentId":"8678"},"payer":{"address":"0x00112233445566778899aabbccddeeff00112233","agentId":"8677","reference":"eip155:11155111:0x8004a818bfb912233c491871b3d84c89a494bd9e:8677"},"paymentMoved":false,"predecessor":{"anchoredHash":"16028a05a3707f8fc4701e5cd074ddd8a170416e054d1f1717b0c4400559e229","blockHeight":"3375637","kind":"acceptance","ledgerId":"370c7672-3a78-4c17-853c-e3037799562c"},"proposal":{"anchoredHash":"b8fc5a5e8dca9126799f2780c198042989c78a2e6e871b9638bc144149f2ac47","blockHeight":"3375636","kind":"proposal","ledgerId":"370c7672-3a78-4c17-853c-e3037799562c"},"protocol":"clockchain.bilateral-authorization/v1","schema":"clockchain.bilateral-transition/v1","sequence":"3","sessionDigest":"04e932d5144bb18a12481657c5c351be3dc760927748c966fee64bc891bd3d73"}';
 
 const DESCRIPTOR = Object.freeze({
   amountOptions: Object.freeze([
@@ -62,6 +62,7 @@ const DESCRIPTOR = Object.freeze({
   ]),
   chainId: "11155111",
   expirySeconds: "600",
+  mandateDigest: "b".repeat(64),
   namespace: "cbv1",
   payee: Object.freeze({
     address: PAYEE_ADDRESS,
@@ -82,7 +83,8 @@ const DESCRIPTOR = Object.freeze({
   protocolVersion: "1",
   registry: "0x8004a818bfb912233c491871b3d84c89a494bd9e",
   repositorySha: "0123456789abcdef0123456789abcdef01234567",
-  schema: "clockchain.bilateral-session-descriptor/v1",
+  requestDigest: "c".repeat(64),
+  schema: "clockchain.bilateral-session-descriptor/v2",
   sessionId: "00112233445566778899aabbccddeeff",
   settlement: "not-executed",
 });
@@ -328,6 +330,29 @@ test("M1, M2, and M3 canonical bytes and SHA-256 digests are byte-pinned", () =>
 
 test("the fixture session digest is pinned to the deterministic Billy/Iris descriptor", () => {
   assert.equal(dSession(cloneDescriptor()), SESSION_DIGEST);
+});
+
+test("each intent digest changes the derived proposal session binding", () => {
+  const baselineDescriptor = cloneDescriptor();
+  const baselineSession = dSession(baselineDescriptor);
+  const baselineProposal = buildProposal({
+    amount: { currency: "USD", value: "100" },
+    descriptor: baselineDescriptor,
+    sessionDigest: baselineSession,
+  });
+  for (const key of ["mandateDigest", "requestDigest"]) {
+    const descriptor = cloneDescriptor();
+    descriptor[key] = "d".repeat(64);
+    const sessionDigest = dSession(descriptor);
+    const proposal = buildProposal({
+      amount: { currency: "USD", value: "100" },
+      descriptor,
+      sessionDigest,
+    });
+    assert.notEqual(sessionDigest, baselineSession);
+    assert.notEqual(proposal.sessionDigest, baselineProposal.sessionDigest);
+    assert.notEqual(transitionDigest(proposal), transitionDigest(baselineProposal));
+  }
 });
 
 test("authoritative triples have exact data keys and are detached and frozen", () => {

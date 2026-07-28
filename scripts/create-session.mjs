@@ -41,6 +41,7 @@ import {
 const execFileAsync = promisify(execFile);
 const REPOSITORY_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const PROMPT_SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const INTENT_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 export const MAX_AMOUNTS_ARGUMENT_BYTES = 2_087;
 export const MAX_PROMPT_FILE_BYTES = 65_536;
 const READ_FLAGS =
@@ -58,6 +59,7 @@ const KEYGEN_ARGUMENTS = Object.freeze(["--key-id"]);
 const CREATE_ARGUMENTS = Object.freeze([
   "--amounts",
   "--key-id",
+  "--mandate-digest",
   "--output",
   "--payee-address",
   "--payee-agent-id",
@@ -67,11 +69,13 @@ const CREATE_ARGUMENTS = Object.freeze([
   "--payer-name",
   "--prompt-file",
   "--prompt-sha256",
+  "--request-digest",
   "--repository-sha",
 ]);
 const REQUIRED_CREATE_ARGUMENTS = Object.freeze([
   "--amounts",
   "--key-id",
+  "--mandate-digest",
   "--output",
   "--payee-address",
   "--payee-agent-id",
@@ -79,6 +83,7 @@ const REQUIRED_CREATE_ARGUMENTS = Object.freeze([
   "--payer-address",
   "--payer-agent-id",
   "--payer-name",
+  "--request-digest",
 ]);
 const DEFAULT_FILE_SYSTEM = Object.freeze({
   lstat,
@@ -686,6 +691,7 @@ function buildDescriptor(values, {
     amountOptions,
     chainId: DESCRIPTOR_CHAIN_ID,
     expirySeconds: DESCRIPTOR_EXPIRY_SECONDS,
+    mandateDigest: values.get("--mandate-digest"),
     namespace: DESCRIPTOR_NAMESPACE,
     payee: {
       address: values.get("--payee-address"),
@@ -705,10 +711,17 @@ function buildDescriptor(values, {
     protocolVersion: PROTOCOL_VERSION,
     registry: REGISTRY_ADDRESS,
     repositorySha,
+    requestDigest: values.get("--request-digest"),
     schema: DESCRIPTOR_SCHEMA,
     sessionId,
     settlement: DESCRIPTOR_SETTLEMENT,
   };
+  if (
+    !INTENT_DIGEST_PATTERN.test(descriptor.mandateDigest) ||
+    !INTENT_DIGEST_PATTERN.test(descriptor.requestDigest)
+  ) {
+    fail();
+  }
   try {
     validateDescriptor(descriptor);
   } catch {
