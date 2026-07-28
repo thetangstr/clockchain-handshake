@@ -20,14 +20,36 @@ const ROOT = new URL("../", import.meta.url).pathname;
 const COORDINATOR_SCHEMA = "clockchain.bilateral-coordination-process-coordinator/v1";
 const AUTHORIZE = "AUTHORIZED";
 const PROCESS_PHASE_DEADLINE_MS = 90_000;
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const within = (promise, ms) => Promise.race([
-  promise,
-  new Promise((_resolve, reject) => setTimeout(
-    () => reject(new Error("bounded wait expired")),
-    ms,
-  )),
+const FAKE_CLOCKCHAIN_BASE_TIME_MS = 1_784_923_200_000;
+const SHARED_TEST_CLOCK_MS = FAKE_CLOCKCHAIN_BASE_TIME_MS - 1_000;
+assert.equal(new Date(FAKE_CLOCKCHAIN_BASE_TIME_MS).toISOString(), "2026-07-24T20:00:00.000Z");
+assert.equal(SHARED_TEST_CLOCK_MS < FAKE_CLOCKCHAIN_BASE_TIME_MS, true);
+const PROCESS_FAILURE_SCENARIOS = Object.freeze([
+  "missing-mandate",
+  "forged-iris-signature",
+  "wrong-billie-signer",
+  "invoice-prefix-mismatch",
+  "request-replay-changed-bytes",
+  "expired-intent",
+  "descriptor-swap",
+  "fourth-write",
+  "stale-verifier-publication",
+  "mismatched-verifier-publication",
 ]);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function within(promise, ms) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("bounded wait expired")), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const DIRECT_PROCESS_ROWS = Object.freeze(["relay restart during long poll", "relay crash"]);
 const ADVERSARIAL_CITATIONS = Object.freeze([
@@ -75,6 +97,7 @@ const EXPECTED_REHEARSAL_RELAY_EFFECTS = Object.freeze([
   "payee:ENROLLMENT_CONFIRMED:release",
   "payee:FUNDING_INPUTS_READY:release",
   "payee:IDENTITY_PACKAGE_READY:rehearsal",
+  "payee:PAYMENT_REQUEST_READY:rehearsal",
   "payee:PREFLIGHT_PARTICIPANT_READY:release",
   "payee:ROLE_PACKAGE_READY:rehearsal",
   "payee:ROLE_STARTED:rehearsal",
@@ -83,6 +106,8 @@ const EXPECTED_REHEARSAL_RELAY_EFFECTS = Object.freeze([
   "payer:ENROLLMENT_CONFIRMED:release",
   "payer:FUNDING_INPUTS_READY:release",
   "payer:IDENTITY_PACKAGE_READY:rehearsal",
+  "payer:PAYER_MANDATE_READY:rehearsal",
+  "payer:PAYMENT_REQUEST_MATCHED:rehearsal",
   "payer:PREFLIGHT_PARTICIPANT_READY:release",
   "payer:ROLE_PACKAGE_READY:rehearsal",
   "payer:ROLE_STARTED:rehearsal",
@@ -118,12 +143,77 @@ async function waitForPrivateMarker(path, expected, output) {
   }
   throw new Error(`readiness missing before ${PROCESS_PHASE_DEADLINE_MS}ms: ${path}`);
 }
-function spawned(args, options) { const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"], ...options }); let stdout = ""; let stderr = ""; child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8"); child.stdout.on("data", (chunk) => { stdout += chunk; }); child.stderr.on("data", (chunk) => { stderr += chunk; }); return { child, output: () => ({ stderr, stdout }), wait: () => new Promise((resolve, reject) => { child.once("error", reject); child.once("close", (code, signal) => resolve({ code, signal, stderr, stdout })); }) }; }
+function spawned(args, options) {
+  const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"], ...options });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const completion = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolve({ code, signal, stderr, stdout }));
+  });
+  return { child, output: () => ({ stderr, stdout }), wait: () => completion };
+}
 function standalone(file, args = []) {
   const { NODE_TEST_CONTEXT, ...environment } = process.env;
   return spawned([file, ...args], { env: environment }).wait();
 }
 async function stop(process_) { if (process_.exitCode !== null || process_.signalCode !== null) return; process_.kill("SIGTERM"); await Promise.race([new Promise((resolve) => process_.once("close", resolve)), sleep(1_000)]); if (process_.exitCode === null && process_.signalCode === null) { process_.kill("SIGKILL"); await new Promise((resolve) => process_.once("close", resolve)); } }
+async function descendantPids(rootPid) {
+  const { stdout } = await execFile("/bin/ps", ["-axo", "pid=,ppid="]);
+  const children = new Map();
+  for (const line of stdout.trim().split("\n")) {
+    const match = /^\s*([0-9]+)\s+([0-9]+)\s*$/.exec(line);
+    if (match === null) continue;
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    if (!children.has(ppid)) children.set(ppid, []);
+    children.get(ppid).push(pid);
+  }
+  const descendants = [];
+  const pending = [rootPid];
+  while (pending.length > 0) {
+    const parent = pending.pop();
+    for (const child of children.get(parent) ?? []) {
+      descendants.push(child);
+      pending.push(child);
+    }
+  }
+  return descendants;
+}
+async function stopGroup(process_) {
+  if (!Number.isInteger(process_?.pid) || process_.pid <= 0) return;
+  const descendants = await descendantPids(process_.pid);
+  for (const pid of [process_.pid, ...descendants.reverse()]) {
+    try { process.kill(pid, "SIGTERM"); } catch (error) { if (error?.code !== "ESRCH") throw error; }
+  }
+  await Promise.race([
+    process_.exitCode !== null || process_.signalCode !== null ? Promise.resolve() : new Promise((resolve) => process_.once("close", resolve)),
+    sleep(1_000),
+  ]);
+  for (const pid of [process_.pid, ...descendants]) {
+    try { process.kill(pid, "SIGKILL"); } catch (error) { if (error?.code !== "ESRCH") throw error; }
+  }
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const live = [process_.pid, ...descendants].filter((pid) => {
+      try { process.kill(pid, 0); return true; } catch (error) { if (error?.code === "ESRCH") return false; throw error; }
+    });
+    if (live.length === 0) return;
+    await sleep(10);
+  }
+  throw new Error("coordinator descendant cleanup deadline expired");
+}
+async function stopPids(pids) {
+  for (const signal of ["SIGTERM", "SIGKILL"]) {
+    for (const pid of pids) {
+      try { process.kill(pid, signal); } catch (error) { if (error?.code !== "ESRCH") throw error; }
+    }
+    if (signal === "SIGTERM") await sleep(1_000);
+  }
+}
 async function availablePort() { const server = createServer(); await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); }); const { port } = server.address(); await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); return port; }
 function certificateFingerprint(certificate) { return createHash("sha256").update(new X509Certificate(certificate).raw).digest("hex"); }
 async function relayReady(process_) { let buffer = ""; return new Promise((resolve, reject) => { process_.child.stdout.on("data", (chunk) => { buffer += chunk; const end = buffer.indexOf("\n"); if (end >= 0) { try { resolve(JSON.parse(buffer.slice(0, end))); } catch (error) { reject(error); } } }); process_.child.once("error", reject); process_.child.once("close", (code, signal) => { if (!buffer.includes("\n")) reject(new Error(`relay exited before readiness: ${code}/${signal}: ${process_.output().stderr}`)); }); }); }
@@ -144,7 +234,7 @@ test("process child is inert when directly discovered by node:test but rejects a
   assert.match(direct.stderr, /^PROCESS_CHILD_FAILED:dispatch/m);
 });
 
-async function createProcessSession(t, { barrier = null, coordinatorFirst = barrier === null } = {}) {
+async function createProcessSession(t, { barrier = null, coordinatorFirst = barrier === null, scenario = "success" } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bilateral-process-e2e-")));
   await chmod(root, 0o700);
   t.after(() => rm(root, { force: true, recursive: true }));
@@ -175,6 +265,10 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
   await cp(
     join(ROOT, "test/helpers/fake-bilateral-clockchain-service.mjs"),
     join(clone, "test/helpers/fake-bilateral-clockchain-service.mjs"),
+  );
+  await cp(
+    join(ROOT, "test/helpers/bilateral-fixed-clock.mjs"),
+    join(clone, "test/helpers/bilateral-fixed-clock.mjs"),
   );
   await cp(
     join(ROOT, "src/bilateral/coordination/artifact.mjs"),
@@ -236,10 +330,20 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
   t.after(() => stop(fake.child));
   const fakeReady = await waitFor(fakeListen, fake);
   const fakeClient = createFakeBilateralClockchainHttpClient(fakeReady);
+  const preflightFakeState = join(root, "preflight-fake-state.json");
+  const preflightFakeListen = join(root, "preflight-fake-listen.json");
+  const preflightFake = spawned([
+    "test/helpers/fake-bilateral-clockchain-service.mjs",
+    "--state", preflightFakeState,
+    "--listen-file", preflightFakeListen,
+    "--max-operations", "64",
+  ], { cwd: clone });
+  t.after(() => stop(preflightFake.child));
+  const preflightFakeReady = await waitFor(preflightFakeListen, preflightFake);
 
   const relayState = join(root, "relay-state");
   await mkdir(relayState, { mode: 0o700 });
-  const relay = spawned([
+  const relayArguments = [
     "bin/handshake-relay.mjs",
     "--host", "127.0.0.1",
     "--port", "0",
@@ -247,7 +351,19 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
     "--state", relayState,
     "--tls-certificate", certificate,
     "--tls-private-key", certificateKey,
-  ], { cwd: clone });
+  ];
+  const relayEnvironment = {
+    ...process.env,
+    CLOCKCHAIN_BILATERAL_TEST_CLOCK_MS: String(SHARED_TEST_CLOCK_MS),
+    NODE_OPTIONS: [
+      process.env.NODE_OPTIONS,
+      `--import=${join(clone, "test/helpers/bilateral-fixed-clock.mjs")}`,
+    ].filter(Boolean).join(" "),
+  };
+  const relay = spawned(relayArguments, {
+    cwd: clone,
+    env: relayEnvironment,
+  });
   t.after(() => stop(relay.child));
   let relayBuffer = "";
   const relayLine = await new Promise((resolve, reject) => {
@@ -258,7 +374,7 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
     });
     relay.child.once("error", reject);
   });
-  const relayReady = JSON.parse(relayLine);
+  const relayListen = JSON.parse(relayLine);
 
   const releaseRoot = join(root, "operator-release");
   await mkdir(releaseRoot, { mode: 0o700 });
@@ -290,7 +406,7 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
     "--operator-key-id": "process-e2e-operator",
     "--operator-private-key": operatorPrivateKey,
     "--release-root": releaseRoot,
-    "--relay-url": `https://127.0.0.1:${relayReady.port}`,
+    "--relay-url": `https://127.0.0.1:${relayListen.port}`,
     "--repository-sha": repositorySha,
     "--rpc-url-file": operatorRpc,
     "--tls-certificate": certificate,
@@ -306,10 +422,13 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
       payee: { agentIds: { rehearsal: "8678", stakeholder: "8680" }, configPath: configurations.payee, logs: logs.payee, stateRoot: roleRoots.payee, token: "payee-process-token" },
       verifier: { configPath: configurations.verifier, logs: logs.verifier },
     },
+    clockMs: SHARED_TEST_CLOCK_MS,
     coordinatorFirst,
     fake: fakeReady,
+    preflightFake: preflightFakeReady,
     repositoryRoot: clone,
     report,
+    scenario,
     schema: COORDINATOR_SCHEMA,
   });
 
@@ -325,7 +444,16 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
     logs,
     outputs,
     relay,
-    relayReady,
+    relayReady: relayListen,
+    restartRelay: async () => {
+      const restartedArguments = [...relayArguments];
+      restartedArguments[restartedArguments.indexOf("--port") + 1] = String(relayListen.port);
+      const restarted = spawned(restartedArguments, { cwd: clone, env: relayEnvironment });
+      t.after(() => stop(restarted.child));
+      const ready = await within(relayReady(restarted), 5_000);
+      assert.equal(ready.port, relayListen.port);
+      return restarted;
+    },
     report,
     repositorySha,
     releaseRoot,
@@ -339,13 +467,16 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
     operatorPrivateKey,
     operatorRpc,
     operatorToken,
+    preflightFake,
+    preflightFakeState,
   };
 }
 
 test("real coordinator and supervisors gate one isolated three-transition process session", { concurrency: false }, async (t) => {
   const session = await createProcessSession(t);
   const coordinator = session.startCoordinator();
-  const coordinatorExit = await coordinator.wait();
+  t.after(() => stopGroup(coordinator.child));
+  const coordinatorExit = await within(coordinator.wait(), PROCESS_PHASE_DEADLINE_MS);
   const roleDiagnostics = await Promise.all(["payer", "payee", "verifier"].flatMap((name) => [
     readFile(session.logs[name].stdout, "utf8").catch(() => ""),
     readFile(session.logs[name].stderr, "utf8").catch(() => ""),
@@ -353,16 +484,19 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   assert.deepEqual(
     { code: coordinatorExit.code, signal: coordinatorExit.signal },
     { code: 0, signal: null },
-    `${coordinatorExit.stderr}\n${roleDiagnostics.join("\n")}`,
+    `${coordinatorExit.stderr}\n${roleDiagnostics.join("\n")}\n${session.relay.output().stderr}`,
   );
   const snapshot = JSON.parse(await readFile(session.fakeState, "utf8"));
   const payerResult = JSON.parse(await readFile(join(session.outputs.payer, "party-result.json"), "utf8"));
   const payeeResult = JSON.parse(await readFile(join(session.outputs.payee, "party-result.json"), "utf8"));
+  const descriptorEnvelope = JSON.parse(await readFile(join(session.roleRoots.payer, "rehearsal", "descriptor.json"), "utf8"));
   const verdict = JSON.parse(await readFile(join(session.outputs.verifier, "bilateral-verdict.json"), "utf8"));
   const coordinatorReport = JSON.parse(await readFile(session.report, "utf8"));
   assert.match(coordinatorReport.release.releaseId, /^release-[0-9a-f]{16}$/);
   assert.equal(coordinatorReport.release.repositorySha, session.repositorySha);
   assert.match(coordinatorReport.release.sessionId, /^[0-9a-f-]{36}$/);
+  assert.equal(descriptorEnvelope.descriptor.payer.displayName, "Iris");
+  assert.equal(descriptorEnvelope.descriptor.payee.displayName, "Billie");
   assert.ok(Array.isArray(coordinatorReport.authenticatedRelayEvents));
   assert.equal(coordinatorReport.coordinatorState, "REHEARSAL_VERIFIED");
   assert.match(coordinatorReport.verifierPublicationDigest, /^[0-9a-f]{64}$/);
@@ -417,8 +551,11 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   const protocolAnchors = snapshot.calls.logAction.filter(({ asset_reference_id }) => ["proposal", "acceptance", "acknowledgment"].map((slot) => sessionKey(payerResult.sessionDigest, slot)).includes(asset_reference_id));
   assert.deepEqual(protocolAnchors.map(({ asset_reference_id }) => asset_reference_id), ["proposal", "acceptance", "acknowledgment"].map((slot) => sessionKey(payerResult.sessionDigest, slot)));
   assert.equal(protocolAnchors.length, 3);
-  assert.equal(snapshot.writeCount, 5);
-  assert.equal(snapshot.calls.logAction.length - protocolAnchors.length, 2);
+  assert.equal(snapshot.writeCount, 3);
+  assert.equal(snapshot.calls.logAction.length, 3);
+  const preflightSnapshot = JSON.parse(await readFile(session.preflightFakeState, "utf8"));
+  assert.equal(preflightSnapshot.writeCount, 2);
+  assert.equal(preflightSnapshot.paymentMoved, false);
   assert.equal(payerResult.transitions.length, 3);
   assert.ok(payeeResult.transitions.length >= 2);
   assert.deepEqual(payeeResult.transitions.slice(0, 2), payerResult.transitions.slice(0, 2));
@@ -472,6 +609,65 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   await assertCompletion(session.outputs.payer, ".party-result.complete.json", "party-result.json", "PARTY-RESULT.md");
   await assertCompletion(session.outputs.payee, ".party-result.complete.json", "party-result.json", "PARTY-RESULT.md");
   await assertCompletion(session.outputs.verifier, ".bilateral-verdict.complete.json", "bilateral-verdict.json", "BILATERAL-VERDICT.md");
+  const consolePort = await availablePort();
+  const startConsole = () => spawned([
+    "bin/handshake-console.mjs",
+    "--host", "127.0.0.1",
+    "--port", String(consolePort),
+    "--state-root", session.releaseRoot,
+  ], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      CLOCKCHAIN_BILATERAL_TEST_CLOCK_MS: String(SHARED_TEST_CLOCK_MS),
+      NODE_OPTIONS: [
+        process.env.NODE_OPTIONS,
+        `--import=${join(ROOT, "test/helpers/bilateral-fixed-clock.mjs")}`,
+      ].filter(Boolean).join(" "),
+    },
+  });
+  const fetchConsole = async (process_) => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (process_.output().stdout === "Handshake console listening.\n") {
+        const response = await fetch(`http://127.0.0.1:${consolePort}/v1/console/session`);
+        assert.equal(response.status, 200);
+        return response.json();
+      }
+      if (process_.child.exitCode !== null) assert.fail(process_.output().stderr);
+      await sleep(10);
+    }
+    assert.fail("console readiness deadline expired");
+  };
+  const firstConsole = startConsole();
+  t.after(() => stop(firstConsole.child));
+  const firstProjection = await fetchConsole(firstConsole);
+  await stop(firstConsole.child);
+  const restartedConsole = startConsole();
+  t.after(() => stop(restartedConsole.child));
+  const restartedProjection = await fetchConsole(restartedConsole);
+  await stop(restartedConsole.child);
+  for (const projection of [firstProjection, restartedProjection]) {
+    assert.equal(projection.paymentMoved, false);
+    assert.equal(projection.verifier.status, AUTHORIZE);
+    assert.equal(projection.verifier.advisory, false);
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(projection.actors).map(([role, actor]) => [role, actor.health])),
+      { operator: "UNAVAILABLE", payee: "UNAVAILABLE", payer: "UNAVAILABLE" },
+    );
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(projection.session.observations).map(([service, observation]) => [service, observation.health])),
+      { relay: "UNAVAILABLE", watcher: "UNAVAILABLE" },
+    );
+    assert.deepEqual(projection.anchors.map(({ digest }) => digest), payerResult.transitions.map(({ digest }) => digest));
+    assert.equal(projection.session.releaseId, coordinatorReport.release.releaseId);
+    assert.equal(projection.session.repositorySha, coordinatorReport.release.repositorySha);
+    assert.equal(projection.session.sessionId, coordinatorReport.release.sessionId);
+  }
+  assert.equal(firstConsole.output().stdout.includes(AUTHORIZE), false);
+  assert.equal(firstConsole.output().stderr.includes(AUTHORIZE), false);
+  assert.equal(restartedConsole.output().stdout.includes(AUTHORIZE), false);
+  assert.equal(restartedConsole.output().stderr.includes(AUTHORIZE), false);
+  await assertPrivateFile(coordinatorReport.consoleStatePath);
   const namedLogs = Object.fromEntries(await Promise.all(["payer", "payee", "verifier"].map(async (name) => [name, {
     stderr: await readFile(session.logs[name].stderr, "utf8"),
     stdout: await readFile(session.logs[name].stdout, "utf8"),
@@ -508,6 +704,33 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   assert.equal(session.fake.output().stderr.includes(AUTHORIZE), false);
   assert.equal(session.relay.output().stdout.includes(AUTHORIZE), false);
   assert.equal(session.relay.output().stderr.includes(AUTHORIZE), false);
+  const canaries = ["operator-process-token", "payer-process-token", "payee-process-token"];
+  const persistedCanarySurfaces = [
+    coordinatorExit.stdout,
+    coordinatorExit.stderr,
+    session.fake.output().stdout,
+    session.fake.output().stderr,
+    session.relay.output().stdout,
+    session.relay.output().stderr,
+    JSON.stringify(firstProjection),
+    JSON.stringify(restartedProjection),
+    await readFile(session.fakeState, "utf8"),
+    await readFile(session.preflightFakeState, "utf8"),
+    await readFile(coordinatorReport.consoleStatePath, "utf8"),
+    await readFile(session.report, "utf8"),
+    ...await Promise.all(["payer", "payee", "verifier"].flatMap((name) => [
+      readFile(session.logs[name].stdout, "utf8"),
+      readFile(session.logs[name].stderr, "utf8"),
+    ])),
+    ...(await Promise.all((await readdir(join(session.root, "relay-state"), { recursive: true })).map(async (name) => {
+      const path = join(session.root, "relay-state", name);
+      const info = await lstat(path);
+      return info.isFile() ? readFile(path, "utf8") : "";
+    }))),
+  ];
+  for (const canary of canaries) {
+    assert.ok(persistedCanarySurfaces.every((text) => !text.includes(canary)), canary);
+  }
   assert.equal((await readFile(new URL("helpers/bilateral-coordination-child.mjs", import.meta.url), "utf8")).includes(AUTHORIZE), false);
   await assertPrivateFile(session.report, { canonical: true });
   for (const log of Object.values(session.logs)) { await assertPrivateFile(log.stdout); await assertPrivateFile(log.stderr); }
@@ -539,6 +762,123 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   for (const output of Object.values(session.outputs)) await assertRoot(output);
   for (const pid of [coordinatorReport.coordinatorPid, coordinatorReport.payer.pid, coordinatorReport.payee.pid, coordinatorReport.verifier.pid]) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
   for (const pid of [session.fake.child.pid, session.relay.child.pid]) assert.doesNotThrow(() => process.kill(pid, 0));
+});
+
+test("relay restarts after mandate and after request fail closed without authorization", { concurrency: false }, async (t) => {
+  for (const [scenario, stage] of [
+    ["relay-restart-after-mandate", "mandate-ready"],
+    ["relay-restart-after-request", "request-ready"],
+  ]) {
+    await t.test(stage, { concurrency: false }, async (t) => {
+      const session = await createProcessSession(t, { barrier: true, scenario });
+      const coordinator = session.startCoordinator();
+      t.after(() => stopGroup(coordinator.child));
+      await waitForPrivateMarker(session.barrier.ready, {
+        schema: COORDINATOR_SCHEMA,
+        stage,
+      }, coordinator);
+      await stop(session.relay.child);
+      const restartedRelay = await session.restartRelay();
+      await canonicalPrivateExclusive(session.barrier.release, { release: true });
+      let exit;
+      try {
+        exit = await within(coordinator.wait(), PROCESS_PHASE_DEADLINE_MS);
+      } catch (error) {
+        const roleLogs = await Promise.all(["payer", "payee"].flatMap((role) => [
+          readFile(session.logs[role].stdout, "utf8").catch(() => ""),
+          readFile(session.logs[role].stderr, "utf8").catch(() => ""),
+        ]));
+        throw new Error(`${scenario}: ${error.message}\ncoordinator=${JSON.stringify(coordinator.output())}\nroles=${roleLogs.join("\\n")}\nrelay=${JSON.stringify(restartedRelay.output())}`);
+      }
+      assert.notEqual(exit.code, 0);
+      assert.equal(exit.signal, null);
+      assert.match(exit.stderr, /^PROCESS_CHILD_FAILED:coordinator-run-rehearsal_identities_ready:/m);
+      await assert.rejects(readFile(session.report, "utf8"), { code: "ENOENT" });
+      assert.equal(JSON.parse(await readFile(session.fakeState, "utf8")).writeCount, 0);
+      for (const output of [exit.stdout, exit.stderr, session.relay.output().stdout, session.relay.output().stderr, restartedRelay.output().stdout, restartedRelay.output().stderr]) {
+        assert.equal(output.includes(AUTHORIZE), false);
+      }
+    });
+  }
+});
+
+test("coordinator restart before descriptor resumes durable intent state", { concurrency: false }, async (t) => {
+  const session = await createProcessSession(t, { barrier: true, scenario: "coordinator-restart-before-descriptor" });
+  const first = session.startCoordinator();
+  t.after(() => stopGroup(first.child));
+  await waitForPrivateMarker(session.barrier.ready, {
+    schema: COORDINATOR_SCHEMA,
+    stage: "intents-ready",
+  }, first);
+  const survivingSupervisors = await descendantPids(first.child.pid);
+  assert.equal(survivingSupervisors.length, 2);
+  t.after(() => stopPids(survivingSupervisors));
+  await stop(first.child);
+  for (const pid of survivingSupervisors) assert.doesNotThrow(() => process.kill(pid, 0));
+  await assert.rejects(readFile(session.report, "utf8"), { code: "ENOENT" });
+  await canonicalPrivateExclusive(session.barrier.release, { release: true });
+  const restarted = session.startCoordinator();
+  t.after(() => stopGroup(restarted.child));
+  const exit = await within(restarted.wait(), PROCESS_PHASE_DEADLINE_MS);
+  assert.deepEqual(
+    { code: exit.code, signal: exit.signal },
+    { code: 0, signal: null },
+    `${exit.stderr}\n${first.output().stderr}\nphase=${await readFile(`${session.report}.phase`, "utf8").catch(() => "missing")}`,
+  );
+  const report = JSON.parse(await readFile(session.report, "utf8"));
+  assert.equal(report.coordinatorState, "REHEARSAL_VERIFIED");
+  assert.equal(JSON.parse(await readFile(session.fakeState, "utf8")).writeCount, 3);
+  assert.ok([first.output().stdout, first.output().stderr, exit.stdout, exit.stderr].every((output) => !output.includes(AUTHORIZE)));
+  await stopPids(survivingSupervisors);
+  for (const pid of survivingSupervisors) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+});
+
+test("isolated process faults fail closed before authorizing output", { concurrency: false }, async (t) => {
+  const expectedFailurePhases = {
+    "missing-mandate": "coordinator-run-(?:preflight_passed|funding_ready)",
+    "forged-iris-signature": "coordinator-run-(?:preflight_passed|funding_ready)",
+    "wrong-billie-signer": "coordinator-run-(?:preflight_passed|funding_ready)",
+    "invoice-prefix-mismatch": "coordinator-run-(?:preflight_passed|funding_ready)",
+    "request-replay-changed-bytes": "coordinator-run-(?:preflight_passed|funding_ready)",
+    "expired-intent": "coordinator-run-(?:preflight_passed|funding_ready)",
+    "descriptor-swap": "coordinator-verifier",
+    "fourth-write": "coordinator-verifier",
+    "stale-verifier-publication": "coordinator-verifier-after-snapshot",
+    "mismatched-verifier-publication": "coordinator-verifier-after-snapshot",
+  };
+  for (const scenario of PROCESS_FAILURE_SCENARIOS) {
+    await t.test(scenario, { concurrency: false }, async (t) => {
+      const session = await createProcessSession(t, { scenario });
+      const coordinator = session.startCoordinator();
+      t.after(() => stopGroup(coordinator.child));
+      const exit = await within(coordinator.wait(), PROCESS_PHASE_DEADLINE_MS);
+      assert.notEqual(exit.code, 0, `${scenario} unexpectedly succeeded`);
+      assert.equal(exit.signal, null);
+      assert.match(exit.stderr, new RegExp(`^PROCESS_CHILD_FAILED:${expectedFailurePhases[scenario]}:`, "m"), scenario);
+      const outputs = await Promise.all([
+        Promise.resolve(exit.stdout),
+        Promise.resolve(exit.stderr),
+        ...["payer", "payee", "verifier"].flatMap((name) => [
+          readFile(session.logs[name].stdout, "utf8").catch(() => ""),
+          readFile(session.logs[name].stderr, "utf8").catch(() => ""),
+        ]),
+      ]);
+      assert.equal(outputs.some((text) => text.includes(AUTHORIZE)), false, scenario);
+      const snapshot = await readFile(session.fakeState, "utf8")
+        .then((text) => JSON.parse(text))
+        .catch((error) => {
+          if (error?.code !== "ENOENT") throw error;
+          return { paymentMoved: false, writeCount: 0 };
+        });
+      assert.equal(snapshot.paymentMoved, false, scenario);
+      assert.equal(
+        snapshot.writeCount,
+        ["descriptor-swap", "fourth-write", "stale-verifier-publication", "mismatched-verifier-publication"].includes(scenario) ? 3 : 0,
+        scenario,
+      );
+      assert.equal(JSON.parse(await readFile(session.preflightFakeState, "utf8")).writeCount, 2, scenario);
+    });
+  }
 });
 
 test("relay restart during a pinned long poll fails closed and recovers empty state", { concurrency: false }, async (t) => {
@@ -598,7 +938,7 @@ test("relay restart during a pinned long poll fails closed and recovers empty st
 test("relay crash before verifier fails closed without spawning a verifier", { concurrency: false }, async (t) => {
   const session = await createProcessSession(t, { barrier: true });
   const coordinator = session.startCoordinator();
-  t.after(() => stop(coordinator.child));
+  t.after(() => stopGroup(coordinator.child));
 
   await waitForPrivateMarker(session.barrier.ready, {
     schema: COORDINATOR_SCHEMA,
@@ -633,7 +973,7 @@ test("relay crash before verifier fails closed without spawning a verifier", { c
   assert.ok(existingOutputs.every((text) => !text.includes(AUTHORIZE)));
   const afterCrash = JSON.parse(await readFile(session.fakeState, "utf8"));
   assert.equal(afterCrash.calls.logAction.filter(({ asset_reference_id }) => ["proposal", "acceptance", "acknowledgment"].map((slot) => sessionKey(payerResult.sessionDigest, slot)).includes(asset_reference_id)).length, 3);
-  assert.equal(afterCrash.writeCount, 5);
+  assert.equal(afterCrash.writeCount, 3);
 });
 
 test("adversarial matrix citations name existing focused coverage", async () => {

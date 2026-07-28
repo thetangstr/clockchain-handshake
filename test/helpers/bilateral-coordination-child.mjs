@@ -5,10 +5,13 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Agent, request as httpsRequest } from "node:https";
 import process from "node:process";
+import { toHex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 
+import { canonicalBytes } from "../../src/bilateral/canonical.mjs";
 import { buildDefaultRoleInput, runPayerRole, runPayeeRole } from "../../src/bilateral/roles.mjs";
 import { CHAIN_ID, REGISTRY_ADDRESS } from "../../src/constants.mjs";
 import { createRecovery, createRegistrationIntent, withMetadataTransaction } from "../../src/registration-internal.mjs";
@@ -22,6 +25,7 @@ import { main as acceptMain } from "../../bin/handshake-accept.mjs";
 import { main as preflightMain } from "../../scripts/probe-bilateral-rendezvous.mjs";
 import { runCli as registrationRunCli } from "../../scripts/register-bilateral-identity.mjs";
 import { buildDefaultVerifierInput, main as verifierMain } from "../../scripts/verify-bilateral-results.mjs";
+import { renderBilateralVerdictMarkdown } from "../../src/bilateral/verdict.mjs";
 import { createFakeBilateralClockchainHttpClient } from "./fake-bilateral-clockchain-service.mjs";
 
 const SCHEMA = "clockchain.bilateral-coordination-process-child/v1";
@@ -31,6 +35,22 @@ const STOP_GRACE_MS = 1_000;
 const BARRIER_DEADLINE_MS = 90_000;
 const ROLE_SCHEMA = "clockchain.bilateral-coordination-process-supervisor/v1";
 const COORDINATOR_SCHEMA = "clockchain.bilateral-coordination-process-coordinator/v1";
+const PROCESS_SCENARIOS = new Set([
+  "success",
+  "missing-mandate",
+  "forged-iris-signature",
+  "wrong-billie-signer",
+  "invoice-prefix-mismatch",
+  "request-replay-changed-bytes",
+  "expired-intent",
+  "descriptor-swap",
+  "fourth-write",
+  "relay-restart-after-mandate",
+  "relay-restart-after-request",
+  "coordinator-restart-before-descriptor",
+  "stale-verifier-publication",
+  "mismatched-verifier-publication",
+]);
 let failurePhase = "dispatch";
 
 function fail() {
@@ -111,10 +131,11 @@ function validFake(value) {
 }
 
 function validRoleConfiguration(value, role) {
-  if (!exact(value, ["agentIds", "fake", "launchManifestPath", "repositoryRoot", "role", "schema", "sepoliaRpc", "startBarrier", "stateRoot", "token"])
+  if (!exact(value, ["agentIds", "clockMs", "controlBarrier", "fake", "launchManifestPath", "preflightFake", "repositoryRoot", "role", "scenario", "schema", "sepoliaRpc", "startBarrier", "stateRoot", "token"])
     || value.schema !== ROLE_SCHEMA
     || value.role !== role
     || !validFake(value.fake)
+    || !validFake(value.preflightFake)
     || !absolute(value.launchManifestPath)
     || !absolute(value.repositoryRoot)
     || !absolute(value.stateRoot)
@@ -128,7 +149,9 @@ function validRoleConfiguration(value, role) {
     || !exact(value.agentIds, ["rehearsal", "stakeholder"])
     || !/^[1-9][0-9]*$/.test(value.agentIds.rehearsal)
     || !/^[1-9][0-9]*$/.test(value.agentIds.stakeholder)
-    || value.agentIds.rehearsal === value.agentIds.stakeholder) fail();
+    || value.agentIds.rehearsal === value.agentIds.stakeholder || !Number.isSafeInteger(value.clockMs) || value.clockMs < 0
+    || !PROCESS_SCENARIOS.has(value.scenario)) fail();
+  if (value.controlBarrier !== null && (!exact(value.controlBarrier, ["ready", "release"]) || !absolute(value.controlBarrier.ready) || !absolute(value.controlBarrier.release))) fail();
   return value;
 }
 
@@ -182,7 +205,7 @@ function boundedRoleRunner(value, role, owners) {
       jitter: () => 0,
       monotonicNow: () => elapsed,
       notifyReady,
-      now: () => 1_784_923_200_000,
+      now: () => value.clockMs,
       sleeper: async () => {
         elapsed += 1;
         await new Promise((resolve) => setImmediate(resolve));
@@ -199,6 +222,7 @@ function supervisorLauncher(value, role, owners, inspector) {
   const roleRunner = boundedRoleRunner(value, role, owners);
   const registration = async (args) => {
     const run = args[args.indexOf("--output") + 1].endsWith("/rehearsal/identity") ? "rehearsal" : "stakeholder";
+    const displayName = role === "payer" ? "Iris" : "Billie";
     const agentId = value.agentIds[run];
     const stableHash = (label) => `0x${createHash("sha256").update(`${role}:${run}:${label}`).digest("hex")}`;
     const dependencies = {
@@ -209,15 +233,15 @@ function supervisorLauncher(value, role, owners, inspector) {
         if (typeof privateKey !== "string" || !/^0x[0-9a-f]{40}$/i.test(expectedAddress) || Object.hasOwn(owners, agentId)) fail();
         const registerTx = stableHash("register");
         const metadataTx = stableHash("metadata");
-        const intent = createRegistrationIntent({ address: expectedAddress, displayName: `${role} ${run}`, registerCalldata: "0x01020304", registerGas: 150_000n, transactionFields: { gasPrice: 2n } });
-        const recovery = createRecovery({ address: expectedAddress, agentId: BigInt(agentId), displayName: `${role} ${run}`, registerBlock: 4_000n, registerTx });
+        const intent = createRegistrationIntent({ address: expectedAddress, displayName, registerCalldata: "0x01020304", registerGas: 150_000n, transactionFields: { gasPrice: 2n } });
+        const recovery = createRecovery({ address: expectedAddress, agentId: BigInt(agentId), displayName, registerBlock: 4_000n, registerTx });
         await onCheckpoint(intent);
         await onCheckpoint(recovery);
         await onCheckpoint(withMetadataTransaction(recovery, metadataTx, 1));
         const owner = expectedAddress.toLowerCase();
         await createFakeBilateralClockchainHttpClient(value.fake).registerAgent({ agentId, owner, status: "active" });
         owners[agentId] = owner;
-        return { address: expectedAddress, agentId, chainId: CHAIN_ID, displayName: `${role} ${run}`, identityReference: recovery.identityReference, metadataBlock: "4001", metadataTx, registerBlock: recovery.registerBlock, registerTx, registryAddress: REGISTRY_ADDRESS, registryNamespace: recovery.registryNamespace };
+        return { address: expectedAddress, agentId, chainId: CHAIN_ID, displayName, identityReference: recovery.identityReference, metadataBlock: "4001", metadataTx, registerBlock: recovery.registerBlock, registerTx, registryAddress: REGISTRY_ADDRESS, registryNamespace: recovery.registryNamespace };
       },
     };
     return registrationRunCli(args, dependencies);
@@ -271,9 +295,27 @@ function supervisorLauncher(value, role, owners, inspector) {
         return Object.freeze({ ambiguous: false, started: true, completion });
       }
       if (command === "scripts/probe-bilateral-rendezvous.mjs") {
-        let now = 1_784_923_200_000;
+        const barrierRoot = dirname(value.stateRoot);
+        const readyPath = join(barrierRoot, `.preflight-${role}-ready.json`);
+        const peerPath = join(barrierRoot, `.preflight-${role === "payer" ? "payee" : "payer"}-ready.json`);
+        await writeOrReuseExact(readyPath, { role, schema: ROLE_SCHEMA, stage: "preflight-client-ready" });
+        const peerDeadline = Date.now() + BARRIER_DEADLINE_MS;
+        let peerReady = false;
+        while (Date.now() < peerDeadline) {
+          try {
+            const peer = JSON.parse(await readFile(peerPath, "utf8"));
+            if (!exact(peer, ["role", "schema", "stage"]) || peer.role === role || peer.schema !== ROLE_SCHEMA || peer.stage !== "preflight-client-ready") fail();
+            peerReady = true;
+            break;
+          } catch (error) {
+            if (error?.code !== "ENOENT") throw error;
+          }
+          await sleep(5);
+        }
+        if (!peerReady) fail();
+        let now = value.clockMs;
         await preflightMain(args, {
-          createClient: () => createFakeBilateralClockchainHttpClient(value.fake),
+          createClient: () => createFakeBilateralClockchainHttpClient(value.preflightFake),
           now: () => ++now,
           repositoryPublicKeyResolver: async ({ repositoryPath, repositorySha }) => {
             const key = /^docs\/operator-keys\/([a-z0-9][a-z0-9-]{0,63})\.pub$/.exec(repositoryPath);
@@ -311,6 +353,7 @@ async function runSupervisorRole(value, role) {
     stateRoot: configuration.stateRoot,
   });
   const owners = Object.create(null);
+  let replayRequestBytes = null;
   const inspector = createGitInspector(configuration.repositoryRoot);
   const immediateEvents = (client) => {
     if (!client || typeof client.readEvents !== "function") fail();
@@ -322,19 +365,112 @@ async function runSupervisorRole(value, role) {
       },
     });
   };
+  const scenarioClient = (client) => {
+    const immediate = immediateEvents(client);
+    const checkpoint = async (stage) => {
+      if (configuration.controlBarrier === null) fail();
+      await writeOrReuseExact(configuration.controlBarrier.ready, { schema: COORDINATOR_SCHEMA, stage });
+      await waitForRelease(configuration.controlBarrier.release);
+    };
+    if (configuration.scenario === "relay-restart-after-mandate" && role === "payer") {
+      return Object.freeze({
+        ...immediate,
+        publishPayerMandate: async (input) => {
+          const receipt = await immediate.publishPayerMandate(input);
+          await checkpoint("mandate-ready");
+          return receipt;
+        },
+      });
+    }
+    if (configuration.scenario === "relay-restart-after-request" && role === "payee") {
+      return Object.freeze({
+        ...immediate,
+        submitPaymentRequest: async (input) => {
+          const receipt = await immediate.submitPaymentRequest(input);
+          await checkpoint("request-ready");
+          return receipt;
+        },
+      });
+    }
+    if (configuration.scenario === "missing-mandate" && role === "payer") {
+      return Object.freeze({
+        ...immediate,
+        publishPayerMandate: async ({ bytes }) => Object.freeze({
+          digest: createHash("sha256").update(bytes).digest("hex"),
+        }),
+      });
+    }
+    if (configuration.scenario === "request-replay-changed-bytes" && role === "payee") {
+      return Object.freeze({
+        ...immediate,
+        submitPaymentRequest: async ({ bytes }) => {
+          const receipt = await immediate.submitPaymentRequest({ bytes });
+          if (!Buffer.isBuffer(replayRequestBytes) || replayRequestBytes.equals(bytes)) fail();
+          let replayRejected = false;
+          try {
+            await immediate.submitPaymentRequest({ bytes: replayRequestBytes });
+          } catch {
+            replayRejected = true;
+          }
+          if (!replayRejected || receipt?.paymentMoved !== false) fail();
+          throw new Error("conflicting request replay rejected");
+        },
+      });
+    }
+    return immediate;
+  };
   // Production dependencies are frozen.  Copying the surface makes every test
   // substitution explicit and keeps the TLS/enrollment/replay implementation.
   const dependencies = {
     ...production,
-    createCoordinationClient: (input) => immediateEvents(production.createCoordinationClient(input)),
-    createResumedCoordinationClient: async (input) => immediateEvents(await production.createResumedCoordinationClient(input)),
+    createCoordinationClient: (input) => scenarioClient(production.createCoordinationClient(input)),
+    createResumedCoordinationClient: async (input) => scenarioClient(await production.createResumedCoordinationClient(input)),
     async ensureToken({ role: requestedRole }) {
       if (requestedRole !== role) fail();
       return Object.freeze({ tokenPath });
     },
+    nowMs: () => configuration.clockMs,
     async verifyFundingInputs() { return Object.freeze({ paymentMoved: false }); },
     launcher: supervisorLauncher(configuration, role, owners, inspector),
   };
+  if (configuration.scenario === "forged-iris-signature" && role === "payer") {
+    dependencies.signPayerMandate = async (input) => {
+      const envelope = structuredClone(await production.signPayerMandate(input));
+      const last = envelope.signature.value.at(-1);
+      envelope.signature.value = `${envelope.signature.value.slice(0, -1)}${last === "0" ? "1" : "0"}`;
+      return envelope;
+    };
+  }
+  if (["wrong-billie-signer", "invoice-prefix-mismatch", "expired-intent", "request-replay-changed-bytes"].includes(configuration.scenario) && role === "payee") {
+    dependencies.signPaymentRequest = async (input) => {
+      if (configuration.scenario === "wrong-billie-signer") {
+        const other = privateKeyToAccount(`0x${"42".repeat(32)}`);
+        const request = structuredClone(input.request);
+        return Object.freeze({
+          request: Object.freeze(request),
+          schema: "clockchain.bilateral-payment-request-envelope/v1",
+          signature: Object.freeze({
+            address: other.address,
+            algorithm: "eip191",
+            value: await other.signMessage({ message: { raw: toHex(canonicalBytes(request)) } }),
+          }),
+        });
+      }
+      const changed = structuredClone(input);
+      changed.request = structuredClone(input.request);
+      if (configuration.scenario === "invoice-prefix-mismatch") {
+        changed.request.invoiceReference = `WRONG-${changed.request.invoiceReference}`;
+      } else if (configuration.scenario === "expired-intent") {
+        changed.request.expiresAtMs = String(Number(changed.request.createdAtMs) + 1);
+      } else {
+        const replay = structuredClone(input);
+        replay.request = structuredClone(input.request);
+        replay.request.invoiceReference = `${replay.request.invoiceReference}-REPLAY`;
+        replayRequestBytes = canonicalBytes(await production.signPaymentRequest(replay));
+      }
+      return production.signPaymentRequest(changed);
+    };
+  }
   const supervisor = await createRoleSupervisor({
     dependencies,
     launchManifestPath: configuration.launchManifestPath,
@@ -372,7 +508,7 @@ function roleDependencies(value, role) {
       ...input,
       jitter: () => 0,
       monotonicNow: () => elapsed,
-      now: () => 1_784_923_200_000,
+      now: () => value.clockMs,
       sleeper: async () => {
         elapsed += 1;
         await sleep(20);
@@ -389,16 +525,20 @@ async function runRole(value, role) {
 }
 
 async function runVerifier(value) {
-  if (!exact(value, ["arguments", "fake", "owners", "schema"])
+  if (!exact(value, ["arguments", "fake", "owners", "scenario", "schema"])
     || value.schema !== SCHEMA
     || !Array.isArray(value.arguments)
     || !validFake(value.fake)
-    || !validOwners(value.owners)) fail();
+    || !validOwners(value.owners)
+    || !PROCESS_SCENARIOS.has(value.scenario)) fail();
   const result = await verifierMain(value.arguments, {
     buildVerifierInput: (values) => buildDefaultVerifierInput(values, {
       createClockchainClient: () => createFakeBilateralClockchainHttpClient(value.fake),
       createIdentityClient: () => identity(value.owners),
     }),
+    ...(["stale-verifier-publication", "mismatched-verifier-publication"].includes(value.scenario)
+      ? { stdout: { write() {} } }
+      : {}),
   });
   if (result !== 0) fail();
 }
@@ -447,9 +587,9 @@ async function waitForChild(child) {
     child.once("close", (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
   });
 }
-async function start(configuration) {
-  const stdout = await open(configuration.logs.stdout, "wx", 0o600);
-  const stderr = await open(configuration.logs.stderr, "wx", 0o600);
+async function start(configuration, { resume = false } = {}) {
+  const stdout = await open(configuration.logs.stdout, resume ? "a" : "wx", 0o600);
+  const stderr = await open(configuration.logs.stderr, resume ? "a" : "wx", 0o600);
   try {
     return spawn(process.execPath, [
       process.argv[1],
@@ -469,6 +609,21 @@ async function writeExclusive(path, value) {
     flag: "wx",
     mode: 0o600,
   });
+}
+
+async function writeOrReuseExact(path, value) {
+  const bytes = canonicalJson(value);
+  try {
+    await writeFile(path, bytes, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || (info.mode & 0o777) !== 0o600 || await readFile(path, "utf8") !== bytes) fail();
+  }
 }
 
 async function readRelease(path) {
@@ -523,7 +678,7 @@ function validCoordinatorRole(value) {
 }
 
 function validCoordinatorConfiguration(value) {
-  if (!exact(value, ["arguments", "barrier", "children", "coordinatorFirst", "fake", "repositoryRoot", "report", "schema"])
+  if (!exact(value, ["arguments", "barrier", "children", "clockMs", "coordinatorFirst", "fake", "preflightFake", "repositoryRoot", "report", "scenario", "schema"])
     || value.schema !== COORDINATOR_SCHEMA
     || typeof value.coordinatorFirst !== "boolean"
     || !Array.isArray(value.arguments)
@@ -541,8 +696,10 @@ function validCoordinatorConfiguration(value) {
     || !absolute(value.children.verifier.configPath)
     || !validLogs(value.children.verifier.logs)
     || !validFake(value.fake)
+    || !validFake(value.preflightFake)
     || !absolute(value.repositoryRoot)
-    || !absolute(value.report)) fail();
+    || !absolute(value.report) || !Number.isSafeInteger(value.clockMs) || value.clockMs < 0
+    || !PROCESS_SCENARIOS.has(value.scenario)) fail();
   if (value.barrier !== null && (!exact(value.barrier, ["ready", "release"]) || !absolute(value.barrier.ready) || !absolute(value.barrier.release))) fail();
   return value;
 }
@@ -660,10 +817,14 @@ function supervisorConfiguration(value, role, release) {
   if (!manifest || !absolute(manifest.path)) fail();
   return Object.freeze({
     agentIds: child.agentIds,
+    clockMs: value.clockMs,
+    controlBarrier: value.barrier,
     fake: value.fake,
     launchManifestPath: manifest.path,
+    preflightFake: value.preflightFake,
     repositoryRoot: value.repositoryRoot,
     role,
+    scenario: value.scenario,
     schema: ROLE_SCHEMA,
     sepoliaRpc: "http://127.0.0.1:8545",
     startBarrier: privateRoleBarrier(value, role),
@@ -684,6 +845,11 @@ async function descriptorOwners(path) {
 async function runProductionCoordinatorChild(input) {
   failurePhase = "coordinator-configuration";
   const value = validCoordinatorConfiguration(input);
+  const phasePath = `${value.report}.phase`;
+  const phase = async (next) => {
+    failurePhase = next;
+    await writeFile(phasePath, `${next}\n`, { mode: 0o600 });
+  };
   const cli = parseCoordinatorArguments(value.arguments);
   const config = await readCoordinatorRuntimeConfig(cli, { repositoryRoot: value.repositoryRoot });
   const active = new Set();
@@ -692,19 +858,39 @@ async function runProductionCoordinatorChild(input) {
   let payeeProcess = null;
   let drainWatchers = async () => {};
   try {
-    failurePhase = "coordinator-runtime";
+    await phase("coordinator-runtime");
     const coordinatorClockStartedAt = Date.now();
+    let failureClockElapsedMs = 0;
+    const intentFailureScenario = new Set([
+      "missing-mandate",
+      "forged-iris-signature",
+      "wrong-billie-signer",
+      "invoice-prefix-mismatch",
+      "request-replay-changed-bytes",
+      "expired-intent",
+    ]).has(value.scenario);
     runtime = createCoordinatorRuntimeDependencies(config, {
       repositoryRoot: value.repositoryRoot,
-      now: () => 1_784_923_200_000 + (Date.now() - coordinatorClockStartedAt),
-      sleeper: async () => { await sleep(20); },
+      now: () => value.clockMs + (
+        intentFailureScenario
+          ? failureClockElapsedMs
+          : Date.now() - coordinatorClockStartedAt
+      ),
+      sleeper: async (delay) => {
+        if (intentFailureScenario) failureClockElapsedMs += delay;
+        await sleep(intentFailureScenario ? 1 : 20);
+      },
       waitForFunding: boundedFunding,
       watchBilateralSession: boundedWatcher,
     });
-    failurePhase = "coordinator-release";
-    const release = await loadOrCreateCoordinatorRelease(config, { runtime });
-    if (!release.manifests || release.state !== "BOOTSTRAPPING") fail();
-    await waitForLaunchManifests(release);
+    await phase("coordinator-release");
+    const loadedRelease = await loadOrCreateCoordinatorRelease(config, { runtime });
+    const resumed = loadedRelease.state !== "BOOTSTRAPPING";
+    const release = resumed ? loadedRelease : Object.freeze({ ...loadedRelease });
+    if (!resumed) {
+      if (!Array.isArray(release.manifests) || release.manifests.length !== 2) fail();
+      await waitForLaunchManifests(release);
+    }
     const coordinatorDependencies = runtime.runDependencies(release);
     const firstRunDependencies = value.coordinatorFirst
       ? coordinatorFirstReadinessDependencies(coordinatorDependencies)
@@ -713,28 +899,30 @@ async function runProductionCoordinatorChild(input) {
       ? Promise.resolve().then(() => runProductionCoordinator({ dependencies: firstRunDependencies, release, releaseRoot: config.releaseRoot.path }))
       : null;
     coordinatorFirstRun?.catch(() => {});
-    failurePhase = "coordinator-role-start";
-    for (const role of ["payer", "payee"]) {
-      const child = value.children[role];
-      await writeExclusive(child.configPath, supervisorConfiguration(value, role, release));
-      const process_ = await start({ logs: child.logs, mode: role, path: child.configPath });
-      if (role === "payer") payerProcess = process_;
-      else payeeProcess = process_;
-      active.add(process_);
+    await phase("coordinator-role-start");
+    if (!resumed) {
+      for (const role of ["payer", "payee"]) {
+        const child = value.children[role];
+        await writeOrReuseExact(child.configPath, supervisorConfiguration(value, role, release));
+        const process_ = await start({ logs: child.logs, mode: role, path: child.configPath });
+        if (role === "payer") payerProcess = process_;
+        else payeeProcess = process_;
+        active.add(process_);
+      }
+      await phase("coordinator-role-bootstrap");
+      await Promise.all(["payer", "payee"].map((role) => waitForRoleBootstrap(privateRoleBarrier(value, role).ready, role)));
+      for (const role of ["payer", "payee"]) await writeOrReuseExact(privateRoleBarrier(value, role).release, { release: true });
     }
-    failurePhase = "coordinator-role-bootstrap";
-    await Promise.all(["payer", "payee"].map((role) => waitForRoleBootstrap(privateRoleBarrier(value, role).ready, role)));
-    for (const role of ["payer", "payee"]) await writeExclusive(privateRoleBarrier(value, role).release, { release: true });
     const base = coordinatorDependencies;
-    failurePhase = "coordinator-enrollment";
-    if (!value.coordinatorFirst) await waitForEnrollmentConfirmations(base.readEvents, [payerProcess, payeeProcess]);
+    await phase("coordinator-enrollment");
+    if (!value.coordinatorFirst && !resumed) await waitForEnrollmentConfirmations(base.readEvents, [payerProcess, payeeProcess]);
     let verifierProcess = null;
     let beforeVerifier = null;
     let afterVerifier = null;
     const runVerifierChild = async (args) => {
-      failurePhase = "coordinator-verifier";
+      await phase("coordinator-verifier");
       if (!Array.isArray(args) || args[0] !== join(value.repositoryRoot, "scripts/verify-bilateral-results.mjs")) fail();
-      if (value.barrier !== null) {
+      if (value.barrier !== null && !["relay-restart-after-mandate", "relay-restart-after-request", "coordinator-restart-before-descriptor"].includes(value.scenario)) {
         await writeExclusive(value.barrier.ready, { schema: COORDINATOR_SCHEMA, stage: "roles-complete" });
         await waitForRelease(value.barrier.release);
         await base.readEvents({ after: null, waitMs: 0 });
@@ -742,39 +930,98 @@ async function runProductionCoordinatorChild(input) {
       const descriptor = args[args.indexOf("--descriptor") + 1];
       if (!absolute(descriptor)) fail();
       const owners = await descriptorOwners(descriptor);
-      await writeExclusive(value.children.verifier.configPath, { arguments: args.slice(1), fake: value.fake, owners, schema: SCHEMA });
-      failurePhase = "coordinator-verifier-before-snapshot";
+      if (value.scenario === "descriptor-swap") {
+        const envelope = JSON.parse(await readFile(descriptor, "utf8"));
+        envelope.descriptor.amount.value = "101";
+        await writeFile(descriptor, canonicalJson(envelope), { mode: 0o600 });
+      }
+      if (value.scenario === "fourth-write") {
+        const result = JSON.parse(await readFile(join(value.children.payer.stateRoot, "rehearsal", "result", "party-result.json"), "utf8"));
+        const transition = result.transitions[0];
+        await createFakeBilateralClockchainHttpClient(value.fake).logAction({
+          asset_hash: transition.digest,
+          asset_reference_id: transition.message.assetReferenceId,
+          hash_type: "SHA-256",
+        });
+      }
+      await writeExclusive(value.children.verifier.configPath, { arguments: args.slice(1), fake: value.fake, owners, scenario: value.scenario, schema: SCHEMA });
+      await phase("coordinator-verifier-before-snapshot");
       beforeVerifier = (await createFakeBilateralClockchainHttpClient(value.fake).snapshot()).readCounters;
-      failurePhase = "coordinator-verifier-start";
+      await phase("coordinator-verifier-start");
       verifierProcess = await start({ logs: value.children.verifier.logs, mode: "verifier", path: value.children.verifier.configPath });
       active.add(verifierProcess);
-      failurePhase = "coordinator-verifier-wait";
+      await phase("coordinator-verifier-wait");
       const result = await waitForChild(verifierProcess);
       active.delete(verifierProcess);
       if (result.code !== 0 || result.signal !== null) return null;
-      failurePhase = "coordinator-verifier-after-snapshot";
+      if (["stale-verifier-publication", "mismatched-verifier-publication"].includes(value.scenario)) {
+        const outputDirectory = args[args.indexOf("--output") + 1];
+        const verdictPath = join(outputDirectory, "bilateral-verdict.json");
+        const markdownPath = join(outputDirectory, "BILATERAL-VERDICT.md");
+        const markerPath = join(outputDirectory, ".bilateral-verdict.complete.json");
+        const verdict = JSON.parse(await readFile(verdictPath, "utf8"));
+        if (value.scenario === "stale-verifier-publication") verdict.sessionDigest = "0".repeat(64);
+        else verdict.mandateDigest = "1".repeat(64);
+        const verdictBytes = Buffer.from(`${JSON.stringify(verdict, null, 2)}\n`, "utf8");
+        const markdownBytes = Buffer.from(renderBilateralVerdictMarkdown(verdict), "utf8");
+        const markerBytes = Buffer.from(`${canonicalJson({
+          jsonSha256: createHash("sha256").update(verdictBytes).digest("hex"),
+          markdownSha256: createHash("sha256").update(markdownBytes).digest("hex"),
+          schema: "clockchain.bilateral-authorization-verdict-completion/v2",
+        })}\n`, "utf8");
+        await writeFile(verdictPath, verdictBytes, { mode: 0o600 });
+        await writeFile(markdownPath, markdownBytes, { mode: 0o600 });
+        await writeFile(markerPath, markerBytes, { mode: 0o600 });
+      }
+      await phase("coordinator-verifier-after-snapshot");
       afterVerifier = (await createFakeBilateralClockchainHttpClient(value.fake).snapshot()).readCounters;
       return 0;
     };
     // Production runtime owns the verifier staging, pin checks, and verdict
     // publication. Only its bounded process-launch seam is replaced below.
     const injectedRuntime = createCoordinatorRuntimeDependencies(config, {
+      ...(["success", "coordinator-restart-before-descriptor"].includes(value.scenario)
+        ? { createWatcherClient: () => createFakeBilateralClockchainHttpClient(value.fake) }
+        : { watchBilateralSession: boundedWatcher }),
       repositoryRoot: value.repositoryRoot,
       now: base.now,
       sleeper: base.sleeper,
       waitForFunding: boundedFunding,
-      watchBilateralSession: boundedWatcher,
       runVerifierChild,
     });
     let current = value.coordinatorFirst ? await coordinatorFirstRun : release;
-    if (value.coordinatorFirst) {
+    if (value.coordinatorFirst && !resumed) {
       if (!current || current.paymentMoved !== false || current.state !== "FUNDING_READY") fail();
       current = Object.freeze({ ...release, ...current });
     }
-    failurePhase = "coordinator-run";
+    if (resumed) {
+      if (!current || current.paymentMoved !== false) fail();
+      current = Object.freeze({ ...release, ...current });
+    }
+    await phase("coordinator-run");
     for (let turn = 0; turn < 64; turn += 1) {
-      failurePhase = `coordinator-run-${current.state.toLowerCase()}`;
-      const runDependencies = injectedRuntime.runDependencies(current);
+      await phase(`coordinator-run-${current.state.toLowerCase()}`);
+      let runDependencies = injectedRuntime.runDependencies(current);
+      if (value.barrier !== null && value.scenario === "coordinator-restart-before-descriptor") {
+        const createDescriptor = runDependencies.createDescriptor;
+        runDependencies = Object.freeze({
+          ...runDependencies,
+          createDescriptor: async (input) => {
+            let released = false;
+            try {
+              await readRelease(value.barrier.release);
+              released = true;
+            } catch (error) {
+              if (error?.code !== "ENOENT") throw error;
+            }
+            if (!released) {
+              await writeOrReuseExact(value.barrier.ready, { schema: COORDINATOR_SCHEMA, stage: "intents-ready" });
+              await waitForRelease(value.barrier.release);
+            }
+            return createDescriptor(input);
+          },
+        });
+      }
       drainWatchers = runDependencies.drainWatchers;
       const next = await runProductionCoordinator({ dependencies: runDependencies, release: current, releaseRoot: config.releaseRoot.path });
       if (!next || next.paymentMoved !== false) fail();
@@ -789,10 +1036,12 @@ async function runProductionCoordinatorChild(input) {
       finalDependencies.readVerifierPublication({ subjectRun: "rehearsal" }),
     ]);
     if (!Array.isArray(authenticatedRelayEvents) || !publication || typeof publication.publicationDigest !== "string") fail();
+    const consoleStatePath = join(config.releaseRoot.path, "console-state.json");
     await writeExclusive(value.report, {
       authenticatedRelayEvents,
       coordinatorPid: process.pid,
       coordinatorState: current.state,
+      consoleStatePath,
       payer: { pid: payerProcess?.pid ?? null },
       payee: { pid: payeeProcess?.pid ?? null },
       paymentMoved: false,
