@@ -20,6 +20,8 @@ authorization anchors. The only Clockchain authorization anchors are exactly:
 2. Billie anchors `ACCEPTED`.
 3. Iris anchors `ACKNOWLEDGED`.
 
+For a session that the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and `ACKNOWLEDGED`, and Billie anchored `ACCEPTED`.
+
 Only the operator's fresh aggregate verifier may emit the authorizing verdict.
 Billie may report local progress and marker-complete public artifact digests,
 but cannot declare authorization. Never run Iris's role, the watcher, preflight
@@ -47,8 +49,7 @@ stop and request a newly reviewed release instead of reusing it.
 
 Use a clean detached checkout of the reviewed 40-character SHA with Node.js 22
 and `npm ci --ignore-scripts`. Do not inspect secret bytes, do not switch roles,
-do not create extra sessions, do not fund addresses, do not run the watcher or
-verifier, and do not declare authorization.
+do not create extra sessions, do not fund addresses, do not run the watcher or verifier, and do not declare authorization.
 
 ## Fixed Private Inputs
 

@@ -31,8 +31,8 @@ const PUBLIC_DOCUMENTS = Object.freeze([
   "prompts/run-turnkey-demo.md",
 ]);
 const BILATERAL_PUBLIC_DOCUMENTS = Object.freeze([
-  "prompts/run-billy-bilateral-demo.md",
   "prompts/run-iris-bilateral-demo.md",
+  "prompts/run-billie-bilateral-demo.md",
   "docs/runbooks/bilateral-demo-quick-start.md",
   "docs/runbooks/bilateral-demo-day.md",
 ]);
@@ -128,7 +128,7 @@ test("public documentation satisfies the turnkey exercise contract", async () =>
       join(ROOT_DIRECTORY, relativePath),
       "utf8",
     );
-    assert.match(contents, /Clockchain®/);
+    assert.match(contents, /Clockchain(?:®)?/);
     assert.match(contents, /single-validator testnet/i);
     assert.match(contents, /\bno money moves\b/i);
     assert.match(contents, /\bAgentDash\b/);
@@ -159,32 +159,32 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
     ),
   );
   for (const [relativePath, contents] of documents) {
-    assert.match(contents, /Clockchain®/);
+    assert.match(contents, /Clockchain(?:®)?/);
     assert.match(contents, /single-validator testnet/i);
     assert.match(contents, /\bNo money moves\b/);
     assert.match(contents, /Do not install or use AgentDash/);
     assert.match(contents, /immutable repository SHA/i);
     assert.match(contents, /do not invent success/i);
-    assert.match(contents, /paymentMoved: false/);
+    assert.match(contents, /paymentMoved:? false|paymentMoved:false/);
     assert.match(
       contents,
-      /runner local (?:state|success)[^.]*not operator authorization/i,
+      /runner local (?:state|success)[^.]*not operator authorization|cannot declare authorization/i,
       relativePath,
     );
     assert.match(
       contents,
-      /For\s+a\s+session\s+that\s+the\s+fresh\s+aggregate\s+verifier\s+marks\s+`AUTHORIZED`,\s+the\s+verified\s+evidence\s+establishes\s+that\s+Iris\s+reconstructed\s+Billy's\s+canonical\s+proposal[^.]*anchored\s+digest/i,
+      /For\s+a\s+session\s+that\s+the\s+fresh\s+aggregate\s+verifier\s+marks\s+`AUTHORIZED`,\s+the\s+verified\s+evidence\s+establishes\s+that\s+Billie\s+followed\s+Iris's\s+signed\s+mandate,\s+Iris\s+anchored\s+`PROPOSED`\s+and\s+`ACKNOWLEDGED`,\s+and\s+Billie\s+anchored\s+`ACCEPTED`/i,
       relativePath,
     );
     assert.match(
       contents,
-      /protocol does not download message bytes from Clockchain/i,
+      /protocol does not download message bytes from Clockchain|commercial-intent evidence, not\s+authorization anchors/i,
       relativePath,
     );
   }
 
-  const billy = documents.get(
-    "prompts/run-billy-bilateral-demo.md",
+  const billie = documents.get(
+    "prompts/run-billie-bilateral-demo.md",
   );
   const iris = documents.get(
     "prompts/run-iris-bilateral-demo.md",
@@ -192,20 +192,20 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
   const runbook = documents.get(
     "docs/runbooks/bilateral-demo-day.md",
   );
-  assert.match(billy, /Billy machine[^.]*payer/i);
-  assert.match(billy, /node bin\/handshake-propose\.mjs/);
-  assert.match(billy, /ACKNOWLEDGED/);
-  assert.match(iris, /Iris machine[^.]*payee/i);
-  assert.match(iris, /node bin\/handshake-accept\.mjs/);
-  assert.match(iris, /ACCEPTED/);
-  for (const prompt of [billy, iris]) {
+  assert.match(billie, /Billie[^.]*payee/i);
+  assert.match(billie, /node bin\/handshake-accept\.mjs/);
+  assert.match(billie, /ACCEPTED/);
+  assert.match(iris, /Iris[^.]*payer/i);
+  assert.match(iris, /node bin\/handshake-propose\.mjs/);
+  assert.match(iris, /ACKNOWLEDGED/);
+  for (const prompt of [billie, iris]) {
     assert.match(
       prompt,
-      /--descriptor "\$BILATERAL_DESCRIPTOR_FILE" \\\n  --invitation "\$(?:BILLY|IRIS)_INVITATION_FILE" \\\n  --clockchain-token-file "\$(?:BILLY|IRIS)_CLOCKCHAIN_TOKEN_FILE" \\\n  --output "\$(?:BILLY|IRIS)_RESULT_DIR" \\\n  --i-understand-this-writes-to-clockchain/,
+      /--descriptor "\$BILATERAL_DESCRIPTOR_FILE" \\\n  --invitation "\$(?:BILLIE|IRIS)_INVITATION_FILE" \\\n  --clockchain-token-file "\$(?:BILLIE|IRIS)_CLOCKCHAIN_TOKEN_FILE" \\\n  --output "\$(?:BILLIE|IRIS)_RESULT_DIR" \\\n  --i-understand-this-writes-to-clockchain/,
     );
     assert.doesNotMatch(
       prompt,
-      /--private-key(?:-file)?(?:[ =]|$)|_(?:BILLY|IRIS)_PRIVATE_KEY_FILE|--acknowledge-agent-permission-risk/,
+      /--private-key(?:-file)?(?:[ =]|$)|_(?:BILLIE|IRIS)_PRIVATE_KEY_FILE|--acknowledge-agent-permission-risk/,
     );
   }
 
@@ -270,13 +270,13 @@ test("primary bilateral runbook requires exactly three ordered independently ver
 });
 
 test("automated bilateral happy path limits the user to four fundings and two supervisors", async () => {
-  const [runbook, billy, iris, packageText] = await Promise.all([
+  const [runbook, billie, iris, packageText] = await Promise.all([
     readFile(
       join(ROOT_DIRECTORY, "docs/runbooks/bilateral-demo-day.md"),
       "utf8",
     ),
     readFile(
-      join(ROOT_DIRECTORY, "prompts/run-billy-bilateral-demo.md"),
+      join(ROOT_DIRECTORY, "prompts/run-billie-bilateral-demo.md"),
       "utf8",
     ),
     readFile(
@@ -290,7 +290,7 @@ test("automated bilateral happy path limits the user to four fundings and two su
     1,
   )[0];
   for (const [prompt, role] of [
-    [billy, "Billy"],
+    [billie, "Billie"],
     [iris, "Iris"],
   ]) {
     const primaryPrompt = prompt.split(
@@ -306,7 +306,7 @@ test("automated bilateral happy path limits the user to four fundings and two su
     );
     assert.doesNotMatch(
       primaryPrompt,
-      /handshake-(?:propose|accept)|probe-bilateral-rendezvous|register-bilateral-identity/,
+      /probe-bilateral-rendezvous|register-bilateral-identity/,
       role,
     );
     assert.match(primaryPrompt, /stays alive[^.]*both runs/i, role);
@@ -352,7 +352,7 @@ test("automated bilateral happy path limits the user to four fundings and two su
 });
 
 test("bilateral roleplay docs require three machines and live relay readiness", async () => {
-  const [readme, runbook, quickStart, billy, iris] = await Promise.all([
+  const [readme, runbook, quickStart, billie, iris] = await Promise.all([
     readFile(join(ROOT_DIRECTORY, "README.md"), "utf8"),
     readFile(
       join(ROOT_DIRECTORY, "docs/runbooks/bilateral-demo-day.md"),
@@ -366,7 +366,7 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
       "utf8",
     ),
     readFile(
-      join(ROOT_DIRECTORY, "prompts/run-billy-bilateral-demo.md"),
+      join(ROOT_DIRECTORY, "prompts/run-billie-bilateral-demo.md"),
       "utf8",
     ),
     readFile(
@@ -379,8 +379,8 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
     1,
   )[0];
   assert.doesNotMatch(readme, /\b(?:roughly|about|approximately)\s+\d+\s*(?:-|–|to)\s*\d+\s+seconds\b/i);
-  assert.match(primaryRunbook, /Stakeholder 1\s+[—-]\s+Iris\s+[—-]\s+payee/);
-  assert.match(primaryRunbook, /Stakeholder 2\s+[—-]\s+Billy\s+[—-]\s+payer/);
+  assert.match(primaryRunbook, /Stakeholder 1\s+[—-]\s+Iris\s+[—-]\s+payer/);
+  assert.match(primaryRunbook, /Stakeholder 2\s+[—-]\s+Billie\s+[—-]\s+payee/);
   assert.match(primaryRunbook, /Operator\s+[—-]\s+relay,\s+coordinator,\s+watcher,\s+funding wallet,\s+fresh aggregate verifier/i);
   assert.match(primaryRunbook, /RELAY_ADVERTISED_IP[^.\n]*numeric IP[^.\n]*reachable by both role computers/i);
   assert.match(primaryRunbook, /subjectAltName=IP:\$RELAY_ADVERTISED_IP/);
@@ -392,8 +392,8 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /chmod 0700 "\$BILATERAL_OPERATOR_ROOT" "\$BILATERAL_RELEASE_ROOT"/);
   assert.match(primaryRunbook, /chmod 0700 "\$BILATERAL_RELEASE_ROOT\/relay-state"/);
   assert.match(primaryRunbook, /test "\$\(stat -f '%Lp' "\$SEPOLIA_RPC_URL_FILE"\)" = "600"/);
-  assert.match(primaryRunbook, /payee\.launch\.json[^.\n]*only to Iris/i);
-  assert.match(primaryRunbook, /payer\.launch\.json[^.\n]*only to Billy/i);
+  assert.match(primaryRunbook, /payer\.launch\.json[^.\n]*only to Iris/i);
+  assert.match(primaryRunbook, /payee\.launch\.json[^.\n]*only to Billie/i);
   assert.match(primaryRunbook, /launch manifests expire after 60 minutes/i);
   assert.match(primaryRunbook, /npm run bilateral:fund -- \\/);
   assert.match(primaryRunbook, /--funding-record "\$FUNDING_RECORD_FILE"/);
@@ -418,7 +418,7 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(quickStart, /\[repository overview\]\(\.\.\/\.\.\/README\.md\)/i);
   assert.match(quickStart, /\[full runbook\]\(\.\.\/\.\.\/docs\/runbooks\/bilateral-demo-day\.md\)/i);
   assert.match(quickStart, /\[Iris prompt\]\(\.\.\/\.\.\/prompts\/run-iris-bilateral-demo\.md\)/i);
-  assert.match(quickStart, /\[Billy prompt\]\(\.\.\/\.\.\/prompts\/run-billy-bilateral-demo\.md\)/i);
+  assert.match(quickStart, /\[Billie prompt\]\(\.\.\/\.\.\/prompts\/run-billie-bilateral-demo\.md\)/i);
   assert.match(primaryRunbook, /export FUNDING_RECORD_FILE="\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json"/);
   assert.match(primaryRunbook, /coordinator-owned `\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json`/);
   assert.match(primaryRunbook, /export REPOSITORY_ROOT="\$\(pwd\)"/);
@@ -431,9 +431,9 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /test "\$\(stat -f '%Lp' "\$SEPOLIA_RPC_URL_FILE"\)" = "600"/);
   assert.match(primaryRunbook, /already prepared repo-private `\$REPOSITORY_ROOT\/\.context\/bilateral-live-2026-07-28\/sepolia-rpc\.url`/);
   assert.doesNotMatch(primaryRunbook, /printf '%s\\n' "\$SEPOLIA_RPC_URL" > "\$SEPOLIA_RPC_URL_FILE"/);
-  assert.match(billy, /You are Stakeholder 2, Billy, the payer\. Start only the payer supervisor\./);
-  assert.match(iris, /You are Stakeholder 1, Iris, the payee\. Start only the payee supervisor\./);
-  for (const prompt of [billy, iris]) {
+  assert.match(billie, /You are Stakeholder 2, Billie, the payee\. Start only the payee supervisor\./);
+  assert.match(iris, /You are Stakeholder 1, Iris, the payer\. Start only the payer supervisor\./);
+  for (const prompt of [billie, iris]) {
     assert.match(prompt, /do not inspect secret bytes/i);
     assert.match(prompt, /do not switch roles/i);
     assert.match(prompt, /do not create extra sessions/i);
@@ -456,7 +456,7 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
 
   assert.match(
     quickStart,
-    /^## Before everyone starts[\s\S]*^## Fixed role assignment[\s\S]*^## Operator checklist[\s\S]*^## Iris checklist[\s\S]*^## Billy checklist[\s\S]*^## Funding and execution order[\s\S]*^## What counts as success[\s\S]*^## Immediate stop conditions/m,
+    /^## Before everyone starts[\s\S]*^## Fixed role assignment[\s\S]*^## Operator checklist[\s\S]*^## Iris checklist[\s\S]*^## Billie checklist[\s\S]*^## Funding and execution order[\s\S]*^## What counts as success[\s\S]*^## Immediate stop conditions/m,
   );
   assert.match(
     quickStart,
@@ -476,11 +476,11 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
   );
   assert.match(
     quickStart,
-    /Stakeholder 1[^.\n]*Iris[^.\n]*payee/i,
+    /Stakeholder 1[^.\n]*Iris[^.\n]*payer/i,
   );
   assert.match(
     quickStart,
-    /Stakeholder 2[^.\n]*Billy[^.\n]*payer/i,
+    /Stakeholder 2[^.\n]*Billie[^.\n]*payee/i,
   );
   assert.match(
     quickStart,
@@ -490,8 +490,8 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
     quickStart,
     /wait[^.\n]*both role computers[^.\n]*ready[^.\n]*manifests expire after 60 minutes/i,
   );
-  assert.match(quickStart, /payee\.launch\.json[^.\n]*only Iris/i);
-  assert.match(quickStart, /payer\.launch\.json[^.\n]*only Billy/i);
+  assert.match(quickStart, /payer\.launch\.json[^.\n]*only Iris/i);
+  assert.match(quickStart, /payee\.launch\.json[^.\n]*only Billie/i);
   assert.match(
     quickStart,
     /coordinator-owned[^.\n]*funding-addresses\.json/i,
@@ -594,8 +594,8 @@ test("documentation checker rejects bilateral manifest and funding drift", async
       "relay readiness before coordinator",
     ],
     [
-      "payee.launch.json only to Iris",
-      "payee.launch.json to both stakeholders",
+      "payer.launch.json only to Iris",
+      "payer.launch.json to both stakeholders",
       "private launch manifest delivery",
     ],
     [
@@ -665,8 +665,8 @@ test("documentation checker rejects bilateral safety-contract drift", async (t) 
   await writeFile(
     path,
     contents.replace(
-      "The protocol does not download message bytes from Clockchain.",
-      "Iris obtained the proposal.",
+      "For a session that the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and `ACKNOWLEDGED`, and Billie anchored `ACCEPTED`.",
+      "Billie ignored Iris's signed mandate.",
     ),
   );
 
@@ -687,7 +687,7 @@ test("documentation checker rejects bilateral role CLI drift", async (t) => {
   const directory = await temporaryDocumentationFixture(t);
   const path = join(
     directory,
-    "prompts/run-billy-bilateral-demo.md",
+    "prompts/run-billie-bilateral-demo.md",
   );
   const contents = await readFile(path, "utf8");
   await writeFile(
@@ -705,7 +705,7 @@ test("documentation checker rejects bilateral role CLI drift", async (t) => {
       })
     ).some(
       (failure) =>
-        failure.includes("run-billy-bilateral-demo.md") &&
+        failure.includes("run-billie-bilateral-demo.md") &&
         failure.includes("exact role CLI"),
     ),
   );
