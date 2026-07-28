@@ -51,3 +51,22 @@ test("projection exposes only closed failure summary", () => {
   const input = base(); input.lifecycleView.failure = { active: true, code: "RECOVERY_REQUIRED", run: "stakeholder", cause: { path: "console-canary" }, message: "console-canary" };
   const value = buildConsoleProjection(input); assert.deepEqual(value.failure, { active: true, code: "RECOVERY_REQUIRED", run: "stakeholder" }); assert.equal(JSON.stringify(value).includes("console-canary"), false);
 });
+
+test("projection allowlists phase and failure values instead of direct lifecycle strings", () => {
+  const input = base();
+  input.lifecycleView.state = "console-canary";
+  input.lifecycleView.failure = { active: true, code: "console-canary", run: "console-canary" };
+  const value = buildConsoleProjection(input);
+  assert.equal(JSON.stringify(value).includes("console-canary"), false);
+  assert.deepEqual(value.phase, { advisory: true, value: "UNAVAILABLE" });
+  assert.equal(value.failure, null);
+});
+
+test("projection requires three distinct anchor digests", () => {
+  const input = base();
+  input.watcherSnapshot.anchors[1].digest = input.watcherSnapshot.anchors[0].digest;
+  input.verifierPublication.anchorDigests[1] = input.watcherSnapshot.anchors[0].digest;
+  const value = buildConsoleProjection(input);
+  assert.deepEqual(value.anchors.map((anchor) => anchor.digest), [digest("1"), digest("1"), digest("3")]);
+  assert.equal(value.verifier.status, "PENDING");
+});

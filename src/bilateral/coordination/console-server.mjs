@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import { lstatSync, fstatSync, openSync, readFileSync, closeSync } from "node:fs";
+import { constants, lstatSync, fstatSync, openSync, readFileSync, closeSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -11,13 +11,15 @@ const headers = Object.freeze({ "Cache-Control": "no-store", "Content-Security-P
 const routes = Object.freeze({ "/": ["index.html", "text/html; charset=utf-8"], "/assets/app.js": ["app.js", "application/javascript; charset=utf-8"], "/assets/styles.css": ["styles.css", "text/css; charset=utf-8"] });
 function fail() { throw new Error("Console server failed safely."); }
 function privateFile(stat) { return stat.isFile() && !stat.isSymbolicLink() && stat.uid === process.getuid() && (stat.mode & 0o777) === 0o600 && stat.size > 0 && stat.size <= 65536; }
+function sameIdentity(left, right) { return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid && left.mode === right.mode; }
 export function createStateRootProjection({ stateRoot }) {
   if (typeof stateRoot !== "string" || stateRoot.length === 0) fail();
-  const root = lstatSync(stateRoot); if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== process.getuid() || (root.mode & 0o777) !== 0o700) fail(); const sameRoot = (next) => next.isDirectory() && !next.isSymbolicLink() && next.dev === root.dev && next.ino === root.ino && next.uid === root.uid && next.mode === root.mode;
+  const root = lstatSync(stateRoot); if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== process.getuid() || (root.mode & 0o777) !== 0o700) fail(); const rootFd = openSync(stateRoot, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0)); const openedRoot = fstatSync(rootFd); const sameRoot = (next) => next.isDirectory() && !next.isSymbolicLink() && sameIdentity(root, next) && sameIdentity(root, openedRoot);
+  if (!sameRoot(openedRoot)) { closeSync(rootFd); fail(); }
   const path = join(stateRoot, "console-state.json");
   return () => {
-    if (!sameRoot(lstatSync(stateRoot))) fail(); const before = lstatSync(path); if (!privateFile(before)) fail(); const fd = openSync(path, 0 | (process.platform === "win32" ? 0 : 0x20000)); let bytes; let opened; try { opened = fstatSync(fd); bytes = readFileSync(fd); } finally { closeSync(fd); }
-    const after = lstatSync(path); if (!sameRoot(lstatSync(stateRoot)) || !privateFile(after) || !privateFile(opened) || before.dev !== opened.dev || before.ino !== opened.ino || before.size !== opened.size || before.mtimeMs !== opened.mtimeMs || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || !bytes.equals(Buffer.from(`${JSON.stringify(JSON.parse(bytes.toString("utf8")))}\n`))) fail();
+    if (!sameRoot(lstatSync(stateRoot)) || !sameRoot(fstatSync(rootFd))) fail(); const before = lstatSync(path); if (!privateFile(before)) fail(); const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)); let bytes; let opened; try { opened = fstatSync(fd); bytes = readFileSync(fd); } finally { closeSync(fd); }
+    const after = lstatSync(path); if (!sameRoot(lstatSync(stateRoot)) || !sameRoot(fstatSync(rootFd)) || !privateFile(after) || !privateFile(opened) || !sameIdentity(before, opened) || before.size !== opened.size || before.mtimeMs !== opened.mtimeMs || !sameIdentity(before, after) || before.size !== after.size || before.mtimeMs !== after.mtimeMs || !bytes.equals(Buffer.from(`${JSON.stringify(JSON.parse(bytes.toString("utf8")))}\n`))) fail();
     let value; try { value = JSON.parse(bytes.toString("utf8")); } catch { fail(); }
     const keys = ["lifecycleView", "mandate", "nowMs", "request", "verifierPublication", "watcherSnapshot"];
     if (!value || Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) fail();
