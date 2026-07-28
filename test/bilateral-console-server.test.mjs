@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -16,8 +16,38 @@ test("console serves only fixed read-only no-store routes on loopback", async (t
   assert.equal(home.status, 200); assert.equal(home.headers.get("cache-control"), "no-store");
   assert.match(home.headers.get("content-security-policy"), /default-src 'none'/);
   assert.equal((await fetch(`http://127.0.0.1:${port}/../package.json`)).status, 404);
-  assert.equal((await fetch(`http://127.0.0.1:${port}/v1/console/session`, { method: "POST" })).status, 405);
+  for (const method of ["HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+    const response = await fetch(`http://127.0.0.1:${port}/v1/console/session`, { method });
+    assert.equal(response.status, 405, method);
+    assert.equal(response.headers.get("allow"), "GET", method);
+    assert.equal(response.headers.get("cache-control"), "no-store", method);
+  }
   assert.deepEqual(await (await fetch(`http://127.0.0.1:${port}/v1/console/session`)).json(), { paymentMoved: false });
+});
+
+test("console UI renders structured public fields with textContent only", async () => {
+  const [index, app] = await Promise.all([
+    readFile(new URL("../src/bilateral/coordination/console/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../src/bilateral/coordination/console/app.js", import.meta.url), "utf8"),
+  ]);
+
+  for (const id of [
+    "operator-health",
+    "iris-health",
+    "billie-health",
+    "request-status",
+    "mandate-status",
+    "anchor-timeline",
+    "deadline-freshness",
+    "failure-recovery",
+    "relay-advisory",
+    "watcher-advisory",
+    "verifier-state",
+  ]) {
+    assert.match(index, new RegExp(`id="${id}"`), id);
+  }
+  assert.match(app, /\.textContent\s*=/);
+  assert.doesNotMatch(app, /\binnerHTML\b|\blocalStorage\b|\bsessionStorage\b|document\.cookie|JSON\.stringify/);
 });
 
 test("console CLI requires state root and LAN acknowledgement with TLS files", () => {

@@ -31,10 +31,10 @@ export function createConsoleServer({ projection, tls = null }) {
   const handler = async (request, response) => {
     const method = request.method; let path; try { if (typeof request.url !== "string" || request.url.length > 2048) { response.writeHead(414, headers).end(); return; } path = new URL(request.url, "http://localhost").pathname; } catch { response.writeHead(400, headers).end(); return; }
     if (!Number.isSafeInteger(request.rawHeaders.join("").length) || request.rawHeaders.join("").length > 8192) { response.writeHead(431, headers).end(); return; }
-    if (!["GET", "HEAD"].includes(method)) { response.writeHead(405, { ...headers, Allow: "GET, HEAD" }).end(); return; }
-    if (path === "/v1/console/session") { let body; try { body = Buffer.from(JSON.stringify(projection())); } catch { response.writeHead(500, headers).end(); return; } response.writeHead(200, { ...headers, "Content-Type": "application/json; charset=utf-8" }); if (method === "GET") response.end(body); else response.end(); return; }
+    if (method !== "GET") { response.writeHead(405, { ...headers, Allow: "GET" }).end(); return; }
+    if (path === "/v1/console/session") { let body; try { body = Buffer.from(JSON.stringify(projection())); } catch { response.writeHead(500, headers).end(); return; } response.writeHead(200, { ...headers, "Content-Type": "application/json; charset=utf-8" }); response.end(body); return; }
     const route = routes[path]; if (!route) { response.writeHead(404, headers).end(); return; }
-    try { const body = await readFile(fileURLToPath(new URL(route[0], assets))); response.writeHead(200, { ...headers, "Content-Type": route[1] }); if (method === "GET") response.end(body); else response.end(); } catch { response.writeHead(500, headers).end(); }
+    try { const body = await readFile(fileURLToPath(new URL(route[0], assets))); response.writeHead(200, { ...headers, "Content-Type": route[1] }); response.end(body); } catch { response.writeHead(500, headers).end(); }
   };
   if (tls === null) return createServer(handler);
   if (!tls || !Buffer.isBuffer(tls.cert) || !Buffer.isBuffer(tls.key)) fail();

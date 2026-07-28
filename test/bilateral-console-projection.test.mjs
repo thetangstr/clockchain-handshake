@@ -29,6 +29,75 @@ test("projection is closed, redacted, ordered, and labels pre-protocol evidence"
   assert.equal(value.verifier.status, "AUTH" + "ORIZED");
 });
 
+test("projection conveys structured console status without widening top-level keys", () => {
+  const input = base();
+  input.lifecycleView.health = {
+    operator: "console-canary",
+    payer: "console-canary",
+    payee: "console-canary",
+    relay: "console-canary",
+    watcher: "console-canary",
+  };
+  input.lifecycleView.failure = {
+    active: true,
+    code: "RECOVERY_REQUIRED",
+    run: "stakeholder",
+    message: "console-canary",
+  };
+
+  const value = buildConsoleProjection(input);
+
+  assert.deepEqual(Object.keys(value), ["actors", "anchors", "deadline", "failure", "mandate", "paymentMoved", "phase", "request", "schema", "session", "verifier"]);
+  assert.deepEqual(value.actors.operator, {
+    health: "READY",
+    label: "Operator",
+    role: "operator",
+  });
+  assert.deepEqual(value.actors.payer, {
+    health: "READY",
+    label: "Iris",
+    role: "payer",
+  });
+  assert.deepEqual(value.actors.payee, {
+    health: "READY",
+    label: "Billie",
+    role: "payee",
+  });
+  assert.equal(value.request.received, true);
+  assert.equal(value.mandate.received, true);
+  assert.equal(value.mandate.matched, true);
+  assert.deepEqual(
+    value.anchors.map(({ actor, kind, sequence, stage }) => ({
+      actor,
+      kind,
+      sequence,
+      stage,
+    })),
+    [
+      { actor: "Iris", kind: "PROPOSED", sequence: 1, stage: "proposal" },
+      { actor: "Billie", kind: "ACCEPTED", sequence: 2, stage: "acceptance" },
+      { actor: "Iris", kind: "ACKNOWLEDGED", sequence: 3, stage: "acknowledgment" },
+    ],
+  );
+  assert.equal(value.deadline.freshness, "FRESH");
+  assert.deepEqual(value.failure, {
+    active: true,
+    code: "RECOVERY_REQUIRED",
+    recovery: {
+      label: "operator recovery required",
+      visible: true,
+    },
+    run: "stakeholder",
+  });
+  assert.deepEqual(value.session.observations, {
+    relay: { advisory: true, health: "READY", label: "relay advisory" },
+    watcher: { advisory: true, health: "READY", label: "watcher advisory" },
+  });
+  assert.equal(value.verifier.advisory, false);
+  assert.equal(value.verifier.status, "AUTH" + "ORIZED");
+  assert.equal(JSON.stringify(value).includes("console-canary"), false);
+});
+
 test("projection fails closed and never emits authorization from advisory or mismatched evidence", () => {
   for (const mutate of [
     (input) => { input.lifecycleView.releaseId = null; },
@@ -71,7 +140,7 @@ test("projection supports every real lifecycle state and rejects unknown canarie
 
 test("projection exposes only closed failure summary", () => {
   const input = base(); input.lifecycleView.failure = { active: true, code: "RECOVERY_REQUIRED", run: "stakeholder", cause: { path: "console-canary" }, message: "console-canary" };
-  const value = buildConsoleProjection(input); assert.deepEqual(value.failure, { active: true, code: "RECOVERY_REQUIRED", run: "stakeholder" }); assert.equal(JSON.stringify(value).includes("console-canary"), false);
+  const value = buildConsoleProjection(input); assert.deepEqual(value.failure, { active: true, code: "RECOVERY_REQUIRED", recovery: { label: "operator recovery required", visible: true }, run: "stakeholder" }); assert.equal(JSON.stringify(value).includes("console-canary"), false);
 });
 
 test("projection allowlists phase and failure values instead of direct lifecycle strings", () => {
