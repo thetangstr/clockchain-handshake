@@ -840,6 +840,17 @@ async function beginDescriptor({ dependencies, persisted, release, releaseRoot, 
     if (typeof dependencies[key] !== "function") invalid();
   }
   const action = subjectRun === "rehearsal" ? "REHEARSAL_DESCRIPTOR" : "STAKEHOLDER_DESCRIPTOR";
+  const intentEvents = checkedAuthenticatedEvents(
+    await dependencies.readVerifiedRawEvents({ sessionId: release.sessionId }),
+    release,
+  );
+  const requiredIntents = [
+    ["PAYER_MANDATE_READY", "payer"],
+    ["PAYMENT_REQUEST_READY", "payee"],
+    ["PAYMENT_REQUEST_MATCHED", "payer"],
+  ];
+  const boundIntents = requiredIntents.map(([kind, role]) => intentEvents.filter((event) => event.kind === kind && event.role === role && event.subjectRun === subjectRun));
+  if (boundIntents.some((events) => events.length !== 1) || !SHA256_PATTERN.test(boundIntents[0][0].artifactDigest) || !SHA256_PATTERN.test(boundIntents[1][0].artifactDigest) || boundIntents[2][0].artifactDigest !== null) invalid();
   const existing = persisted.checkpoints.filter((entry) => entry.action === action && entry.role === "operator" && entry.subjectRun === subjectRun).at(-1);
   if (existing?.status === "EVENT_APPENDED") return awaitDescriptorAcceptance({ dependencies, persisted, release, releaseRoot, subjectRun, action });
   if (existing?.status === "ARTIFACT_STORED") {

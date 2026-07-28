@@ -150,6 +150,13 @@ function privateKeyPem(pair) {
 function signedReplayFixture(keys = Object.fromEntries(["operator", "payer", "payee"].map((role) => [role, generateKeyPairSync("ed25519")])) ) {
   const events = [];
   const append = ({ artifactDigest = null, key, kind, previousEventDigest, role, subjectRun = "release" }) => {
+    if (["REHEARSAL_DESCRIPTOR_READY", "STAKEHOLDER_DESCRIPTOR_READY"].includes(kind)) {
+      const has = (eventKind) => events.some((event) => event.kind === eventKind && event.subjectRun === subjectRun);
+      const requestDigest = subjectRun === "rehearsal" ? "d".repeat(64) : "e".repeat(64);
+      if (!has("PAYER_MANDATE_READY")) append({ artifactDigest: subjectRun === "rehearsal" ? "c".repeat(64) : "f".repeat(64), kind: "PAYER_MANDATE_READY", role: "payer", subjectRun });
+      if (!has("PAYMENT_REQUEST_READY")) append({ artifactDigest: requestDigest, kind: "PAYMENT_REQUEST_READY", role: "payee", subjectRun });
+      if (!has("PAYMENT_REQUEST_MATCHED")) append({ artifactDigest: null, kind: "PAYMENT_REQUEST_MATCHED", role: "payer", subjectRun });
+    }
     key ??= keys[role];
     const previous = events.filter((event) => event.role === role).at(-1);
     events.push(createCoordinationEnvelope({
@@ -413,6 +420,9 @@ test("publishes the exact release-bound verifier claim with its authenticated ev
   const registration = append("operator", "REGISTER_REHEARSAL", "4".repeat(64), "rehearsal");
   const payerIdentity = append("payer", "IDENTITY_PACKAGE_READY", "5".repeat(64), "rehearsal");
   const payeeIdentity = append("payee", "IDENTITY_PACKAGE_READY", "6".repeat(64), "rehearsal");
+  append("payer", "PAYER_MANDATE_READY", "c".repeat(64), "rehearsal");
+  append("payee", "PAYMENT_REQUEST_READY", "d".repeat(64), "rehearsal");
+  append("payer", "PAYMENT_REQUEST_MATCHED", null, "rehearsal");
   const descriptor = append("operator", "REHEARSAL_DESCRIPTOR_READY", "7".repeat(64), "rehearsal");
   append("payer", "DESCRIPTOR_ACCEPTED", descriptor.artifactDigest, "rehearsal");
   append("payee", "DESCRIPTOR_ACCEPTED", descriptor.artifactDigest, "rehearsal");
@@ -1197,6 +1207,9 @@ test("recreates a completed descriptor locally before its first relay upload", a
   const registration = append("operator", "REGISTER_REHEARSAL", "4".repeat(64), "rehearsal");
   const payerIdentity = append("payer", "IDENTITY_PACKAGE_READY", "5".repeat(64), "rehearsal");
   const payeeIdentity = append("payee", "IDENTITY_PACKAGE_READY", "6".repeat(64), "rehearsal");
+  append("payer", "PAYER_MANDATE_READY", "c".repeat(64), "rehearsal");
+  append("payee", "PAYMENT_REQUEST_READY", "d".repeat(64), "rehearsal");
+  append("payer", "PAYMENT_REQUEST_MATCHED", null, "rehearsal");
   const descriptorBytes = stableBytes({ descriptor: "recreated" });
   const descriptorDigest = sha256(descriptorBytes);
   const release = {

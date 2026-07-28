@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { promisify } from "node:util";
+import { privateKeyToAccount } from "viem/accounts";
 
 import {
   COORDINATOR_CLI_FLAGS,
@@ -30,6 +31,8 @@ import {
 } from "../src/bilateral/coordination/coordinator-runtime.mjs";
 import { createSignedEnvelope, rawPublicKeyBase64FromPem } from "../src/bilateral/descriptor.mjs";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
+import { payerMandateDigest, signPayerMandate } from "../src/bilateral/payer-mandate.mjs";
+import { signPaymentRequest } from "../src/bilateral/payment-request.mjs";
 import { runCoordinator as runCoordinatorCore } from "../src/bilateral/coordination/coordinator.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -49,6 +52,40 @@ const INTENT_DIGESTS = Object.freeze({
   mandateDigest: "c".repeat(64),
   requestDigest: "d".repeat(64),
 });
+const INTENT_PAYER = privateKeyToAccount(`0x${"1".repeat(64)}`);
+const INTENT_PAYEE = privateKeyToAccount(`0x${"2".repeat(64)}`);
+const INTENT_SESSION_ID = "11111111-2222-4333-8444-555555555555";
+const INTENT_NOW_MS = 1785294300000;
+
+function intentParties() {
+  return {
+    payer: { address: INTENT_PAYER.address.toLowerCase(), agentId: "101", displayName: "Iris", role: "payer" },
+    payee: { address: INTENT_PAYEE.address.toLowerCase(), agentId: "202", displayName: "Billie", role: "payee" },
+  };
+}
+
+async function signedIntents({ amount = "100", repositorySha = "b".repeat(40) } = {}) {
+  const parties = intentParties();
+  const mandateEnvelope = await signPayerMandate({
+    mandate: {
+      amount: { currency: "USD", value: amount }, expiresAtMs: "1785297600000", invoiceReferencePrefix: "TREL-", issuedAtMs: "1785294000000",
+      payee: { address: parties.payee.address, agentId: parties.payee.agentId }, payer: { address: parties.payer.address, agentId: parties.payer.agentId }, paymentMoved: false,
+      protocol: "clockchain.bilateral-authorization/v1", purpose: "freight-services", releaseId: "2026-07-28-live-demo", repositorySha,
+      requestEndpoint: `/v1/sessions/${INTENT_SESSION_ID}/payment-requests`, schema: "clockchain.bilateral-payer-mandate/v1", sessionId: INTENT_SESSION_ID, subjectRun: "stakeholder",
+    },
+    signMessage: (bytes) => INTENT_PAYER.signMessage({ message: { raw: bytes } }),
+  });
+  const requestEnvelope = await signPaymentRequest({
+    request: {
+      amount: { currency: "USD", value: amount }, createdAtMs: "1785294300000", expiresAtMs: "1785297000000", invoiceReference: "TREL-2026-0001", mandateDigest: payerMandateDigest(mandateEnvelope),
+      payee: { address: parties.payee.address, agentId: parties.payee.agentId }, payer: { address: parties.payer.address, agentId: parties.payer.agentId }, paymentMoved: false,
+      protocol: "clockchain.bilateral-authorization/v1", purpose: "freight-services", releaseId: "2026-07-28-live-demo", repositorySha, requestId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      schema: "clockchain.bilateral-payment-request/v1", sessionId: INTENT_SESSION_ID, subjectRun: "stakeholder",
+    },
+    signMessage: (bytes) => INTENT_PAYEE.signMessage({ message: { raw: bytes } }),
+  });
+  return { mandateEnvelope, parties, requestEnvelope };
+}
 
 test("coordinator runtime accepts each required flag exactly once and nothing else", () => {
   const argv = COORDINATOR_CLI_FLAGS.flatMap((flag) => [flag, VALUES[flag]]);
@@ -454,8 +491,10 @@ test("durable verifier context is canonical and rejects tampering after a fresh 
   t.after(() => handle.close());
   const context = {
     descriptorDigest: "a".repeat(64), outputDirectory: join(root, "verifier", "rehearsal"),
+    mandateDigest: "e".repeat(64),
     packageDigests: { payer: "b".repeat(64), payee: "c".repeat(64) }, paymentMoved: false,
     publicationDigest: "d".repeat(64), releaseId: "release-a", repositorySha: "e".repeat(40),
+    requestDigest: "f".repeat(64),
     schema: "clockchain.bilateral-coordinator-verifier-context/v1", sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd", subjectRun: "rehearsal",
   };
   await writeVerifierContext(pinned, "context.json", context);
@@ -590,9 +629,9 @@ test("runtime cancels and drains an active watcher when a later coordinator oper
 test("bundled watcher cancellation clears its referenced timer before a failing coordinator exits", async () => {
   const runtimeUrl = new URL("../src/bilateral/coordination/coordinator-runtime.mjs", import.meta.url).href;
   const script = `
-    import { createCoordinatorDescriptor, createCoordinatorRuntimeDependencies, runCoordinatorUntilComplete } from ${JSON.stringify(runtimeUrl)};
+    import { createCoordinatorRuntimeDependencies, runCoordinatorUntilComplete } from ${JSON.stringify(runtimeUrl)};
     const config = { clockchainToken: "timer-canary", operatorIdentity: { keyId: "clockchain-demo-2026", privateKeyPem: "private", publicKey: "public" }, operatorPublicKey: "public", releaseRoot: { path: "/release" }, repositorySha: "b".repeat(40), relayUrl: "https://127.0.0.1:8443", rpcUrl: "https://127.0.0.1/", tlsCertificatePem: "certificate", tlsFingerprint: "c".repeat(64) };
-    const descriptor = createCoordinatorDescriptor({ parties: { payer: { address: "0x00112233445566778899aabbccddeeff00112233", agentId: "8677", displayName: "Billy", role: "payer" }, payee: { address: "0xffeeddccbbaa99887766554433221100ffeeddcc", agentId: "8678", displayName: "Iris", role: "payee" } }, mandateDigest: "c".repeat(64), promptSha256: "a".repeat(64), repositorySha: config.repositorySha, requestDigest: "d".repeat(64), sessionId: "00112233445566778899aabbccddeeff" });
+    const descriptor = { amountOptions: [{ currency: "USD", value: "100" }], chainId: "11155111", expirySeconds: "600", mandateDigest: "c".repeat(64), namespace: "cbv1", payee: { address: "0xffeeddccbbaa99887766554433221100ffeeddcc", agentId: "8678", displayName: "Billie", role: "payee" }, payer: { address: "0x00112233445566778899aabbccddeeff00112233", agentId: "8677", displayName: "Iris", role: "payer" }, paymentMoved: false, promptSha256: "a".repeat(64), protocol: "clockchain.bilateral-authorization/v1", protocolVersion: "1", registry: "0x8004a818bfb912233c491871b3d84c89a494bd9e", repositorySha: config.repositorySha, requestDigest: "d".repeat(64), schema: "clockchain.bilateral-session-descriptor/v2", sessionId: "00112233445566778899aabbccddeeff", settlement: "not-executed" };
     let emitted;
     const output = new Promise((resolve_) => { emitted = resolve_; });
     const runtime = createCoordinatorRuntimeDependencies(config, { validateArtifactWithFacts: async () => ({ facts: { descriptor } }), createClient: () => ({ getArtifact: async () => Buffer.from("descriptor") }), createTransport: () => ({}), createWatcherClient: ({ signal }) => ({ getBlock: async () => [], resolveAgent: async () => [], searchActions: async () => [], verifyCrossParty: async () => { if (signal.aborted) throw new Error("aborted"); return {}; } }), now: () => 0, watcherOutput: () => emitted() });
@@ -612,7 +651,7 @@ test("default MCP watcher fetch composes finalizer and timeout signals without r
   AbortSignal.any = (signals) => { capturedSignals = [...signals]; return originalAny(signals); };
   t.after(() => { AbortSignal.any = originalAny; });
   const config = { clockchainToken: "mcp-watch-token", operatorIdentity: { keyId: "clockchain-demo-2026", privateKeyPem: "private", publicKey: "public" }, operatorPublicKey: "public", releaseRoot: { path: "/release" }, repositorySha: "b".repeat(40), relayUrl: "https://127.0.0.1:8443", rpcUrl: "https://127.0.0.1/", tlsCertificatePem: "certificate", tlsFingerprint: "c".repeat(64) };
-  const descriptor = createCoordinatorDescriptor({ parties: { payer: { address: "0x00112233445566778899aabbccddeeff00112233", agentId: "8677", displayName: "Billy", role: "payer" }, payee: { address: "0xffeeddccbbaa99887766554433221100ffeeddcc", agentId: "8678", displayName: "Iris", role: "payee" } }, ...INTENT_DIGESTS, promptSha256: "a".repeat(64), repositorySha: config.repositorySha, sessionId: "00112233445566778899aabbccddeeff" });
+  const descriptor = { amountOptions: [{ currency: "USD", value: "100" }], chainId: "11155111", expirySeconds: "600", mandateDigest: "c".repeat(64), namespace: "cbv1", payee: { address: "0xffeeddccbbaa99887766554433221100ffeeddcc", agentId: "8678", displayName: "Billie", role: "payee" }, payer: { address: "0x00112233445566778899aabbccddeeff00112233", agentId: "8677", displayName: "Iris", role: "payer" }, paymentMoved: false, promptSha256: "a".repeat(64), protocol: "clockchain.bilateral-authorization/v1", protocolVersion: "1", registry: "0x8004a818bfb912233c491871b3d84c89a494bd9e", repositorySha: config.repositorySha, requestDigest: "d".repeat(64), schema: "clockchain.bilateral-session-descriptor/v2", sessionId: "00112233445566778899aabbccddeeff", settlement: "not-executed" };
   const runtime = createCoordinatorRuntimeDependencies(config, {
     createClient: () => ({ getArtifact: async () => Buffer.from("descriptor") }), createTransport: () => ({}), validateArtifactWithFacts: async () => ({ facts: { descriptor } }), watcherOutput: () => { outputs += 1; },
     watcherFetch: async (_url, init) => {
@@ -648,18 +687,18 @@ test("pinned descriptor envelope requires the exact Git operator and derived run
   for (const hostile of [signed({}, other), signed({}, privateKeyPem, "other-key"), signed({ repositorySha: "d".repeat(40) }), signed({ sessionId: "e".repeat(32) })]) assert.throws(() => validatePinnedDescriptorEnvelope(hostile, pins));
 });
 
-test("coordinator descriptor permits exactly the USD 100 option", () => {
-  const parties = { payer: { address: "0x00112233445566778899aabbccddeeff00112233", agentId: "8677", displayName: "Billy", role: "payer" }, payee: { address: "0xffeeddccbbaa99887766554433221100ffeeddcc", agentId: "8678", displayName: "Iris", role: "payee" } };
-  const input = { parties, ...INTENT_DIGESTS, promptSha256: "a".repeat(64), repositorySha: "b".repeat(40), sessionId: "c".repeat(32) };
-  const descriptor = createCoordinatorDescriptor(input);
-  assert.deepEqual(descriptor.amountOptions, [{ currency: "USD", value: "100" }]);
-  assert.equal(descriptor.mandateDigest, input.mandateDigest);
-  assert.equal(descriptor.requestDigest, input.requestDigest);
+test("coordinator descriptor derives amount and intent digests only from verified envelopes", async () => {
+  const input = { ...(await signedIntents({ amount: "250" })), nowMs: INTENT_NOW_MS, promptSha256: "a".repeat(64), repositorySha: "b".repeat(40), sessionId: "c".repeat(32) };
+  const descriptor = await createCoordinatorDescriptor(input);
+  assert.deepEqual(descriptor.amountOptions.map((amount) => Object.fromEntries(Object.entries(amount))), [{ currency: "USD", value: "250" }]);
+  assert.equal(descriptor.mandateDigest, payerMandateDigest(input.mandateEnvelope));
+  assert.notEqual(descriptor.requestDigest, input.mandateEnvelope.mandate.requestEndpoint);
   for (const hostile of [
-    { ...input, mandateDigest: undefined },
-    { ...input, mandateDigest: "C".repeat(64) },
-    { ...input, requestDigest: undefined },
-    { ...input, requestDigest: "d".repeat(63) },
-    { ...input, parties: {} },
-  ]) assert.throws(() => createCoordinatorDescriptor(hostile));
+    { ...input, mandateEnvelope: undefined },
+    { ...input, requestEnvelope: undefined },
+    { ...input, requestEnvelope: { ...input.requestEnvelope, request: { ...input.requestEnvelope.request, amount: { currency: "USD", value: "251" } } } },
+    { ...input, repositorySha: "c".repeat(40) },
+    { ...input, parties: { ...input.parties, payer: { ...input.parties.payer, agentId: "999" } } },
+    { ...input, nowMs: 1785297600000 },
+  ]) await assert.rejects(createCoordinatorDescriptor(hostile));
 });

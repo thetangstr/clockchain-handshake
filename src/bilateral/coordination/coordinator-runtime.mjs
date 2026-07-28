@@ -11,6 +11,14 @@ import { sepolia } from "viem/chains";
 
 import { canonicalizeReceiptEventValue } from "../../canonical.mjs";
 import { canonicalBytes } from "../canonical.mjs";
+import {
+  payerMandateDigest,
+  verifyPayerMandate,
+} from "../payer-mandate.mjs";
+import {
+  paymentRequestDigest,
+  verifyPaymentRequest,
+} from "../payment-request.mjs";
 import { BILATERAL_PROTOCOL, DESCRIPTOR_CHAIN_ID, DESCRIPTOR_EXPIRY_SECONDS, DESCRIPTOR_NAMESPACE, DESCRIPTOR_SCHEMA, DESCRIPTOR_SETTLEMENT, PROTOCOL_VERSION, REGISTRY_ADDRESS, createSignedEnvelope, dSession, rawPublicKeyBase64FromPem, validateDescriptor, verifyDescriptorEnvelope } from "../descriptor.mjs";
 import { validateRelayArtifactWithFacts } from "./artifact.mjs";
 import { createCapabilityRegistration } from "./capability-registration.mjs";
@@ -143,9 +151,39 @@ export function validatePinnedDescriptorEnvelope(envelope, { keyId, publicKey, r
   if (!envelope?.operator || envelope.operator.keyId !== keyId || envelope.operator.publicKey !== publicKey || envelope.descriptor?.repositorySha !== repositorySha || envelope.descriptor.paymentMoved !== false || envelope.descriptor.sessionId !== sessionId) fail();
   verifyDescriptorEnvelope(envelope, { repositoryPublicKey: publicKey });
 }
-export function createCoordinatorDescriptor({ mandateDigest, parties, promptSha256, repositorySha, requestDigest, sessionId }) {
-  if (!parties?.payer || !parties?.payee || !SHA40.test(repositorySha) || !SHA64.test(promptSha256) || !/^[0-9a-f]{32}$/.test(sessionId)) fail();
-  const descriptor = { amountOptions: [{ currency: "USD", value: "100" }], chainId: DESCRIPTOR_CHAIN_ID, expirySeconds: DESCRIPTOR_EXPIRY_SECONDS, mandateDigest, namespace: DESCRIPTOR_NAMESPACE, payee: parties.payee, payer: parties.payer, paymentMoved: false, promptSha256, protocol: BILATERAL_PROTOCOL, protocolVersion: PROTOCOL_VERSION, registry: REGISTRY_ADDRESS, repositorySha, requestDigest, schema: DESCRIPTOR_SCHEMA, sessionId, settlement: DESCRIPTOR_SETTLEMENT };
+export async function createCoordinatorDescriptor({ mandateEnvelope, nowMs = Date.now(), parties, promptSha256, repositorySha, requestEnvelope, sessionId }) {
+  if (!parties?.payer || !parties?.payee || !SHA40.test(repositorySha) || !SHA64.test(promptSha256) || !/^[0-9a-f]{32}$/.test(sessionId) || !Number.isSafeInteger(nowMs) || nowMs < 0) fail();
+  const mandate = mandateEnvelope?.mandate;
+  if (!mandate || mandate.repositorySha !== repositorySha || mandate.payer?.address !== parties.payer.address || mandate.payer?.agentId !== parties.payer.agentId || mandate.payee?.address !== parties.payee.address || mandate.payee?.agentId !== parties.payee.agentId || parties.payer.role !== "payer" || parties.payee.role !== "payee") fail();
+  const expected = {
+    amount: mandate.amount,
+    invoiceReferencePrefix: mandate.invoiceReferencePrefix,
+    payee: mandate.payee,
+    payer: mandate.payer,
+    purpose: mandate.purpose,
+    releaseId: mandate.releaseId,
+    repositorySha,
+    sessionId: mandate.sessionId,
+    subjectRun: mandate.subjectRun,
+  };
+  let verifiedMandate;
+  let verifiedRequest;
+  try {
+    verifiedMandate = await verifyPayerMandate({
+      envelope: mandateEnvelope,
+      expected: { ...expected, requestEndpoint: `/v1/sessions/${expected.sessionId}/payment-requests` },
+      nowMs,
+    });
+    verifiedRequest = await verifyPaymentRequest({
+      envelope: requestEnvelope,
+      mandateEnvelope,
+      expected,
+      nowMs,
+    });
+  } catch { fail(); }
+  const mandateDigest = payerMandateDigest(verifiedMandate);
+  const requestDigest = paymentRequestDigest(verifiedRequest);
+  const descriptor = { amountOptions: [verifiedRequest.request.amount], chainId: DESCRIPTOR_CHAIN_ID, expirySeconds: DESCRIPTOR_EXPIRY_SECONDS, mandateDigest, namespace: DESCRIPTOR_NAMESPACE, payee: parties.payee, payer: parties.payer, paymentMoved: false, promptSha256, protocol: BILATERAL_PROTOCOL, protocolVersion: PROTOCOL_VERSION, registry: REGISTRY_ADDRESS, repositorySha, requestDigest, schema: DESCRIPTOR_SCHEMA, sessionId, settlement: DESCRIPTOR_SETTLEMENT };
   validateDescriptor(descriptor); return descriptor;
 }
 export function createWatcherLifecycle({ run }) {
@@ -229,8 +267,8 @@ export async function readVerifierContext(root, name) {
   const path = join(root.path, name); if (dirname(path) !== root.path) fail(); await assertRoot(root);
   const bytes = await readStable(path, STATE_MAX_BYTES, privateFile);
   let value; try { value = JSON.parse(bytes.toString("utf8")); } catch { fail(); }
-  const keys = ["descriptorDigest", "outputDirectory", "packageDigests", "paymentMoved", "publicationDigest", "releaseId", "repositorySha", "schema", "sessionId", "subjectRun"];
-  if (!value || Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key)) || !SHA64.test(value.descriptorDigest) || !SHA64.test(value.packageDigests?.payer) || !SHA64.test(value.packageDigests?.payee) || !SHA64.test(value.publicationDigest) || value.paymentMoved !== false || value.schema !== VERIFIER_CONTEXT_SCHEMA || !["rehearsal", "stakeholder"].includes(value.subjectRun) || !canonical(value).equals(bytes)) fail();
+  const keys = ["descriptorDigest", "mandateDigest", "outputDirectory", "packageDigests", "paymentMoved", "publicationDigest", "releaseId", "repositorySha", "requestDigest", "schema", "sessionId", "subjectRun"];
+  if (!value || Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key)) || !SHA64.test(value.descriptorDigest) || !SHA64.test(value.mandateDigest) || !SHA64.test(value.packageDigests?.payer) || !SHA64.test(value.packageDigests?.payee) || !SHA64.test(value.publicationDigest) || !SHA64.test(value.requestDigest) || value.paymentMoved !== false || value.schema !== VERIFIER_CONTEXT_SCHEMA || !["rehearsal", "stakeholder"].includes(value.subjectRun) || !canonical(value).equals(bytes)) fail();
   await assertRoot(root); return Object.freeze(value);
 }
 export async function runChildWithDeadline(args, deadlineMs = COORDINATOR_FUNDING_DEADLINE_MS, graceMs = 5_000) {
@@ -423,8 +461,17 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
           const enrolled = parseCoordinationEnrollmentSet((await verifiedPreparation()).enrollmentSetBytes);
           const identities = Object.create(null); for (const role of ["payer", "payee"]) identities[role] = await freshArtifact({ artifactType: "identity-package", kinds: ["IDENTITY_PACKAGE_READY"], role, subjectRun });
           const parties = Object.fromEntries(["payer", "payee"].map((role) => { const identity = identities[role].checked.facts.identity; const enrollment = parseCoordinationEnrollment(Buffer.from(enrolled.enrollments[role].enrollmentBase64, "base64")); if (!identity || identity.repositorySha !== repositorySha || identity.paymentMoved !== false || identity.address !== enrollment.invitations[subjectRun].address || typeof identity.agentId !== "string" || typeof identity.displayName !== "string" || identity.displayName.trim() !== identity.displayName) fail(); return [role, { address: identity.address, agentId: identity.agentId, displayName: identity.displayName, role }]; }));
+          const expectedParties = Object.freeze({ payer: Object.freeze({ address: parties.payer.address, agentId: parties.payer.agentId }), payee: Object.freeze({ address: parties.payee.address, agentId: parties.payee.agentId }) });
+          const mandateArtifact = await freshArtifact({ artifactType: "payer-mandate", kinds: ["PAYER_MANDATE_READY"], role: "payer", subjectRun });
+          const mandateEnvelope = await client.readPayerMandate({ payer: expectedParties.payer, payee: expectedParties.payee, subjectRun });
+          if (!Buffer.isBuffer(mandateEnvelope) || !mandateEnvelope.equals(mandateArtifact.bytes)) fail();
+          const requestArtifact = await freshArtifact({ artifactType: "payment-request", kinds: ["PAYMENT_REQUEST_READY"], role: "payee", subjectRun });
+          let requestId;
+          try { requestId = JSON.parse(requestArtifact.bytes.toString("utf8"))?.request?.requestId; } catch { fail(); }
+          const requestEnvelope = await client.readPaymentRequest({ payer: expectedParties.payer, payee: expectedParties.payee, requestId, subjectRun });
+          if (!Buffer.isBuffer(requestEnvelope) || !requestEnvelope.equals(requestArtifact.bytes)) fail();
           const descriptorSession = deriveDescriptorSessionId({ releaseId: release.releaseId, repositorySha: release.repositorySha, sessionId: release.sessionId, subjectRun });
-          const descriptor = createCoordinatorDescriptor({ parties, promptSha256: await (dependencies.computePromptHash ?? computeBilateralPromptHash)({ repositorySha }), repositorySha, sessionId: descriptorSession }); return canonicalBytes(createSignedEnvelope(descriptor, { keyId: config.operatorIdentity.keyId, privateKeyPem: config.operatorIdentity.privateKeyPem }));
+          const descriptor = await createCoordinatorDescriptor({ mandateEnvelope: JSON.parse(mandateEnvelope.toString("utf8")), nowMs: now(), parties, promptSha256: await (dependencies.computePromptHash ?? computeBilateralPromptHash)({ repositorySha }), repositorySha, requestEnvelope: JSON.parse(requestEnvelope.toString("utf8")), sessionId: descriptorSession }); return canonicalBytes(createSignedEnvelope(descriptor, { keyId: config.operatorIdentity.keyId, privateKeyPem: config.operatorIdentity.privateKeyPem }));
         },
         validateRehearsalPackage: async ({ bytes, descriptorDigest, party, role, subjectRun }) => { if (!Buffer.isBuffer(bytes) || !SHA64.test(descriptorDigest) || !["payer", "payee"].includes(role) || !["rehearsal", "stakeholder"].includes(subjectRun) || party?.role !== role || party.paymentMoved !== false) fail(); const descriptorBytes = await client.getArtifact({ artifactType: "signed-descriptor", digest: descriptorDigest }); const envelope = (await artifactValidator({ artifactType: "signed-descriptor", bytes: descriptorBytes, expectedDigest: descriptorDigest, secretCanaries: [] })).facts; const expectedSession = deriveDescriptorSessionId({ releaseId: release.releaseId, repositorySha: config.repositorySha, sessionId: release.sessionId, subjectRun }); validatePinnedDescriptorEnvelope(envelope, { keyId: config.operatorIdentity.keyId, publicKey: config.operatorPublicKey, repositorySha: config.repositorySha, sessionId: expectedSession }); if (party.sessionDigest !== dSession(envelope.descriptor) || party.repositorySha !== config.repositorySha || party.signature?.address?.toLowerCase() !== envelope.descriptor[role].address.toLowerCase()) fail(); return true; },
         launchVerifier: async ({ descriptorDigest, outputDirectory, packageDigests, subjectRun }) => {
@@ -454,7 +501,7 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
           await immutable(); await assertRoot(config.releaseRoot); validatePinnedDescriptorEnvelope(envelope, { keyId: config.operatorIdentity.keyId, publicKey: config.operatorPublicKey, repositorySha: config.repositorySha, sessionId: expectedSession });
           const publication = await validateVerdictPublication({ outputDirectory, repositorySha: config.repositorySha, sessionDigest: dSession(envelope.descriptor) });
           await assertRoot(config.releaseRoot);
-          const context = Object.freeze({ descriptorDigest, outputDirectory, packageDigests: Object.freeze({ ...packageDigests }), paymentMoved: false, publicationDigest: publication.publicationDigest, releaseId: release.releaseId, repositorySha: config.repositorySha, schema: VERIFIER_CONTEXT_SCHEMA, sessionId: release.sessionId, subjectRun });
+          const context = Object.freeze({ descriptorDigest, mandateDigest: envelope.descriptor.mandateDigest, outputDirectory, packageDigests: Object.freeze({ ...packageDigests }), paymentMoved: false, publicationDigest: publication.publicationDigest, releaseId: release.releaseId, repositorySha: config.repositorySha, requestDigest: envelope.descriptor.requestDigest, schema: VERIFIER_CONTEXT_SCHEMA, sessionId: release.sessionId, subjectRun });
           await writeVerifierContext(config.releaseRoot, `.verifier-context-${subjectRun}.json`, context); await assertRoot(config.releaseRoot); verifierContexts.set(outputDirectory, context);
           return Object.freeze({ outputDirectory, result: Object.freeze({ exitCode: 0, publicationDigest: publication.publicationDigest, status: "VERIFICATION_PASSED", stderr: "", stdout: "" }) });
         },
@@ -464,6 +511,7 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
           const context = verifierContexts.get(outputDirectory) ?? await readVerifierContext(config.releaseRoot, `.verifier-context-${subjectRun}.json`); await assertRoot(config.releaseRoot); if (!context || context.outputDirectory !== outputDirectory || context.publicationDigest !== publicationDigest || context.subjectRun !== subjectRun || context.releaseId !== release.releaseId || context.sessionId !== release.sessionId || repositorySha !== config.repositorySha || JSON.stringify(context.packageDigests) !== JSON.stringify(packageDigests)) fail();
           const descriptor = await client.getArtifact({ artifactType: "signed-descriptor", digest: context.descriptorDigest }); const envelope = (await artifactValidator({ artifactType: "signed-descriptor", bytes: descriptor, expectedDigest: context.descriptorDigest, secretCanaries: [] })).facts;
           await assertRoot(config.releaseRoot); await immutable(); await assertRoot(config.releaseRoot); validatePinnedDescriptorEnvelope(envelope, { keyId: config.operatorIdentity.keyId, publicKey: config.operatorPublicKey, repositorySha: config.repositorySha, sessionId: deriveDescriptorSessionId({ releaseId: release.releaseId, repositorySha: config.repositorySha, sessionId: release.sessionId, subjectRun }) });
+          if (envelope.descriptor.mandateDigest !== context.mandateDigest || envelope.descriptor.requestDigest !== context.requestDigest) fail();
           const publication = await validateVerdictPublication({ outputDirectory, repositorySha, sessionDigest: dSession(envelope.descriptor) });
           await assertRoot(config.releaseRoot);
           if (
