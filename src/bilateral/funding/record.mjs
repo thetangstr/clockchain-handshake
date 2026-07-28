@@ -88,7 +88,7 @@ function validateAddress(value, seen) {
 
 function snapshotDenseDataArray(value, length, code) {
   if (
-    !Array.isArray(value) ||
+    !guarded(code, () => Array.isArray(value)) ||
     guarded(code, () => Object.getPrototypeOf(value)) !== Array.prototype
   ) {
     fail(code);

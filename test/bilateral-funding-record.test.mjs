@@ -61,6 +61,12 @@ function throwingProxy(target, trap) {
   });
 }
 
+function revokedArrayProxy() {
+  const { proxy, revoke } = Proxy.revocable([], {});
+  revoke();
+  return proxy;
+}
+
 test("validateFundingRecord returns an immutable exact copy of the canonical record", () => {
   assert.equal(FUNDING_RECORD_SCHEMA, RECORD.schema);
 
@@ -110,6 +116,7 @@ test("validateFundingRecord rejects malformed funding records fail-closed", () =
     },
     { ...mutableRecord(), addresses: arrayWithGetter(0, RECORD.addresses[0]) },
     { ...mutableRecord(), addresses: arraySubclass(RECORD.addresses) },
+    { ...mutableRecord(), addresses: revokedArrayProxy() },
     throwingProxy(mutableRecord(), "getPrototypeOf"),
     throwingProxy(mutableRecord(), "ownKeys"),
     throwingProxy(mutableRecord(), "getOwnPropertyDescriptor"),
@@ -308,6 +315,7 @@ test("planFundingTransfers rejects unsafe or ambiguous planning facts fail-close
     throwingProxy(validInput, "ownKeys"),
     throwingProxy(validInput, "getOwnPropertyDescriptor"),
     { ...validInput, participantFacts: facts.slice(0, 3) },
+    { ...validInput, participantFacts: revokedArrayProxy() },
     { ...validInput, feePerTransferWei: "100" },
     { ...validInput, fundingBalanceWei: 10_000_000_000_000_100 },
     { ...validInput, fundingNonce: "7" },
