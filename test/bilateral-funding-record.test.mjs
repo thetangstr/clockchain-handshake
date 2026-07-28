@@ -41,6 +41,18 @@ function arrayWithGetter(index, value) {
   return array;
 }
 
+class MapOverrideArray extends Array {
+  map() {
+    return [];
+  }
+}
+
+function arraySubclass(values) {
+  const array = new MapOverrideArray();
+  for (const value of values) array.push(value);
+  return array;
+}
+
 test("validateFundingRecord returns an immutable exact copy of the canonical record", () => {
   assert.equal(FUNDING_RECORD_SCHEMA, RECORD.schema);
 
@@ -89,6 +101,7 @@ test("validateFundingRecord rejects malformed funding records fail-closed", () =
       ),
     },
     { ...mutableRecord(), addresses: arrayWithGetter(0, RECORD.addresses[0]) },
+    { ...mutableRecord(), addresses: arraySubclass(RECORD.addresses) },
   ];
 
   for (const [index, invalid] of invalidRecords.entries()) {
@@ -188,6 +201,41 @@ test("planFundingTransfers preserves record order and assigns explicit sequentia
   assert.equal(plan.paymentMoved, false);
 });
 
+test("planFundingTransfers accounts for every below-floor participant without caller-controlled array methods", () => {
+  const record = validateFundingRecord(mutableRecord());
+  const facts = [
+    { address: record.addresses[0], balanceWei: 0n, nonce: 0n },
+    { address: record.addresses[1], balanceWei: 0n, nonce: 0n },
+    { address: record.addresses[2], balanceWei: 0n, nonce: 0n },
+    { address: record.addresses[3], balanceWei: 0n, nonce: 0n },
+  ];
+
+  const plan = planFundingTransfers({
+    feePerTransferWei: 25n,
+    fundingBalanceWei: 40_000_000_000_000_100n,
+    fundingNonce: 3n,
+    participantFacts: facts,
+    record,
+  });
+
+  assert.equal(plan.transfers.length, 4);
+  assert.equal(plan.adopted.length, 0);
+  assert.equal(plan.totalValueWei, 40_000_000_000_000_000n);
+  assert.equal(plan.totalFeeWei, 100n);
+  assert.deepEqual(
+    plan.transfers.map(({ fundingNonce, valueWei }) => ({
+      fundingNonce,
+      valueWei,
+    })),
+    [
+      { fundingNonce: 3n, valueWei: 10_000_000_000_000_000n },
+      { fundingNonce: 4n, valueWei: 10_000_000_000_000_000n },
+      { fundingNonce: 5n, valueWei: 10_000_000_000_000_000n },
+      { fundingNonce: 6n, valueWei: 10_000_000_000_000_000n },
+    ],
+  );
+});
+
 test("planFundingTransfers rejects unsafe or ambiguous planning facts fail-closed", () => {
   const record = validateFundingRecord(mutableRecord());
   const facts = [
@@ -246,6 +294,15 @@ test("planFundingTransfers rejects unsafe or ambiguous planning facts fail-close
           return facts[0];
         },
       }),
+    },
+    {
+      ...validInput,
+      participantFacts: arraySubclass([
+        { address: record.addresses[0], balanceWei: 0n, nonce: 0n },
+        { address: record.addresses[1], balanceWei: 0n, nonce: 0n },
+        { address: record.addresses[2], balanceWei: 0n, nonce: 0n },
+        { address: record.addresses[3], balanceWei: 0n, nonce: 0n },
+      ]),
     },
     {
       ...validInput,

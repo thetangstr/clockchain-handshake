@@ -77,7 +77,11 @@ function validateAddress(value, seen) {
 }
 
 function requireDenseDataArray(value, length, code) {
-  if (!Array.isArray(value) || value.length !== length) {
+  if (
+    !Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Array.prototype ||
+    value.length !== length
+  ) {
     fail(code);
   }
   const arrayKeys = Reflect.ownKeys(value);
@@ -107,6 +111,14 @@ function requireDenseDataArray(value, length, code) {
   }
 }
 
+function copyDataArray(value, length) {
+  const copy = [];
+  for (let index = 0; index < length; index += 1) {
+    copy.push(Object.getOwnPropertyDescriptor(value, String(index)).value);
+  }
+  return copy;
+}
+
 function requireBigint(value, code) {
   if (typeof value !== "bigint" || value < 0n) fail(code);
   return value;
@@ -128,9 +140,10 @@ export function validateFundingRecord(value) {
   requireDenseDataArray(value.addresses, 4, "BILATERAL_FUNDING_INVALID_RECORD");
 
   const seen = new Set();
-  const addresses = value.addresses.map((address) =>
-    validateAddress(address, seen),
-  );
+  const addresses = [];
+  for (const address of copyDataArray(value.addresses, 4)) {
+    addresses.push(validateAddress(address, seen));
+  }
   return Object.freeze({
     addresses: Object.freeze(addresses),
     paymentMoved: false,
@@ -145,7 +158,10 @@ function validateParticipantFacts(value, addresses) {
     "BILATERAL_FUNDING_INVALID_PARTICIPANTS",
   );
 
-  return value.map((fact, index) => {
+  const facts = [];
+  const participantData = copyDataArray(value, 4);
+  for (let index = 0; index < participantData.length; index += 1) {
+    const fact = participantData[index];
     requireExactDataKeys(
       fact,
       PARTICIPANT_FACT_KEYS,
@@ -165,12 +181,13 @@ function validateParticipantFacts(value, addresses) {
     if (nonce !== 0n || balanceWei > PARTICIPANT_MAXIMUM_WEI) {
       fail("BILATERAL_FUNDING_INVALID_PARTICIPANTS");
     }
-    return Object.freeze({
+    facts.push(Object.freeze({
       address: fact.address,
       balanceWei,
       nonce,
-    });
-  });
+    }));
+  }
+  return facts;
 }
 
 export function planFundingTransfers(value) {
