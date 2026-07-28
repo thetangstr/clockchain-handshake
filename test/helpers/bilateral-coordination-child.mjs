@@ -523,8 +523,9 @@ function validCoordinatorRole(value) {
 }
 
 function validCoordinatorConfiguration(value) {
-  if (!exact(value, ["arguments", "barrier", "children", "fake", "repositoryRoot", "report", "schema"])
+  if (!exact(value, ["arguments", "barrier", "children", "coordinatorFirst", "fake", "repositoryRoot", "report", "schema"])
     || value.schema !== COORDINATOR_SCHEMA
+    || typeof value.coordinatorFirst !== "boolean"
     || !Array.isArray(value.arguments)
     || value.arguments.some((entry) => typeof entry !== "string" || entry.length === 0 || entry.includes("\0"))
     || !exact(value.children, ["payer", "payee", "verifier"])
@@ -607,6 +608,30 @@ async function waitForEnrollmentConfirmations(readEvents, children) {
   fail();
 }
 
+async function waitForLaunchManifests(release) {
+  if (!Array.isArray(release?.manifests) || release.manifests.length !== 2) fail();
+  const seen = new Set();
+  for (const role of ["payee", "payer"]) {
+    const manifest = release.manifests.find((entry) => entry.role === role);
+    if (!manifest || !absolute(manifest.path) || seen.has(manifest.path)) fail();
+    seen.add(manifest.path);
+    const deadline = Date.now() + BARRIER_DEADLINE_MS;
+    let found = false;
+    while (Date.now() < deadline) {
+      try {
+        const info = await lstat(manifest.path);
+        if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || (info.mode & 0o777) !== 0o600) fail();
+        found = true;
+        break;
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      await sleep(20);
+    }
+    if (!found) fail();
+  }
+}
+
 function supervisorConfiguration(value, role, release) {
   const child = value.children[role];
   const manifest = release.manifests?.find((entry) => entry.role === role);
@@ -649,13 +674,19 @@ async function runProductionCoordinatorChild(input) {
     runtime = createCoordinatorRuntimeDependencies(config, {
       repositoryRoot: value.repositoryRoot,
       now: (() => { let value_ = 1_784_923_200_000; return () => ++value_; })(),
-      sleeper: async () => { await sleep(20); },
+      sleeper: async () => { await sleep(value.coordinatorFirst ? 250 : 20); },
       waitForFunding: boundedFunding,
       watchBilateralSession: boundedWatcher,
     });
     failurePhase = "coordinator-release";
     const release = await loadOrCreateCoordinatorRelease(config, { runtime });
     if (!release.manifests || release.state !== "BOOTSTRAPPING") fail();
+    await waitForLaunchManifests(release);
+    const coordinatorDependencies = runtime.runDependencies(release);
+    const coordinatorFirstRun = value.coordinatorFirst
+      ? Promise.resolve().then(() => runProductionCoordinator({ dependencies: coordinatorDependencies, release, releaseRoot: config.releaseRoot.path }))
+      : null;
+    coordinatorFirstRun?.catch(() => {});
     failurePhase = "coordinator-role-start";
     for (const role of ["payer", "payee"]) {
       const child = value.children[role];
@@ -668,9 +699,9 @@ async function runProductionCoordinatorChild(input) {
     failurePhase = "coordinator-role-bootstrap";
     await Promise.all(["payer", "payee"].map((role) => waitForRoleBootstrap(privateRoleBarrier(value, role).ready, role)));
     for (const role of ["payer", "payee"]) await writeExclusive(privateRoleBarrier(value, role).release, { release: true });
-    const base = runtime.runDependencies(release);
+    const base = coordinatorDependencies;
     failurePhase = "coordinator-enrollment";
-    await waitForEnrollmentConfirmations(base.readEvents, [payerProcess, payeeProcess]);
+    if (!value.coordinatorFirst) await waitForEnrollmentConfirmations(base.readEvents, [payerProcess, payeeProcess]);
     let verifierProcess = null;
     let beforeVerifier = null;
     let afterVerifier = null;
@@ -709,7 +740,11 @@ async function runProductionCoordinatorChild(input) {
       watchBilateralSession: boundedWatcher,
       runVerifierChild,
     });
-    let current = release;
+    let current = value.coordinatorFirst ? await coordinatorFirstRun : release;
+    if (value.coordinatorFirst) {
+      if (!current || current.paymentMoved !== false || current.state !== "FUNDING_READY") fail();
+      current = Object.freeze({ ...release, ...current });
+    }
     failurePhase = "coordinator-run";
     for (let turn = 0; turn < 64; turn += 1) {
       failurePhase = `coordinator-run-${current.state.toLowerCase()}`;

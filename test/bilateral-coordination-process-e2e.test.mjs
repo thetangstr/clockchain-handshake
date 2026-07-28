@@ -13,6 +13,7 @@ import { transitionDigest } from "../src/bilateral/messages.mjs";
 import { sessionKey } from "../src/bilateral/refid.mjs";
 import { createFakeBilateralClockchainHttpClient } from "./helpers/fake-bilateral-clockchain-service.mjs";
 import { COORDINATOR_CLI_FLAGS } from "../src/bilateral/coordination/coordinator-runtime.mjs";
+import { decryptInvitation } from "../src/invitation.mjs";
 
 const execFile = promisify(execFileCallback);
 const ROOT = new URL("../", import.meta.url).pathname;
@@ -129,25 +130,6 @@ async function relayReady(process_) { let buffer = ""; return new Promise((resol
 function pinnedGet({ ca, fingerprint, path, port }) { return new Promise((resolve, reject) => { const request = httpsRequest({ ca, host: "127.0.0.1", method: "GET", path, port, rejectUnauthorized: true, servername: "localhost", headers: { host: `127.0.0.1:${port}` } }, (response) => { const peer = response.socket.getPeerCertificate(true); const actual = peer.raw && createHash("sha256").update(peer.raw).digest("hex"); if (actual !== fingerprint) { response.destroy(); reject(new Error("relay fingerprint mismatch")); return; } const chunks = []; response.on("data", (chunk) => chunks.push(chunk)); response.once("end", () => resolve({ body: Buffer.concat(chunks), statusCode: response.statusCode })); }); request.once("error", reject); request.end(); }); }
 function sha256(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
 function triple(transition) { return { anchoredHash: transition.onChain.anchoredHash, blockHeight: transition.onChain.blockHeight, kind: transition.message.kind, ledgerId: transition.onChain.ledgerId }; }
-async function patchGeneratedCoordinatorChild(path) {
-  const source = await readFile(path, "utf8");
-  const patched = source
-    .replace(
-      '    await Promise.all(["payer", "payee"].map((role) => waitForRoleBootstrap(privateRoleBarrier(value, role).ready, role)));\n    for (const role of ["payer", "payee"]) await writeExclusive(privateRoleBarrier(value, role).release, { release: true });',
-      '    await Promise.all(["payer", "payee"].map((role) => waitForRoleBootstrap(privateRoleBarrier(value, role).ready, role)));\n    const startupDependencies = runtime.runDependencies(release);\n    const startupRun = Promise.resolve().then(() => runProductionCoordinator({ dependencies: startupDependencies, release, releaseRoot: config.releaseRoot.path }));\n    startupRun.catch(() => {});\n    await sleep(20);\n    for (const role of ["payer", "payee"]) await writeExclusive(privateRoleBarrier(value, role).release, { release: true });',
-    )
-    .replace(
-      '    let current = release;\n    failurePhase = "coordinator-run";',
-      '    let current = await startupRun;\n    if (!current || current.paymentMoved !== false || current.state !== "FUNDING_READY") fail();\n    current = Object.freeze({ ...release, ...current });\n    await sleep(1000);\n    failurePhase = "coordinator-run";',
-    )
-    .replace(
-      '    failurePhase = "coordinator-enrollment";\n    await waitForEnrollmentConfirmations(base.readEvents, [payerProcess, payeeProcess]);',
-      '    failurePhase = "coordinator-enrollment";',
-    );
-  if (patched === source || !patched.includes("startupRun")) throw new Error("failed to patch generated coordinator child");
-  await writeFile(path, patched, { mode: 0o600 });
-  await chmod(path, 0o600);
-}
 function assertPaymentNeverMoved(value) { if (Array.isArray(value)) return value.forEach(assertPaymentNeverMoved); if (value !== null && typeof value === "object") { for (const [key, child] of Object.entries(value)) { if (key === "paymentMoved") assert.equal(child, false); assertPaymentNeverMoved(child); } } }
 async function assertPrivateFile(path, { canonical = false, pretty = false } = {}) { const info = await lstat(path); assert.equal(info.isFile(), true); assert.equal(info.isSymbolicLink(), false); assert.equal(info.nlink, 1); assert.equal(info.mode & 0o777, 0o600); const bytes = await readFile(path); const text = bytes.toString("utf8"); if (canonical) assert.equal(text, canonicalJson(JSON.parse(text))); if (pretty) assert.equal(text, `${JSON.stringify(JSON.parse(text), null, 2)}\n`); return bytes; }
 async function assertRoot(path) { const info = await lstat(path); assert.equal(info.isDirectory(), true); assert.equal(info.isSymbolicLink(), false); assert.equal(info.mode & 0o777, 0o700); }
@@ -190,7 +172,6 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
     join(ROOT, "test/helpers/bilateral-coordination-child.mjs"),
     join(clone, "test/helpers/bilateral-coordination-child.mjs"),
   );
-  if (coordinatorFirst) await patchGeneratedCoordinatorChild(join(clone, "test/helpers/bilateral-coordination-child.mjs"));
   await cp(
     join(ROOT, "test/helpers/fake-bilateral-clockchain-service.mjs"),
     join(clone, "test/helpers/fake-bilateral-clockchain-service.mjs"),
@@ -325,6 +306,7 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
       payee: { agentIds: { rehearsal: "8678", stakeholder: "8680" }, configPath: configurations.payee, logs: logs.payee, stateRoot: roleRoots.payee, token: "payee-process-token" },
       verifier: { configPath: configurations.verifier, logs: logs.verifier },
     },
+    coordinatorFirst,
     fake: fakeReady,
     repositoryRoot: clone,
     report,
@@ -502,6 +484,22 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   assert.equal(fundingLines[0].addresses.length, 4);
   assert.equal(new Set(fundingLines[0].addresses).size, 4);
   assert.ok(fundingLines[0].addresses.every((address) => /^0x[0-9a-f]{40}$/.test(address)));
+  const fundingInvitationPaths = {
+    payeeRehearsal: join(session.roleRoots.payee, "invitation-secret", "payee-rehearsal.secret.json"),
+    payeeStakeholder: join(session.roleRoots.payee, "invitation-secret", "payee-stakeholder.secret.json"),
+    payerRehearsal: join(session.roleRoots.payer, "invitation-secret", "payer-rehearsal.secret.json"),
+    payerStakeholder: join(session.roleRoots.payer, "invitation-secret", "payer-stakeholder.secret.json"),
+  };
+  const invitationAddress = async (path) => {
+    const secret = JSON.parse(await readFile(path, "utf8"));
+    return (await decryptInvitation(secret.bundle, secret.code)).address.toLowerCase();
+  };
+  assert.deepEqual(fundingLines[0].addresses, [
+    await invitationAddress(fundingInvitationPaths.payerRehearsal),
+    await invitationAddress(fundingInvitationPaths.payeeRehearsal),
+    await invitationAddress(fundingInvitationPaths.payerStakeholder),
+    await invitationAddress(fundingInvitationPaths.payeeStakeholder),
+  ]);
   const fundingAddressBytes = await assertPrivateFile(join(session.releaseRoot, "funding-addresses.json"));
   assert.equal(fundingAddressBytes.toString("utf8"), `${JSON.stringify(fundingLines[0])}\n`);
   assert.equal(coordinatorExit.stdout.includes(AUTHORIZE), false);

@@ -867,7 +867,7 @@ test("waits for advisory enrollment readiness before reading the authoritative e
       appendOperatorEvent: async ({ artifactDigest, kind, subjectRun }) => fixture.append({ artifactDigest, kind, role: "operator", subjectRun }),
       readEnrollmentSet: async () => {
         enrollmentReads += 1;
-        assert.equal(views, 3);
+        assert.equal(views, 4);
         fixture.append({ role: "payer", kind: "ENROLLMENT_CONFIRMED" });
         fixture.append({ role: "payee", kind: "ENROLLMENT_CONFIRMED" });
         return set;
@@ -875,8 +875,9 @@ test("waits for advisory enrollment readiness before reading the authoritative e
       readEvents: async () => fixture.events,
       readSessionView: async () => {
         views += 1;
-        if (views === 1) return { facts: { enrollmentConfirmed: { payee: false, payer: false } }, paymentMoved: false };
-        if (views === 2) return { facts: { enrollmentConfirmed: { payee: false, payer: true } }, paymentMoved: false };
+        if (views === 1) throw new Error("relay view not published yet");
+        if (views === 2) return { facts: { enrollmentConfirmed: { payee: false, payer: false } }, paymentMoved: false };
+        if (views === 3) return { facts: { enrollmentConfirmed: { payee: false, payer: true } }, paymentMoved: false };
         return { facts: { enrollmentConfirmed: { payee: true, payer: true } }, paymentMoved: false };
       },
       sleeper: async () => { sleeps += 1; },
@@ -893,7 +894,28 @@ test("waits for advisory enrollment readiness before reading the authoritative e
   });
   assert.equal(result.state, "FUNDING_READY");
   assert.equal(enrollmentReads, 1);
-  assert.equal(sleeps, 2);
+  assert.equal(sleeps, 3);
+});
+
+test("rejects advisory enrollment readiness when the authoritative set disagrees with signed relay state", async () => {
+  const fixture = signedReplayFixture();
+  fixture.append({ role: "payer", kind: "ENROLLMENT_CONFIRMED" });
+  fixture.append({ role: "payee", kind: "ENROLLMENT_CONFIRMED" });
+  const mismatchedSet = await enrollmentSetBytes({
+    payee: await enrollment("payee", 1),
+    payer: await enrollment("payer", 3),
+  });
+  const release = { capabilityDigests: ["a".repeat(64), "b".repeat(64)], paymentMoved: false, releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, schema: COORDINATOR_STATE_SCHEMA, sessionId: SESSION_ID };
+
+  await assert.rejects(runCoordinatorCore({
+    dependencies: {
+      ...rawReplayDependencies({ fixture, set: mismatchedSet }),
+      readEvents: async () => fixture.events,
+      readSessionView: async () => ({ facts: { enrollmentConfirmed: { payee: true, payer: true } }, paymentMoved: false }),
+    },
+    release,
+    releaseRoot: "/private/release",
+  }), { code: "COORDINATION_COORDINATOR_INVALID" });
 });
 
 test("fails closed when advisory enrollment readiness is malformed, regresses, or times out", async () => {

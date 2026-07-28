@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, createHash, X509Certificate } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, link, lstat, mkdir, mkdtemp, open, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { execFile as execFileCallback } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -202,6 +202,52 @@ test("runtime rejects stale funding address temporaries before publishing", asyn
     "0x3333333333333333333333333333333333333333",
     "0x4444444444444444444444444444444444444444",
   ]));
+});
+
+test("runtime rejects funding address publication when the destination appears after absence validation", async (t) => {
+  const rootPath = await mkdtemp(join(tmpdir(), "coordinator-runtime-funding-race-"));
+  await chmod(rootPath, 0o700);
+  const before = await lstat(rootPath);
+  const handle = await open(rootPath, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0));
+  t.after(() => handle.close());
+  t.after(() => rm(rootPath, { recursive: true, force: true }));
+  const config = {
+    clockchainToken: "token",
+    operatorIdentity: { keyId: "clockchain-demo-2026", privateKeyPem: "private", publicKey: "public" },
+    operatorPublicKey: "public",
+    releaseRoot: { before, handle, path: rootPath },
+    repositorySha: "a".repeat(40),
+    relayUrl: "https://127.0.0.1:8443",
+    rpcUrl: "https://127.0.0.1/",
+    tlsCertificatePem: "certificate",
+    tlsFingerprint: "b".repeat(64),
+  };
+  const addresses = [
+    "0x1111111111111111111111111111111111111111",
+    "0x2222222222222222222222222222222222222222",
+    "0x3333333333333333333333333333333333333333",
+    "0x4444444444444444444444444444444444444444",
+  ];
+  let raced = false;
+  const runtime = createCoordinatorRuntimeDependencies(config, {
+    createClient: () => ({}),
+    createTransport: () => ({}),
+    fundingFileSystem: {
+      link: async (temporary, path) => {
+        raced = true;
+        await writeFile(path, "{}", { mode: 0o600 });
+        return link(temporary, path);
+      },
+      lstat,
+      open,
+      readdir,
+      unlink,
+    },
+  });
+
+  await assert.rejects(runtime.runDependencies({ releaseId: "release-a", repositorySha: config.repositorySha, sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }).displayAddresses(addresses));
+  assert.equal(raced, true);
+  assert.equal(await readFile(join(rootPath, "funding-addresses.json"), "utf8"), "{}");
 });
 
 test("runtime release dependencies satisfy the coordinator release contract", async (t) => {

@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { createHash, createPrivateKey, createPublicKey, randomUUID, X509Certificate } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { isIP } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -74,31 +74,43 @@ async function writePrivate(path, bytes) {
   const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
   try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
 }
-async function publishFundingAddresses(root, addresses) {
+function fundingFileSystem(value) {
+  const methods = ["link", "lstat", "open", "readdir", "unlink"];
+  if (value === undefined) return Object.freeze({ link, lstat, open, readdir, unlink });
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.keys(value).length !== methods.length || methods.some((method) => typeof value[method] !== "function")) fail();
+  return Object.freeze(Object.fromEntries(methods.map((method) => [method, value[method]])));
+}
+async function writePrivateWithFileSystem(path, bytes, fs) {
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > 3_145_728) fail();
+  const handle = await fs.open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+  try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+}
+async function publishFundingAddresses(root, addresses, fs = fundingFileSystem()) {
   const bytes = fundingAddressBytes(addresses);
   const path = join(root.path, FUNDING_ADDRESSES_FILE_NAME);
-  await assertRoot(root);
-  const names = await readdir(root.path);
+  await assertRoot(root, fs);
+  const names = await fs.readdir(root.path);
   if (!Array.isArray(names) || names.some((name) => typeof name !== "string" || name.startsWith(".funding-addresses") && name.endsWith(".tmp"))) fail();
   let existing = null;
-  try { existing = await readStable(path, bytes.length + 1, privateFile); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  try { existing = await readStable(path, bytes.length + 1, privateFile, fs); } catch (error) { if (error?.code !== "ENOENT") throw error; }
   if (existing !== null) {
     if (!existing.equals(bytes)) fail();
-    await assertRoot(root);
+    await assertRoot(root, fs);
     return bytes;
   }
   const temporary = join(root.path, `.${FUNDING_ADDRESSES_FILE_NAME}.${randomUUID()}.tmp`);
   try {
-    await writePrivate(temporary, bytes);
-    await assertRoot(root);
-    try { await readStable(path, bytes.length + 1, privateFile); fail(); } catch (error) { if (error?.message === "Coordinator startup failed safely.") throw error; if (error?.code !== "ENOENT") fail(); }
-    await rename(temporary, path);
+    await writePrivateWithFileSystem(temporary, bytes, fs);
+    await assertRoot(root, fs);
+    try { await readStable(path, bytes.length + 1, privateFile, fs); fail(); } catch (error) { if (error?.message === "Coordinator startup failed safely.") throw error; if (error?.code !== "ENOENT") fail(); }
+    await fs.link(temporary, path);
+    await fs.unlink(temporary);
     await root.handle.sync();
-    await assertRoot(root);
-    if (!(await readStable(path, bytes.length + 1, privateFile)).equals(bytes)) fail();
+    await assertRoot(root, fs);
+    if (!(await readStable(path, bytes.length + 1, privateFile, fs)).equals(bytes)) fail();
     return bytes;
   } finally {
-    await unlink(temporary).catch(() => {});
+    await fs.unlink(temporary).catch(() => {});
   }
 }
 async function privateStage(root, name) {
@@ -370,7 +382,7 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
       };
       const runtimeDependencies = Object.freeze({
         appendOperatorEvent: client.appendOperatorEvent, appendVerifiedEvent: client.appendVerifiedEvent, createVerifiedEvent: client.createVerifiedEvent, getArtifact: client.getArtifact, putArtifact: client.putArtifact, readEnrollmentSet: client.readEnrollmentSet, readEvents: client.readEvents, readSessionView: client.readSessionView, readVerifierPublication: client.readVerifierPublication,
-        readState: state.readState, writeState: state.writeState, resolveOperatorPublicKey: async () => config.operatorPublicKey, waitForFunding: dependencies.waitForFunding ?? createProductionFundingWaiter({ now, rpcUrl: config.rpcUrl, sleeper }), now, sleeper, displayAddresses: async (addresses) => { if (displayedFunding) fail(); displayedFunding = true; const bytes = await publishFundingAddresses(config.releaseRoot, addresses); (dependencies.output ?? ((line) => process.stdout.write(line)))(bytes.toString("utf8")); }, createTransport: () => transport,
+        readState: state.readState, writeState: state.writeState, resolveOperatorPublicKey: async () => config.operatorPublicKey, waitForFunding: dependencies.waitForFunding ?? createProductionFundingWaiter({ now, rpcUrl: config.rpcUrl, sleeper }), now, sleeper, displayAddresses: async (addresses) => { if (displayedFunding) fail(); displayedFunding = true; const bytes = await publishFundingAddresses(config.releaseRoot, addresses, fundingFileSystem(dependencies.fundingFileSystem)); (dependencies.output ?? ((line) => process.stdout.write(line)))(bytes.toString("utf8")); }, createTransport: () => transport,
         launcher: async () => fail(), verifyMarkerCompleteVerdict: async () => fail(),
         // The coordinator owns lifecycle ordering; this runtime only validates a
         // bounded artifact snapshot and observes authenticated relay effects.

@@ -1472,7 +1472,18 @@ async function waitForAdvisoryEnrollmentReadiness({ dependencies }) {
     if (!Number.isSafeInteger(current) || current < 0 || (previous !== undefined && current < previous)) invalid();
     previous = current;
     deadline ??= current + FUNDING_READINESS_DEADLINE_MS;
-    const view = await dependencies.readSessionView();
+    let view;
+    try {
+      view = await dependencies.readSessionView();
+    } catch {
+      view = null;
+    }
+    if (view === null) {
+      if (current >= deadline || attempts >= FUNDING_READINESS_DEADLINE_MS / FUNDING_READINESS_INTERVAL_MS) invalid();
+      attempts += 1;
+      await dependencies.sleeper(Math.min(FUNDING_READINESS_INTERVAL_MS, Math.max(1, deadline - current)));
+      continue;
+    }
     if (!isPlainObject(view) || view.paymentMoved !== false || !isPlainObject(view.facts) || !isPlainObject(view.facts.enrollmentConfirmed)) invalid();
     const confirmed = view.facts.enrollmentConfirmed;
     if (confirmed.payee === true && confirmed.payer === true) return;
@@ -1638,8 +1649,6 @@ export async function runCoordinator(input) {
       !COORDINATOR_STATES.has(persistedState.state)
     ) invalid();
   }
-  const events = await dependencies.readEvents({ after: null, waitMs: 0 });
-  if (!Array.isArray(events)) invalid();
   await waitForAdvisoryEnrollmentReadiness({ dependencies });
   const enrollmentSetBytes = await dependencies.readEnrollmentSet();
   let enrollmentSet;
@@ -1661,6 +1670,8 @@ export async function runCoordinator(input) {
   };
   const payee = enrollmentFor("payee");
   const payer = enrollmentFor("payer");
+  const events = await dependencies.readEvents({ after: null, waitMs: 0 });
+  if (!Array.isArray(events)) invalid();
   const replay = await authenticateCoordinatorReplay({
     dependencies,
     enrollments: Object.freeze({ payer, payee }),
