@@ -92,3 +92,24 @@ test("projection requires three distinct anchor digests", () => {
   assert.deepEqual(value.anchors.map((anchor) => anchor.digest), [digest("1"), digest("1"), digest("3")]);
   assert.equal(value.verifier.status, "PENDING");
 });
+
+test("projection requires bounded decimal expiration timestamps", () => {
+  for (const [label, expiresAtMs] of [
+    ["infinity exponent", "1e999"],
+    ["signed", "+1785297600000"],
+    ["negative", "-1785297600000"],
+    ["whitespace", "1785297600000 "],
+    ["decimal", "1785297600000.1"],
+    ["empty", ""],
+    ["overlarge", String(BigInt(Number.MAX_SAFE_INTEGER) + 1n)],
+    ["too long", "1".repeat(17)],
+    ["malformed", "not-a-time"],
+    ["expired", "1785294300000"],
+  ]) {
+    const input = base();
+    input.mandate.mandate.expiresAtMs = expiresAtMs;
+    input.request.request.expiresAtMs = expiresAtMs;
+    const value = buildConsoleProjection(input);
+    assert.equal(value.verifier.status, "PENDING", label);
+  }
+});

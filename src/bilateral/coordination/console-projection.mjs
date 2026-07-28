@@ -8,9 +8,15 @@ const PHASES = new Set([...RELEASE_STATES, "UNAVAILABLE"]);
 const FAILURE_CODES = new Set(["RECOVERY_REQUIRED", "TERMINAL_FAILURE", "ABORTED"]);
 const FAILURE_RUNS = new Set(["release", "rehearsal", "stakeholder"]);
 const VERIFIER_PUBLICATION_SCHEMA = "clockchain.bilateral-verifier-publication/v1";
+const MAX_SAFE_MS = BigInt(Number.MAX_SAFE_INTEGER);
 
 function digest(value) { return typeof value === "string" && SHA64.test(value) ? value : null; }
 function object(value) { return value !== null && typeof value === "object" && !Array.isArray(value) ? value : Object.create(null); }
+function timestamp(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 16 || !/^(?:0|[1-9][0-9]*)$/.test(value)) return null;
+  const parsed = BigInt(value);
+  return parsed <= MAX_SAFE_MS ? parsed : null;
+}
 function anchor(value, index) {
   const item = object(value);
   if (item.kind !== ANCHORS[index] || item.verified !== true || digest(item.digest) === null || !/^(?:0|[1-9][0-9]*)$/.test(String(item.block))) return null;
@@ -32,7 +38,9 @@ export function buildConsoleProjection(input) {
   const mandateDigest = digest(mandateValue.mandateDigest); const requestDigest = digest(requestValue.requestDigest);
   const sessionBound = session.releaseId !== null && session.repositorySha !== null && session.sessionId !== null;
   const intentSafe = mandate.paymentMoved === false && request.paymentMoved === false;
-  const nowValid = Number.isSafeInteger(value.nowMs) && typeof mandate.expiresAtMs === "string" && typeof request.expiresAtMs === "string" && value.nowMs < Number(mandate.expiresAtMs) && value.nowMs < Number(request.expiresAtMs);
+  const now = Number.isSafeInteger(value.nowMs) && value.nowMs >= 0 ? BigInt(value.nowMs) : null;
+  const mandateExpires = timestamp(mandate.expiresAtMs); const requestExpires = timestamp(request.expiresAtMs);
+  const nowValid = now !== null && mandateExpires !== null && requestExpires !== null && now < mandateExpires && now < requestExpires;
   const watcherBindings = { descriptorDigest: digest(watcher.descriptorDigest), packageDigests: { payer: digest(watcher.packageDigests?.payer), payee: digest(watcher.packageDigests?.payee) } };
   const fresh = sessionBound && intentSafe && ordered && nowValid && mandateDigest !== null && requestDigest !== null && watcherBindings.descriptorDigest !== null && watcherBindings.packageDigests.payer !== null && watcherBindings.packageDigests.payee !== null && publicationMatches(value.verifierPublication, session, mandateDigest, requestDigest, anchors, watcherBindings);
   const rawFailure = object(lifecycle.failure); const failure = FAILURE_CODES.has(rawFailure.code) && FAILURE_RUNS.has(rawFailure.run) ? Object.freeze({ active: rawFailure.active === true, code: rawFailure.code, run: rawFailure.run }) : null;
