@@ -243,6 +243,17 @@ Not-tested: Relay transport and live identities are covered by later tasks.
 - Modify: `test/bilateral-messages.test.mjs`
 - Modify: `test/bilateral-evidence.test.mjs`
 - Modify: `test/bilateral-verdict.test.mjs`
+- Modify descriptor fixtures only: `test/bilateral-protocol.test.mjs`
+- Modify descriptor fixtures only: `test/bilateral-roles.test.mjs`
+- Modify descriptor fixtures only: `test/bilateral-runner.test.mjs`
+- Modify descriptor fixtures only: `test/bilateral-watcher.test.mjs`
+- Modify descriptor fixtures only: `test/bilateral-round2-integration.test.mjs`
+- Modify descriptor fixtures only: `test/bilateral-operational-e2e.test.mjs`
+- Modify descriptor fixtures only: `test/bilateral-coordination-client.test.mjs`
+- Modify descriptor fixtures only: `test/bilateral-coordination-coordinator-runtime.test.mjs`
+- Modify descriptor fixtures only: `test/bilateral-coordination-relay.test.mjs`
+- Modify descriptor fixtures only: `test/bilateral-coordination-storage.test.mjs`
+- Modify descriptor fixtures only: `test/bilateral-coordination-supervisor-runtime.test.mjs`
 
 - [ ] **Step 1: Add RED descriptor commitment tests**
 
@@ -267,7 +278,18 @@ node --test \
   test/bilateral-descriptor.test.mjs \
   test/bilateral-messages.test.mjs \
   test/bilateral-evidence.test.mjs \
-  test/bilateral-verdict.test.mjs
+  test/bilateral-verdict.test.mjs \
+  test/bilateral-protocol.test.mjs \
+  test/bilateral-roles.test.mjs \
+  test/bilateral-runner.test.mjs \
+  test/bilateral-watcher.test.mjs \
+  test/bilateral-round2-integration.test.mjs \
+  test/bilateral-operational-e2e.test.mjs \
+  test/bilateral-coordination-client.test.mjs \
+  test/bilateral-coordination-coordinator-runtime.test.mjs \
+  test/bilateral-coordination-relay.test.mjs \
+  test/bilateral-coordination-storage.test.mjs \
+  test/bilateral-coordination-supervisor-runtime.test.mjs
 ```
 
 Expected: FAIL because the new exact fields are rejected or ignored.
