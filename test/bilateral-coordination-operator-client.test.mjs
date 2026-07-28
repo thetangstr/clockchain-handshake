@@ -421,6 +421,27 @@ test("operator transport rejects malformed response headers and noncanonical res
   }
 });
 
+test("operator transport treats only exact commercial-intent reads as bounded octet streams", async (t) => {
+  const tls = await certificate(t);
+  const body = Buffer.from("{}", "utf8");
+  const server = https.createServer({ cert: tls.pem, key: tls.key }, (request, response) => {
+    request.resume();
+    response.writeHead(200, { "content-length": String(body.length), "content-type": "application/octet-stream" });
+    response.end(body);
+  });
+  const port = await listen(server, t);
+  const transport = testTransport(tls, port, { bodyMs: 50, connectMs: 50, headerMs: 50, totalMs: 200 });
+  for (const path of [
+    `/v1/sessions/${SESSION_ID}/mandate?subjectRun=rehearsal`,
+    `/v1/sessions/${SESSION_ID}/payment-requests/${SESSION_ID}`,
+  ]) {
+    const result = await transport.request({ body: null, method: "GET", path });
+    assert.equal(result.contentType, "application/octet-stream");
+    assert.deepEqual(result.body, body);
+  }
+  await assert.rejects(transport.request({ body: null, method: "GET", path: `/v1/sessions/${SESSION_ID}/mandate?subjectRun=release` }), { code: "COORDINATION_OPERATOR_CLIENT_INVALID" });
+});
+
 test("operator transport types only exact safe missing-session view responses", async (t) => {
   const tls = await certificate(t);
   const missing = canonicalBytes({
