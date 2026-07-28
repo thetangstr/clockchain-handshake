@@ -36,23 +36,31 @@ function fail(code) {
   throw new BilateralFundingError(code);
 }
 
-function isPlainDataObject(value) {
-  if (value === null || typeof value !== "object") return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+function guarded(code, operation) {
+  try {
+    return operation();
+  } catch (error) {
+    if (error instanceof BilateralFundingError) throw error;
+    fail(code);
+  }
 }
 
-function requireExactDataKeys(value, keys, code) {
-  if (!isPlainDataObject(value)) fail(code);
-  const ownKeys = Reflect.ownKeys(value);
+function snapshotExactDataObject(value, keys, code) {
+  if (value === null || typeof value !== "object") fail(code);
+  const prototype = guarded(code, () => Object.getPrototypeOf(value));
+  if (prototype !== Object.prototype && prototype !== null) fail(code);
+  const ownKeys = guarded(code, () => Reflect.ownKeys(value));
   if (
     ownKeys.length !== keys.length ||
     !keys.every((key) => ownKeys.includes(key))
   ) {
     fail(code);
   }
+  const snapshot = {};
   for (const key of keys) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    const descriptor = guarded(code, () =>
+      Object.getOwnPropertyDescriptor(value, key),
+    );
     if (
       !descriptor ||
       !descriptor.enumerable ||
@@ -60,7 +68,9 @@ function requireExactDataKeys(value, keys, code) {
     ) {
       fail(code);
     }
+    snapshot[key] = descriptor.value;
   }
+  return Object.freeze(snapshot);
 }
 
 function validateAddress(value, seen) {
@@ -76,15 +86,24 @@ function validateAddress(value, seen) {
   return value;
 }
 
-function requireDenseDataArray(value, length, code) {
+function snapshotDenseDataArray(value, length, code) {
   if (
     !Array.isArray(value) ||
-    Object.getPrototypeOf(value) !== Array.prototype ||
-    value.length !== length
+    guarded(code, () => Object.getPrototypeOf(value)) !== Array.prototype
   ) {
     fail(code);
   }
-  const arrayKeys = Reflect.ownKeys(value);
+  const lengthDescriptor = guarded(code, () =>
+    Object.getOwnPropertyDescriptor(value, "length"),
+  );
+  if (
+    !lengthDescriptor ||
+    !Object.hasOwn(lengthDescriptor, "value") ||
+    lengthDescriptor.value !== length
+  ) {
+    fail(code);
+  }
+  const arrayKeys = guarded(code, () => Reflect.ownKeys(value));
   const indexPattern = new RegExp(`^(?:${Array.from(
     { length },
     (_, index) => index,
@@ -99,8 +118,11 @@ function requireDenseDataArray(value, length, code) {
   ) {
     fail(code);
   }
+  const copy = [];
   for (let index = 0; index < length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    const descriptor = guarded(code, () =>
+      Object.getOwnPropertyDescriptor(value, String(index)),
+    );
     if (
       !descriptor ||
       !descriptor.enumerable ||
@@ -108,15 +130,9 @@ function requireDenseDataArray(value, length, code) {
     ) {
       fail(code);
     }
+    copy.push(descriptor.value);
   }
-}
-
-function copyDataArray(value, length) {
-  const copy = [];
-  for (let index = 0; index < length; index += 1) {
-    copy.push(Object.getOwnPropertyDescriptor(value, String(index)).value);
-  }
-  return copy;
+  return Object.freeze(copy);
 }
 
 function requireBigint(value, code) {
@@ -125,23 +141,26 @@ function requireBigint(value, code) {
 }
 
 export function validateFundingRecord(value) {
-  requireExactDataKeys(
+  const snapshot = snapshotExactDataObject(
     value,
     FUNDING_RECORD_KEYS,
     "BILATERAL_FUNDING_INVALID_RECORD",
   );
   if (
-    value.schema !== FUNDING_RECORD_SCHEMA ||
-    value.paymentMoved !== false ||
-    !Array.isArray(value.addresses)
+    snapshot.schema !== FUNDING_RECORD_SCHEMA ||
+    snapshot.paymentMoved !== false
   ) {
     fail("BILATERAL_FUNDING_INVALID_RECORD");
   }
-  requireDenseDataArray(value.addresses, 4, "BILATERAL_FUNDING_INVALID_RECORD");
+  const addressData = snapshotDenseDataArray(
+    snapshot.addresses,
+    4,
+    "BILATERAL_FUNDING_INVALID_RECORD",
+  );
 
   const seen = new Set();
   const addresses = [];
-  for (const address of copyDataArray(value.addresses, 4)) {
+  for (const address of addressData) {
     addresses.push(validateAddress(address, seen));
   }
   return Object.freeze({
@@ -152,18 +171,16 @@ export function validateFundingRecord(value) {
 }
 
 function validateParticipantFacts(value, addresses) {
-  requireDenseDataArray(
+  const participantData = snapshotDenseDataArray(
     value,
     4,
     "BILATERAL_FUNDING_INVALID_PARTICIPANTS",
   );
 
   const facts = [];
-  const participantData = copyDataArray(value, 4);
   for (let index = 0; index < participantData.length; index += 1) {
-    const fact = participantData[index];
-    requireExactDataKeys(
-      fact,
+    const fact = snapshotExactDataObject(
+      participantData[index],
       PARTICIPANT_FACT_KEYS,
       "BILATERAL_FUNDING_INVALID_PARTICIPANTS",
     );
@@ -191,7 +208,7 @@ function validateParticipantFacts(value, addresses) {
 }
 
 export function planFundingTransfers(value) {
-  requireExactDataKeys(
+  const input = snapshotExactDataObject(
     value,
     PLAN_INPUT_KEYS,
     "BILATERAL_FUNDING_INVALID_PLAN",
@@ -202,7 +219,7 @@ export function planFundingTransfers(value) {
     fundingNonce,
     participantFacts,
     record,
-  } = value;
+  } = input;
   const validatedRecord = validateFundingRecord(record);
   const fee = requireBigint(
     feePerTransferWei,

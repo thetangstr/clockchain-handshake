@@ -53,6 +53,14 @@ function arraySubclass(values) {
   return array;
 }
 
+function throwingProxy(target, trap) {
+  return new Proxy(target, {
+    [trap]() {
+      throw new Error("caller-controlled trap");
+    },
+  });
+}
+
 test("validateFundingRecord returns an immutable exact copy of the canonical record", () => {
   assert.equal(FUNDING_RECORD_SCHEMA, RECORD.schema);
 
@@ -102,6 +110,9 @@ test("validateFundingRecord rejects malformed funding records fail-closed", () =
     },
     { ...mutableRecord(), addresses: arrayWithGetter(0, RECORD.addresses[0]) },
     { ...mutableRecord(), addresses: arraySubclass(RECORD.addresses) },
+    throwingProxy(mutableRecord(), "getPrototypeOf"),
+    throwingProxy(mutableRecord(), "ownKeys"),
+    throwingProxy(mutableRecord(), "getOwnPropertyDescriptor"),
   ];
 
   for (const [index, invalid] of invalidRecords.entries()) {
@@ -236,6 +247,45 @@ test("planFundingTransfers accounts for every below-floor participant without ca
   );
 });
 
+test("planFundingTransfers snapshots participant fact descriptors and never redirects through proxy gets", () => {
+  const record = validateFundingRecord(mutableRecord());
+  let reads = 0;
+  const mutableAddressFact = new Proxy(
+    { address: record.addresses[0], balanceWei: 0n, nonce: 0n },
+    {
+      get(target, property, receiver) {
+        if (property === "address") {
+          reads += 1;
+          return reads === 1
+            ? record.addresses[0]
+            : "0x5555555555555555555555555555555555555555";
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    },
+  );
+
+  const plan = planFundingTransfers({
+    feePerTransferWei: 25n,
+    fundingBalanceWei: 40_000_000_000_000_100n,
+    fundingNonce: 3n,
+    participantFacts: [
+      mutableAddressFact,
+      { address: record.addresses[1], balanceWei: 0n, nonce: 0n },
+      { address: record.addresses[2], balanceWei: 0n, nonce: 0n },
+      { address: record.addresses[3], balanceWei: 0n, nonce: 0n },
+    ],
+    record,
+  });
+
+  assert.equal(reads, 0);
+  assert.equal(plan.transfers[0].address, record.addresses[0]);
+  assert.notEqual(
+    plan.transfers[0].address,
+    "0x5555555555555555555555555555555555555555",
+  );
+});
+
 test("planFundingTransfers rejects unsafe or ambiguous planning facts fail-closed", () => {
   const record = validateFundingRecord(mutableRecord());
   const facts = [
@@ -254,6 +304,9 @@ test("planFundingTransfers rejects unsafe or ambiguous planning facts fail-close
   const invalidInputs = [
     null,
     { ...validInput, extra: true },
+    throwingProxy(validInput, "getPrototypeOf"),
+    throwingProxy(validInput, "ownKeys"),
+    throwingProxy(validInput, "getOwnPropertyDescriptor"),
     { ...validInput, participantFacts: facts.slice(0, 3) },
     { ...validInput, feePerTransferWei: "100" },
     { ...validInput, fundingBalanceWei: 10_000_000_000_000_100 },
@@ -262,6 +315,14 @@ test("planFundingTransfers rejects unsafe or ambiguous planning facts fail-close
       ...validInput,
       participantFacts: facts.map((fact, index) =>
         index === 0 ? { ...fact, extra: true } : fact,
+      ),
+    },
+    {
+      ...validInput,
+      participantFacts: facts.map((fact, index) =>
+        index === 0
+          ? throwingProxy(fact, "getOwnPropertyDescriptor")
+          : fact,
       ),
     },
     {
