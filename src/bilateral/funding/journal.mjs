@@ -62,6 +62,13 @@ const OBSERVED_INPUT_KEYS = Object.freeze([
   "transactionHash",
 ]);
 const FUNDED_INPUT_KEYS = Object.freeze(["address", "fundingNonce"]);
+const RECOVERY_INPUT_KEYS = Object.freeze([
+  "binding",
+  "journalTransfer",
+  "nonceTransaction",
+  "receipt",
+  "recipientFact",
+]);
 
 const defaultDependencies = Object.freeze({
   fileSystem: Object.freeze({
@@ -294,6 +301,17 @@ function validateJournalDocument(value) {
     "BILATERAL_FUNDING_INVALID_JOURNAL",
   );
   const transfers = transferData.map(validateTransfer);
+  const seenTransfers = new Set();
+  for (const transfer of transfers) {
+    if (!binding.recipients.includes(transfer.address)) {
+      fail("BILATERAL_FUNDING_INVALID_JOURNAL");
+    }
+    const transferKey = `${transfer.address}:${transfer.fundingNonce}`;
+    if (seenTransfers.has(transferKey)) {
+      fail("BILATERAL_FUNDING_INVALID_JOURNAL");
+    }
+    seenTransfers.add(transferKey);
+  }
   const maxStateIndex = transfers.reduce(
     (max, transfer) => Math.max(max, FUNDING_STATES.indexOf(transfer.state)),
     0,
@@ -417,6 +435,11 @@ function freezeJournal(document, path, identity, fileSystem) {
       await handle.writeFile(bytes);
       await handle.chmod(0o600);
       await handle.sync();
+      const beforeRename = await fileSystem.lstat(path);
+      validateFileStats(beforeRename);
+      if (!sameFile(beforeRename, identity)) {
+        fail("BILATERAL_FUNDING_REPLACED");
+      }
       await handle.close();
       handle = null;
       await fileSystem.rename(temporary, path);
@@ -661,7 +684,7 @@ function validateRecipientFact(value, transfer) {
   return { balanceWei, nonce };
 }
 
-function validateTransaction(value, transfer) {
+function validateTransaction(value, transfer, binding) {
   if (value === null || value === undefined) return null;
   const transaction = snapshotExactDataObject(
     value,
@@ -672,6 +695,8 @@ function validateTransaction(value, transfer) {
     transaction.hash === null ||
     !HASH_PATTERN.test(transaction.hash) ||
     transaction.to !== transfer.address ||
+    transaction.from !== binding.fundingAddress ||
+    transaction.chainId !== binding.chainId ||
     normalizeInteger(transaction.nonce) !== transfer.fundingNonce ||
     normalizeInteger(transaction.valueWei) !== transfer.valueWei
   ) {
@@ -683,19 +708,10 @@ function validateTransaction(value, transfer) {
   ) {
     fail("BILATERAL_FUNDING_REPLACED_TRANSACTION");
   }
-  if (
-    Object.hasOwn(transfer, "fundingAddress") &&
-    transaction.from !== transfer.fundingAddress
-  ) {
-    fail("BILATERAL_FUNDING_REPLACED_TRANSACTION");
-  }
-  if (Object.hasOwn(transfer, "chainId") && transaction.chainId !== transfer.chainId) {
-    fail("BILATERAL_FUNDING_REPLACED_TRANSACTION");
-  }
   return transaction;
 }
 
-function validateReceipt(value, transfer, transaction) {
+function validateReceipt(value, transfer, transaction, binding) {
   if (value === null || value === undefined) return null;
   const receipt = snapshotExactDataObject(
     value,
@@ -708,6 +724,8 @@ function validateReceipt(value, transfer, transaction) {
   if (
     !HASH_PATTERN.test(receipt.transactionHash) ||
     receipt.to !== transfer.address ||
+    receipt.from !== binding.fundingAddress ||
+    receipt.chainId !== binding.chainId ||
     normalizeInteger(receipt.nonce) !== transfer.fundingNonce ||
     normalizeInteger(receipt.valueWei) !== transfer.valueWei
   ) {
@@ -722,33 +740,22 @@ function validateReceipt(value, transfer, transaction) {
   ) {
     fail("BILATERAL_FUNDING_REPLACED_TRANSACTION");
   }
-  if (
-    Object.hasOwn(transfer, "fundingAddress") &&
-    receipt.from !== transfer.fundingAddress
-  ) {
-    fail("BILATERAL_FUNDING_REPLACED_TRANSACTION");
-  }
-  if (Object.hasOwn(transfer, "chainId") && receipt.chainId !== transfer.chainId) {
-    fail("BILATERAL_FUNDING_REPLACED_TRANSACTION");
-  }
   return receipt;
 }
 
-export function classifyFundingRecovery({
-  journalTransfer,
-  nonceTransaction,
-  receipt,
-  recipientFact,
-}) {
-  const transfer =
-    journalTransfer?.state === "PLANNED"
-      ? validatePlannedTransferLike(journalTransfer)
-      : validateTransferLike(journalTransfer);
-  const recipient = validateRecipientFact(recipientFact, transfer);
-  const fundedThresholdWei = Object.hasOwn(transfer, "targetBalanceWei")
-    ? transfer.targetBalanceWei
-    : transfer.valueWei;
-  if (BigInt(recipient.balanceWei) >= BigInt(fundedThresholdWei)) {
+export function classifyFundingRecovery(value) {
+  const input = snapshotExactDataObject(
+    value,
+    RECOVERY_INPUT_KEYS,
+    "BILATERAL_FUNDING_AMBIGUOUS_RECOVERY",
+  );
+  const recoveryBinding = validateBinding(input.binding);
+  const transfer = validateRecoveryTransfer(input.journalTransfer);
+  if (!recoveryBinding.recipients.includes(transfer.address)) {
+    fail("BILATERAL_FUNDING_AMBIGUOUS_RECOVERY");
+  }
+  const recipient = validateRecipientFact(input.recipientFact, transfer);
+  if (BigInt(recipient.balanceWei) >= BigInt(recoveryBinding.targetBalanceWei)) {
     if (recipient.nonce !== "0") {
       fail("BILATERAL_FUNDING_RECIPIENT_NONCE_USED");
     }
@@ -756,76 +763,53 @@ export function classifyFundingRecovery({
   }
   if (transfer.state === "PLANNED") return "WAIT";
 
-  const transaction = validateTransaction(nonceTransaction, transfer);
-  const foundReceipt = validateReceipt(receipt, transfer, transaction);
-  if (foundReceipt) return "FUNDED";
-  if (transaction) return "OBSERVED";
-  return "WAIT";
-}
-
-function validatePlannedTransferLike(value) {
-  if (value === null || typeof value !== "object") {
-    fail("BILATERAL_FUNDING_INVALID_TRANSFER");
-  }
-  const copy = {
-    address: validateAddress(
-      value.address,
-      "BILATERAL_FUNDING_INVALID_TRANSFER",
-    ),
-    feeWei: validateWeiString(
-      value.feeWei,
-      "BILATERAL_FUNDING_INVALID_TRANSFER",
-    ),
-    fundingNonce: validateDecimalIntegerString(
-      value.fundingNonce,
-      "BILATERAL_FUNDING_INVALID_TRANSFER",
-    ),
-    state: "PLANNED",
-    transactionDigest:
-      typeof value.transactionDigest === "string" &&
-      SHA256_PATTERN.test(value.transactionDigest)
-        ? value.transactionDigest
-        : fail("BILATERAL_FUNDING_INVALID_TRANSFER"),
-    transactionHash:
-      value.transactionHash === null
-        ? null
-        : fail("BILATERAL_FUNDING_INVALID_TRANSFER"),
-    valueWei: validateWeiString(
-      value.valueWei,
-      "BILATERAL_FUNDING_INVALID_TRANSFER",
-    ),
-  };
-  if (Object.hasOwn(value, "targetBalanceWei")) {
-    copy.targetBalanceWei = validateWeiString(
-      value.targetBalanceWei,
-      "BILATERAL_FUNDING_INVALID_TRANSFER",
-    );
-  }
-  return Object.freeze(copy);
-}
-
-function validateTransferLike(value) {
-  const transfer = validateTransfer(
-    Object.fromEntries(
-      TRANSFER_KEYS.map((key) => [key, value?.[key]]),
-    ),
+  const transaction = validateTransaction(
+    input.nonceTransaction,
+    transfer,
+    recoveryBinding,
   );
-  const copy = { ...transfer };
-  if (Object.hasOwn(value, "fundingAddress")) {
-    copy.fundingAddress = validateAddress(
-      value.fundingAddress,
+  const foundReceipt = validateReceipt(
+    input.receipt,
+    transfer,
+    transaction,
+    recoveryBinding,
+  );
+  if (foundReceipt) return "FUNDED";
+  if (transaction) {
+    return transfer.state === "TRANSACTION_OBSERVED" ? "WAIT" : "OBSERVED";
+  }
+  fail("BILATERAL_FUNDING_DROPPED_TRANSACTION");
+}
+
+function validateRecoveryTransfer(value) {
+  const transfer = snapshotExactDataObject(
+    value,
+    TRANSFER_KEYS,
+    "BILATERAL_FUNDING_INVALID_TRANSFER",
+  );
+  if (transfer.state === "PLANNED") {
+    validateAddress(transfer.address, "BILATERAL_FUNDING_INVALID_TRANSFER");
+    validateWeiString(transfer.feeWei, "BILATERAL_FUNDING_INVALID_TRANSFER");
+    validateDecimalIntegerString(
+      transfer.fundingNonce,
       "BILATERAL_FUNDING_INVALID_TRANSFER",
     );
+    validateWeiString(transfer.valueWei, "BILATERAL_FUNDING_INVALID_TRANSFER");
+    if (
+      !SHA256_PATTERN.test(transfer.transactionDigest) ||
+      transfer.transactionHash !== null
+    ) {
+      fail("BILATERAL_FUNDING_INVALID_TRANSFER");
+    }
+    return Object.freeze({
+      address: transfer.address,
+      feeWei: transfer.feeWei,
+      fundingNonce: transfer.fundingNonce,
+      state: "PLANNED",
+      transactionDigest: transfer.transactionDigest,
+      transactionHash: null,
+      valueWei: transfer.valueWei,
+    });
   }
-  if (Object.hasOwn(value, "chainId")) {
-    if (value.chainId !== 11155111) fail("BILATERAL_FUNDING_INVALID_TRANSFER");
-    copy.chainId = value.chainId;
-  }
-  if (Object.hasOwn(value, "targetBalanceWei")) {
-    copy.targetBalanceWei = validateWeiString(
-      value.targetBalanceWei,
-      "BILATERAL_FUNDING_INVALID_TRANSFER",
-    );
-  }
-  return Object.freeze(copy);
+  return validateTransfer(transfer);
 }

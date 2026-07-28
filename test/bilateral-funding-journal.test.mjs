@@ -4,6 +4,7 @@ import {
   lstat,
   mkdtemp,
   readFile,
+  rename as nodeRename,
   rm,
   symlink,
   writeFile,
@@ -300,6 +301,7 @@ test("journal updates reject replacement and tampered persisted bytes fail-close
 test("classifyFundingRecovery returns WAIT before durable intent and never requests resend after intent", () => {
   assert.equal(
     classifyFundingRecovery({
+      binding: binding(),
       journalTransfer: { ...broadcastIntent(), state: "PLANNED" },
       nonceTransaction: null,
       receipt: null,
@@ -307,22 +309,21 @@ test("classifyFundingRecovery returns WAIT before durable intent and never reque
     }),
     "WAIT",
   );
-  assert.equal(
-    classifyFundingRecovery({
-      journalTransfer: broadcastIntent(),
-      nonceTransaction: null,
-      receipt: null,
-      recipientFact: { address: RECIPIENTS[0], balanceWei: 0n, nonce: 0n },
-    }),
-    "WAIT",
+  assert.throws(
+    () =>
+      classifyFundingRecovery({
+        binding: binding(),
+        journalTransfer: broadcastIntent(),
+        nonceTransaction: null,
+        receipt: null,
+        recipientFact: { address: RECIPIENTS[0], balanceWei: 0n, nonce: 0n },
+      }),
+    BilateralFundingError,
   );
 });
 
 test("classifyFundingRecovery advances observed transactions and funded recipients", () => {
-  const transfer = broadcastIntent({
-    chainId: 11155111,
-    fundingAddress: FUNDING_ADDRESS,
-  });
+  const transfer = broadcastIntent();
   const nonceTransaction = {
     chainId: 11155111,
     from: FUNDING_ADDRESS,
@@ -334,6 +335,7 @@ test("classifyFundingRecovery advances observed transactions and funded recipien
 
   assert.equal(
     classifyFundingRecovery({
+      binding: binding(),
       journalTransfer: transfer,
       nonceTransaction,
       receipt: null,
@@ -344,6 +346,7 @@ test("classifyFundingRecovery advances observed transactions and funded recipien
 
   assert.equal(
     classifyFundingRecovery({
+      binding: binding(),
       journalTransfer: transfer,
       nonceTransaction,
       receipt: {
@@ -367,6 +370,7 @@ test("classifyFundingRecovery advances observed transactions and funded recipien
 
   assert.equal(
     classifyFundingRecovery({
+      binding: binding(),
       journalTransfer: broadcastIntent(),
       nonceTransaction: null,
       receipt: null,
@@ -382,8 +386,6 @@ test("classifyFundingRecovery advances observed transactions and funded recipien
 
 test("classifyFundingRecovery fails closed for replaced, reverted, mismatched, dropped, or ambiguous outcomes", () => {
   const transfer = broadcastIntent({
-    chainId: 11155111,
-    fundingAddress: FUNDING_ADDRESS,
     transactionHash:
       "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   });
@@ -438,6 +440,7 @@ test("classifyFundingRecovery fails closed for replaced, reverted, mismatched, d
     assert.throws(
       () =>
         classifyFundingRecovery({
+          binding: binding(),
           journalTransfer: transfer,
           nonceTransaction: invalid.nonceTransaction,
           receipt: invalid.receipt,
@@ -450,4 +453,261 @@ test("classifyFundingRecovery fails closed for replaced, reverted, mismatched, d
       BilateralFundingError,
     );
   }
+});
+
+test("classifyFundingRecovery requires exact binding context before trusting sender chain or target", () => {
+  const transfer = broadcastIntent();
+  const nonceTransaction = {
+    chainId: 11155111,
+    from: FUNDING_ADDRESS,
+    hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    nonce: "7",
+    to: RECIPIENTS[0],
+    valueWei: "10000000000000000",
+  };
+  const recipientFact = { address: RECIPIENTS[0], balanceWei: 0n, nonce: 0n };
+
+  assert.throws(
+    () =>
+      classifyFundingRecovery({
+        journalTransfer: transfer,
+        nonceTransaction,
+        receipt: null,
+        recipientFact,
+      }),
+    BilateralFundingError,
+  );
+  assert.throws(
+    () =>
+      classifyFundingRecovery({
+        binding: binding({ chainId: 1 }),
+        journalTransfer: transfer,
+        nonceTransaction,
+        receipt: null,
+        recipientFact,
+      }),
+    BilateralFundingError,
+  );
+  assert.throws(
+    () =>
+      classifyFundingRecovery({
+        binding: binding({ fundingAddress: RECIPIENTS[1] }),
+        journalTransfer: transfer,
+        nonceTransaction,
+        receipt: null,
+        recipientFact,
+      }),
+    BilateralFundingError,
+  );
+});
+
+test("classifyFundingRecovery uses only binding target balance and never falls back to transfer value", () => {
+  assert.throws(
+    () =>
+      classifyFundingRecovery({
+        binding: binding(),
+        journalTransfer: broadcastIntent({ valueWei: "1" }),
+        nonceTransaction: null,
+        receipt: null,
+        recipientFact: { address: RECIPIENTS[0], balanceWei: 1n, nonce: 0n },
+      }),
+    BilateralFundingError,
+  );
+});
+
+test("classifyFundingRecovery treats post-intent missing nonce evidence as terminal while observed tx waits for receipt", () => {
+  assert.throws(
+    () =>
+      classifyFundingRecovery({
+        binding: binding(),
+        journalTransfer: broadcastIntent(),
+        nonceTransaction: null,
+        receipt: null,
+        recipientFact: { address: RECIPIENTS[0], balanceWei: 0n, nonce: 0n },
+      }),
+    BilateralFundingError,
+  );
+
+  assert.equal(
+    classifyFundingRecovery({
+      binding: binding(),
+      journalTransfer: broadcastIntent({
+        state: "TRANSACTION_OBSERVED",
+        transactionHash:
+          "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      }),
+      nonceTransaction: {
+        chainId: 11155111,
+        from: FUNDING_ADDRESS,
+        hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        nonce: "7",
+        to: RECIPIENTS[0],
+        valueWei: "10000000000000000",
+      },
+      receipt: null,
+      recipientFact: { address: RECIPIENTS[0], balanceWei: 0n, nonce: 0n },
+    }),
+    "WAIT",
+  );
+});
+
+test("openFundingJournal rejects persisted transfers outside the bound recipients or duplicate address nonce pair", async () => {
+  const alienDirectory = await privateDirectory("funding-journal-alien-transfer-");
+  const bound = binding();
+  await writeFile(
+    join(alienDirectory, "funding-journal.json"),
+    canonicalJson({
+      binding: bound,
+      schema: FUNDING_JOURNAL_SCHEMA,
+      state: "BROADCAST_INTENT",
+      transfers: [
+        broadcastIntent({
+          address: "0x9999999999999999999999999999999999999999",
+        }),
+      ],
+    }),
+    { mode: 0o600 },
+  );
+  await assert.rejects(
+    openFundingJournal({ binding: bound, journalDirectory: alienDirectory }),
+    BilateralFundingError,
+  );
+
+  const duplicateDirectory = await privateDirectory(
+    "funding-journal-duplicate-transfer-",
+  );
+  const transfer = broadcastIntent();
+  await writeFile(
+    join(duplicateDirectory, "funding-journal.json"),
+    canonicalJson({
+      binding: bound,
+      schema: FUNDING_JOURNAL_SCHEMA,
+      state: "BROADCAST_INTENT",
+      transfers: [transfer, transfer],
+    }),
+    { mode: 0o600 },
+  );
+  await assert.rejects(
+    openFundingJournal({ binding: bound, journalDirectory: duplicateDirectory }),
+    BilateralFundingError,
+  );
+});
+
+test("classifyFundingRecovery snapshots planned and recovery descriptors without invoking getters or proxy gets", () => {
+  let reads = 0;
+  const hostileTransfer = new Proxy(
+    { ...broadcastIntent(), state: "PLANNED" },
+    {
+      get(target, property, receiver) {
+        if (property === "address") reads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    },
+  );
+
+  assert.equal(
+    classifyFundingRecovery({
+      binding: binding(),
+      journalTransfer: hostileTransfer,
+      nonceTransaction: null,
+      receipt: null,
+      recipientFact: { address: RECIPIENTS[0], balanceWei: 0n, nonce: 0n },
+    }),
+    "WAIT",
+  );
+  assert.equal(reads, 0);
+
+  let accessorReads = 0;
+  assert.throws(
+    () =>
+      classifyFundingRecovery({
+        binding: binding(),
+        journalTransfer: Object.defineProperty(
+          { ...broadcastIntent(), state: "PLANNED" },
+          "address",
+          {
+            enumerable: true,
+            get() {
+              accessorReads += 1;
+              return RECIPIENTS[0];
+            },
+          },
+        ),
+        nonceTransaction: null,
+        receipt: null,
+        recipientFact: { address: RECIPIENTS[0], balanceWei: 0n, nonce: 0n },
+      }),
+    BilateralFundingError,
+  );
+  assert.equal(accessorReads, 0);
+
+  assert.throws(
+    () =>
+      classifyFundingRecovery({
+        binding: binding(),
+        journalTransfer: broadcastIntent(),
+        nonceTransaction: Object.defineProperty(
+          {
+            chainId: 11155111,
+            from: FUNDING_ADDRESS,
+            hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            nonce: "7",
+            to: RECIPIENTS[0],
+            valueWei: "10000000000000000",
+          },
+          "from",
+          {
+            enumerable: true,
+            get() {
+              return FUNDING_ADDRESS;
+            },
+          },
+        ),
+        receipt: null,
+        recipientFact: { address: RECIPIENTS[0], balanceWei: 0n, nonce: 0n },
+      }),
+    BilateralFundingError,
+  );
+});
+
+test("journal update checks target identity immediately before rename", async () => {
+  const directory = await privateDirectory("funding-journal-rename-race-");
+  let journalPath;
+  let renameCalled = false;
+  const fileSystem = {
+    async open(path, flags, mode) {
+      const handle = await import("node:fs/promises").then(({ open }) =>
+        open(path, flags, mode),
+      );
+      if (!path.includes(".funding-journal.tmp-")) return handle;
+      return {
+        ...handle,
+        chmod: handle.chmod.bind(handle),
+        close: handle.close.bind(handle),
+        stat: handle.stat.bind(handle),
+        writeFile: handle.writeFile.bind(handle),
+        async sync() {
+          await handle.sync();
+          await rm(journalPath);
+          await writeFile(journalPath, canonicalJson({}), { mode: 0o600 });
+        },
+      };
+    },
+    async rename(from, to) {
+      renameCalled = true;
+      await nodeRename(from, to);
+    },
+  };
+  const journal = await openFundingJournal({
+    binding: binding(),
+    journalDirectory: directory,
+    dependencies: { fileSystem },
+  });
+  journalPath = journal.path;
+
+  await assert.rejects(
+    journal.recordBroadcastIntent(broadcastIntent()),
+    BilateralFundingError,
+  );
+  assert.equal(renameCalled, false);
 });
