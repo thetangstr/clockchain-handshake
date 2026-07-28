@@ -30,6 +30,9 @@ export const COORDINATION_EVENT_AUTHORITIES =
     ENROLLMENT_CONFIRMED: "role",
     FUNDING_INPUTS_READY: "role",
     IDENTITY_PACKAGE_READY: "role",
+    PAYER_MANDATE_READY: "payer",
+    PAYMENT_REQUEST_READY: "payee",
+    PAYMENT_REQUEST_MATCHED: "payer",
     PREFLIGHT_PARTICIPANT_READY: "role",
     RECOVERY_REQUIRED: "role",
     ROLE_PACKAGE_READY: "role",
@@ -74,6 +77,9 @@ const FACT_KEYS = Object.freeze([
   "enrollmentReceipt",
   "fundingInputsReady",
   "identityPackageReady",
+  "payerMandateReady",
+  "paymentRequestReady",
+  "paymentRequestMatched",
   "preflightParticipantReady",
   "preflightPlanReady",
   "recoveryAuthorized",
@@ -147,6 +153,9 @@ const EVENT_RUNS = Object.freeze({
   EXACT_RECOVERY_AUTHORIZATION: RECOVERY_RUN_KEYS,
   FUNDING_INPUTS_READY: Object.freeze(["release"]),
   IDENTITY_PACKAGE_READY: RUN_KEYS,
+  PAYER_MANDATE_READY: RUN_KEYS,
+  PAYMENT_REQUEST_READY: RUN_KEYS,
+  PAYMENT_REQUEST_MATCHED: RUN_KEYS,
   PREFLIGHT_PARTICIPANT_READY: Object.freeze([
     "release",
   ]),
@@ -333,6 +342,9 @@ function readFacts(value) {
     identityPackageReady: runRoleFacts(
       data.get("identityPackageReady"),
     ),
+    payerMandateReady: runFacts(data.get("payerMandateReady")),
+    paymentRequestReady: runFacts(data.get("paymentRequestReady")),
+    paymentRequestMatched: runFacts(data.get("paymentRequestMatched")),
     preflightParticipantReady: roleFacts(
       data.get("preflightParticipantReady"),
     ),
@@ -418,6 +430,9 @@ function emptyFacts() {
     enrollmentReceipt: false,
     fundingInputsReady: emptyRoleFacts(),
     identityPackageReady: emptyRunRoleFacts(),
+    payerMandateReady: emptyRunFacts(),
+    paymentRequestReady: emptyRunFacts(),
+    paymentRequestMatched: emptyRunFacts(),
     preflightParticipantReady: emptyRoleFacts(),
     preflightPlanReady: false,
     recoveryAuthorized: emptyRecoveryRoleDigestFacts(),
@@ -828,8 +843,30 @@ export function reduceReleaseEvent(
           : "STAKEHOLDER_IDENTITIES_READY";
       requireState(view, expectedState);
       requireBoth(facts.identityPackageReady[run]);
+      if (!facts.payerMandateReady[run] || !facts.paymentRequestReady[run] || !facts.paymentRequestMatched[run]) invalid();
       assertUnused(facts.runDescriptorReady[run]);
       facts.runDescriptorReady[run] = true;
+      break;
+    }
+    case "PAYER_MANDATE_READY": {
+      requireState(view, run === "rehearsal" ? "REHEARSAL_IDENTITIES_READY" : "STAKEHOLDER_IDENTITIES_READY");
+      requireBoth(facts.identityPackageReady[run]);
+      assertUnused(facts.payerMandateReady[run]);
+      facts.payerMandateReady[run] = true;
+      break;
+    }
+    case "PAYMENT_REQUEST_READY": {
+      requireState(view, run === "rehearsal" ? "REHEARSAL_IDENTITIES_READY" : "STAKEHOLDER_IDENTITIES_READY");
+      if (!facts.payerMandateReady[run]) invalid();
+      assertUnused(facts.paymentRequestReady[run]);
+      facts.paymentRequestReady[run] = true;
+      break;
+    }
+    case "PAYMENT_REQUEST_MATCHED": {
+      requireState(view, run === "rehearsal" ? "REHEARSAL_IDENTITIES_READY" : "STAKEHOLDER_IDENTITIES_READY");
+      if (!facts.paymentRequestReady[run]) invalid();
+      assertUnused(facts.paymentRequestMatched[run]);
+      facts.paymentRequestMatched[run] = true;
       break;
     }
     case "DESCRIPTOR_ACCEPTED": {

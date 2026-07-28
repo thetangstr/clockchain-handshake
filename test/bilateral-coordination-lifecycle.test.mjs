@@ -37,6 +37,9 @@ const FACT_KEYS = Object.freeze([
   "enrollmentReceipt",
   "fundingInputsReady",
   "identityPackageReady",
+  "payerMandateReady",
+  "paymentRequestReady",
+  "paymentRequestMatched",
   "preflightParticipantReady",
   "preflightPlanReady",
   "recoveryAuthorized",
@@ -234,6 +237,9 @@ function toRunRunning(subjectRun) {
     "payee",
     subjectRun,
   );
+  view = apply(view, "PAYER_MANDATE_READY", "payer", subjectRun);
+  view = apply(view, "PAYMENT_REQUEST_READY", "payee", subjectRun);
+  view = apply(view, "PAYMENT_REQUEST_MATCHED", "payer", subjectRun);
   view = apply(
     view,
     descriptorKind,
@@ -282,6 +288,20 @@ function toRunPackagesReady(subjectRun) {
     subjectRun,
   );
 }
+
+test("requires payer mandate, payee request, and payer match before a run descriptor", () => {
+  let view = toPreflightPassed();
+  view = apply(view, "REGISTER_REHEARSAL", "operator", "rehearsal");
+  view = apply(view, "IDENTITY_PACKAGE_READY", "payer", "rehearsal");
+  view = apply(view, "IDENTITY_PACKAGE_READY", "payee", "rehearsal");
+  assert.throws(() => apply(view, "REHEARSAL_DESCRIPTOR_READY", "operator", "rehearsal"), CoordinationLifecycleError);
+  view = apply(view, "PAYER_MANDATE_READY", "payer", "rehearsal");
+  assert.throws(() => apply(view, "REHEARSAL_DESCRIPTOR_READY", "operator", "rehearsal"), CoordinationLifecycleError);
+  view = apply(view, "PAYMENT_REQUEST_READY", "payee", "rehearsal");
+  assert.throws(() => apply(view, "REHEARSAL_DESCRIPTOR_READY", "operator", "rehearsal"), CoordinationLifecycleError);
+  view = apply(view, "PAYMENT_REQUEST_MATCHED", "payer", "rehearsal");
+  assert.equal(apply(view, "REHEARSAL_DESCRIPTOR_READY", "operator", "rehearsal").facts.runDescriptorReady.rehearsal, true);
+});
 
 function toRehearsalVerified() {
   return apply(
@@ -360,6 +380,9 @@ test("pins the closed release states and event authorities", () => {
     ENROLLMENT_CONFIRMED: "role",
     FUNDING_INPUTS_READY: "role",
     IDENTITY_PACKAGE_READY: "role",
+    PAYER_MANDATE_READY: "payer",
+    PAYMENT_REQUEST_READY: "payee",
+    PAYMENT_REQUEST_MATCHED: "payer",
     PREFLIGHT_PARTICIPANT_READY: "role",
     RECOVERY_REQUIRED: "role",
     ROLE_PACKAGE_READY: "role",
@@ -600,6 +623,9 @@ test("reduces the complete valid release sequence through COMPLETE", () => {
     view.state,
     "REHEARSAL_IDENTITIES_READY",
   );
+  view = apply(view, "PAYER_MANDATE_READY", "payer", "rehearsal");
+  view = apply(view, "PAYMENT_REQUEST_READY", "payee", "rehearsal");
+  view = apply(view, "PAYMENT_REQUEST_MATCHED", "payer", "rehearsal");
   view = apply(
     view,
     "REHEARSAL_DESCRIPTOR_READY",
@@ -684,6 +710,9 @@ test("reduces the complete valid release sequence through COMPLETE", () => {
     view.state,
     "STAKEHOLDER_IDENTITIES_READY",
   );
+  view = apply(view, "PAYER_MANDATE_READY", "payer", "stakeholder");
+  view = apply(view, "PAYMENT_REQUEST_READY", "payee", "stakeholder");
+  view = apply(view, "PAYMENT_REQUEST_MATCHED", "payer", "stakeholder");
   view = apply(
     view,
     "STAKEHOLDER_DESCRIPTOR_READY",
@@ -1492,6 +1521,9 @@ test("recovery request digests are globally single-use across the release", () =
     "payee",
     "stakeholder",
   );
+  authorized = apply(authorized, "PAYER_MANDATE_READY", "payer", "stakeholder");
+  authorized = apply(authorized, "PAYMENT_REQUEST_READY", "payee", "stakeholder");
+  authorized = apply(authorized, "PAYMENT_REQUEST_MATCHED", "payer", "stakeholder");
   authorized = apply(
     authorized,
     "STAKEHOLDER_DESCRIPTOR_READY",

@@ -1101,6 +1101,8 @@ test("pins the closed artifact policy and storage bounds", () => {
   assert.deepEqual(ARTIFACT_POLICIES, {
     "coordination-enrollment": { maximum: 65_536 },
     "coordination-receipt": { maximum: 65_536 },
+    "payer-mandate": { maximum: 65_536 },
+    "payment-request": { maximum: 65_536 },
     "failure-summary": { maximum: 16_384 },
     "identity-package": {
       maximum: 1_048_576,

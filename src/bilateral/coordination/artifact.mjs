@@ -47,6 +47,8 @@ import {
   probeKey,
   REFID_PATTERN,
 } from "../refid.mjs";
+import { validatePayerMandate } from "../payer-mandate.mjs";
+import { validatePaymentRequest } from "../payment-request.mjs";
 
 export const MAX_RELAY_ARTIFACT_BYTES = 1_048_576;
 export const MAX_RELAY_PACKAGE_BYTES = 3_145_728;
@@ -60,6 +62,8 @@ export const ARTIFACT_POLICIES = Object.freeze({
   "coordination-receipt": Object.freeze({
     maximum: 65_536,
   }),
+  "payer-mandate": Object.freeze({ maximum: 65_536 }),
+  "payment-request": Object.freeze({ maximum: 65_536 }),
   "failure-summary": Object.freeze({
     maximum: 16_384,
   }),
@@ -1036,6 +1040,12 @@ async function validateRelayArtifactInternal(input) {
         parsed,
         canaries,
       );
+    } else if (data.artifactType === "payer-mandate") {
+      readExactData(parsed, ["mandate", "schema", "signature"]);
+      validatePayerMandate(parsed.mandate);
+    } else if (data.artifactType === "payment-request") {
+      readExactData(parsed, ["request", "schema", "signature"]);
+      validatePaymentRequest(parsed.request);
     } else if (
       data.artifactType === "signed-descriptor"
     ) {
