@@ -439,7 +439,21 @@ async function runSupervisorRole(value, role) {
       const changed = structuredClone(input);
       if (configuration.scenario === "expired-mandate") {
         changed.mandate = structuredClone(input.mandate);
-        changed.mandate.expiresAtMs = String(Number(changed.mandate.createdAtMs) + 1);
+        changed.mandate.expiresAtMs = String(
+          Number(changed.mandate.issuedAtMs) + 1,
+        );
+        if (
+          !/^(?:0|[1-9][0-9]*)$/.test(changed.mandate.issuedAtMs) ||
+          !/^(?:0|[1-9][0-9]*)$/.test(changed.mandate.expiresAtMs) ||
+          !(
+            Number(changed.mandate.issuedAtMs) <
+              Number(changed.mandate.expiresAtMs) &&
+            Number(changed.mandate.expiresAtMs) <=
+              configuration.clockMs
+          )
+        ) {
+          fail();
+        }
         return production.signPayerMandate(changed);
       }
       const envelope = structuredClone(await production.signPayerMandate(changed));
