@@ -116,6 +116,11 @@ function assertContext(value) {
   if (typeof data.releaseId !== "string" || data.releaseId.length === 0 || data.releaseId.length > 256 || data.releaseId.trim() !== data.releaseId || !/^[ -~]+$/.test(data.releaseId) || typeof data.repositorySha !== "string" || !REPOSITORY_SHA_PATTERN.test(data.repositorySha) || typeof data.sessionId !== "string" || !UUID_PATTERN.test(data.sessionId)) invalid();
   return Object.freeze(data);
 }
+function expectedParty(value) {
+  const data = exact(value, ["address", "agentId"]);
+  if (typeof data.address !== "string" || !/^0x[0-9a-f]{40}$/.test(data.address) || typeof data.agentId !== "string" || !DECIMAL_PATTERN.test(data.agentId)) invalid();
+  return frozen({ address: data.address, agentId: data.agentId });
+}
 function assertIdentity(value) {
   const data = exact(value, ["keyId", "privateKeyPem", "publicKey"]);
   if (typeof data.keyId !== "string" || !KEY_ID_PATTERN.test(data.keyId) || typeof data.publicKey !== "string" || typeof data.privateKeyPem !== "string" || data.privateKeyPem.length === 0 || Buffer.byteLength(data.privateKeyPem) > 1024) invalid();
@@ -424,7 +429,8 @@ export function createOperatorRelayClient(input) {
       return frozen({ ...view, facts: validateFacts(view.facts, template.facts) });
     },
     async readVerifierPublication(value) {
-      const inputValue = exact(value, ["subjectRun"]);
+      const inputValue = exact(value, ["payer", "payee", "subjectRun"]);
+      const payer = expectedParty(inputValue.payer); const payee = expectedParty(inputValue.payee);
       if (!["rehearsal", "stakeholder"].includes(inputValue.subjectRun)) invalid();
       const parsed = canonicalJson(await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/verifier-publications/${inputValue.subjectRun}` }, "application/json"));
       return parsed === null ? null : validatePublication(parsed, context, inputValue.subjectRun);
@@ -434,13 +440,18 @@ export function createOperatorRelayClient(input) {
       if (!["rehearsal", "stakeholder"].includes(inputValue.subjectRun)) invalid();
       const bytes = await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/mandate?subjectRun=${inputValue.subjectRun}` }, "application/octet-stream");
       try { await validateRelayArtifact({ artifactType: "payer-mandate", bytes, expectedDigest: sha256(bytes), secretCanaries: [] }); } catch { invalid(); }
+      const envelope = canonicalJson(bytes);
+      if (envelope.mandate.releaseId !== context.releaseId || envelope.mandate.repositorySha !== context.repositorySha || envelope.mandate.sessionId !== context.sessionId || envelope.mandate.subjectRun !== inputValue.subjectRun || envelope.mandate.paymentMoved !== false || !canonicalBytes(envelope.mandate.payer).equals(canonicalBytes(payer)) || !canonicalBytes(envelope.mandate.payee).equals(canonicalBytes(payee))) invalid();
       return Buffer.from(bytes);
     },
     async readPaymentRequest(value) {
-      const inputValue = exact(value, ["requestId"]);
+      const inputValue = exact(value, ["payer", "payee", "requestId", "subjectRun"]);
+      const payer = expectedParty(inputValue.payer); const payee = expectedParty(inputValue.payee);
       if (typeof inputValue.requestId !== "string" || !UUID_PATTERN.test(inputValue.requestId)) invalid();
       const bytes = await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/payment-requests/${inputValue.requestId}` }, "application/octet-stream");
       try { await validateRelayArtifact({ artifactType: "payment-request", bytes, expectedDigest: sha256(bytes), secretCanaries: [] }); } catch { invalid(); }
+      const envelope = canonicalJson(bytes);
+      if (envelope.request.releaseId !== context.releaseId || envelope.request.repositorySha !== context.repositorySha || envelope.request.sessionId !== context.sessionId || envelope.request.requestId !== inputValue.requestId || envelope.request.subjectRun !== inputValue.subjectRun || envelope.request.paymentMoved !== false || !canonicalBytes(envelope.request.payer).equals(canonicalBytes(payer)) || !canonicalBytes(envelope.request.payee).equals(canonicalBytes(payee))) invalid();
       return Buffer.from(bytes);
     },
     prepareCapabilityRegistration(value) {
