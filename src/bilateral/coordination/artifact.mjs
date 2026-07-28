@@ -47,8 +47,8 @@ import {
   probeKey,
   REFID_PATTERN,
 } from "../refid.mjs";
-import { validatePayerMandate } from "../payer-mandate.mjs";
-import { validatePaymentRequest } from "../payment-request.mjs";
+import { PAYER_MANDATE_ENVELOPE_SCHEMA, payerMandateSigningBytes, validatePayerMandate } from "../payer-mandate.mjs";
+import { PAYMENT_REQUEST_ENVELOPE_SCHEMA, paymentRequestSigningBytes, validatePaymentRequest } from "../payment-request.mjs";
 
 export const MAX_RELAY_ARTIFACT_BYTES = 1_048_576;
 export const MAX_RELAY_PACKAGE_BYTES = 3_145_728;
@@ -1043,9 +1043,15 @@ async function validateRelayArtifactInternal(input) {
     } else if (data.artifactType === "payer-mandate") {
       readExactData(parsed, ["mandate", "schema", "signature"]);
       validatePayerMandate(parsed.mandate);
+      if (parsed.schema !== PAYER_MANDATE_ENVELOPE_SCHEMA || parsed.signature?.algorithm !== "eip191" || parsed.signature.address !== parsed.mandate.payer.address) invalid();
+      const recovered = await recoverMessageAddress({ message: { raw: payerMandateSigningBytes(parsed.mandate) }, signature: parsed.signature.value });
+      if (recovered.toLowerCase() !== parsed.mandate.payer.address) invalid();
     } else if (data.artifactType === "payment-request") {
       readExactData(parsed, ["request", "schema", "signature"]);
       validatePaymentRequest(parsed.request);
+      if (parsed.schema !== PAYMENT_REQUEST_ENVELOPE_SCHEMA || parsed.signature?.algorithm !== "eip191" || parsed.signature.address !== parsed.request.payee.address) invalid();
+      const recovered = await recoverMessageAddress({ message: { raw: paymentRequestSigningBytes(parsed.request) }, signature: parsed.signature.value });
+      if (recovered.toLowerCase() !== parsed.request.payee.address) invalid();
     } else if (
       data.artifactType === "signed-descriptor"
     ) {

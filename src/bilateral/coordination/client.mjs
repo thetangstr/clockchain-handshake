@@ -385,6 +385,12 @@ function parseCanonicalJson(bytes) {
   return parsed;
 }
 
+function expectedParty(value) {
+  const data = readExactData(value, ["address", "agentId"]);
+  if (typeof data.address !== "string" || !/^0x[0-9a-f]{40}$/.test(data.address) || typeof data.agentId !== "string" || !DECIMAL_PATTERN.test(data.agentId)) invalid();
+  return Object.freeze({ address: data.address, agentId: data.agentId });
+}
+
 function assertRelayUrl(value) {
   if (typeof value !== "string") {
     invalid();
@@ -1734,8 +1740,7 @@ function createCoordinationClientCore({
       const data = readExactData(value, ["bytes", "subjectRun"]);
       if (context.role !== "payer" || !["rehearsal", "stakeholder"].includes(data.subjectRun) || !Buffer.isBuffer(data.bytes)) invalid();
       const bytes = Buffer.from(data.bytes);
-      const envelope = parseCanonicalJson(bytes);
-      try { validatePayerMandate(envelope.mandate); } catch { invalid(); }
+      await assertArtifactInput("payer-mandate", bytes, sha256(bytes));
       const metadata = await putArtifact({ artifactType: "payer-mandate", bytes, expectedDigest: sha256(bytes) });
       await appendEvent({ artifactDigest: metadata.digest, kind: "PAYER_MANDATE_READY", subjectRun: data.subjectRun });
       return metadata;
@@ -1745,8 +1750,8 @@ function createCoordinationClientCore({
       const data = readExactData(value, ["bytes"]);
       if (context.role !== "payee" || !Buffer.isBuffer(data.bytes) || data.bytes.length === 0 || data.bytes.length > 65_536) invalid();
       const bytes = Buffer.from(data.bytes);
+      await assertArtifactInput("payment-request", bytes, sha256(bytes));
       const envelope = parseCanonicalJson(bytes);
-      try { validatePaymentRequest(envelope.request); } catch { invalid(); }
       const subjectRun = envelope.request.subjectRun;
       if (!["rehearsal", "stakeholder"].includes(subjectRun) || envelope.request.sessionId !== context.sessionId) invalid();
       const response = validateInjectedResponse(await exactRequest(transport, { body: bytes, method: "POST", path: `/v1/sessions/${context.sessionId}/payment-requests` }), "application/json");
@@ -1757,21 +1762,24 @@ function createCoordinationClientCore({
     }
 
     async function readPayerMandate(value) {
-      const data = readExactData(value, ["subjectRun"]);
+      const data = readExactData(value, ["payer", "payee", "subjectRun"]);
+      const payer = expectedParty(data.payer); const payee = expectedParty(data.payee);
       if (!["rehearsal", "stakeholder"].includes(data.subjectRun)) invalid();
       const bytes = validateInjectedResponse(await exactRequest(transport, { body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/mandate?subjectRun=${data.subjectRun}` }), "application/octet-stream");
+      await assertArtifactInput("payer-mandate", bytes, sha256(bytes));
       const envelope = parseCanonicalJson(bytes);
-      try { validatePayerMandate(envelope.mandate); } catch { invalid(); }
+      if (envelope.mandate.releaseId !== context.releaseId || envelope.mandate.repositorySha !== context.repositorySha || envelope.mandate.sessionId !== context.sessionId || envelope.mandate.subjectRun !== data.subjectRun || envelope.mandate.paymentMoved !== false || canonicalBytes(envelope.mandate.payer).equals(canonicalBytes(payer)) === false || canonicalBytes(envelope.mandate.payee).equals(canonicalBytes(payee)) === false) invalid();
       return Buffer.from(bytes);
     }
 
     async function readPaymentRequest(value) {
-      const data = readExactData(value, ["requestId"]);
+      const data = readExactData(value, ["payer", "payee", "requestId", "subjectRun"]);
+      const payer = expectedParty(data.payer); const payee = expectedParty(data.payee);
       if (typeof data.requestId !== "string" || !UUID_PATTERN.test(data.requestId)) invalid();
       const bytes = validateInjectedResponse(await exactRequest(transport, { body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/payment-requests/${data.requestId}` }), "application/octet-stream");
+      await assertArtifactInput("payment-request", bytes, sha256(bytes));
       const envelope = parseCanonicalJson(bytes);
-      try { validatePaymentRequest(envelope.request); } catch { invalid(); }
-      if (envelope.request.requestId !== data.requestId || envelope.request.sessionId !== context.sessionId) invalid();
+      if (envelope.request.requestId !== data.requestId || envelope.request.sessionId !== context.sessionId || envelope.request.releaseId !== context.releaseId || envelope.request.repositorySha !== context.repositorySha || envelope.request.subjectRun !== data.subjectRun || envelope.request.paymentMoved !== false || !canonicalBytes(envelope.request.payer).equals(canonicalBytes(payer)) || !canonicalBytes(envelope.request.payee).equals(canonicalBytes(payee))) invalid();
       return Buffer.from(bytes);
     }
 
