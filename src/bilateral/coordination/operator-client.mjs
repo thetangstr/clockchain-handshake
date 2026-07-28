@@ -429,14 +429,14 @@ export function createOperatorRelayClient(input) {
       return frozen({ ...view, facts: validateFacts(view.facts, template.facts) });
     },
     async readVerifierPublication(value) {
-      const inputValue = exact(value, ["payer", "payee", "subjectRun"]);
-      const payer = expectedParty(inputValue.payer); const payee = expectedParty(inputValue.payee);
+      const inputValue = exact(value, ["subjectRun"]);
       if (!["rehearsal", "stakeholder"].includes(inputValue.subjectRun)) invalid();
       const parsed = canonicalJson(await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/verifier-publications/${inputValue.subjectRun}` }, "application/json"));
       return parsed === null ? null : validatePublication(parsed, context, inputValue.subjectRun);
     },
     async readPayerMandate(value) {
-      const inputValue = exact(value, ["subjectRun"]);
+      const inputValue = exact(value, ["payer", "payee", "subjectRun"]);
+      const payer = expectedParty(inputValue.payer); const payee = expectedParty(inputValue.payee);
       if (!["rehearsal", "stakeholder"].includes(inputValue.subjectRun)) invalid();
       const bytes = await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/mandate?subjectRun=${inputValue.subjectRun}` }, "application/octet-stream");
       try { await validateRelayArtifact({ artifactType: "payer-mandate", bytes, expectedDigest: sha256(bytes), secretCanaries: [] }); } catch { invalid(); }
