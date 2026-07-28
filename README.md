@@ -15,10 +15,11 @@ Read the [stakeholder and operator runbook](DEMO.md), the
 [standalone prompt](prompts/run-turnkey-demo.md), and the
 [invitation handling notes](invites/README.md). A
 [sanitized recovery evidence summary](docs/demo-evidence/latest.md) records the
-independently re-verified public evidence. The expected live run takes roughly
-30–90 seconds under normal testnet conditions. A passing `npm run demo` writes
-sanitized `RESULT.md` and `result.json`; neither a narrative nor a submitted
-transaction is a PASS by itself. When a run stops instead, the
+independently re-verified public evidence. Live duration depends on external
+testnet services and is intentionally not documented as a timeline promise. A
+passing `npm run demo` writes sanitized `RESULT.md` and `result.json`; neither
+a narrative nor a submitted transaction is a PASS by itself. When a run stops
+instead, the
 [failure code reference](DEMO.md#failure-codes) lists every public failure code,
 the exit it produces, and the next action for the operator.
 
@@ -30,6 +31,12 @@ machines. Start with the
 the machine-specific [Billy prompt](prompts/run-billy-bilateral-demo.md) and
 [Iris prompt](prompts/run-iris-bilateral-demo.md) from one reviewed immutable
 repository SHA.
+
+Demo-day role mapping is fixed: Stakeholder 1 is Iris, the payee; Stakeholder 2 is Billy, the payer; the operator runs the relay, coordinator, watcher,
+reusable Sepolia treasury, and fresh aggregate verifier from this Mac. The
+reusable Sepolia treasury is funding authority only for deterministic testnet
+gas top-ups through `npm run bilateral:fund`; it never signs participant
+registration, role, watcher, or verifier actions.
 
 Billy anchors an exact USD 100 proposal, Iris anchors an acceptance bound to
 that proposal, and Billy anchors the final acknowledgment. For a session that

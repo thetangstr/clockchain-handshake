@@ -355,6 +355,11 @@ const VERIFIER_COMMAND = `node scripts/verify-bilateral-results.mjs \\
   --payee-results "$IRIS_TRANSFERRED_RESULT_DIR" \\
   --payer-results "$BILLY_TRANSFERRED_RESULT_DIR" \\
   --rpc-url "$SEPOLIA_RPC_URL"`;
+const FUNDING_COMMAND = `npm run bilateral:fund -- \\
+  --funding-record "$FUNDING_RECORD_FILE" \\
+  --journal-directory "$FUNDING_JOURNAL_DIR" \\
+  --keystore "$SEPOLIA_TREASURY_KEYSTORE" \\
+  --rpc-url-file "$SEPOLIA_RPC_URL_FILE"`;
 
 function bilateralContractFailures(relativePath, contents) {
   const failures = [];
@@ -367,6 +372,10 @@ function bilateralContractFailures(relativePath, contents) {
   }
   const pathRequirements = {
     "prompts/run-billy-bilateral-demo.md": [
+      [
+        "Stakeholder 2 role card",
+        /\bYou are Stakeholder 2, Billy, the payer\. Start only the payer supervisor\./,
+      ],
       ["Billy payer machine role", /\bBilly machine[^.]*payer\b/i],
       [
         "automated supervisor session",
@@ -392,8 +401,26 @@ function bilateralContractFailures(relativePath, contents) {
         "single-session machine preparation",
         /\bpreflight\b[\s\S]*\bregistration\b[\s\S]*\bsynchronized start\b/i,
       ],
+      [
+        "clean detached checkout",
+        /\bclean detached checkout\b[^.]*\breviewed 40-character SHA\b/i,
+      ],
+      [
+        "60-minute launch manifests",
+        /\blaunch manifest expires after 60 minutes\b/i,
+      ],
+      ["secret-byte prohibition", /\bdo not inspect secret bytes\b/i],
+      ["role-switch prohibition", /\bdo not switch roles\b/i],
+      ["extra-session prohibition", /\bdo not create extra sessions\b/i],
+      ["funding prohibition", /\bdo not fund addresses\b/i],
+      ["watcher/verifier prohibition", /\bdo not run the watcher or verifier\b/i],
+      ["authorization prohibition", /\bdo not declare authorization\b/i],
     ],
     "prompts/run-iris-bilateral-demo.md": [
+      [
+        "Stakeholder 1 role card",
+        /\bYou are Stakeholder 1, Iris, the payee\. Start only the payee supervisor\./,
+      ],
       ["Iris payee machine role", /\bIris machine[^.]*payee\b/i],
       [
         "automated supervisor session",
@@ -419,8 +446,34 @@ function bilateralContractFailures(relativePath, contents) {
         "single-session machine preparation",
         /\bpreflight\b[\s\S]*\bregistration\b[\s\S]*\bsynchronized start\b/i,
       ],
+      [
+        "clean detached checkout",
+        /\bclean detached checkout\b[^.]*\breviewed 40-character SHA\b/i,
+      ],
+      [
+        "60-minute launch manifests",
+        /\blaunch manifest expires after 60 minutes\b/i,
+      ],
+      ["secret-byte prohibition", /\bdo not inspect secret bytes\b/i],
+      ["role-switch prohibition", /\bdo not switch roles\b/i],
+      ["extra-session prohibition", /\bdo not create extra sessions\b/i],
+      ["funding prohibition", /\bdo not fund addresses\b/i],
+      ["watcher/verifier prohibition", /\bdo not run the watcher or verifier\b/i],
+      ["authorization prohibition", /\bdo not declare authorization\b/i],
     ],
     "docs/runbooks/bilateral-demo-day.md": [
+      [
+        "Stakeholder 1 role mapping",
+        /\bStakeholder 1\s+[—-]\s+Iris\s+[—-]\s+payee\b/,
+      ],
+      [
+        "Stakeholder 2 role mapping",
+        /\bStakeholder 2\s+[—-]\s+Billy\s+[—-]\s+payer\b/,
+      ],
+      [
+        "operator role mapping",
+        /\bOperator\s+[—-]\s+relay,\s+coordinator,\s+watcher,\s+funding wallet,\s+fresh aggregate verifier\b/i,
+      ],
       ["automated primary flow", /\bAutomated primary flow\b/i],
       [
         "exact relay entrypoint",
@@ -445,6 +498,82 @@ function bilateralContractFailures(relativePath, contents) {
         /\bPhysical separation\b[^.]*\battested\b[^.]*\bnot cryptographically proven\b/i,
       ],
       ["change invalidation", /\bcode or prompt change\b[^.]*\baborts the release\b/i],
+      [
+        "reachable numeric relay",
+        /\bRELAY_ADVERTISED_IP\b[^.\n]*\bnumeric IP\b[^.\n]*\breachable by both role computers\b/i,
+      ],
+      [
+        "reachable numeric relay",
+        /\b127\.0\.0\.1\b[^.\n]*\bmust not be the advertised relay address\b/i,
+      ],
+      [
+        "all-interface relay bind",
+        /\bRELAY_LISTEN_HOST=0\.0\.0\.0\b[^.\n]*\ball-interface bind\b/i,
+      ],
+      [
+        "advertised relay bind default",
+        /--host "\$\{RELAY_LISTEN_HOST:-\$RELAY_ADVERTISED_IP\}"/,
+      ],
+      [
+        "relay certificate IP SAN",
+        /\bsubjectAltName=IP:\$RELAY_ADVERTISED_IP\b/,
+      ],
+      [
+        "relay certificate fingerprint",
+        /\bRELAY_TLS_FINGERPRINT=.*openssl x509\b/,
+      ],
+      [
+        "coordinator relay URL",
+        /\bhttps:\/\/\$RELAY_ADVERTISED_IP:\$RELAY_PORT\b/,
+      ],
+      [
+        "0700 operator and release roots",
+        /\bchmod 0700 "\$BILATERAL_OPERATOR_ROOT" "\$BILATERAL_RELEASE_ROOT"/,
+      ],
+      [
+        "0700 relay state",
+        /\bchmod 0700 "\$BILATERAL_RELEASE_ROOT\/relay-state"/,
+      ],
+      [
+        "0600 RPC URL file",
+        /\bchmod 0600 "\$SEPOLIA_RPC_URL_FILE"/,
+      ],
+      [
+        "private launch manifest delivery",
+        /\bpayee\.launch\.json\b[^.\n]*\bonly to Iris\b/i,
+      ],
+      [
+        "private launch manifest delivery",
+        /\bpayer\.launch\.json\b[^.\n]*\bonly to Billy\b/i,
+      ],
+      [
+        "60-minute launch manifests",
+        /\blaunch manifests expire after 60 minutes\b/i,
+      ],
+      [
+        "funding record capture",
+        /\bsave\b[^.\n]*\bfunding-addresses\.json\b[^.\n]*\bmode-`0600` record file\b/i,
+      ],
+      [
+        "funding budget",
+        /\b0\.05 Sepolia ETH\b[^.\n]*\bfour `0\.01 ETH` allocations\b/i,
+      ],
+      [
+        "participant gas boundary",
+        /\bdemo transactions spend gas from participant balances\b[^.\n]*\bnever move the represented USD payment\b/i,
+      ],
+      [
+        "recovery reserve",
+        /\bsecond `0\.05` drip\b[^.\n]*\brecovery reserve\b/i,
+      ],
+      [
+        "unrecoverable write reset",
+        /\bfresh invitations and a newly reviewed release\b/i,
+      ],
+      [
+        "verifier-only authorization",
+        /\baccept `AUTHORIZED` only from each fresh aggregate verifier\b/i,
+      ],
       [
         "recovery appendix",
         /\bOperator-authorized recovery appendix\b/i,
@@ -573,6 +702,7 @@ function bilateralContractFailures(relativePath, contents) {
       ["exact role CLI", BILLY_ROLE_COMMAND],
       ["exact role CLI", IRIS_ROLE_COMMAND],
       ["exact verifier CLI", VERIFIER_COMMAND],
+      ["reusable bilateral funding command", FUNDING_COMMAND],
     ],
   };
   for (
@@ -593,6 +723,21 @@ function bilateralContractFailures(relativePath, contents) {
     failures.push(
       `${relativePath}: contains obsolete bilateral CLI flag.`,
     );
+  }
+  if (relativePath === "docs/runbooks/bilateral-demo-day.md") {
+    const primary = contents.split(
+      /^## Operator-authorized recovery appendix$/m,
+      1,
+    )[0];
+    if (
+      /\b(?:--host|--relay-url)\s+(?:"|\$?\{?)?127\.0\.0\.1\b/.test(
+        primary,
+      )
+    ) {
+      failures.push(
+        `${relativePath}: primary flow must not advertise localhost as the two-machine relay endpoint.`,
+      );
+    }
   }
   return failures;
 }
@@ -622,6 +767,35 @@ function packageContractFailures(contents) {
   } catch {
     return ["package.json: must be valid JSON."];
   }
+}
+
+function readmeRoleplayFailures(contents) {
+  const failures = [];
+  if (
+    /\b(?:roughly|about|approximately)\s+\d+\s*(?:-|–|to)\s*\d+\s+seconds\b/i.test(
+      contents,
+    )
+  ) {
+    failures.push(
+      "README.md: bilateral readiness documentation must not make live timeline claims.",
+    );
+  }
+  if (!/\breusable Sepolia treasury\b/i.test(contents)) {
+    failures.push(
+      "README.md: missing reusable Sepolia treasury boundary.",
+    );
+  }
+  if (!/\bStakeholder 1\b[^.\n]*\bIris\b[^.\n]*\bpayee\b/i.test(contents)) {
+    failures.push(
+      "README.md: missing Stakeholder 1 Iris payee role mapping.",
+    );
+  }
+  if (!/\bStakeholder 2\b[^.\n]*\bBilly\b[^.\n]*\bpayer\b/i.test(contents)) {
+    failures.push(
+      "README.md: missing Stakeholder 2 Billy payer role mapping.",
+    );
+  }
+  return failures;
 }
 
 function isPlainRoot(rootDirectory) {
@@ -1485,6 +1659,7 @@ export async function checkDocumentation({
     failures.push(...promptContractFailures(prompt));
   }
   if (readme !== undefined) {
+    failures.push(...readmeRoleplayFailures(readme));
     const embeddedPrompt = extractReadmePrompt(readme);
     if (embeddedPrompt === null) {
       failures.push(

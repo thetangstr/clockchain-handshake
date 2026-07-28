@@ -22,13 +22,79 @@ a submitted transaction, or a narrative is never that verdict.
 
 ## Automated primary flow
 
-The operator freezes one clean 40-character repository SHA, prepares the
-operator key and TLS certificate, and starts the HTTPS relay and coordinator:
+Role cards are fixed for the whole release:
+
+- Stakeholder 1 — Iris — payee.
+- Stakeholder 2 — Billy — payer.
+- Operator — relay, coordinator, watcher, funding wallet, fresh aggregate verifier.
+
+All three computers use Node.js 22, `npm ci --ignore-scripts`, and a clean
+detached checkout of one reviewed 40-character SHA. Stop if any worktree is
+dirty, if `git rev-parse HEAD` differs, if the relay IP is not reachable by both
+role computers, or if any private input is missing, readable by the wrong user,
+or delivered to the wrong role.
+
+On this Mac, record the reviewed release SHA, create owner-controlled operator
+and release roots, create the Ed25519 operator key, and prepare private runtime
+files:
+
+```sh
+export BILATERAL_REPOSITORY_SHA="$(git rev-parse HEAD)"
+printf '%s\n' "$BILATERAL_REPOSITORY_SHA" | grep -Eq '^[0-9a-f]{40}$'
+
+export BILATERAL_OPERATOR_ROOT="$HOME/.clockchain/bilateral/$BILATERAL_REPOSITORY_SHA"
+export BILATERAL_RELEASE_ROOT="$BILATERAL_OPERATOR_ROOT/release"
+mkdir -p "$BILATERAL_OPERATOR_ROOT" "$BILATERAL_RELEASE_ROOT" "$BILATERAL_RELEASE_ROOT/relay-state"
+chmod 0700 "$BILATERAL_OPERATOR_ROOT" "$BILATERAL_RELEASE_ROOT"
+chmod 0700 "$BILATERAL_RELEASE_ROOT/relay-state"
+
+export OPERATOR_KEY_ID="bilateral-demo-$BILATERAL_REPOSITORY_SHA"
+node scripts/create-session.mjs keygen --key-id "$OPERATOR_KEY_ID"
+export OPERATOR_PRIVATE_KEY_FILE=".context/operator-keys/$OPERATOR_KEY_ID.ed25519.pem"
+
+export SEPOLIA_RPC_URL_FILE="$BILATERAL_OPERATOR_ROOT/sepolia-rpc-url.txt"
+printf '%s\n' "$SEPOLIA_RPC_URL" > "$SEPOLIA_RPC_URL_FILE"
+chmod 0600 "$SEPOLIA_RPC_URL_FILE"
+
+export OPERATOR_CLOCKCHAIN_TOKEN_FILE="$BILATERAL_OPERATOR_ROOT/operator.clockchain-token"
+node scripts/mint-bilateral-token.mjs \
+  --role operator \
+  --output "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \
+  --repository-sha "$BILATERAL_REPOSITORY_SHA"
+```
+
+Choose one advertised numeric relay endpoint for the two role computers.
+`RELAY_ADVERTISED_IP` must be a numeric IP reachable by both role computers;
+127.0.0.1 must not be the advertised relay address. The relay process may bind
+that advertised interface or, when the host firewall is constrained,
+`RELAY_LISTEN_HOST=0.0.0.0` as an explicitly documented all-interface bind.
+The TLS certificate subject alternative name must contain the exact advertised
+IP, and the coordinator must pin the matching certificate fingerprint:
+
+```sh
+export RELAY_ADVERTISED_IP="192.0.2.10"
+export RELAY_PORT="8443"
+export RELAY_URL="https://$RELAY_ADVERTISED_IP:$RELAY_PORT"
+export RELAY_TLS_CERTIFICATE="$BILATERAL_RELEASE_ROOT/relay.crt"
+export RELAY_TLS_PRIVATE_KEY="$BILATERAL_RELEASE_ROOT/relay.key"
+
+openssl req -x509 -newkey rsa:3072 -nodes \
+  -keyout "$RELAY_TLS_PRIVATE_KEY" \
+  -out "$RELAY_TLS_CERTIFICATE" \
+  -subj "/CN=$RELAY_ADVERTISED_IP" \
+  -addext "subjectAltName=IP:$RELAY_ADVERTISED_IP" \
+  -days 1
+chmod 0600 "$RELAY_TLS_PRIVATE_KEY"
+RELAY_TLS_FINGERPRINT="$(openssl x509 -in "$RELAY_TLS_CERTIFICATE" -outform DER | openssl dgst -sha256 -binary | xxd -p -c 256)"
+```
+
+Start the relay and coordinator from the operator Mac. Keep both processes
+attached and stop on any nonzero exit:
 
 ```sh
 npm run bilateral:relay -- \
-  --host 127.0.0.1 \
-  --port 8443 \
+  --host "${RELAY_LISTEN_HOST:-$RELAY_ADVERTISED_IP}" \
+  --port "$RELAY_PORT" \
   --repository-sha "$BILATERAL_REPOSITORY_SHA" \
   --state "$BILATERAL_RELEASE_ROOT/relay-state" \
   --tls-certificate "$RELAY_TLS_CERTIFICATE" \
@@ -39,18 +105,41 @@ npm run bilateral:coordinator -- \
   --operator-key-id "$OPERATOR_KEY_ID" \
   --operator-private-key "$OPERATOR_PRIVATE_KEY_FILE" \
   --release-root "$BILATERAL_RELEASE_ROOT" \
-  --relay-url "$RELAY_URL" \
+  --relay-url "https://$RELAY_ADVERTISED_IP:$RELAY_PORT" \
   --repository-sha "$BILATERAL_REPOSITORY_SHA" \
   --rpc-url-file "$SEPOLIA_RPC_URL_FILE" \
   --tls-certificate "$RELAY_TLS_CERTIFICATE" \
   --tls-fingerprint "$RELAY_TLS_FINGERPRINT"
 ```
 
+The coordinator publishes two private launch manifests under the release root.
+Launch manifests expire after 60 minutes. Privately transfer payee.launch.json only to Iris and payer.launch.json only to Billy through separate private
+channels; never transfer the other role's manifest, an invitation, a token, a
+private key, the Sepolia RPC URL, or the treasury keystore. Each role machine
+uses its prompt, one manifest, one private state directory, and the same clean
+detached checkout of the reviewed 40-character SHA.
+
 The user has exactly two kinds of demo-day action:
 
 1. Start exactly two supervisor sessions—Billy once with the payer launch
    manifest and Iris once with the payee launch manifest.
-2. Fund the four displayed addresses with the documented Sepolia amount.
+2. Fund the four displayed addresses with the reusable Sepolia treasury command.
+
+Billy machine:
+
+```sh
+npm run bilateral:supervisor -- \
+  --launch-manifest "$BILLY_LAUNCH_MANIFEST" \
+  --state "$BILLY_SUPERVISOR_STATE"
+```
+
+Iris machine:
+
+```sh
+npm run bilateral:supervisor -- \
+  --launch-manifest "$IRIS_LAUNCH_MANIFEST" \
+  --state "$IRIS_SUPERVISOR_STATE"
+```
 
 The same Billy and Iris processes remain alive across both runs. Each supervisor
 creates two invitations and one token per role for both runs. After both
@@ -58,14 +147,32 @@ authenticated enrollments, the coordinator displays exactly four signed public
 addresses and continuously checks their balances and nonce-zero status; there
 is no human “funding complete” signal.
 
+Save the coordinator's single canonical funding-addresses.json line to a mode-`0600` record file, then run one treasury funding batch:
+
+```sh
+export FUNDING_RECORD_FILE="$BILATERAL_OPERATOR_ROOT/funding-addresses.json"
+export FUNDING_JOURNAL_DIR="$BILATERAL_OPERATOR_ROOT/funding-journal"
+export SEPOLIA_TREASURY_KEYSTORE="$BILATERAL_OPERATOR_ROOT/sepolia-treasury.json"
+
+npm run bilateral:fund -- \
+  --funding-record "$FUNDING_RECORD_FILE" \
+  --journal-directory "$FUNDING_JOURNAL_DIR" \
+  --keystore "$SEPOLIA_TREASURY_KEYSTORE" \
+  --rpc-url-file "$SEPOLIA_RPC_URL_FILE"
+```
+
+0.05 Sepolia ETH covers four `0.01 ETH` allocations plus ordinary treasury
+transfer gas for one clean rehearsal-plus-stakeholder release. The demo transactions spend gas from participant balances but never move the represented USD payment, so every protocol and verdict artifact remains `paymentMoved: false`. A second `0.05` drip is a recovery reserve because an ambiguous or
+consumed invitation cannot be reused. Fresh invitations and a newly reviewed release are required after an unrecoverable write.
+
 The coordinator then runs one signed physical-machine preflight for both runs,
 registers the rehearsal identities, creates the signed USD 100 descriptor,
 starts Iris before Billy, collects both marker-complete role packages, and
-launches a fresh aggregate verifier. Only that verifier's original terminal
-output can authorize. An exact rehearsal verifier pass unlocks the stakeholder
+launches a fresh aggregate verifier. Accept `AUTHORIZED` only from each fresh aggregate verifier. An exact rehearsal verifier pass unlocks the stakeholder
 run, which uses fresh registration, descriptor, result, and verdict directories
 but the same supervisor keys, tokens, preflight, prompts, release, and
-repository SHA.
+repository SHA. The coordinator completes rehearsal before it starts the
+stakeholder run; any attempt to overlap the runs stops the release.
 
 Physical separation is attested by the operator, not cryptographically proven.
 Any code or prompt change after preflight aborts the release. Any SHA, key,

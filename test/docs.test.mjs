@@ -350,6 +350,141 @@ test("automated bilateral happy path limits the user to four fundings and two su
   }
 });
 
+test("bilateral roleplay docs require three machines and live relay readiness", async () => {
+  const [readme, runbook, billy, iris] = await Promise.all([
+    readFile(join(ROOT_DIRECTORY, "README.md"), "utf8"),
+    readFile(
+      join(ROOT_DIRECTORY, "docs/runbooks/bilateral-demo-day.md"),
+      "utf8",
+    ),
+    readFile(
+      join(ROOT_DIRECTORY, "prompts/run-billy-bilateral-demo.md"),
+      "utf8",
+    ),
+    readFile(
+      join(ROOT_DIRECTORY, "prompts/run-iris-bilateral-demo.md"),
+      "utf8",
+    ),
+  ]);
+  const primaryRunbook = runbook.split(
+    /^## Operator-authorized recovery appendix$/m,
+    1,
+  )[0];
+  assert.doesNotMatch(readme, /\b(?:roughly|about|approximately)\s+\d+\s*(?:-|–|to)\s*\d+\s+seconds\b/i);
+  assert.match(primaryRunbook, /Stakeholder 1\s+[—-]\s+Iris\s+[—-]\s+payee/);
+  assert.match(primaryRunbook, /Stakeholder 2\s+[—-]\s+Billy\s+[—-]\s+payer/);
+  assert.match(primaryRunbook, /Operator\s+[—-]\s+relay,\s+coordinator,\s+watcher,\s+funding wallet,\s+fresh aggregate verifier/i);
+  assert.match(primaryRunbook, /RELAY_ADVERTISED_IP[^.\n]*numeric IP[^.\n]*reachable by both role computers/i);
+  assert.match(primaryRunbook, /subjectAltName=IP:\$RELAY_ADVERTISED_IP/);
+  assert.match(primaryRunbook, /RELAY_TLS_FINGERPRINT=.*openssl x509/i);
+  assert.match(primaryRunbook, /https:\/\/\$RELAY_ADVERTISED_IP:\$RELAY_PORT/);
+  assert.match(primaryRunbook, /127\.0\.0\.1[^.\n]*must not be the advertised relay address/i);
+  assert.match(primaryRunbook, /--host "\$\{RELAY_LISTEN_HOST:-\$RELAY_ADVERTISED_IP\}"/);
+  assert.match(primaryRunbook, /RELAY_LISTEN_HOST=0\.0\.0\.0[^.\n]*all-interface bind/i);
+  assert.match(primaryRunbook, /chmod 0700 "\$BILATERAL_OPERATOR_ROOT" "\$BILATERAL_RELEASE_ROOT"/);
+  assert.match(primaryRunbook, /chmod 0700 "\$BILATERAL_RELEASE_ROOT\/relay-state"/);
+  assert.match(primaryRunbook, /chmod 0600 "\$SEPOLIA_RPC_URL_FILE"/);
+  assert.match(primaryRunbook, /payee\.launch\.json[^.\n]*only to Iris/i);
+  assert.match(primaryRunbook, /payer\.launch\.json[^.\n]*only to Billy/i);
+  assert.match(primaryRunbook, /launch manifests expire after 60 minutes/i);
+  assert.match(primaryRunbook, /npm run bilateral:fund -- \\/);
+  assert.match(primaryRunbook, /--funding-record "\$FUNDING_RECORD_FILE"/);
+  assert.match(primaryRunbook, /--journal-directory "\$FUNDING_JOURNAL_DIR"/);
+  assert.match(primaryRunbook, /--keystore "\$SEPOLIA_TREASURY_KEYSTORE"/);
+  assert.match(primaryRunbook, /--rpc-url-file "\$SEPOLIA_RPC_URL_FILE"/);
+  assert.match(primaryRunbook, /0\.05 Sepolia ETH[^.\n]*four `0\.01 ETH` allocations/i);
+  assert.match(primaryRunbook, /second `0\.05` drip[^.\n]*recovery reserve/i);
+  assert.match(primaryRunbook, /fresh invitations and a newly reviewed release/i);
+  assert.match(primaryRunbook, /demo transactions spend gas from participant balances[^.\n]*never move the represented USD payment/i);
+  assert.match(primaryRunbook, /paymentMoved: false/);
+  assert.match(primaryRunbook, /accept `AUTHORIZED` only from each fresh aggregate verifier/i);
+  assert.match(billy, /You are Stakeholder 2, Billy, the payer\. Start only the payer supervisor\./);
+  assert.match(iris, /You are Stakeholder 1, Iris, the payee\. Start only the payee supervisor\./);
+  for (const prompt of [billy, iris]) {
+    assert.match(prompt, /do not inspect secret bytes/i);
+    assert.match(prompt, /do not switch roles/i);
+    assert.match(prompt, /do not create extra sessions/i);
+    assert.match(prompt, /do not fund addresses/i);
+    assert.match(prompt, /do not run the watcher or verifier/i);
+    assert.match(prompt, /do not declare authorization/i);
+    assert.match(prompt, /clean detached checkout[^.]*reviewed 40-character SHA/i);
+    assert.match(prompt, /launch manifest expires after 60 minutes/i);
+  }
+});
+
+test("documentation checker rejects non-reachable bilateral relay drift", async (t) => {
+  const directory = await temporaryDocumentationFixture(t);
+  const path = join(
+    directory,
+    "docs/runbooks/bilateral-demo-day.md",
+  );
+  const contents = await readFile(path, "utf8");
+  assert.ok(contents.includes("127.0.0.1 must not be the advertised relay address"));
+  await writeFile(
+    path,
+    contents.replace(
+      "127.0.0.1 must not be the advertised relay address",
+      "127.0.0.1 is acceptable as the advertised relay address",
+    ),
+  );
+
+  assert.ok(
+    (
+      await checkDocumentation({
+        rootDirectory: directory,
+      })
+    ).some(
+      (failure) =>
+        failure.includes("bilateral-demo-day.md") &&
+        failure.includes("reachable numeric relay"),
+    ),
+  );
+});
+
+test("documentation checker rejects bilateral manifest and funding drift", async (t) => {
+  const cases = [
+    [
+      "payee.launch.json only to Iris",
+      "payee.launch.json to both stakeholders",
+      "private launch manifest delivery",
+    ],
+    [
+      "Launch manifests expire after 60 minutes",
+      "launch manifests remain valid until used",
+      "60-minute launch manifests",
+    ],
+    [
+      "npm run bilateral:fund --",
+      "node scripts/fund-bilateral-addresses.mjs",
+      "reusable bilateral funding command",
+    ],
+  ];
+
+  for (const [expected, replacement, diagnostic] of cases) {
+    await t.test(diagnostic, async () => {
+      const directory = await temporaryDocumentationFixture(t);
+      const path = join(
+        directory,
+        "docs/runbooks/bilateral-demo-day.md",
+      );
+      const contents = await readFile(path, "utf8");
+      assert.ok(contents.includes(expected));
+      await writeFile(path, contents.replace(expected, replacement));
+      assert.ok(
+        (
+          await checkDocumentation({
+            rootDirectory: directory,
+          })
+        ).some(
+          (failure) =>
+            failure.includes("bilateral-demo-day.md") &&
+            failure.includes(diagnostic),
+        ),
+      );
+    });
+  }
+});
+
 test("documentation checker rejects bilateral safety-contract drift", async (t) => {
   const directory = await temporaryDocumentationFixture(t);
   const path = join(
