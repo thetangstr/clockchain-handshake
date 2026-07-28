@@ -16,6 +16,7 @@ import {
 
 const PAYER = privateKeyToAccount(`0x${"1".repeat(64)}`);
 const PAYEE = privateKeyToAccount(`0x${"2".repeat(64)}`);
+const IMPOSTOR = privateKeyToAccount(`0x${"3".repeat(64)}`);
 const PAYER_ADDRESS = PAYER.address.toLowerCase();
 const PAYEE_ADDRESS = PAYEE.address.toLowerCase();
 const SESSION_ID = "11111111-2222-4333-8444-555555555555";
@@ -128,4 +129,92 @@ test("verification requires a real current validity window", async () => {
   await assert.rejects(verifyPayerMandate({ envelope, expected: expected(), nowMs: 1785293999999 }));
   await assert.rejects(verifyPayerMandate({ envelope, expected: expected(), nowMs: 1785297600000 }));
   await assert.rejects(verifyPayerMandate({ envelope, expected: expected(), nowMs: "1785294300000" }));
+});
+
+test("verification rejects every independently mismatched expected mandate binding", async () => {
+  const envelope = await signed();
+  const otherSessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const cases = [
+    ["amount", { amount: { currency: "USD", value: "99" } }],
+    ["invoiceReferencePrefix", { invoiceReferencePrefix: "OTHER-" }],
+    ["payee", { payee: { address: PAYER_ADDRESS, agentId: "202" } }],
+    ["payer", { payer: { address: PAYEE_ADDRESS, agentId: "101" } }],
+    ["purpose", { purpose: "other-services" }],
+    ["releaseId", { releaseId: "2026-07-29-live-demo" }],
+    ["repositorySha", { repositorySha: "b".repeat(40) }],
+    ["requestEndpoint", { requestEndpoint: `/v1/sessions/${otherSessionId}/payment-requests`, sessionId: otherSessionId }],
+    ["sessionId", { sessionId: otherSessionId, requestEndpoint: `/v1/sessions/${otherSessionId}/payment-requests` }],
+    ["subjectRun", { subjectRun: "rehearsal" }],
+  ];
+  for (const [name, override] of cases) {
+    await assert.rejects(
+      verifyPayerMandate({ envelope, expected: expected(override), nowMs: 1785294300000 }),
+      name,
+    );
+  }
+  const partial = expected();
+  delete partial.subjectRun;
+  await assert.rejects(verifyPayerMandate({ envelope, expected: partial, nowMs: 1785294300000 }));
+  await assert.rejects(verifyPayerMandate({ envelope, expected: {}, nowMs: 1785294300000 }));
+});
+
+test("verification rejects a valid signature recovered from the wrong signer", async () => {
+  const envelope = await signPayerMandate({
+    mandate: mandate(),
+    signMessage: (bytes) => IMPOSTOR.signMessage({ message: { raw: bytes } }),
+  });
+  assert.equal(envelope.signature.address, PAYER_ADDRESS);
+  await assert.rejects(verifyPayerMandate({ envelope, expected: expected(), nowMs: 1785294300000 }));
+});
+
+test("mandate verification rejects hostile exact-shape nested, envelope, signature, and expected objects", async () => {
+  const envelope = await signed();
+  const verify = (candidate = envelope, context = expected()) =>
+    verifyPayerMandate({ envelope: candidate, expected: context, nowMs: 1785294300000 });
+  for (const nestedKey of ["amount", "payer", "payee"]) {
+    const missing = structuredClone(envelope);
+    delete missing.mandate[nestedKey].address;
+    if (nestedKey === "amount") delete missing.mandate.amount.currency;
+    await assert.rejects(verify(missing));
+    const unknown = structuredClone(envelope);
+    unknown.mandate[nestedKey].unknown = "no";
+    await assert.rejects(verify(unknown));
+    const accessor = structuredClone(envelope);
+    Object.defineProperty(accessor.mandate[nestedKey], nestedKey === "amount" ? "value" : "agentId", { enumerable: true, get() { throw new Error("read"); } });
+    await assert.rejects(verify(accessor));
+    const proxy = structuredClone(envelope);
+    proxy.mandate[nestedKey] = new Proxy(proxy.mandate[nestedKey], {});
+    await assert.rejects(verify(proxy));
+  }
+  for (const change of [
+    (value) => { delete value.schema; },
+    (value) => { value.unknown = "no"; },
+    (value) => Object.defineProperty(value, "schema", { enumerable: true, get() { throw new Error("read"); } }),
+    (value) => new Proxy(value, {}),
+  ]) {
+    const candidate = structuredClone(envelope);
+    const result = change(candidate) ?? candidate;
+    await assert.rejects(verify(result));
+  }
+  for (const change of [
+    (value) => { delete value.value; },
+    (value) => { value.unknown = "no"; },
+    (value) => Object.defineProperty(value, "value", { enumerable: true, get() { throw new Error("read"); } }),
+    (value) => new Proxy(value, {}),
+  ]) {
+    const candidate = structuredClone(envelope);
+    const result = change(candidate.signature) ?? candidate.signature;
+    candidate.signature = result;
+    await assert.rejects(verify(candidate));
+  }
+  for (const change of [
+    (value) => { delete value.subjectRun; },
+    (value) => { value.unknown = "no"; },
+    (value) => Object.defineProperty(value, "subjectRun", { enumerable: true, get() { throw new Error("read"); } }),
+    (value) => new Proxy(value, {}),
+  ]) {
+    const context = expected();
+    const result = change(context) ?? context;
+    await assert.rejects(verify(envelope, result));
+  }
 });
