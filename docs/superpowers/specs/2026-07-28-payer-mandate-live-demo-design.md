@@ -125,13 +125,15 @@ but Iris owns its policy and authority cryptographically.
 The endpoint:
 
 ```text
+GET  /v1/sessions/{sessionId}/mandate?subjectRun={rehearsal|stakeholder}
 POST /v1/sessions/{sessionId}/payment-requests
 GET  /v1/sessions/{sessionId}/payment-requests/{requestId}
 ```
 
-accepts one exact, Billie-signed request for the assigned session. The relay
-may validate shape, signatures, bounds, replay state, and session membership.
-It may not approve the request, create Iris's mandate, or begin the protocol.
+publishes the exact Iris-signed mandate and accepts one exact, Billie-signed
+request for the assigned session. The relay may validate shape, signatures,
+bounds, replay state, and session membership. It may not approve the request,
+create Iris's mandate, or begin the protocol.
 
 Before accepting requests, the inbox requires an Iris-signed mandate
 commitment that binds:
@@ -225,10 +227,11 @@ cannot modify their commercial terms.
 
 ### 5.3 Validation and recovery
 
-Marker-complete validators must exist for the request, mandate, preflight,
-identity, party-result, failure, recovery, and aggregate-verdict artifacts.
-They must reject missing, duplicated, reordered, expired, malformed, replayed,
-or mismatched evidence before the relay accepts the corresponding event.
+Exact validators must exist for the signed request and mandate. Marker-complete
+validators must exist for the preflight, identity, party-result, failure,
+recovery, and aggregate-verdict artifacts. Together they must reject missing,
+duplicated, reordered, expired, malformed, replayed, or mismatched evidence
+before the relay accepts the corresponding event.
 
 Recovery reuses only validated public state. It never reconstructs or
 transports role secrets, silently changes a session identifier, or turns an
