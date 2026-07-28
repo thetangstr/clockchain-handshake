@@ -7,6 +7,8 @@ import test from "node:test";
 import { createConsoleServer, createStateRootProjection } from "../src/bilateral/coordination/console-server.mjs";
 import { parseConsoleArguments, readConsoleTlsInput } from "../bin/handshake-console.mjs";
 
+const digest = (value) => value.repeat(64);
+
 test("console serves only fixed read-only no-store routes on loopback", async (t) => {
   const app = createConsoleServer({ projection: () => ({ paymentMoved: false }) });
   await new Promise((resolve) => app.listen(0, "127.0.0.1", resolve));
@@ -82,7 +84,7 @@ test("state-root projection re-reads bounded canonical state on every request", 
   const root = await mkdtemp(join(tmpdir(), "console-state-")); await chmod(root, 0o700); t.after(() => import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true })));
   const file = join(root, "console-state.json"); const state = (phase) => ({ lifecycleView: { releaseId: "release-a", repositorySha: "a".repeat(40), sessionId: "11111111-2222-4333-8444-555555555555", state: phase }, mandate: {}, nowMs: 0, request: {}, verifierPublication: null, watcherSnapshot: {} });
   await writeFile(file, `${JSON.stringify(state("REHEARSAL_RUNNING"))}\n`, { mode: 0o600 });
-  const projection = createStateRootProjection({ stateRoot: root });
+  const projection = createStateRootProjection({ now: () => 2, stateRoot: root });
   assert.equal(projection().phase.value, "REHEARSAL_RUNNING");
   await writeFile(file, `${JSON.stringify(state("STAKEHOLDER_RUNNING"))}\n`, { mode: 0o600 });
   assert.equal(projection().phase.value, "STAKEHOLDER_RUNNING");
@@ -98,8 +100,48 @@ test("state-root projection permits exact nested lifecycle health without wideni
     `${JSON.stringify({ lifecycleView: { health: { schema: "clockchain.bilateral-console-health/v1", observedAtMs: "1", expiresAtMs: "3", actors: { operator: "READY", payer: "WAITING", payee: "UNAVAILABLE" }, services: { relay: "READY", watcher: "WAITING" } } }, mandate: {}, nowMs: 2, request: {}, verifierPublication: null, watcherSnapshot: {} })}\n`,
     { mode: 0o600 },
   );
-  const projection = createStateRootProjection({ stateRoot: root });
+  const projection = createStateRootProjection({ now: () => 2, stateRoot: root });
   assert.equal(projection().actors.operator.health, "READY");
+});
+
+test("state-root projection recomputes freshness from server time", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "console-state-clock-")); await chmod(root, 0o700); t.after(() => import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true })));
+  const file = join(root, "console-state.json");
+  await writeFile(
+    file,
+    `${JSON.stringify({
+      lifecycleView: { releaseId: "release-a", repositorySha: "a".repeat(40), sessionId: "11111111-2222-4333-8444-555555555555", state: "STAKEHOLDER_RUNNING", facts: { payerMandateReady: { stakeholder: true }, paymentRequestReady: { stakeholder: true }, paymentRequestMatched: { stakeholder: true } } },
+      mandate: { mandate: { amount: { currency: "USD", value: "100" }, expiresAtMs: "1785297600000", paymentMoved: false }, mandateDigest: digest("e") },
+      nowMs: 1785294300000,
+      request: { request: { amount: { currency: "USD", value: "100" }, expiresAtMs: "1785297000000", paymentMoved: false }, requestDigest: digest("f") },
+      verifierPublication: { markerComplete: true, paymentMoved: false, publicationDigest: digest("a"), releaseId: "release-a", repositorySha: "a".repeat(40), schema: "clockchain.bilateral-verifier-publication/v1", sessionId: "11111111-2222-4333-8444-555555555555", status: "VERIFICATION_PASSED", subjectRun: "stakeholder", descriptorDigest: digest("d"), mandateDigest: digest("e"), requestDigest: digest("f"), packageDigests: { payer: digest("b"), payee: digest("c") }, anchorDigests: [digest("1"), digest("2"), digest("3")] },
+      watcherSnapshot: { descriptorDigest: digest("d"), packageDigests: { payer: digest("b"), payee: digest("c") }, anchors: [
+        { digest: digest("1"), kind: "PROPOSED", block: "10", verified: true },
+        { digest: digest("2"), kind: "ACCEPTED", block: "11", verified: true },
+        { digest: digest("3"), kind: "ACKNOWLEDGED", block: "12", verified: true },
+      ] },
+    })}\n`,
+    { mode: 0o600 },
+  );
+  const projection = createStateRootProjection({ now: () => 1785298000000, stateRoot: root });
+  const value = projection();
+  assert.equal(value.deadline.freshness, "EXPIRED");
+  assert.equal(value.verifier.status, "PENDING");
+});
+
+test("state-root projection rejects unsafe or nonmonotonic server clocks", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "console-state-nonmonotonic-clock-")); await chmod(root, 0o700); t.after(() => import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true })));
+  const file = join(root, "console-state.json");
+  await writeFile(
+    file,
+    `${JSON.stringify({ lifecycleView: {}, mandate: {}, nowMs: 0, request: {}, verifierPublication: null, watcherSnapshot: {} })}\n`,
+    { mode: 0o600 },
+  );
+  const times = [2, 1];
+  const projection = createStateRootProjection({ now: () => times.shift(), stateRoot: root });
+  assert.equal(projection().deadline.nowMs, 2);
+  assert.throws(projection);
+  assert.throws(() => createStateRootProjection({ now: () => 1.5, stateRoot: root })());
 });
 
 test("state-root projection rejects a symlinked console-state file", async (t) => {

@@ -12,17 +12,23 @@ const routes = Object.freeze({ "/": ["index.html", "text/html; charset=utf-8"], 
 function fail() { throw new Error("Console server failed safely."); }
 function privateFile(stat) { return stat.isFile() && !stat.isSymbolicLink() && stat.uid === process.getuid() && (stat.mode & 0o777) === 0o600 && stat.size > 0 && stat.size <= 65536; }
 function sameIdentity(left, right) { return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid && left.mode === right.mode; }
-export function createStateRootProjection({ stateRoot }) {
+export function createStateRootProjection({ now = Date.now, stateRoot }) {
+  if (typeof now !== "function") fail();
   if (typeof stateRoot !== "string" || stateRoot.length === 0) fail();
   const root = lstatSync(stateRoot); if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== process.getuid() || (root.mode & 0o777) !== 0o700) fail(); const rootFd = openSync(stateRoot, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0)); const openedRoot = fstatSync(rootFd); const sameRoot = (next) => next.isDirectory() && !next.isSymbolicLink() && sameIdentity(root, next) && sameIdentity(root, openedRoot);
   if (!sameRoot(openedRoot)) { closeSync(rootFd); fail(); }
   const path = join(stateRoot, "console-state.json");
+  let lastNow = null;
   return () => {
+    const currentNow = now();
+    if (!Number.isSafeInteger(currentNow) || currentNow < 0 || (lastNow !== null && currentNow < lastNow)) fail();
+    lastNow = currentNow;
     if (!sameRoot(lstatSync(stateRoot)) || !sameRoot(fstatSync(rootFd))) fail(); const before = lstatSync(path); if (!privateFile(before)) fail(); const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)); let bytes; let opened; try { opened = fstatSync(fd); bytes = readFileSync(fd); } finally { closeSync(fd); }
     const after = lstatSync(path); if (!sameRoot(lstatSync(stateRoot)) || !sameRoot(fstatSync(rootFd)) || !privateFile(after) || !privateFile(opened) || !sameIdentity(before, opened) || before.size !== opened.size || before.mtimeMs !== opened.mtimeMs || !sameIdentity(before, after) || before.size !== after.size || before.mtimeMs !== after.mtimeMs || !bytes.equals(Buffer.from(`${JSON.stringify(JSON.parse(bytes.toString("utf8")))}\n`))) fail();
     let value; try { value = JSON.parse(bytes.toString("utf8")); } catch { fail(); }
     const keys = ["lifecycleView", "mandate", "nowMs", "request", "verifierPublication", "watcherSnapshot"];
     if (!value || Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) fail();
+    value.nowMs = currentNow;
     return buildConsoleProjection(value);
   };
 }
