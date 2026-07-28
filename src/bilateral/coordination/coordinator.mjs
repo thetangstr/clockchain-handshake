@@ -163,6 +163,7 @@ const COORDINATOR_STATES = new Set([
 ]);
 const FUNDING_READINESS_DEADLINE_MS = 8 * 60_000;
 const FUNDING_READINESS_INTERVAL_MS = 20_000;
+const ADVISORY_SESSION_NOT_FOUND_CODE = "COORDINATION_SESSION_NOT_FOUND";
 const AUTHENTICATED_EVENT_KEYS = Object.freeze([
   "artifactDigest", "eventDigest", "kind", "paymentMoved", "previousEventDigest",
   "releaseId", "repositorySha", "role", "schema", "sequence", "sessionId",
@@ -1475,7 +1476,8 @@ async function waitForAdvisoryEnrollmentReadiness({ dependencies }) {
     let view;
     try {
       view = await dependencies.readSessionView();
-    } catch {
+    } catch (error) {
+      if (error?.code !== ADVISORY_SESSION_NOT_FOUND_CODE) throw error;
       view = null;
     }
     if (view === null) {

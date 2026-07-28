@@ -113,6 +113,10 @@ const REQUEST_ERROR = Object.freeze({
   code: "COORDINATION_RELAY_REQUEST_INVALID",
   paymentMoved: false,
 });
+const SESSION_NOT_FOUND_ERROR = Object.freeze({
+  code: "COORDINATION_SESSION_NOT_FOUND",
+  paymentMoved: false,
+});
 const execFile = promisify(execFileCallback);
 
 export class CoordinationRelayStartupError extends Error {
@@ -965,8 +969,12 @@ export function createRelayRequestHandler(service, host, port) {
         return;
       }
       throw new Error();
-    } catch {
-      sendJson(response, 400, REQUEST_ERROR);
+    } catch (error) {
+      if (error?.code === "COORDINATION_SESSION_NOT_FOUND") {
+        sendJson(response, 404, SESSION_NOT_FOUND_ERROR);
+      } else {
+        sendJson(response, 400, REQUEST_ERROR);
+      }
     } finally {
       clearTimeout(totalTimer);
       request.off("aborted", abortRequest);

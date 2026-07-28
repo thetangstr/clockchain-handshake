@@ -290,7 +290,9 @@ function createPinnedOperatorHttpsTransportInternal(input, timing) {
           const contentLengths = rawHeaderValues(incoming.rawHeaders, "content-length");
           const contentTypes = rawHeaderValues(incoming.rawHeaders, "content-type");
           const artifact = request.method === "GET" && /^\/v1\/artifacts\//.test(request.path);
+          const sessionView = request.method === "GET" && /^\/v1\/sessions\/[0-9a-f-]{36}\/view$/.test(request.path);
           const expectedType = artifact ? "application/octet-stream" : "application/json";
+          if (incoming.statusCode === 404 && sessionView) return fail(new OperatorRelayClientError("COORDINATION_SESSION_NOT_FOUND"));
           if (incoming.statusCode !== 200 || contentLengths.length !== 1 || contentTypes.length !== 1 || contentTypes[0] !== expectedType || !DECIMAL_PATTERN.test(contentLengths[0]) || Number(contentLengths[0]) > OPERATOR_CLIENT_MAX_RESPONSE_BYTES || ["content-encoding", "location", "transfer-encoding", "upgrade"].some((name) => rawHeaderValues(incoming.rawHeaders, name).length !== 0)) return fail(new OperatorRelayClientError());
           const chunks = []; let length = 0;
           bodyTimer = setTimeout(() => fail(new OperatorRelayClientError("COORDINATION_TRANSPORT_AMBIGUOUS")), timing.bodyMs);

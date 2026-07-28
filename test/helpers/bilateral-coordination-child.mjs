@@ -608,6 +608,28 @@ async function waitForEnrollmentConfirmations(readEvents, children) {
   fail();
 }
 
+function readyEnrollmentView(value) {
+  return value?.facts?.enrollmentConfirmed?.payee === true
+    && value?.facts?.enrollmentConfirmed?.payer === true;
+}
+
+function coordinatorFirstReadinessDependencies(dependencies) {
+  return Object.freeze({
+    ...dependencies,
+    readSessionView: async () => {
+      const deadline = Date.now() + BARRIER_DEADLINE_MS;
+      let lastView;
+      while (Date.now() < deadline) {
+        const view = await dependencies.readSessionView();
+        if (readyEnrollmentView(view)) return view;
+        lastView = view;
+        await sleep(20);
+      }
+      return lastView;
+    },
+  });
+}
+
 async function waitForLaunchManifests(release) {
   if (!Array.isArray(release?.manifests) || release.manifests.length !== 2) fail();
   const seen = new Set();
@@ -671,10 +693,11 @@ async function runProductionCoordinatorChild(input) {
   let drainWatchers = async () => {};
   try {
     failurePhase = "coordinator-runtime";
+    const coordinatorClockStartedAt = Date.now();
     runtime = createCoordinatorRuntimeDependencies(config, {
       repositoryRoot: value.repositoryRoot,
-      now: (() => { let value_ = 1_784_923_200_000; return () => ++value_; })(),
-      sleeper: async () => { await sleep(value.coordinatorFirst ? 250 : 20); },
+      now: () => 1_784_923_200_000 + (Date.now() - coordinatorClockStartedAt),
+      sleeper: async () => { await sleep(20); },
       waitForFunding: boundedFunding,
       watchBilateralSession: boundedWatcher,
     });
@@ -683,8 +706,11 @@ async function runProductionCoordinatorChild(input) {
     if (!release.manifests || release.state !== "BOOTSTRAPPING") fail();
     await waitForLaunchManifests(release);
     const coordinatorDependencies = runtime.runDependencies(release);
+    const firstRunDependencies = value.coordinatorFirst
+      ? coordinatorFirstReadinessDependencies(coordinatorDependencies)
+      : coordinatorDependencies;
     const coordinatorFirstRun = value.coordinatorFirst
-      ? Promise.resolve().then(() => runProductionCoordinator({ dependencies: coordinatorDependencies, release, releaseRoot: config.releaseRoot.path }))
+      ? Promise.resolve().then(() => runProductionCoordinator({ dependencies: firstRunDependencies, release, releaseRoot: config.releaseRoot.path }))
       : null;
     coordinatorFirstRun?.catch(() => {});
     failurePhase = "coordinator-role-start";

@@ -236,16 +236,18 @@ const ARTIFACT_EVENT_TYPES = Object.freeze({
 });
 
 export class CoordinationRelayError extends Error {
-  constructor() {
+  constructor(code = "COORDINATION_RELAY_INVALID") {
     super("Coordination relay operation failed safely.");
     this.name = new.target.name;
     this.category = "verification";
-    this.code = "COORDINATION_RELAY_INVALID";
+    this.code = /^COORDINATION_[A-Z_]+$/.test(code)
+      ? code
+      : "COORDINATION_RELAY_INVALID";
   }
 }
 
-function invalid() {
-  throw new CoordinationRelayError();
+function invalid(code) {
+  throw new CoordinationRelayError(code);
 }
 
 function isPlainObject(value) {
@@ -566,6 +568,9 @@ function readEnvelope(value) {
 
 function assertReleaseView(value, sessionId, repositorySha) {
   const data = readExactData(value, RELEASE_VIEW_KEYS);
+  if (data.releaseId === null) {
+    invalid("COORDINATION_SESSION_NOT_FOUND");
+  }
   if (
     !Array.isArray(data.events) ||
     data.paymentMoved !== false ||
