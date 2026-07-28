@@ -254,18 +254,22 @@ async function submitPaymentRequestPhase({ client, dependencies, localState, rep
   return state;
 }
 async function matchPaymentRequestPhase({ client, dependencies, localState, replay, subjectRun }) {
-  if (typeof client?.readPayerMandate !== "function" || typeof client?.readPaymentRequest !== "function" || typeof client?.appendEvent !== "function") invalid();
+  if (typeof client?.getArtifact !== "function" || typeof client?.readPayerMandate !== "function" || typeof client?.readPaymentRequest !== "function" || typeof client?.appendEvent !== "function") invalid();
   const parties = await resolveRunParties({ client, dependencies, enrollmentSet: replay.enrollmentSet, events: replay.events, localState, subjectRun });
   const timeMs = nowMs(dependencies);
   const policy = intentPolicy(localState, subjectRun);
-  const requestId = requestIdForRun(localState, dependencies, subjectRun);
   const mandateBytes = await client.readPayerMandate({ payer: parties.payer, payee: parties.payee, subjectRun });
-  const requestBytes = await client.readPaymentRequest({ payer: parties.payer, payee: parties.payee, requestId, subjectRun });
-  if (!Buffer.isBuffer(mandateBytes) || !Buffer.isBuffer(requestBytes)) invalid();
+  if (!Buffer.isBuffer(mandateBytes)) invalid();
   const mandateEvent = eventFor(replay.events, "payer", "PAYER_MANDATE_READY", subjectRun);
   const requestEvent = eventFor(replay.events, "payee", "PAYMENT_REQUEST_READY", subjectRun);
+  if (!requestEvent || !/^[0-9a-f]{64}$/.test(requestEvent.artifactDigest)) invalid();
+  const requestBytes = await client.getArtifact({ artifactType: "payment-request", digest: requestEvent.artifactDigest });
+  if (!Buffer.isBuffer(requestBytes)) invalid();
   const mandateEnvelope = parseCanonicalEnvelope(mandateBytes, mandateEvent.artifactDigest);
   const requestEnvelope = await verifyPaymentRequest({ envelope: parseCanonicalEnvelope(requestBytes, requestEvent.artifactDigest), mandateEnvelope, expected: { ...policy, payer: parties.payer, payee: parties.payee, releaseId: localState.releaseId, repositorySha: localState.repositorySha, sessionId: localState.sessionId, subjectRun }, nowMs: timeMs });
+  const requestId = requestEnvelope.request.requestId;
+  const routedBytes = await client.readPaymentRequest({ payer: parties.payer, payee: parties.payee, requestId, subjectRun });
+  if (!Buffer.isBuffer(routedBytes) || !routedBytes.equals(requestBytes)) invalid();
   const journal = exactIntentJournal({ mandateBytes, mandateEnvelope, requestBytes, requestEnvelope, requestId, stage: "PAYMENT_REQUEST_MATCHED", subjectRun });
   await client.appendEvent({ artifactDigest: null, kind: "PAYMENT_REQUEST_MATCHED", subjectRun });
   const state = Object.freeze({ ...localState, intentJournal: journal, paymentMoved: false, phase: "EVENT_PROCESSED" });

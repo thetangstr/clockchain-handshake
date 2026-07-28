@@ -622,6 +622,10 @@ test("payer verifies the exact Billie request before appending PAYMENT_REQUEST_M
     client: {
       async appendEvent(value) { appended.push(value); },
       async getArtifact({ digest, artifactType }) {
+        if (artifactType === "payment-request") {
+          assert.equal(digest, sha256(requestBytes));
+          return requestBytes;
+        }
         assert.equal(artifactType, "identity-package");
         return artifacts.get(digest);
       },
@@ -664,6 +668,214 @@ test("payer verifies the exact Billie request before appending PAYMENT_REQUEST_M
   assert.deepEqual(appended, [{ artifactDigest: null, kind: "PAYMENT_REQUEST_MATCHED", subjectRun: "rehearsal" }]);
   assert.equal(writes.at(-1).intentJournal.mandateRawDigest, sha256(mandateBytes));
   assert.equal(writes.at(-1).intentJournal.requestRawDigest, sha256(requestBytes));
+});
+
+test("payer discovers Billie's unpredictable requestId from the authenticated payment-request artifact", async () => {
+  const fixture = replayFixture({
+    payerInvitationAddress: payerIntentAccount.address.toLowerCase(),
+    payeeInvitationAddress: payeeIntentAccount.address.toLowerCase(),
+  });
+  const { append, artifacts, events, payerIdentity, payeeIdentity } = replayThroughIdentities(fixture);
+  const payer = JSON.parse(payerIdentity.toString("utf8"));
+  const payee = JSON.parse(payeeIdentity.toString("utf8"));
+  const requestId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const mandateEnvelope = await signPayerMandate({
+    mandate: {
+      amount: { currency: "USD", value: "100" },
+      expiresAtMs: "1785297900000",
+      invoiceReferencePrefix: "invoice-",
+      issuedAtMs: "1785294299999",
+      payee: { address: payee.address, agentId: payee.agentId },
+      payer: { address: payer.address, agentId: payer.agentId },
+      paymentMoved: false,
+      protocol: "clockchain.bilateral-authorization/v1",
+      purpose: "Handshake demo",
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      requestEndpoint: `/v1/sessions/${fixture.session}/payment-requests`,
+      schema: "clockchain.bilateral-payer-mandate/v1",
+      sessionId: fixture.session,
+      subjectRun: "rehearsal",
+    },
+    signMessage: (bytes) => payerIntentAccount.signMessage({ message: { raw: bytes } }),
+  });
+  const requestEnvelope = await signPaymentRequest({
+    request: {
+      amount: { currency: "USD", value: "100" },
+      createdAtMs: "1785294300000",
+      expiresAtMs: "1785297600000",
+      invoiceReference: "invoice-001",
+      mandateDigest: payerMandateDigest(mandateEnvelope),
+      payee: { address: payee.address, agentId: payee.agentId },
+      payer: { address: payer.address, agentId: payer.agentId },
+      paymentMoved: false,
+      protocol: "clockchain.bilateral-authorization/v1",
+      purpose: "Handshake demo",
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      requestId,
+      schema: "clockchain.bilateral-payment-request/v1",
+      sessionId: fixture.session,
+      subjectRun: "rehearsal",
+    },
+    signMessage: (bytes) => payeeIntentAccount.signMessage({ message: { raw: bytes } }),
+  });
+  const mandateBytes = canonicalBytes(mandateEnvelope);
+  const requestBytes = canonicalBytes(requestEnvelope);
+  append("payer", fixture.payer, "PAYER_MANDATE_READY", sha256(mandateBytes), "rehearsal");
+  append("payee", fixture.payee, "PAYMENT_REQUEST_READY", sha256(requestBytes), "rehearsal");
+  const appended = [];
+  const routeReads = [];
+  await runSupervisor({
+    client: {
+      async appendEvent(value) { appended.push(value); },
+      async getArtifact({ digest, artifactType }) {
+        if (artifactType === "identity-package") return artifacts.get(digest);
+        assert.equal(artifactType, "payment-request");
+        assert.equal(digest, sha256(requestBytes));
+        return requestBytes;
+      },
+      async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
+      async readEvents() { return structuredClone(events); },
+      async readPayerMandate() { return mandateBytes; },
+      async readPaymentRequest(value) {
+        routeReads.push(value);
+        assert.equal(value.requestId, requestId);
+        return requestBytes;
+      },
+    },
+    dependencies: {
+      nowMs() { return 1785294300000; },
+      shouldContinue() { return false; },
+      async validateRelayArtifactWithFacts({ artifactType, bytes, expectedDigest }) {
+        assert.equal(sha256(bytes), expectedDigest);
+        return { facts: { identity: JSON.parse(bytes.toString("utf8")) }, artifactType };
+      },
+      verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
+      async writeState() {},
+    },
+    localState: {
+      operatorPublicKey: raw(fixture.operator),
+      processedEventDigests: events.filter((event) => event.role === "operator").map((event) => event.eventDigest),
+      rehearsal: {
+        descriptorPath: "/state/rehearsal/descriptor.json",
+        invitationPath: "/secret/rehearsal",
+        mandatePath: "/state/rehearsal/payer-mandate.json",
+        resultDirectory: "/state/rehearsal/result",
+      },
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      role: "payer",
+      sessionId: fixture.session,
+    },
+  });
+  assert.deepEqual(routeReads.map((value) => value.requestId), [requestId]);
+  assert.deepEqual(appended, [{ artifactDigest: null, kind: "PAYMENT_REQUEST_MATCHED", subjectRun: "rehearsal" }]);
+});
+
+test("payer rejects payment-request route bytes that differ from the authenticated ready artifact", async () => {
+  const fixture = replayFixture({
+    payerInvitationAddress: payerIntentAccount.address.toLowerCase(),
+    payeeInvitationAddress: payeeIntentAccount.address.toLowerCase(),
+  });
+  const { append, artifacts, events, payerIdentity, payeeIdentity } = replayThroughIdentities(fixture);
+  const payer = JSON.parse(payerIdentity.toString("utf8"));
+  const payee = JSON.parse(payeeIdentity.toString("utf8"));
+  const mandateEnvelope = await signPayerMandate({
+    mandate: {
+      amount: { currency: "USD", value: "100" },
+      expiresAtMs: "1785297900000",
+      invoiceReferencePrefix: "invoice-",
+      issuedAtMs: "1785294299999",
+      payee: { address: payee.address, agentId: payee.agentId },
+      payer: { address: payer.address, agentId: payer.agentId },
+      paymentMoved: false,
+      protocol: "clockchain.bilateral-authorization/v1",
+      purpose: "Handshake demo",
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      requestEndpoint: `/v1/sessions/${fixture.session}/payment-requests`,
+      schema: "clockchain.bilateral-payer-mandate/v1",
+      sessionId: fixture.session,
+      subjectRun: "rehearsal",
+    },
+    signMessage: (bytes) => payerIntentAccount.signMessage({ message: { raw: bytes } }),
+  });
+  const request = {
+    amount: { currency: "USD", value: "100" },
+    createdAtMs: "1785294300000",
+    expiresAtMs: "1785297600000",
+    invoiceReference: "invoice-001",
+    mandateDigest: payerMandateDigest(mandateEnvelope),
+    payee: { address: payee.address, agentId: payee.agentId },
+    payer: { address: payer.address, agentId: payer.agentId },
+    paymentMoved: false,
+    protocol: "clockchain.bilateral-authorization/v1",
+    purpose: "Handshake demo",
+    releaseId: fixture.release,
+    repositorySha: fixture.repo,
+    requestId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    schema: "clockchain.bilateral-payment-request/v1",
+    sessionId: fixture.session,
+    subjectRun: "rehearsal",
+  };
+  const requestEnvelope = await signPaymentRequest({
+    request,
+    signMessage: (bytes) => payeeIntentAccount.signMessage({ message: { raw: bytes } }),
+  });
+  const changedEnvelope = await signPaymentRequest({
+    request: { ...request, requestId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" },
+    signMessage: (bytes) => payeeIntentAccount.signMessage({ message: { raw: bytes } }),
+  });
+  const mandateBytes = canonicalBytes(mandateEnvelope);
+  const requestBytes = canonicalBytes(requestEnvelope);
+  const changedBytes = canonicalBytes(changedEnvelope);
+  append("payer", fixture.payer, "PAYER_MANDATE_READY", sha256(mandateBytes), "rehearsal");
+  append("payee", fixture.payee, "PAYMENT_REQUEST_READY", sha256(requestBytes), "rehearsal");
+  let appended = 0;
+  await assert.rejects(runSupervisor({
+    client: {
+      async appendEvent() { appended += 1; },
+      async getArtifact({ digest, artifactType }) {
+        if (artifactType === "identity-package") return artifacts.get(digest);
+        assert.equal(artifactType, "payment-request");
+        assert.equal(digest, sha256(requestBytes));
+        return requestBytes;
+      },
+      async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
+      async readEvents() { return structuredClone(events); },
+      async readPayerMandate() { return mandateBytes; },
+      async readPaymentRequest(value) {
+        assert.equal(value.requestId, request.requestId);
+        return changedBytes;
+      },
+    },
+    dependencies: {
+      nowMs() { return 1785294300000; },
+      shouldContinue() { return false; },
+      async validateRelayArtifactWithFacts({ artifactType, bytes, expectedDigest }) {
+        assert.equal(sha256(bytes), expectedDigest);
+        return { facts: { identity: JSON.parse(bytes.toString("utf8")) }, artifactType };
+      },
+      verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
+      async writeState() {},
+    },
+    localState: {
+      operatorPublicKey: raw(fixture.operator),
+      processedEventDigests: events.filter((event) => event.role === "operator").map((event) => event.eventDigest),
+      rehearsal: {
+        descriptorPath: "/state/rehearsal/descriptor.json",
+        invitationPath: "/secret/rehearsal",
+        mandatePath: "/state/rehearsal/payer-mandate.json",
+        resultDirectory: "/state/rehearsal/result",
+      },
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      role: "payer",
+      sessionId: fixture.session,
+    },
+  }));
+  assert.equal(appended, 0);
 });
 
 test("retries payer mandate publication from durable bytes without re-signing", async () => {
