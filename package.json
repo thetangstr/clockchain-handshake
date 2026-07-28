@@ -8,6 +8,7 @@
   },
   "scripts": {
     "bilateral:coordinator": "node bin/handshake-coordinator.mjs",
+    "bilateral:fund": "node scripts/fund-bilateral-addresses.mjs",
     "bilateral:relay": "node bin/handshake-relay.mjs",
     "bilateral:supervisor": "node bin/handshake-supervisor.mjs",
     "demo": "node bin/handshake-demo.mjs",
