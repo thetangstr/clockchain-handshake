@@ -383,7 +383,7 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /RELAY_LISTEN_HOST=0\.0\.0\.0[^.\n]*all-interface bind/i);
   assert.match(primaryRunbook, /chmod 0700 "\$BILATERAL_OPERATOR_ROOT" "\$BILATERAL_RELEASE_ROOT"/);
   assert.match(primaryRunbook, /chmod 0700 "\$BILATERAL_RELEASE_ROOT\/relay-state"/);
-  assert.match(primaryRunbook, /chmod 0600 "\$SEPOLIA_RPC_URL_FILE"/);
+  assert.match(primaryRunbook, /test "\$\(stat -f '%Lp' "\$SEPOLIA_RPC_URL_FILE"\)" = "600"/);
   assert.match(primaryRunbook, /payee\.launch\.json[^.\n]*only to Iris/i);
   assert.match(primaryRunbook, /payer\.launch\.json[^.\n]*only to Billy/i);
   assert.match(primaryRunbook, /launch manifests expire after 60 minutes/i);
@@ -411,6 +411,12 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /export SEPOLIA_TREASURY_KEYSTORE="\$REPOSITORY_ROOT\/\.context\/sepolia-funding\/funding-wallet\.json"/);
   assert.match(primaryRunbook, /export SEPOLIA_TREASURY_PUBLIC_METADATA="\$REPOSITORY_ROOT\/\.context\/sepolia-funding\/funding-wallet\.public\.json"/);
   assert.match(primaryRunbook, /strict private files/i);
+  assert.match(primaryRunbook, /export SEPOLIA_RPC_URL_FILE="\$REPOSITORY_ROOT\/\.context\/bilateral-live-2026-07-28\/sepolia-rpc\.url"/);
+  assert.match(primaryRunbook, /test -s "\$SEPOLIA_RPC_URL_FILE"/);
+  assert.match(primaryRunbook, /test -f "\$SEPOLIA_RPC_URL_FILE"/);
+  assert.match(primaryRunbook, /test "\$\(stat -f '%Lp' "\$SEPOLIA_RPC_URL_FILE"\)" = "600"/);
+  assert.match(primaryRunbook, /already prepared repo-private `\$REPOSITORY_ROOT\/\.context\/bilateral-live-2026-07-28\/sepolia-rpc\.url`/);
+  assert.doesNotMatch(primaryRunbook, /printf '%s\\n' "\$SEPOLIA_RPC_URL" > "\$SEPOLIA_RPC_URL_FILE"/);
   assert.match(billy, /You are Stakeholder 2, Billy, the payer\. Start only the payer supervisor\./);
   assert.match(iris, /You are Stakeholder 1, Iris, the payee\. Start only the payee supervisor\./);
   for (const prompt of [billy, iris]) {
@@ -433,7 +439,8 @@ test("bilateral operator runbook orders key publication before release freeze", 
     )
   ).split(/^## Operator-authorized recovery appendix$/m, 1)[0];
   const keyId = primaryRunbook.indexOf('export OPERATOR_KEY_ID="bilateral-demo-2026-07-28"');
-  const keygen = primaryRunbook.indexOf("node scripts/create-session.mjs keygen");
+  const keygen = primaryRunbook.indexOf("Initial provisioning only");
+  const keygenCommand = primaryRunbook.indexOf("node scripts/create-session.mjs keygen");
   const commitPublic = primaryRunbook.indexOf("Commit only `docs/operator-keys/$OPERATOR_KEY_ID.pub`");
   const verify = primaryRunbook.indexOf("run `npm run verify`, then freeze `BILATERAL_REPOSITORY_SHA`");
   const freeze = primaryRunbook.indexOf('export BILATERAL_REPOSITORY_SHA="$(git rev-parse HEAD)"');
@@ -447,9 +454,12 @@ test("bilateral operator runbook orders key publication before release freeze", 
     assert.notEqual(index, -1, label);
   }
   assert.ok(keyId < keygen);
-  assert.ok(keygen < commitPublic);
+  assert.ok(keygen < keygenCommand);
+  assert.ok(keygenCommand < commitPublic);
   assert.ok(commitPublic < verify);
   assert.ok(verify < freeze);
+  assert.match(primaryRunbook, /For a demo-day rerun, do not run keygen/i);
+  assert.match(primaryRunbook, /verify and reuse the existing matching committed operator key pair/i);
 });
 
 test("documentation checker rejects non-reachable bilateral relay drift", async (t) => {
@@ -517,6 +527,16 @@ test("documentation checker rejects bilateral manifest and funding drift", async
       'export SEPOLIA_TREASURY_KEYSTORE="$REPOSITORY_ROOT/.context/sepolia-funding/funding-wallet.json"',
       'export SEPOLIA_TREASURY_KEYSTORE="$BILATERAL_OPERATOR_ROOT/sepolia-treasury.json"',
       "repo-private treasury keystore",
+    ],
+    [
+      'export SEPOLIA_RPC_URL_FILE="$REPOSITORY_ROOT/.context/bilateral-live-2026-07-28/sepolia-rpc.url"',
+      'export SEPOLIA_RPC_URL_FILE="$BILATERAL_OPERATOR_ROOT/sepolia-rpc-url.txt"',
+      "repo-private RPC URL file",
+    ],
+    [
+      'test -s "$SEPOLIA_RPC_URL_FILE"',
+      'printf \'%s\\n\' "$SEPOLIA_RPC_URL" > "$SEPOLIA_RPC_URL_FILE"',
+      "no ambient RPC URL rewrite",
     ],
   ];
 

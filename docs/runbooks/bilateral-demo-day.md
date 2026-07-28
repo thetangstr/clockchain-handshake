@@ -34,14 +34,22 @@ dirty, if `git rev-parse HEAD` differs, if the relay IP is not reachable by both
 role computers, or if any private input is missing, readable by the wrong user,
 or delivered to the wrong role.
 
-On this Mac, create the stable Ed25519 operator key before freezing the live
-release. Use the existing stable public key pattern and a dated explicit key ID;
-do not derive the key ID from the release SHA.
+Use the existing stable public key pattern and a dated explicit key ID; do not
+derive the key ID from the release SHA.
 
 ```sh
 export OPERATOR_KEY_ID="bilateral-demo-2026-07-28"
-node scripts/create-session.mjs keygen --key-id "$OPERATOR_KEY_ID"
 export OPERATOR_PRIVATE_KEY_FILE=".context/operator-keys/$OPERATOR_KEY_ID.ed25519.pem"
+test -f "$OPERATOR_PRIVATE_KEY_FILE"
+test -f "docs/operator-keys/$OPERATOR_KEY_ID.pub"
+```
+
+On this Mac, verify and reuse the existing matching committed operator key pair for this prepared release. For a demo-day rerun, do not run keygen against existing files.
+
+Initial provisioning only, before the public-key commit:
+
+```sh
+node scripts/create-session.mjs keygen --key-id "$OPERATOR_KEY_ID"
 ```
 
 Commit only `docs/operator-keys/$OPERATOR_KEY_ID.pub`. Review that public-key
@@ -59,9 +67,10 @@ mkdir -p "$BILATERAL_OPERATOR_ROOT" "$BILATERAL_RELEASE_ROOT" "$BILATERAL_RELEAS
 chmod 0700 "$BILATERAL_OPERATOR_ROOT" "$BILATERAL_RELEASE_ROOT"
 chmod 0700 "$BILATERAL_RELEASE_ROOT/relay-state"
 
-export SEPOLIA_RPC_URL_FILE="$BILATERAL_OPERATOR_ROOT/sepolia-rpc-url.txt"
-printf '%s\n' "$SEPOLIA_RPC_URL" > "$SEPOLIA_RPC_URL_FILE"
-chmod 0600 "$SEPOLIA_RPC_URL_FILE"
+export SEPOLIA_RPC_URL_FILE="$REPOSITORY_ROOT/.context/bilateral-live-2026-07-28/sepolia-rpc.url"
+test -f "$SEPOLIA_RPC_URL_FILE"
+test -s "$SEPOLIA_RPC_URL_FILE"
+test "$(stat -f '%Lp' "$SEPOLIA_RPC_URL_FILE")" = "600"
 
 export SEPOLIA_TREASURY_KEYSTORE="$REPOSITORY_ROOT/.context/sepolia-funding/funding-wallet.json"
 export SEPOLIA_TREASURY_PUBLIC_METADATA="$REPOSITORY_ROOT/.context/sepolia-funding/funding-wallet.public.json"
@@ -76,6 +85,8 @@ node scripts/mint-bilateral-token.mjs \
   --output "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \
   --repository-sha "$BILATERAL_REPOSITORY_SHA"
 ```
+
+The Sepolia RPC endpoint is the already prepared repo-private `$REPOSITORY_ROOT/.context/bilateral-live-2026-07-28/sepolia-rpc.url`; it must be a regular nonempty mode-`0600` file. Do not rewrite it from ambient `SEPOLIA_RPC_URL`.
 
 The treasury keystore and adjacent public metadata are strict private files:
 `.context/sepolia-funding/funding-wallet.json` and

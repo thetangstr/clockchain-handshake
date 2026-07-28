@@ -536,7 +536,27 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "0600 RPC URL file",
-        /\bchmod 0600 "\$SEPOLIA_RPC_URL_FILE"/,
+        /\btest "\$\(stat -f '%Lp' "\$SEPOLIA_RPC_URL_FILE"\)" = "600"/,
+      ],
+      [
+        "repo-private RPC URL file",
+        /\bexport SEPOLIA_RPC_URL_FILE="\$REPOSITORY_ROOT\/\.context\/bilateral-live-2026-07-28\/sepolia-rpc\.url"/,
+      ],
+      [
+        "repo-private RPC URL regular file",
+        /\btest -f "\$SEPOLIA_RPC_URL_FILE"/,
+      ],
+      [
+        "repo-private RPC URL nonempty file",
+        /\btest -s "\$SEPOLIA_RPC_URL_FILE"/,
+      ],
+      [
+        "repo-private RPC URL mode",
+        /\btest "\$\(stat -f '%Lp' "\$SEPOLIA_RPC_URL_FILE"\)" = "600"/,
+      ],
+      [
+        "prepared repo-private RPC URL",
+        /\balready prepared repo-private `\$REPOSITORY_ROOT\/\.context\/bilateral-live-2026-07-28\/sepolia-rpc\.url`/,
       ],
       [
         "private launch manifest delivery",
@@ -577,6 +597,18 @@ function bilateralContractFailures(relativePath, contents) {
       [
         "stable operator key ID",
         /\bexport OPERATOR_KEY_ID="bilateral-demo-2026-07-28"/,
+      ],
+      [
+        "initial provisioning keygen boundary",
+        /\bInitial provisioning only\b/i,
+      ],
+      [
+        "no rerun keygen",
+        /\bFor a demo-day rerun, do not run keygen\b/i,
+      ],
+      [
+        "reuse committed operator key pair",
+        /\bverify and reuse the existing matching committed operator key pair\b/i,
       ],
       [
         "public operator key commit",
@@ -795,10 +827,23 @@ function bilateralContractFailures(relativePath, contents) {
         `${relativePath}: primary flow must use a stable operator key ID before freezing the release SHA.`,
       );
     }
+    if (
+      /printf '%s\\n' "\$SEPOLIA_RPC_URL" > "\$SEPOLIA_RPC_URL_FILE"/.test(
+        primary,
+      )
+    ) {
+      failures.push(
+        `${relativePath}: primary flow must have no ambient RPC URL rewrite; use the prepared repo-private RPC URL file instead of rewriting it from ambient SEPOLIA_RPC_URL.`,
+      );
+    }
     const ordered = [
       [
         "stable operator key ID",
         'export OPERATOR_KEY_ID="bilateral-demo-2026-07-28"',
+      ],
+      [
+        "initial provisioning boundary",
+        "Initial provisioning only",
       ],
       [
         "operator keygen",
