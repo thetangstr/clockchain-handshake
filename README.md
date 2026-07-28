@@ -27,10 +27,11 @@ the exit it produces, and the next action for the operator.
 
 The operator-led bilateral flow uses separate Billy payer and Iris payee
 machines. Start with the
-[bilateral demo-day runbook](docs/runbooks/bilateral-demo-day.md), then deliver
-the machine-specific [Billy prompt](prompts/run-billy-bilateral-demo.md) and
-[Iris prompt](prompts/run-iris-bilateral-demo.md) from one reviewed immutable
-repository SHA.
+[three-computer quick-start](docs/runbooks/bilateral-demo-quick-start.md), then
+use the [bilateral demo-day runbook](docs/runbooks/bilateral-demo-day.md) and
+deliver the machine-specific [Billy prompt](prompts/run-billy-bilateral-demo.md)
+and [Iris prompt](prompts/run-iris-bilateral-demo.md) from one reviewed
+immutable repository SHA.
 
 Demo-day role mapping is fixed: Stakeholder 1 is Iris, the payee; Stakeholder 2 is Billy, the payer; the operator runs the relay, coordinator, watcher,
 reusable Sepolia treasury, and fresh aggregate verifier from this Mac. The

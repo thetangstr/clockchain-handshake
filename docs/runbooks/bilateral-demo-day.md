@@ -4,6 +4,9 @@ This operator runbook coordinates the [Billy payer prompt](../../prompts/run-bil
 the [Iris payee prompt](../../prompts/run-iris-bilateral-demo.md), and the
 [repository overview](../../README.md). It covers preparation, rehearsal, and
 stakeholder execution; it does not replace deterministic verification.
+For the three-computer operator path, start with the
+[three-computer quick-start](./bilateral-demo-quick-start.md), then return here
+for full command detail and recovery boundaries.
 
 This is an Ethereum Sepolia and Clockchain® single-validator testnet exercise.
 No money moves. Do not install or use AgentDash. Do not invent success states.

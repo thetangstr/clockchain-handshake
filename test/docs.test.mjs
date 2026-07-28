@@ -33,6 +33,7 @@ const PUBLIC_DOCUMENTS = Object.freeze([
 const BILATERAL_PUBLIC_DOCUMENTS = Object.freeze([
   "prompts/run-billy-bilateral-demo.md",
   "prompts/run-iris-bilateral-demo.md",
+  "docs/runbooks/bilateral-demo-quick-start.md",
   "docs/runbooks/bilateral-demo-day.md",
 ]);
 const SUPPORT_FILES = Object.freeze([
@@ -351,10 +352,17 @@ test("automated bilateral happy path limits the user to four fundings and two su
 });
 
 test("bilateral roleplay docs require three machines and live relay readiness", async () => {
-  const [readme, runbook, billy, iris] = await Promise.all([
+  const [readme, runbook, quickStart, billy, iris] = await Promise.all([
     readFile(join(ROOT_DIRECTORY, "README.md"), "utf8"),
     readFile(
       join(ROOT_DIRECTORY, "docs/runbooks/bilateral-demo-day.md"),
+      "utf8",
+    ),
+    readFile(
+      join(
+        ROOT_DIRECTORY,
+        "docs/runbooks/bilateral-demo-quick-start.md",
+      ),
       "utf8",
     ),
     readFile(
@@ -405,6 +413,12 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /Terminal 1 - relay/i);
   assert.match(primaryRunbook, /Terminal 2 - coordinator/i);
   assert.match(primaryRunbook, /Start Terminal 2 only after Terminal 1 prints relay readiness/i);
+  assert.match(readme, /\[three-computer quick-start\]\(docs\/runbooks\/bilateral-demo-quick-start\.md\)/i);
+  assert.match(primaryRunbook, /\[three-computer quick-start\]\(\.\/bilateral-demo-quick-start\.md\)/i);
+  assert.match(quickStart, /\[repository overview\]\(\.\.\/\.\.\/README\.md\)/i);
+  assert.match(quickStart, /\[full runbook\]\(\.\.\/\.\.\/docs\/runbooks\/bilateral-demo-day\.md\)/i);
+  assert.match(quickStart, /\[Iris prompt\]\(\.\.\/\.\.\/prompts\/run-iris-bilateral-demo\.md\)/i);
+  assert.match(quickStart, /\[Billy prompt\]\(\.\.\/\.\.\/prompts\/run-billy-bilateral-demo\.md\)/i);
   assert.match(primaryRunbook, /export FUNDING_RECORD_FILE="\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json"/);
   assert.match(primaryRunbook, /coordinator-owned `\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json`/);
   assert.match(primaryRunbook, /export REPOSITORY_ROOT="\$\(pwd\)"/);
@@ -429,6 +443,82 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
     assert.match(prompt, /clean detached checkout[^.]*reviewed 40-character SHA/i);
     assert.match(prompt, /launch manifest expires after 60 minutes/i);
   }
+});
+
+test("three-computer bilateral quick-start preserves demo-day safety gates", async () => {
+  const quickStart = await readFile(
+    join(
+      ROOT_DIRECTORY,
+      "docs/runbooks/bilateral-demo-quick-start.md",
+    ),
+    "utf8",
+  );
+
+  assert.match(
+    quickStart,
+    /^## Before everyone starts[\s\S]*^## Fixed role assignment[\s\S]*^## Operator checklist[\s\S]*^## Iris checklist[\s\S]*^## Billy checklist[\s\S]*^## Funding and execution order[\s\S]*^## What counts as success[\s\S]*^## Immediate stop conditions/m,
+  );
+  assert.match(
+    quickStart,
+    /76f585d1e729326b5d749a61937c3971d4f34050/,
+  );
+  assert.match(
+    quickStart,
+    /Node\.js 22[^.\n]*all three computers/i,
+  );
+  assert.match(
+    quickStart,
+    /clean[^.\n]*76f585d1e729326b5d749a61937c3971d4f34050[^.\n]*all three computers/i,
+  );
+  assert.match(
+    quickStart,
+    /Operator[^.\n]*relay[^.\n]*coordinator[^.\n]*funding[^.\n]*watcher[^.\n]*fresh aggregate verifier/i,
+  );
+  assert.match(
+    quickStart,
+    /Stakeholder 1[^.\n]*Iris[^.\n]*payee/i,
+  );
+  assert.match(
+    quickStart,
+    /Stakeholder 2[^.\n]*Billy[^.\n]*payer/i,
+  );
+  assert.match(
+    quickStart,
+    /relay[^.\n]*before[^.\n]*coordinator/i,
+  );
+  assert.match(
+    quickStart,
+    /wait[^.\n]*both role computers[^.\n]*ready[^.\n]*manifests expire after 60 minutes/i,
+  );
+  assert.match(quickStart, /payee\.launch\.json[^.\n]*only Iris/i);
+  assert.match(quickStart, /payer\.launch\.json[^.\n]*only Billy/i);
+  assert.match(
+    quickStart,
+    /coordinator-owned[^.\n]*funding-addresses\.json/i,
+  );
+  assert.match(quickStart, /npm run bilateral:fund/i);
+  assert.match(
+    quickStart,
+    /PROPOSED[\s\S]*ACCEPTED[\s\S]*ACKNOWLEDGED[\s\S]*operator verification[\s\S]*AUTHORIZED/i,
+  );
+  assert.match(
+    quickStart,
+    /exactly three independently verifiable Clockchain anchors/i,
+  );
+  assert.match(
+    quickStart,
+    /only a fresh aggregate verifier[^.\n]*AUTHORIZED/i,
+  );
+  assert.match(quickStart, /paymentMoved:false/);
+  assert.match(
+    quickStart,
+    /missing, duplicate, reordered, expired, malformed, or mismatched evidence/i,
+  );
+  assert.match(
+    quickStart,
+    /no secrets[^.\n]*live evidence[^.\n]*manifest contents/i,
+  );
+  assert.match(quickStart, /do not claim physical rehearsal passed/i);
 });
 
 test("bilateral operator runbook orders key publication before release freeze", async () => {
@@ -2128,6 +2218,6 @@ test("reports the true gated document count", async () => {
   assert.equal(exitCode, 0);
   assert.equal(
     stdout.text(),
-    "Documentation checks passed (7 gated documents).\n",
+    "Documentation checks passed (8 gated documents).\n",
   );
 });

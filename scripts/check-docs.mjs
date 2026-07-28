@@ -26,6 +26,7 @@ const PUBLIC_DOCUMENTS = Object.freeze([
 const BILATERAL_PUBLIC_DOCUMENTS = Object.freeze([
   "prompts/run-billy-bilateral-demo.md",
   "prompts/run-iris-bilateral-demo.md",
+  "docs/runbooks/bilateral-demo-quick-start.md",
   "docs/runbooks/bilateral-demo-day.md",
 ]);
 const SUPPORTING_DOCUMENTS = Object.freeze([
@@ -43,6 +44,7 @@ const REQUIRED_LINKS = Object.freeze({
     "prompts/run-turnkey-demo.md",
     "prompts/run-billy-bilateral-demo.md",
     "prompts/run-iris-bilateral-demo.md",
+    "docs/runbooks/bilateral-demo-quick-start.md",
     "docs/runbooks/bilateral-demo-day.md",
     "invites/README.md",
   ]),
@@ -57,8 +59,15 @@ const REQUIRED_LINKS = Object.freeze({
   "prompts/run-iris-bilateral-demo.md": Object.freeze([
     "../docs/runbooks/bilateral-demo-day.md",
   ]),
+  "docs/runbooks/bilateral-demo-quick-start.md": Object.freeze([
+    "../../README.md",
+    "../../docs/runbooks/bilateral-demo-day.md",
+    "../../prompts/run-billy-bilateral-demo.md",
+    "../../prompts/run-iris-bilateral-demo.md",
+  ]),
   "docs/runbooks/bilateral-demo-day.md": Object.freeze([
     "../../README.md",
+    "./bilateral-demo-quick-start.md",
     "../../prompts/run-billy-bilateral-demo.md",
     "../../prompts/run-iris-bilateral-demo.md",
   ]),
@@ -179,6 +188,12 @@ const CANONICAL_SAFETY_SECTIONS = Object.freeze({
     }),
   ]),
   "docs/runbooks/bilateral-demo-day.md": Object.freeze([
+    Object.freeze({
+      label: "bilateral safety summary",
+      text: BILATERAL_SAFETY_SECTION,
+    }),
+  ]),
+  "docs/runbooks/bilateral-demo-quick-start.md": Object.freeze([
     Object.freeze({
       label: "bilateral safety summary",
       text: BILATERAL_SAFETY_SECTION,
@@ -688,6 +703,85 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       ["recovery rules", /\bRecovery rules\b/i],
       ["abort conditions", /\bAbort conditions\b/i],
+    ],
+    "docs/runbooks/bilateral-demo-quick-start.md": [
+      [
+        "exact section order",
+        /^## Before everyone starts[\s\S]*^## Fixed role assignment[\s\S]*^## Operator checklist[\s\S]*^## Iris checklist[\s\S]*^## Billy checklist[\s\S]*^## Funding and execution order[\s\S]*^## What counts as success[\s\S]*^## Immediate stop conditions/m,
+      ],
+      [
+        "pinned reviewed release SHA",
+        /\b76f585d1e729326b5d749a61937c3971d4f34050\b/,
+      ],
+      [
+        "Node.js 22 on all computers",
+        /\bNode\.js 22\b[^.\n]*\ball three computers\b/i,
+      ],
+      [
+        "clean exact SHA on all computers",
+        /\bclean\b[^.\n]*\b76f585d1e729326b5d749a61937c3971d4f34050\b[^.\n]*\ball three computers\b/i,
+      ],
+      [
+        "fixed operator role",
+        /\bOperator\b[^.\n]*\brelay\b[^.\n]*\bcoordinator\b[^.\n]*\bfunding\b[^.\n]*\bwatcher\b[^.\n]*\bfresh aggregate verifier\b/i,
+      ],
+      [
+        "fixed Iris role",
+        /\bStakeholder 1\b[^.\n]*\bIris\b[^.\n]*\bpayee\b/i,
+      ],
+      [
+        "fixed Billy role",
+        /\bStakeholder 2\b[^.\n]*\bBilly\b[^.\n]*\bpayer\b/i,
+      ],
+      [
+        "relay before coordinator",
+        /\brelay\b[^.\n]*\bbefore\b[^.\n]*\bcoordinator\b/i,
+      ],
+      [
+        "wait for both roles before launch manifest expiry",
+        /\bwait\b[^.\n]*\bboth role computers\b[^.\n]*\bready\b[^.\n]*\bmanifests expire after 60 minutes\b/i,
+      ],
+      [
+        "payee manifest only Iris",
+        /\bpayee\.launch\.json\b[^.\n]*\bonly Iris\b/i,
+      ],
+      [
+        "payer manifest only Billy",
+        /\bpayer\.launch\.json\b[^.\n]*\bonly Billy\b/i,
+      ],
+      [
+        "coordinator-owned funding record",
+        /\bcoordinator-owned\b[^.\n]*\bfunding-addresses\.json\b/i,
+      ],
+      [
+        "funding command",
+        /\bnpm run bilateral:fund\b/i,
+      ],
+      [
+        "verdict sequence",
+        /\bPROPOSED\b[\s\S]*\bACCEPTED\b[\s\S]*\bACKNOWLEDGED\b[\s\S]*\boperator verification\b[\s\S]*\bAUTHORIZED\b/i,
+      ],
+      [
+        "exactly three independently verifiable anchors",
+        /\bexactly three independently verifiable Clockchain anchors\b/i,
+      ],
+      [
+        "fresh aggregate verifier authorization",
+        /\bonly a fresh aggregate verifier\b[^.\n]*\bAUTHORIZED\b/i,
+      ],
+      ["payment moved false", /\bpaymentMoved:false\b/],
+      [
+        "evidence stop conditions",
+        /\bmissing, duplicate, reordered, expired, malformed, or mismatched evidence\b/i,
+      ],
+      [
+        "secrets and live evidence prohibition",
+        /\bno secrets\b[^.\n]*\blive evidence\b[^.\n]*\bmanifest contents\b/i,
+      ],
+      [
+        "no physical rehearsal passed claim",
+        /\bdo not claim physical rehearsal passed\b/i,
+      ],
     ],
   };
   for (const [label, pattern] of pathRequirements[relativePath] ?? []) {
