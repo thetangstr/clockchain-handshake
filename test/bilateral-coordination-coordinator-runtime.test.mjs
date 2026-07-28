@@ -15,6 +15,7 @@ import {
   deriveDescriptorSessionId,
   loadOrCreateCoordinatorRelease,
   parseCoordinatorArguments,
+  publishConsoleState,
   readCoordinatorRuntimeConfig,
   runChildWithDeadline,
   runPinnedVerifierChild,
@@ -289,6 +290,66 @@ test("runtime rejects funding address publication when the destination appears a
   await assert.rejects(runtime.runDependencies({ releaseId: "release-a", repositorySha: config.repositorySha, sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }).displayAddresses(addresses));
   assert.equal(raced, true);
   assert.equal(await readFile(join(rootPath, "funding-addresses.json"), "utf8"), "{}");
+});
+
+test("console state replaces rehearsal with stakeholder state and reuses exact restart bytes", async (t) => {
+  const rootPath = await mkdtemp(join(tmpdir(), "coordinator-console-state-"));
+  await chmod(rootPath, 0o700);
+  const before = await lstat(rootPath);
+  const handle = await open(rootPath, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0));
+  t.after(() => handle.close());
+  t.after(() => rm(rootPath, { recursive: true, force: true }));
+  const root = { before, handle, path: rootPath };
+  const rehearsal = { padding: "x".repeat(512), paymentMoved: false, subjectRun: "rehearsal" };
+  const stakeholder = { paymentMoved: false, subjectRun: "stakeholder" };
+  const path = await publishConsoleState(root, rehearsal);
+  const rehearsalStat = await lstat(path);
+  assert.equal(await readFile(path, "utf8"), `${JSON.stringify(rehearsal)}\n`);
+
+  assert.equal(await publishConsoleState(root, rehearsal), path);
+  const restartStat = await lstat(path);
+  assert.equal(restartStat.dev, rehearsalStat.dev);
+  assert.equal(restartStat.ino, rehearsalStat.ino);
+
+  assert.equal(await publishConsoleState(root, stakeholder), path);
+  assert.equal(await readFile(path, "utf8"), `${JSON.stringify(stakeholder)}\n`);
+  const stakeholderStat = await lstat(path);
+  assert.notEqual(stakeholderStat.ino, rehearsalStat.ino);
+  assert.equal(stakeholderStat.mode & 0o777, 0o600);
+});
+
+test("console state rejects symlink and destination-appearance races", async (t) => {
+  const rootPath = await mkdtemp(join(tmpdir(), "coordinator-console-race-"));
+  await chmod(rootPath, 0o700);
+  const before = await lstat(rootPath);
+  const handle = await open(rootPath, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0));
+  t.after(() => handle.close());
+  t.after(() => rm(rootPath, { recursive: true, force: true }));
+  const root = { before, handle, path: rootPath };
+  const path = join(rootPath, "console-state.json");
+  const target = join(rootPath, "target.json");
+  await writeFile(target, "untouched", { mode: 0o600 });
+  await symlink(target, path);
+  await assert.rejects(publishConsoleState(root, { paymentMoved: false, subjectRun: "rehearsal" }));
+  assert.equal(await readFile(target, "utf8"), "untouched");
+  await unlink(path);
+
+  let destinationChecks = 0;
+  const fileSystem = {
+    link,
+    async lstat(path_) {
+      if (path_ === path) {
+        destinationChecks += 1;
+        if (destinationChecks === 2) await writeFile(path, "raced", { mode: 0o600 });
+      }
+      return lstat(path_);
+    },
+    open,
+    readdir,
+    unlink,
+  };
+  await assert.rejects(publishConsoleState(root, { paymentMoved: false, subjectRun: "rehearsal" }, fileSystem));
+  assert.equal(await readFile(path, "utf8"), "raced");
 });
 
 test("runtime release dependencies satisfy the coordinator release contract", async (t) => {

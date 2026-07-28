@@ -22,7 +22,9 @@ import {
   COORDINATOR_STATE_SCHEMA,
   createCoordinatorRelease,
   runCoordinator as runCoordinatorCore,
+  validateCoordinatorIntentReadiness,
   validateVerifierChildResult,
+  waitForVerifiedCoordinatorIntentReadiness,
 } from "../src/bilateral/coordination/coordinator.mjs";
 import { createCoordinationEnvelope } from "../src/bilateral/coordination/envelope.mjs";
 
@@ -67,6 +69,96 @@ function capabilityReceipt(request) {
 function coordinationEvent({ artifactDigest = null, eventDigest, kind, role = "operator", subjectRun = "release" }) {
   return { artifactDigest, eventDigest, kind, paymentMoved: false, previousEventDigest: null, releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, role, schema: "clockchain.bilateral-coordination-envelope/v1", sequence: "0", sessionId: SESSION_ID, signature: {}, subjectRun };
 }
+
+function intentEvents(subjectRun = "rehearsal") {
+  return [
+    coordinationEvent({ artifactDigest: "c".repeat(64), eventDigest: "7".repeat(64), kind: "PAYER_MANDATE_READY", role: "payer", subjectRun }),
+    coordinationEvent({ artifactDigest: "d".repeat(64), eventDigest: "8".repeat(64), kind: "PAYMENT_REQUEST_READY", role: "payee", subjectRun }),
+    coordinationEvent({ eventDigest: "9".repeat(64), kind: "PAYMENT_REQUEST_MATCHED", role: "payer", subjectRun }),
+  ];
+}
+
+test("waits for exact same-run commercial intents and ignores the other run", async () => {
+  const complete = intentEvents();
+  const otherRun = intentEvents("stakeholder");
+  let reads = 0;
+  let sleeps = 0;
+  let nowMs = 1_000;
+  await waitForVerifiedCoordinatorIntentReadiness({
+    now: () => nowMs,
+    readEvents: async () => {
+      reads += 1;
+      return reads === 1 ? otherRun : [...otherRun, ...complete];
+    },
+    sleeper: async (delay) => {
+      assert.equal(delay, 100);
+      sleeps += 1;
+      nowMs += delay;
+    },
+    subjectRun: "rehearsal",
+  });
+  assert.equal(reads, 2);
+  assert.equal(sleeps, 1);
+});
+
+test("commercial intent readiness rejects timeout, duplicate, wrong role, malformed digest, reordering, and regressing time", async () => {
+  const complete = intentEvents();
+  const hostile = {
+    duplicate: [...complete, complete[0]],
+    "wrong role": [{ ...complete[0], role: "payee" }, ...complete.slice(1)],
+    "malformed digest": [{ ...complete[0], artifactDigest: null }, ...complete.slice(1)],
+    reordered: [complete[1], complete[0], complete[2]],
+  };
+  for (const [label, events] of Object.entries(hostile)) {
+    assert.throws(
+      () => validateCoordinatorIntentReadiness(events, "rehearsal"),
+      { code: "COORDINATION_COORDINATOR_INVALID" },
+      label,
+    );
+  }
+  let timeoutNow = 1_000;
+  await assert.rejects(
+    waitForVerifiedCoordinatorIntentReadiness({
+      now: () => (timeoutNow += 45_000),
+      readEvents: async () => [],
+      sleeper: async () => {},
+      subjectRun: "rehearsal",
+    }),
+    { code: "COORDINATION_COORDINATOR_INVALID" },
+  );
+  let clockRead = 0;
+  await assert.rejects(
+    waitForVerifiedCoordinatorIntentReadiness({
+      now: () => (clockRead += 1) === 1 ? 1_000 : 999,
+      readEvents: async () => [],
+      sleeper: async () => {},
+      subjectRun: "rehearsal",
+    }),
+    { code: "COORDINATION_COORDINATOR_INVALID" },
+  );
+  for (const initial of [Number.NaN, 1.5, -1, Number.MAX_SAFE_INTEGER]) {
+    await assert.rejects(
+      waitForVerifiedCoordinatorIntentReadiness({
+        now: () => initial,
+        readEvents: async () => [],
+        sleeper: async () => {},
+        subjectRun: "rehearsal",
+      }),
+      { code: "COORDINATION_COORDINATOR_INVALID" },
+      String(initial),
+    );
+  }
+  let unsafeRead = 0;
+  await assert.rejects(
+    waitForVerifiedCoordinatorIntentReadiness({
+      now: () => (unsafeRead += 1) === 1 ? 1_000 : Number.MAX_SAFE_INTEGER + 1,
+      readEvents: async () => [],
+      sleeper: async () => {},
+      subjectRun: "rehearsal",
+    }),
+    { code: "COORDINATION_COORDINATOR_INVALID" },
+  );
+});
 
 function fundingReplay() {
   return [

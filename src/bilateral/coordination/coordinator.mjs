@@ -125,7 +125,7 @@ const RUN_ORCHESTRATION_DEPENDENCY_KEYS = Object.freeze([
   "startWatcher", "validatePublishedBilateralVerdict", "waitForDescriptorAcceptance",
   "validateRehearsalPackage", "waitForRolePackage", "waitForRoleStarted",
 ]);
-const RUN_OPTIONAL_DEPENDENCY_KEYS = Object.freeze(["drainWatchers"]);
+const RUN_OPTIONAL_DEPENDENCY_KEYS = Object.freeze(["drainWatchers", "writeConsoleState"]);
 const SUCCESS_STATUS = "VERIFICATION_PASSED";
 const FUNDING_RECORD_KEYS = Object.freeze([
   "address",
@@ -163,11 +163,19 @@ const COORDINATOR_STATES = new Set([
 ]);
 const FUNDING_READINESS_DEADLINE_MS = 8 * 60_000;
 const FUNDING_READINESS_INTERVAL_MS = 20_000;
+const INTENT_READINESS_DEADLINE_MS = 90_000;
+const INTENT_READINESS_INTERVAL_MS = 100;
+const INTENT_READINESS_MAX_ATTEMPTS = 900;
 const ADVISORY_SESSION_NOT_FOUND_CODE = "COORDINATION_SESSION_NOT_FOUND";
 const AUTHENTICATED_EVENT_KEYS = Object.freeze([
   "artifactDigest", "eventDigest", "kind", "paymentMoved", "previousEventDigest",
   "releaseId", "repositorySha", "role", "schema", "sequence", "sessionId",
   "signature", "subjectRun",
+]);
+const REQUIRED_INTENTS = Object.freeze([
+  Object.freeze({ kind: "PAYER_MANDATE_READY", role: "payer", artifact: "sha256" }),
+  Object.freeze({ kind: "PAYMENT_REQUEST_READY", role: "payee", artifact: "sha256" }),
+  Object.freeze({ kind: "PAYMENT_REQUEST_MATCHED", role: "payer", artifact: "null" }),
 ]);
 
 export class CoordinationCoordinatorError extends Error {
@@ -181,6 +189,52 @@ export class CoordinationCoordinatorError extends Error {
 
 function invalid() {
   throw new CoordinationCoordinatorError();
+}
+
+export function validateCoordinatorIntentReadiness(events, subjectRun) {
+  if (!Array.isArray(events) || !["rehearsal", "stakeholder"].includes(subjectRun)) invalid();
+  const bound = REQUIRED_INTENTS.map(({ artifact, kind, role }) => {
+    const matches = events
+      .map((event, index) => ({ event, index }))
+      .filter(({ event }) => event?.kind === kind && event?.subjectRun === subjectRun);
+    if (
+      matches.length > 1 ||
+      matches.some(({ event }) => event.role !== role) ||
+      matches.some(({ event }) => artifact === "sha256"
+        ? !SHA256_PATTERN.test(event.artifactDigest)
+        : event.artifactDigest !== null)
+    ) invalid();
+    return matches;
+  });
+  if (!bound.every((matches) => matches.length === 1)) return false;
+  if (!(bound[0][0].index < bound[1][0].index && bound[1][0].index < bound[2][0].index)) invalid();
+  return true;
+}
+
+export async function waitForVerifiedCoordinatorIntentReadiness({
+  now,
+  readEvents,
+  sleeper,
+  subjectRun,
+}) {
+  if (
+    typeof now !== "function" ||
+    typeof readEvents !== "function" ||
+    typeof sleeper !== "function" ||
+    !["rehearsal", "stakeholder"].includes(subjectRun)
+  ) invalid();
+  let intentNow = now();
+  if (!Number.isSafeInteger(intentNow) || intentNow < 0 || intentNow > Number.MAX_SAFE_INTEGER - INTENT_READINESS_DEADLINE_MS) invalid();
+  const deadline = intentNow + INTENT_READINESS_DEADLINE_MS;
+  for (let attempt = 0; attempt < INTENT_READINESS_MAX_ATTEMPTS; attempt += 1) {
+    if (validateCoordinatorIntentReadiness(await readEvents(), subjectRun)) return;
+    const nextNow = now();
+    if (!Number.isSafeInteger(nextNow) || nextNow < intentNow || nextNow > Number.MAX_SAFE_INTEGER) invalid();
+    intentNow = nextNow;
+    if (intentNow >= deadline || attempt === INTENT_READINESS_MAX_ATTEMPTS - 1) invalid();
+    await sleeper(INTENT_READINESS_INTERVAL_MS);
+  }
+  invalid();
 }
 
 function isPlainObject(value) {
@@ -840,17 +894,15 @@ async function beginDescriptor({ dependencies, persisted, release, releaseRoot, 
     if (typeof dependencies[key] !== "function") invalid();
   }
   const action = subjectRun === "rehearsal" ? "REHEARSAL_DESCRIPTOR" : "STAKEHOLDER_DESCRIPTOR";
-  const intentEvents = checkedAuthenticatedEvents(
-    await dependencies.readVerifiedRawEvents({ sessionId: release.sessionId }),
-    release,
-  );
-  const requiredIntents = [
-    ["PAYER_MANDATE_READY", "payer"],
-    ["PAYMENT_REQUEST_READY", "payee"],
-    ["PAYMENT_REQUEST_MATCHED", "payer"],
-  ];
-  const boundIntents = requiredIntents.map(([kind, role]) => intentEvents.filter((event) => event.kind === kind && event.role === role && event.subjectRun === subjectRun));
-  if (boundIntents.some((events) => events.length !== 1) || !SHA256_PATTERN.test(boundIntents[0][0].artifactDigest) || !SHA256_PATTERN.test(boundIntents[1][0].artifactDigest) || boundIntents[2][0].artifactDigest !== null) invalid();
+  await waitForVerifiedCoordinatorIntentReadiness({
+    now: dependencies.now,
+    readEvents: async () => checkedAuthenticatedEvents(
+      await dependencies.readVerifiedRawEvents({ sessionId: release.sessionId }),
+      release,
+    ),
+    sleeper: dependencies.sleeper,
+    subjectRun,
+  });
   const existing = persisted.checkpoints.filter((entry) => entry.action === action && entry.role === "operator" && entry.subjectRun === subjectRun).at(-1);
   if (existing?.status === "EVENT_APPENDED") return awaitDescriptorAcceptance({ dependencies, persisted, release, releaseRoot, subjectRun, action });
   if (existing?.status === "ARTIFACT_STORED") {
@@ -1317,7 +1369,14 @@ async function verifyRun({ dependencies, persisted, release, releaseRoot, subjec
     const replay = checkedAuthenticatedEvents(await dependencies.readVerifiedRawEvents({ sessionId: release.sessionId }), release);
     const matched = replay.filter((event) => event.kind === "VERIFICATION_PASSED" && event.role === "operator" && event.subjectRun === subjectRun && event.eventDigest === existing.eventDigest && event.artifactDigest === existing.artifactDigest);
     if (matched.length !== 1) invalid();
-    return descriptorState({ checkpoints: persisted.checkpoints, release, state: verifiedState });
+    const verified = descriptorState({ checkpoints: persisted.checkpoints, release, state: verifiedState });
+    if (typeof dependencies.writeConsoleState === "function") {
+      await dependencies.writeConsoleState({
+        lifecycleView: verified,
+        subjectRun,
+      });
+    }
+    return verified;
   }
   let state = persisted;
   const outputDirectory = join(releaseRoot, "verifier", subjectRun);
