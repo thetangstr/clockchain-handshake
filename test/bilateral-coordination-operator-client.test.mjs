@@ -22,6 +22,14 @@ import {
   createCapabilityRegistration,
 } from "../src/bilateral/coordination/capability-registration.mjs";
 import {
+  PAYER_MANDATE_SCHEMA,
+  signPayerMandate,
+} from "../src/bilateral/payer-mandate.mjs";
+import {
+  PAYMENT_REQUEST_SCHEMA,
+  signPaymentRequest,
+} from "../src/bilateral/payment-request.mjs";
+import {
   createCoordinationEnvelope,
 } from "../src/bilateral/coordination/envelope.mjs";
 import {
@@ -41,6 +49,12 @@ const RELEASE_ID = "release-operator-client";
 const SESSION_ID = "8f953393-86d0-4f99-9d6a-102f525fbecd";
 const execFile = promisify(execFileCallback);
 const INVITATION_KEYS = Object.freeze({ rehearsal: `0x${"1".repeat(64)}`, stakeholder: `0x${"2".repeat(64)}` });
+const INTENT_REQUEST_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const INTENT_PAYER_ACCOUNT = privateKeyToAccount(`0x${"5".repeat(64)}`);
+const INTENT_PAYEE_ACCOUNT = privateKeyToAccount(`0x${"6".repeat(64)}`);
+const INTENT_OTHER_ACCOUNT = privateKeyToAccount(`0x${"7".repeat(64)}`);
+const INTENT_PAYER = Object.freeze({ address: INTENT_PAYER_ACCOUNT.address.toLowerCase(), agentId: "101" });
+const INTENT_PAYEE = Object.freeze({ address: INTENT_PAYEE_ACCOUNT.address.toLowerCase(), agentId: "202" });
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -142,6 +156,67 @@ function verifierPublication(subjectRun, publicationDigest = "d".repeat(64)) {
     status: "VERIFICATION_PASSED",
     subjectRun,
   };
+}
+
+function intentMandate(overrides = {}) {
+  return {
+    amount: { currency: "USD", value: "100" },
+    expiresAtMs: "1785297600000",
+    invoiceReferencePrefix: "TREL-",
+    issuedAtMs: "1785294000000",
+    payee: INTENT_PAYEE,
+    payer: INTENT_PAYER,
+    paymentMoved: false,
+    protocol: "clockchain.bilateral-authorization/v1",
+    purpose: "freight-services",
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    requestEndpoint: `/v1/sessions/${SESSION_ID}/payment-requests`,
+    schema: PAYER_MANDATE_SCHEMA,
+    sessionId: SESSION_ID,
+    subjectRun: "rehearsal",
+    ...overrides,
+  };
+}
+
+async function signedIntentMandate(overrides = {}, signer = INTENT_PAYER_ACCOUNT) {
+  return signPayerMandate({
+    mandate: intentMandate(overrides),
+    signMessage: (bytes) => signer.signMessage({ message: { raw: bytes } }),
+  });
+}
+
+function intentRequest(mandateEnvelope, overrides = {}) {
+  return {
+    amount: { currency: "USD", value: "100" },
+    createdAtMs: "1785294300000",
+    expiresAtMs: "1785297000000",
+    invoiceReference: "TREL-2026-0001",
+    mandateDigest: sha256(canonicalBytes(mandateEnvelope.mandate)),
+    payee: INTENT_PAYEE,
+    payer: INTENT_PAYER,
+    paymentMoved: false,
+    protocol: "clockchain.bilateral-authorization/v1",
+    purpose: "freight-services",
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    requestId: INTENT_REQUEST_ID,
+    schema: PAYMENT_REQUEST_SCHEMA,
+    sessionId: SESSION_ID,
+    subjectRun: "rehearsal",
+    ...overrides,
+  };
+}
+
+async function signedIntentRequest(
+  mandateEnvelope,
+  overrides = {},
+  signer = INTENT_PAYEE_ACCOUNT,
+) {
+  return signPaymentRequest({
+    request: intentRequest(mandateEnvelope, overrides),
+    signMessage: (bytes) => signer.signMessage({ message: { raw: bytes } }),
+  });
 }
 
 async function listen(server, t) {
@@ -598,7 +673,11 @@ test("operator client rejects a verifier publication substituted across release 
     subjectRun: "rehearsal",
   })));
   await assert.rejects(
-    client.readVerifierPublication({ subjectRun: "rehearsal" }),
+    client.readVerifierPublication({
+      payer: INTENT_PAYER,
+      payee: INTENT_PAYEE,
+      subjectRun: "rehearsal",
+    }),
     { code: "COORDINATION_OPERATOR_CLIENT_INVALID" },
   );
 });
@@ -789,4 +868,111 @@ test("operator client exposes only contextual commercial-intent reads", async ()
   assert.equal(typeof client.readPaymentRequest, "function");
   assert.equal("publishPayerMandate" in client, false);
   assert.equal("submitPaymentRequest" in client, false);
+  for (const helper of [
+    "appendPayerMandate",
+    "appendPaymentRequest",
+    "authorizePaymentRequest",
+    "authorizePayment",
+    "createAuthorization",
+    "markAuthorized",
+  ]) {
+    assert.equal(helper in client, false, helper);
+  }
+});
+
+test("operator client rejects hostile payer-mandate reads across envelope and party bindings", async () => {
+  const valid = await signedIntentMandate();
+  const otherParty = { address: INTENT_OTHER_ACCOUNT.address.toLowerCase(), agentId: "303" };
+  const cases = [
+    ["wrong outer schema", { ...valid, schema: "clockchain.bilateral-payer-mandate-envelope/v2" }],
+    ["forged signature", { ...valid, signature: { ...valid.signature, value: `0x${"0".repeat(130)}` } }],
+    ["wrong releaseId", await signedIntentMandate({ releaseId: "release-other" })],
+    ["wrong repositorySha", await signedIntentMandate({ repositorySha: "e".repeat(40) })],
+    ["wrong sessionId", await signedIntentMandate({ requestEndpoint: "/v1/sessions/9f953393-86d0-4f99-9d6a-102f525fbecd/payment-requests", sessionId: "9f953393-86d0-4f99-9d6a-102f525fbecd" })],
+    ["wrong subjectRun", await signedIntentMandate({ subjectRun: "stakeholder" })],
+    ["wrong payer address", await signedIntentMandate({ payer: { ...INTENT_PAYER, address: otherParty.address } }, INTENT_OTHER_ACCOUNT)],
+    ["wrong payer agentId", await signedIntentMandate({ payer: { ...INTENT_PAYER, agentId: "303" } })],
+    ["wrong payee address", await signedIntentMandate({ payee: { ...INTENT_PAYEE, address: otherParty.address } })],
+    ["wrong payee agentId", await signedIntentMandate({ payee: { ...INTENT_PAYEE, agentId: "303" } })],
+  ];
+  for (const [label, envelope] of cases) {
+    const { client } = fixture(async () =>
+      response(canonicalBytes(envelope), "application/octet-stream"),
+    );
+    await assert.rejects(
+      client.readPayerMandate({
+        payer: INTENT_PAYER,
+        payee: INTENT_PAYEE,
+        subjectRun: "rehearsal",
+      }),
+      { code: "COORDINATION_OPERATOR_CLIENT_INVALID" },
+      label,
+    );
+  }
+});
+
+test("operator client rejects hostile payment-request reads across envelope and party bindings", async () => {
+  const mandate = await signedIntentMandate();
+  const valid = await signedIntentRequest(mandate);
+  const otherParty = { address: INTENT_OTHER_ACCOUNT.address.toLowerCase(), agentId: "303" };
+  const cases = [
+    ["wrong outer schema", { ...valid, schema: "clockchain.bilateral-payment-request-envelope/v2" }],
+    ["forged signature", { ...valid, signature: { ...valid.signature, value: `0x${"0".repeat(130)}` } }],
+    ["wrong releaseId", await signedIntentRequest(mandate, { releaseId: "release-other" })],
+    ["wrong repositorySha", await signedIntentRequest(mandate, { repositorySha: "e".repeat(40) })],
+    ["wrong sessionId", await signedIntentRequest(mandate, { sessionId: "9f953393-86d0-4f99-9d6a-102f525fbecd" })],
+    ["wrong subjectRun", await signedIntentRequest(mandate, { subjectRun: "stakeholder" })],
+    ["wrong payer address", await signedIntentRequest(mandate, { payer: { ...INTENT_PAYER, address: otherParty.address } })],
+    ["wrong payer agentId", await signedIntentRequest(mandate, { payer: { ...INTENT_PAYER, agentId: "303" } })],
+    ["wrong payee address", await signedIntentRequest(mandate, { payee: { ...INTENT_PAYEE, address: otherParty.address } }, INTENT_OTHER_ACCOUNT)],
+    ["wrong payee agentId", await signedIntentRequest(mandate, { payee: { ...INTENT_PAYEE, agentId: "303" } })],
+    ["wrong requestId", await signedIntentRequest(mandate, { requestId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" })],
+  ];
+  for (const [label, envelope] of cases) {
+    const { client } = fixture(async () =>
+      response(canonicalBytes(envelope), "application/octet-stream"),
+    );
+    await assert.rejects(
+      client.readPaymentRequest({
+        payer: INTENT_PAYER,
+        payee: INTENT_PAYEE,
+        requestId: INTENT_REQUEST_ID,
+        subjectRun: "rehearsal",
+      }),
+      { code: "COORDINATION_OPERATOR_CLIENT_INVALID" },
+      label,
+    );
+  }
+});
+
+test("operator client snapshots expected commercial parties before intent read transport awaits", async () => {
+  const mandate = await signedIntentMandate();
+  const requestEnvelope = await signedIntentRequest(mandate);
+  for (const [method, input, body] of [
+    [
+      "readPayerMandate",
+      { payer: { ...INTENT_PAYER }, payee: { ...INTENT_PAYEE }, subjectRun: "rehearsal" },
+      canonicalBytes(mandate),
+    ],
+    [
+      "readPaymentRequest",
+      { payer: { ...INTENT_PAYER }, payee: { ...INTENT_PAYEE }, requestId: INTENT_REQUEST_ID, subjectRun: "rehearsal" },
+      canonicalBytes(requestEnvelope),
+    ],
+  ]) {
+    let release = () => {};
+    const { client } = fixture(async () => {
+      await new Promise((resolve) => { release = resolve; });
+      return response(body, "application/octet-stream");
+    });
+    const result = client[method](input);
+    queueMicrotask(() => {
+      input.payer.address = INTENT_OTHER_ACCOUNT.address.toLowerCase();
+      input.payer.agentId = "303";
+      input.payee.address = INTENT_OTHER_ACCOUNT.address.toLowerCase();
+      input.payee.agentId = "303";
+      release();
+    });
+    assert.deepEqual(await result, body, method);
+  }
 });
