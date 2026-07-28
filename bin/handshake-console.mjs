@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 import { createConsoleServer } from "../src/bilateral/coordination/console-server.mjs";
-import { buildConsoleProjection } from "../src/bilateral/coordination/console-projection.mjs";
+import { createStateRootProjection } from "../src/bilateral/coordination/console-server.mjs";
+import { lstatSync, readFileSync } from "node:fs";
 
-const values = process.argv.slice(2); if (values.length !== 0) throw new Error("Console accepts no evidence or secret arguments.");
-const server = createConsoleServer({ projection: () => buildConsoleProjection({}) });
-server.listen(8787, "127.0.0.1", () => process.stdout.write("Handshake console listening on loopback.\n"));
+export function parseConsoleArguments(argv) {
+  const allowed = new Set(["--allow-lan", "--host", "--port", "--state-root", "--tls-certificate", "--tls-key"]); const values = Object.create(null);
+  for (let index = 0; index < argv.length; index += 1) { const flag = argv[index]; if (!allowed.has(flag) || Object.hasOwn(values, flag)) throw new Error("Console arguments failed safely."); if (flag === "--allow-lan") { values[flag] = true; continue; } const value = argv[++index]; if (typeof value !== "string" || value.length === 0 || value.includes("\0")) throw new Error("Console arguments failed safely."); values[flag] = value; }
+  if (typeof values["--state-root"] !== "string") throw new Error("Console arguments failed safely."); const host = values["--host"] ?? "127.0.0.1"; const port = Number(values["--port"] ?? "8787"); if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error("Console arguments failed safely."); const lan = host !== "127.0.0.1" && host !== "::1" && host !== "localhost";
+  if (lan && (!values["--allow-lan"] || !values["--tls-certificate"] || !values["--tls-key"])) throw new Error("Console arguments failed safely."); if (!lan && (values["--allow-lan"] || values["--tls-certificate"] || values["--tls-key"])) throw new Error("Console arguments failed safely.");
+  return Object.freeze({ allowLan: lan, host, port, stateRoot: values["--state-root"], tlsCertificate: values["--tls-certificate"] ?? null, tlsKey: values["--tls-key"] ?? null });
+}
+function privateInput(path) { const stat = lstatSync(path); if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o600 || stat.size === 0 || stat.size > 1024 * 1024) throw new Error("Console TLS failed safely."); return readFileSync(path); }
+if (import.meta.url === new URL(process.argv[1], "file:").href) { const options = parseConsoleArguments(process.argv.slice(2)); const tls = options.allowLan ? { cert: privateInput(options.tlsCertificate), key: privateInput(options.tlsKey) } : null; const server = createConsoleServer({ projection: createStateRootProjection({ stateRoot: options.stateRoot }), tls }); server.listen(options.port, options.host, () => process.stdout.write("Handshake console listening.\n")); }

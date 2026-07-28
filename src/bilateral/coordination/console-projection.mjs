@@ -10,16 +10,19 @@ function anchor(value, index) {
 }
 function publicationMatches(publication, session, mandateDigest, requestDigest, anchors) {
   const value = object(publication);
-  if (value.markerComplete !== true || value.paymentMoved !== false || value.releaseId !== session.releaseId || value.repositorySha !== session.repositorySha || value.sessionId !== session.sessionId || digest(value.descriptorDigest) === null || value.mandateDigest !== mandateDigest || value.requestDigest !== requestDigest || digest(value.packageDigests?.payer) === null || digest(value.packageDigests?.payee) === null || !Array.isArray(value.anchorDigests) || value.anchorDigests.length !== 3) return false;
+  if (value.markerComplete !== true || value.paymentMoved !== false || value.releaseId !== session.releaseId || value.repositorySha !== session.repositorySha || value.sessionId !== session.sessionId || digest(value.publicationDigest) === null || digest(value.descriptorDigest) === null || value.mandateDigest !== mandateDigest || value.requestDigest !== requestDigest || digest(value.packageDigests?.payer) === null || digest(value.packageDigests?.payee) === null || !Array.isArray(value.anchorDigests) || value.anchorDigests.length !== 3) return false;
   return value.anchorDigests.every((item, index) => item === anchors[index]?.digest);
 }
 
 export function buildConsoleProjection(input) {
   const value = object(input); const lifecycle = object(value.lifecycleView); const mandateValue = object(value.mandate); const requestValue = object(value.request); const mandate = object(mandateValue.mandate); const request = object(requestValue.request);
   const session = Object.freeze({ advisory: true, releaseId: typeof lifecycle.releaseId === "string" ? lifecycle.releaseId : null, repositorySha: typeof lifecycle.repositorySha === "string" && /^[0-9a-f]{40}$/.test(lifecycle.repositorySha) ? lifecycle.repositorySha : null, sessionId: typeof lifecycle.sessionId === "string" ? lifecycle.sessionId : null });
-  const anchors = Object.freeze((Array.isArray(value.watcherSnapshot?.anchors) ? value.watcherSnapshot.anchors : []).map(anchor).filter(Boolean));
+  const rawAnchors = Array.isArray(value.watcherSnapshot?.anchors) ? value.watcherSnapshot.anchors : [];
+  const anchors = Object.freeze(rawAnchors.length === 3 ? rawAnchors.map(anchor) : []);
+  const ordered = anchors.length === 3 && anchors.every(Boolean) && anchors.every((item, index) => index === 0 || BigInt(item.block) > BigInt(anchors[index - 1].block));
   const mandateDigest = digest(mandateValue.mandateDigest); const requestDigest = digest(requestValue.requestDigest);
-  const fresh = anchors.length === 3 && mandateDigest !== null && requestDigest !== null && publicationMatches(value.verifierPublication, session, mandateDigest, requestDigest, anchors);
+  const nowValid = Number.isSafeInteger(value.nowMs) && typeof mandate.expiresAtMs === "string" && typeof request.expiresAtMs === "string" && value.nowMs < Number(mandate.expiresAtMs) && value.nowMs < Number(request.expiresAtMs);
+  const fresh = ordered && nowValid && mandateDigest !== null && requestDigest !== null && publicationMatches(value.verifierPublication, session, mandateDigest, requestDigest, anchors);
   return Object.freeze({
     actors: Object.freeze({ operator: "advisory", payer: "Iris", payee: "Billie" }),
     anchors,
