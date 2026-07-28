@@ -60,8 +60,8 @@ import {
   ProtocolFailureError,
 } from "../src/bilateral/protocol.mjs";
 import {
-  runBillyRole,
-  runIrisRole,
+  runPayerRole,
+  runPayeeRole,
 } from "../src/bilateral/roles.mjs";
 import {
   pollForTransition,
@@ -112,13 +112,13 @@ function descriptorFixture({ mandateDigest, requestDigest } = {}) {
     payee: {
       address: PAYEE.address.toLowerCase(),
       agentId: "8678",
-      displayName: "Iris",
+      displayName: "Billie",
       role: "payee",
     },
     payer: {
       address: PAYER.address.toLowerCase(),
       agentId: "8677",
-      displayName: "Billy",
+      displayName: "Iris",
       role: "payer",
     },
     paymentMoved: false,
@@ -272,7 +272,7 @@ async function runIsolatedRoles(t, options = {}) {
   const payerClock = cooperativeClock();
   const payeeClock = cooperativeClock();
 
-  const payeePromise = runIrisRole({
+  const payeePromise = runPayeeRole({
     acknowledgmentPollDurationMs: 120_000,
     canaries: [ROLE_CANARY],
     client: fake,
@@ -288,7 +288,7 @@ async function runIsolatedRoles(t, options = {}) {
       PAYEE.signMessage({ message: { raw: bytes } }),
     sleeper: payeeClock.sleeper,
   });
-  const payerPromise = runBillyRole({
+  const payerPromise = runPayerRole({
     canaries: [ROLE_CANARY],
     client: fake,
     descriptorEnvelope: signed.descriptorEnvelope,
@@ -612,7 +612,7 @@ process.stdout.write(JSON.stringify({ pid: process.pid, verdict }));
   };
 }
 
-test("isolated Billy and Iris roles authorize only through a process-isolated aggregate over serialized public reads", async (t) => {
+test("isolated payer and payee roles authorize only through a process-isolated aggregate over serialized public reads", async (t) => {
   const fixture = await runIsolatedRoles(t);
   const payer = await readPartyResult(
     fixture.payerDirectory,

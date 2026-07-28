@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { Agent, request as httpsRequest } from "node:https";
 import process from "node:process";
 
-import { buildDefaultRoleInput, runBillyRole, runIrisRole } from "../../src/bilateral/roles.mjs";
+import { buildDefaultRoleInput, runPayerRole, runPayeeRole } from "../../src/bilateral/roles.mjs";
 import { CHAIN_ID, REGISTRY_ADDRESS } from "../../src/constants.mjs";
 import { createRecovery, createRegistrationIntent, withMetadataTransaction } from "../../src/registration-internal.mjs";
 import { createRoleSupervisor } from "../../src/bilateral/coordination/supervisor.mjs";
@@ -173,7 +173,7 @@ function boundedRoleRunner(value, role, owners) {
     createClockchainClient: () => createFakeBilateralClockchainHttpClient(value.fake),
     createIdentityClient: () => sharedIdentity,
   });
-  const runner = role === "payer" ? runBillyRole : runIrisRole;
+  const runner = role === "payer" ? runPayerRole : runPayeeRole;
   let elapsed = 0;
   return async (arguments_, notifyReady) => {
     if (typeof notifyReady !== "function") fail();
@@ -364,7 +364,7 @@ function roleDependencies(value, role) {
       createIdentityClient: () => identity(value.owners),
     },
   );
-  const runner = role === "payer" ? runBillyRole : runIrisRole;
+  const runner = role === "payer" ? runPayerRole : runPayeeRole;
   let elapsed = 0;
   return {
     buildRoleInput,

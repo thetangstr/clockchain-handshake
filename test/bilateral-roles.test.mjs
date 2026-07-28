@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import {
+  execFile,
+} from "node:child_process";
+import {
   createHash,
   generateKeyPairSync,
 } from "node:crypto";
@@ -18,6 +21,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import {
   generatePrivateKey,
@@ -59,6 +63,8 @@ import {
   createFakeBilateralClockchain,
 } from "./helpers/fake-bilateral-clockchain.mjs";
 import * as roleModule from "../src/bilateral/roles.mjs";
+
+const execFileAsync = promisify(execFile);
 
 const PAYER_PRIVATE_KEY = generatePrivateKey();
 const PAYEE_PRIVATE_KEY = generatePrivateKey();
@@ -234,6 +240,45 @@ test("role CLIs dispatch through generic protocol runners", async () => {
 test("descriptor fixtures use Iris payer and Billie payee personas", () => {
   assert.equal(descriptor().payer.displayName, "Iris");
   assert.equal(descriptor().payee.displayName, "Billie");
+});
+
+test("actual mapped role prompts are canonical Iris payer and Billie payee surfaces", async () => {
+  const paths = Object.freeze({
+    payer: "prompts/run-iris-bilateral-demo.md",
+    payee: "prompts/run-billie-bilateral-demo.md",
+  });
+  const [payer, payee] = await Promise.all([
+    readFile(join(ROLE_REPOSITORY_ROOT, paths.payer), "utf8"),
+    readFile(join(ROLE_REPOSITORY_ROOT, paths.payee), "utf8"),
+  ]);
+  assert.match(payer, /You are Stakeholder 1, Iris, the payer\./);
+  assert.match(payer, /\bmandate owner\b/i);
+  assert.match(payer, /\bPROPOSED\b/);
+  assert.match(payer, /\bACKNOWLEDGED\b/);
+  assert.doesNotMatch(payer, /\bIris\b[^.\n]*\bpayee\b/i);
+  assert.doesNotMatch(payer, /\bBilly\b[^.\n]*\bpayer\b/i);
+
+  assert.match(payee, /You are Stakeholder 2, Billie, the payee\./);
+  assert.match(payee, /\bvendor\b/i);
+  assert.match(payee, /\bpayment receiver\b/i);
+  assert.match(payee, /\bACCEPTED\b/);
+  assert.match(payee, /\brequest submission\b/i);
+  assert.match(payee, /\bfollow(?:s|ing)? Iris's signed mandate\b/i);
+  assert.doesNotMatch(payee, /\bIris\b[^.\n]*\bpayee\b/i);
+  assert.doesNotMatch(payee, /\bBilly\b[^.\n]*\bpayer\b/i);
+
+  await Promise.all(
+    Object.values(paths).map((repositoryPath) =>
+      execFileAsync("git", [
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--error-unmatch",
+        repositoryPath,
+      ], { cwd: ROLE_REPOSITORY_ROOT }),
+    ),
+  );
 });
 
 test("payer publishes USD 100, verifies payee acceptance, acknowledges, signs, and emits payer evidence", async (t) => {

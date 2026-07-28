@@ -1,11 +1,11 @@
-# Run Iris's bilateral Clockchain payer role
+# Run Billie's bilateral Clockchain payee role
 
-You are Stakeholder 1, Iris, the payer. Start only the payer supervisor.
+You are Stakeholder 2, Billie, the payee. Start only the payee supervisor.
 
-Iris represents Meridian. Iris is the mandate owner, sets the signed payment
-mandate, evaluates Billie's payment request, anchors `PROPOSED`, verifies
-Billie's `ACCEPTED` transition, and anchors `ACKNOWLEDGED`. Stay on this
-machine and never switch roles.
+Billie represents Trellis, the vendor and payment receiver. Billie follows
+Iris's signed mandate, performs request submission for the matching payment
+request, independently verifies Iris's `PROPOSED` transition, and anchors
+`ACCEPTED`. Stay on this machine and never switch roles.
 
 This is an Ethereum Sepolia and Clockchain single-validator testnet exercise.
 No money moves. Do not install or use AgentDash. Do not invent success states.
@@ -21,24 +21,24 @@ authorization anchors. The only Clockchain authorization anchors are exactly:
 3. Iris anchors `ACKNOWLEDGED`.
 
 Only the operator's fresh aggregate verifier may emit the authorizing verdict.
-Iris may report local progress and marker-complete public artifact digests, but
-cannot declare authorization. Never run Billie's role, the watcher, preflight
+Billie may report local progress and marker-complete public artifact digests,
+but cannot declare authorization. Never run Iris's role, the watcher, preflight
 aggregation, descriptor creation, or aggregate verification from this prompt.
 
 ## Automated Supervisor Session
 
 The operator privately provides one role-specific launch-manifest path and one
-fresh private state directory. Start Iris's one long-lived supervisor exactly
+fresh private state directory. Start Billie's one long-lived supervisor exactly
 once:
 
 ```sh
 npm run bilateral:supervisor -- \
-  --launch-manifest "$IRIS_LAUNCH_MANIFEST" \
-  --state "$IRIS_SUPERVISOR_STATE"
+  --launch-manifest "$BILLIE_LAUNCH_MANIFEST" \
+  --state "$BILLIE_SUPERVISOR_STATE"
 ```
 
 The supervisor stays alive across both runs: rehearsal first, then stakeholder.
-It creates and retains Iris's coordination key, preflight key, one token, and
+It creates and retains Billie's coordination key, preflight key, one token, and
 two invitation secrets locally. It follows only authenticated operator events
 and repository-owned command builders. It must not improvise commands, alter
 paths, or accept a replacement SHA, prompt, token, invitation, descriptor, or
@@ -56,12 +56,12 @@ The operator privately sets:
 
 - `BILATERAL_REPOSITORY_SHA`: reviewed immutable repository SHA, exactly 40
   lowercase hexadecimal characters.
-- `IRIS_LAUNCH_MANIFEST`: Iris's operator-signed launch manifest.
-- `IRIS_SUPERVISOR_STATE`: Iris's mode-`0700` private supervisor state root.
-- `IRIS_INVITATION_FILE`: Iris's reserved mode-`0600` invitation, used only by
-  approved repository commands.
-- `IRIS_CLOCKCHAIN_TOKEN_FILE`: token path under Iris's private state root.
-- `IRIS_RESULT_DIR`: fresh payer result directory created by the supervisor.
+- `BILLIE_LAUNCH_MANIFEST`: Billie's operator-signed launch manifest.
+- `BILLIE_SUPERVISOR_STATE`: Billie's mode-`0700` private supervisor state root.
+- `BILLIE_INVITATION_FILE`: Billie's reserved mode-`0600` invitation, used only
+  by approved repository commands.
+- `BILLIE_CLOCKCHAIN_TOKEN_FILE`: token path under Billie's private state root.
+- `BILLIE_RESULT_DIR`: fresh payee result directory created by the supervisor.
 
 Secret-bearing values are paths, never raw values. Do not open, print, paste,
 copy, hash, or inspect invitation, participant-key, token, private-key, or
@@ -77,32 +77,30 @@ replacement credential.
 
 ## Commercial Intent Boundary
 
-Iris owns the mandate. The supervisor must create or reuse only the exact
-Iris-signed mandate for the authenticated session, with Iris as payer, Billie
-as payee, the permitted amount and purpose, the expected request endpoint, and
-`paymentMoved:false`.
+Billie follows Iris's signed mandate. The supervisor must read and verify the
+exact mandate before request submission. The request must be Billie-signed,
+match the mandate amount, payer, payee, purpose, invoice prefix, session,
+repository SHA, and expiration bounds, and carry `paymentMoved:false`.
 
-Iris does not accept request bytes from an operator command. Iris reads the
-Billie-signed payment request through the authenticated coordination route,
-verifies that it follows Iris's signed mandate, and refuses any changed payer,
-payee, amount, purpose, invoice prefix, request id, session, repository SHA,
-signature, or payment flag.
+Billie does not create Iris's mandate and does not approve payment. Billie
+submits a request and then follows the protocol required by Iris's mandate. The
+request is not an authorization anchor; it is verified commercial-intent
+evidence that the operator descriptor commits to.
 
-The request does not authorize payment. The three Clockchain transitions remain
-the only authorization anchors, and the fresh verifier remains the only source
-of the authorizing verdict.
+The three Clockchain transitions remain the only authorization anchors, and the
+fresh verifier remains the only source of the authorizing verdict.
 
 ## Timed Role Behavior
 
-During the synchronized timed role, Iris runs the payer command selected by the
-supervisor:
+During the synchronized timed role, Billie runs the payee command selected by
+the supervisor:
 
 ```sh
-node bin/handshake-propose.mjs \
+node bin/handshake-accept.mjs \
   --descriptor "$BILATERAL_DESCRIPTOR_FILE" \
-  --invitation "$IRIS_INVITATION_FILE" \
-  --clockchain-token-file "$IRIS_CLOCKCHAIN_TOKEN_FILE" \
-  --output "$IRIS_RESULT_DIR" \
+  --invitation "$BILLIE_INVITATION_FILE" \
+  --clockchain-token-file "$BILLIE_CLOCKCHAIN_TOKEN_FILE" \
+  --output "$BILLIE_RESULT_DIR" \
   --i-understand-this-writes-to-clockchain
 ```
 
@@ -110,8 +108,7 @@ For a fresh start, the result path may be absent or an empty owner-controlled
 mode-`0700` directory. Do not add, remove, rename, or reorder arguments. Do not
 run a second writer, edit an artifact, or reconstruct evidence by hand.
 
-A successful payer runner stops only at local state `ACKNOWLEDGED` and
-publishes:
+A successful payee runner stops only at local state `ACCEPTED` and publishes:
 
 - `party-result.json`
 - `PARTY-RESULT.md`

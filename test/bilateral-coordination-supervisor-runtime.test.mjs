@@ -154,6 +154,11 @@ test("creates private state and round-trips a canonical checkpoint", async () =>
   assert.equal((await stat(root)).mode & 0o777, 0o700);
 });
 
+test("coordination process child helper imports under generic role runners", async () => {
+  const child = await import("./helpers/bilateral-coordination-child.mjs");
+  assert.equal(typeof child.main, "function");
+});
+
 test("reads verifier publication through the context-bound client route", async () => {
   const verify = createVerifierPublicationVerifier();
   const context = { event: { artifactDigest: "a".repeat(64), kind: "VERIFICATION_PASSED", role: "operator", subjectRun: "rehearsal" }, releaseId: "release-a", repositorySha: "a".repeat(40), sessionId: "session-a" };

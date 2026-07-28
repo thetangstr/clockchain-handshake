@@ -1344,9 +1344,9 @@ test("prompt hash uses exact git-show bytes and the same canonical role binding 
     PROMPT_HASH_MODULE,
     "runCli",
   );
-  const payer = Buffer.from("Billy prompt\n", "utf8");
+  const payer = Buffer.from("Iris prompt\n", "utf8");
   const payee = Buffer.from(
-    "Iris prompt without trailing newline",
+    "Billie prompt without trailing newline",
     "utf8",
   );
   const expected = createHash("sha256")
@@ -1369,7 +1369,7 @@ test("prompt hash uses exact git-show bytes and the same canonical role binding 
       output: (line) => lines.push(line),
       promptResolver: async (request) => {
         requests.push(request);
-        return request.repositoryPath.includes("billy")
+        return request.repositoryPath.includes("iris")
           ? payer
           : payee;
       },
@@ -1382,8 +1382,8 @@ test("prompt hash uses exact git-show bytes and the same canonical role binding 
   assert.deepEqual(
     requests.map(({ repositoryPath }) => repositoryPath),
     [
-      "prompts/run-billy-bilateral-demo.md",
       "prompts/run-iris-bilateral-demo.md",
+      "prompts/run-billie-bilateral-demo.md",
     ],
   );
   assert.ok(
@@ -1417,14 +1417,14 @@ test("prompt hash default resolution accepts commits and rejects trees or invali
     { cwd: root },
   );
   await mkdir(join(root, "prompts"));
-  const payer = Buffer.from("Billy committed prompt\n");
-  const payee = Buffer.from("Iris committed prompt\n");
+  const payer = Buffer.from("Iris committed prompt\n");
+  const payee = Buffer.from("Billie committed prompt\n");
   await writeFile(
-    join(root, "prompts/run-billy-bilateral-demo.md"),
+    join(root, "prompts/run-iris-bilateral-demo.md"),
     payer,
   );
   await writeFile(
-    join(root, "prompts/run-iris-bilateral-demo.md"),
+    join(root, "prompts/run-billie-bilateral-demo.md"),
     payee,
   );
   await execFileAsync("git", ["add", "prompts"], {
