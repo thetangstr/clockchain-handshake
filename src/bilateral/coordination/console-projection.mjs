@@ -13,6 +13,16 @@ const MAX_SAFE_MS = BigInt(Number.MAX_SAFE_INTEGER);
 const HEALTH = new Set(["READY", "WAITING", "FAILED", "UNAVAILABLE"]);
 const HEALTH_ACTOR_KEYS = Object.freeze(["operator", "payer", "payee"]);
 const HEALTH_SERVICE_KEYS = Object.freeze(["relay", "watcher"]);
+const ACTIVE_RUN_BY_PHASE = Object.freeze({
+  REHEARSAL_IDENTITIES_READY: "rehearsal",
+  REHEARSAL_DESCRIPTOR_READY: "rehearsal",
+  REHEARSAL_RUNNING: "rehearsal",
+  REHEARSAL_VERIFIED: "rehearsal",
+  STAKEHOLDER_IDENTITIES_READY: "stakeholder",
+  STAKEHOLDER_DESCRIPTOR_READY: "stakeholder",
+  STAKEHOLDER_RUNNING: "stakeholder",
+  STAKEHOLDER_VERIFIED: "stakeholder",
+});
 const ANCHOR_DETAILS = Object.freeze([
   Object.freeze({ actor: "Iris", sequence: 1, stage: "proposal" }),
   Object.freeze({ actor: "Billie", sequence: 2, stage: "acceptance" }),
@@ -47,6 +57,12 @@ function timestamp(value) {
   const parsed = BigInt(value);
   return parsed <= MAX_SAFE_MS ? parsed : null;
 }
+function activeRun(phase) {
+  return Object.hasOwn(ACTIVE_RUN_BY_PHASE, phase) ? ACTIVE_RUN_BY_PHASE[phase] : null;
+}
+function runFact(facts, key, run) {
+  return run === null ? false : booleanFact(object(facts[key])[run]);
+}
 function healthSnapshot(value, now) {
   const snapshot = object(value);
   const actors = object(snapshot.actors);
@@ -68,18 +84,20 @@ function anchor(value, index) {
   const details = ANCHOR_DETAILS[index];
   return Object.freeze({ actor: details.actor, block: String(item.block), digest: item.digest, kind: item.kind, sequence: details.sequence, stage: details.stage, verified: true });
 }
-function publicationMatches(publication, session, mandateDigest, requestDigest, anchors, watcher) {
+function publicationMatches(publication, session, mandateDigest, requestDigest, anchors, watcher, run) {
   const value = object(publication);
-  if (value.schema !== VERIFIER_PUBLICATION_SCHEMA || value.status !== "VERIFICATION_PASSED" || value.subjectRun !== "rehearsal" && value.subjectRun !== "stakeholder" || value.markerComplete !== true || value.paymentMoved !== false || value.releaseId !== session.releaseId || value.repositorySha !== session.repositorySha || value.sessionId !== session.sessionId || digest(value.publicationDigest) === null || digest(value.descriptorDigest) === null || value.mandateDigest !== mandateDigest || value.requestDigest !== requestDigest || digest(value.packageDigests?.payer) === null || digest(value.packageDigests?.payee) === null || !Array.isArray(value.anchorDigests) || value.anchorDigests.length !== 3) return false;
+  if (value.schema !== VERIFIER_PUBLICATION_SCHEMA || value.status !== "VERIFICATION_PASSED" || value.subjectRun !== run || value.markerComplete !== true || value.paymentMoved !== false || value.releaseId !== session.releaseId || value.repositorySha !== session.repositorySha || value.sessionId !== session.sessionId || digest(value.publicationDigest) === null || digest(value.descriptorDigest) === null || value.mandateDigest !== mandateDigest || value.requestDigest !== requestDigest || digest(value.packageDigests?.payer) === null || digest(value.packageDigests?.payee) === null || !Array.isArray(value.anchorDigests) || value.anchorDigests.length !== 3) return false;
   return value.descriptorDigest === watcher.descriptorDigest && value.packageDigests.payer === watcher.packageDigests?.payer && value.packageDigests.payee === watcher.packageDigests?.payee && value.anchorDigests.every((item, index) => item === anchors[index]?.digest);
 }
 
 export function buildConsoleProjection(input) {
   const value = object(input); const lifecycle = object(value.lifecycleView); const mandateValue = object(value.mandate); const requestValue = object(value.request); const mandate = object(mandateValue.mandate); const request = object(requestValue.request);
+  const phase = PHASES.has(lifecycle.state) ? lifecycle.state : "UNAVAILABLE";
+  const run = activeRun(phase);
   const facts = object(lifecycle.facts);
-  const requestReceived = booleanFact(object(facts.paymentRequestReady).stakeholder);
-  const mandateReceived = booleanFact(object(facts.payerMandateReady).stakeholder);
-  const mandateMatched = booleanFact(object(facts.paymentRequestMatched).stakeholder);
+  const requestReceived = runFact(facts, "paymentRequestReady", run);
+  const mandateReceived = runFact(facts, "payerMandateReady", run);
+  const mandateMatched = runFact(facts, "paymentRequestMatched", run);
   const rawFailure = object(lifecycle.failure);
   const releaseId = typeof lifecycle.releaseId === "string" && lifecycle.releaseId.length > 0 ? lifecycle.releaseId : null;
   const repositorySha = typeof lifecycle.repositorySha === "string" && SHA40.test(lifecycle.repositorySha) ? lifecycle.repositorySha : null;
@@ -108,10 +126,9 @@ export function buildConsoleProjection(input) {
     repositorySha,
     sessionId,
   });
-  const fresh = sessionBound && intentSafe && ordered && nowValid && mandateDigest !== null && requestDigest !== null && watcherBindings.descriptorDigest !== null && watcherBindings.packageDigests.payer !== null && watcherBindings.packageDigests.payee !== null && publicationMatches(value.verifierPublication, session, mandateDigest, requestDigest, anchors, watcherBindings);
+  const fresh = run !== null && sessionBound && intentSafe && ordered && nowValid && mandateDigest !== null && requestDigest !== null && watcherBindings.descriptorDigest !== null && watcherBindings.packageDigests.payer !== null && watcherBindings.packageDigests.payee !== null && publicationMatches(value.verifierPublication, session, mandateDigest, requestDigest, anchors, watcherBindings, run);
   const failure = FAILURE_CODES.has(rawFailure.code) && FAILURE_RUNS.has(rawFailure.run) ? Object.freeze({ active: rawFailure.active === true, code: rawFailure.code, run: rawFailure.run }) : null;
   const recovery = rawFailure.code === "RECOVERY_REQUIRED" ? Object.freeze({ label: "operator recovery required", visible: true }) : Object.freeze({ label: "no recovery action", visible: false });
-  const phase = PHASES.has(lifecycle.state) ? lifecycle.state : "UNAVAILABLE";
   return Object.freeze({
     actors: Object.freeze({
       operator: Object.freeze({ health: healthSummary.actors.operator, label: "Operator", role: "operator" }),

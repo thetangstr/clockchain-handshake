@@ -29,6 +29,65 @@ test("projection is closed, redacted, ordered, and labels pre-protocol evidence"
   assert.equal(value.verifier.status, "AUTH" + "ORIZED");
 });
 
+test("projection reads rehearsal facts for rehearsal publications", () => {
+  const input = base();
+  input.lifecycleView.state = "REHEARSAL_RUNNING";
+  input.lifecycleView.facts.payerMandateReady = { rehearsal: true, stakeholder: false };
+  input.lifecycleView.facts.paymentRequestReady = { rehearsal: true, stakeholder: false };
+  input.lifecycleView.facts.paymentRequestMatched = { rehearsal: true, stakeholder: false };
+  input.verifierPublication.subjectRun = "rehearsal";
+
+  const value = buildConsoleProjection(input);
+
+  assert.equal(value.request.received, true);
+  assert.equal(value.mandate.received, true);
+  assert.equal(value.mandate.matched, true);
+  assert.equal(value.verifier.status, "AUTH" + "ORIZED");
+});
+
+test("projection reads stakeholder facts for stakeholder publications", () => {
+  const input = base();
+  input.lifecycleView.facts.payerMandateReady = { rehearsal: false, stakeholder: true };
+  input.lifecycleView.facts.paymentRequestReady = { rehearsal: false, stakeholder: true };
+  input.lifecycleView.facts.paymentRequestMatched = { rehearsal: false, stakeholder: true };
+
+  const value = buildConsoleProjection(input);
+
+  assert.equal(value.request.received, true);
+  assert.equal(value.mandate.received, true);
+  assert.equal(value.mandate.matched, true);
+  assert.equal(value.verifier.status, "AUTH" + "ORIZED");
+});
+
+test("projection fails closed when active lifecycle run and verifier publication disagree", () => {
+  const input = base();
+  input.lifecycleView.state = "REHEARSAL_RUNNING";
+  input.lifecycleView.facts.payerMandateReady = { rehearsal: true, stakeholder: true };
+  input.lifecycleView.facts.paymentRequestReady = { rehearsal: true, stakeholder: true };
+  input.lifecycleView.facts.paymentRequestMatched = { rehearsal: true, stakeholder: true };
+  input.verifierPublication.subjectRun = "stakeholder";
+
+  const value = buildConsoleProjection(input);
+
+  assert.equal(value.verifier.status, "PENDING");
+  assert.equal(value.verifier.publicationDigest, null);
+  assert.equal(JSON.stringify(value.verifier).includes("AUTH" + "ORIZED"), false);
+});
+
+test("projection fails closed for unknown phase without emitting an auth literal", () => {
+  const input = base();
+  input.lifecycleView.state = "console-canary";
+
+  const value = buildConsoleProjection(input);
+
+  assert.equal(value.phase.value, "UNAVAILABLE");
+  assert.equal(value.request.received, false);
+  assert.equal(value.mandate.received, false);
+  assert.equal(value.mandate.matched, false);
+  assert.equal(value.verifier.status, "PENDING");
+  assert.equal(JSON.stringify(value).includes("AUTH" + "ORIZED"), false);
+});
+
 test("projection conveys structured console status without widening top-level keys", () => {
   const input = base();
   input.lifecycleView.health = {
