@@ -20,6 +20,7 @@ import { canonicalizeReceiptEventValue } from "../src/canonical.mjs";
 import { createSignedEnvelope } from "../src/bilateral/descriptor.mjs";
 import { createLaunchManifest, writeLaunchManifest } from "../src/bilateral/coordination/manifest.mjs";
 import { createCoordinationReceipt } from "../src/bilateral/coordination/receipt.mjs";
+import { main as createInvitationFiles } from "../scripts/create-invitations.mjs";
 
 const DESCRIPTOR_SESSION_DOMAIN =
   "clockchain.bilateral-descriptor-session/v1\n";
@@ -559,6 +560,31 @@ test("creates invitation proofs once and rejects partial secrets", async () => {
   await assert.doesNotReject(ensureInvitations({ ...input, create: async () => { throw new Error("recreated"); } }));
   await unlink(proofs[0].secretPath);
   await assert.rejects(ensureInvitations(input));
+});
+
+test("creates canonical Iris payer and Billie payee invitation personas", async () => {
+  for (const [role, displayName] of [["payer", "Iris"], ["payee", "Billie"]]) {
+    const root = await mkdtemp(join(tmpdir(), `supervisor-${role}-persona-`));
+    let creationArguments;
+    const input = {
+      capabilityDigest: "1".repeat(64),
+      releaseId: "release-a",
+      repositorySha: "a".repeat(40),
+      role,
+      sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd",
+      stateRoot: root,
+      create: async (arguments_) => {
+        creationArguments = arguments_;
+        await createInvitationFiles(arguments_);
+      },
+    };
+    const proofs = await ensureInvitations(input);
+    assert.equal(proofs.length, 2);
+    assert.deepEqual(
+      creationArguments.slice(creationArguments.indexOf("--names"), creationArguments.indexOf("--names") + 2),
+      ["--names", `${displayName},${displayName}`],
+    );
+  }
 });
 
 test("rejects incomplete child argv before any process can be considered ready", async () => {

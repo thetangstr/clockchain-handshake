@@ -514,7 +514,8 @@ export async function ensureInvitations({ capabilityDigest, releaseId, repositor
   if (present[0] !== present[1]) fail();
   if (!present[0]) {
     const creator = create ?? (async (input) => createInvitationFiles(input));
-    await creator(['--output-public', publicDirectory, '--output-secret', secretDirectory, '--ids', `${role}-rehearsal,${role}-stakeholder`, '--names', `${role} rehearsal,${role} stakeholder`]);
+    const displayName = role === "payer" ? "Iris" : role === "payee" ? "Billie" : fail();
+    await creator(['--output-public', publicDirectory, '--output-secret', secretDirectory, '--ids', `${role}-rehearsal,${role}-stakeholder`, '--names', `${displayName},${displayName}`]);
   }
   const proofs = await Promise.all(runs.map((run, index) => loadInvitationProof({ capabilityDigest, releaseId, repositorySha, role, run, sessionId, secretPath: paths[index] })));
   if (proofs[0].address === proofs[1].address || proofs[0].secretPath === proofs[1].secretPath || proofs[0].signature === proofs[1].signature) fail();
