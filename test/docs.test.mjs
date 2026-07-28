@@ -35,6 +35,7 @@ const BILATERAL_PUBLIC_DOCUMENTS = Object.freeze([
   "prompts/run-billie-bilateral-demo.md",
   "docs/runbooks/bilateral-demo-quick-start.md",
   "docs/runbooks/bilateral-demo-day.md",
+  "docs/runbooks/bilateral-demo-live-handoff.md",
 ]);
 const BILATERAL_COMPATIBILITY_DOCUMENTS = Object.freeze([
   "prompts/run-billy-bilateral-demo.md",
@@ -59,6 +60,12 @@ const PUBLISHED_TRANSACTIONS = Object.freeze([
   "0x6981f9250589fc550a68e6ee2b0146323066c64332c3542e4bbb6d9f9f47c676",
   "0xbb9435c8f9d46f0f57e0aab6208610f2b4c37177b33d27319f1b0311db16b160",
 ]);
+const LIVE_HANDOFF_RELEASE_SHA =
+  "54d3476de9309d386fe3e903a843b473b3851c15";
+const LIVE_HANDOFF_HELPER_URL =
+  "https://clockchain-research.vercel.app/handshake/run";
+const LIVE_HANDOFF_TREASURY_ADDRESS =
+  "0x157a377e4181f3f87c7f6efed5ddc340ccc00dce";
 
 function memoryOutput() {
   let value = "";
@@ -161,6 +168,14 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
         ),
       ]),
     ),
+  );
+  assert.equal(documents.size, 5);
+  assert.equal(
+    PUBLIC_DOCUMENTS.length +
+      BILATERAL_PUBLIC_DOCUMENTS.length +
+      BILATERAL_COMPATIBILITY_DOCUMENTS.length +
+      SUPPORT_FILES.filter((path) => path === "invites/README.md").length,
+    10,
   );
   for (const [relativePath, contents] of documents) {
     assert.match(contents, /Clockchain(?:®)?/);
@@ -464,7 +479,7 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
   );
   assert.match(
     quickStart,
-    /76f585d1e729326b5d749a61937c3971d4f34050/,
+    new RegExp(LIVE_HANDOFF_RELEASE_SHA),
   );
   assert.match(
     quickStart,
@@ -472,7 +487,10 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
   );
   assert.match(
     quickStart,
-    /clean[^.\n]*76f585d1e729326b5d749a61937c3971d4f34050[^.\n]*all three computers/i,
+    new RegExp(
+      String.raw`clean[^.\n]*${LIVE_HANDOFF_RELEASE_SHA}[^.\n]*all three computers`,
+      "i",
+    ),
   );
   assert.match(
     quickStart,
@@ -523,6 +541,146 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
     /no secrets[^.\n]*live evidence[^.\n]*manifest contents/i,
   );
   assert.match(quickStart, /do not claim physical rehearsal passed/i);
+});
+
+test("live bilateral handoff pins the public operator checklist without secrets", async () => {
+  const handoff = await readFile(
+    join(
+      ROOT_DIRECTORY,
+      "docs/runbooks/bilateral-demo-live-handoff.md",
+    ),
+    "utf8",
+  );
+  const startupOrder =
+    "relay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor";
+
+  assert.match(handoff, new RegExp(LIVE_HANDOFF_RELEASE_SHA));
+  assert.match(handoff, new RegExp(LIVE_HANDOFF_HELPER_URL.replaceAll(".", "\\.")));
+  assert.match(handoff, new RegExp(LIVE_HANDOFF_TREASURY_ADDRESS, "i"));
+  assert.match(handoff, /clean detached checkout[\s\S]*Node\.js 22[\s\S]*npm ci --ignore-scripts[\s\S]*all three computers/i);
+  assert.match(handoff, /\.context\/bilateral-live-2026-07-28\//);
+  assert.match(handoff, /\.context\/sepolia-funding\//);
+  assert.match(handoff, /0700[\s\S]*0600/);
+  assert.match(handoff, /never print, read, paste, or inspect\s+private contents with an agent/i);
+  assert.match(handoff, /No token, invitation, capability, private key,\s+TLS key, RPC URL, or live evidence value/i);
+  assert.match(handoff, /readFile\(process\.env\.SEPOLIA_RPC_URL_FILE/);
+  assert.match(handoff, /eth_chainId[\s\S]*eth_getBalance[\s\S]*eth_getTransactionCount/);
+  assert.match(handoff, /must not print the RPC URL/i);
+  assert.match(handoff, /SAFE_SEPOLIA_TREASURY_CHECK_FAILED/);
+  assert.doesNotMatch(handoff, /payload\.error\.message|\$\{method\}/);
+  assert.ok(
+    handoff.indexOf("try {\n  const rpcUrl = (await readFile(process.env.SEPOLIA_RPC_URL_FILE") <
+      handoff.indexOf("async function rpc(method"),
+  );
+  assert.match(handoff, /chainId: BigInt\(chainIdHex\)\.toString\(10\)/);
+  assert.match(handoff, /nonce: BigInt\(nonceHex\)\.toString\(10\)/);
+  assert.ok(handoff.includes(startupOrder));
+  assert.match(handoff, /192\.0\.2\.10` is a documentation-only placeholder/i);
+  assert.match(handoff, /replace it with a numeric LAN IP reachable by both role computers/i);
+  assert.match(handoff, /127\.0\.0\.1[\s\S]*documentation range[\s\S]*non-routable address/i);
+  assert.match(handoff, /openssl req -x509 -newkey rsa:3072 -nodes/);
+  assert.match(handoff, /subjectAltName=IP:\$RELAY_ADVERTISED_IP/);
+  assert.match(handoff, /RELAY_TLS_FINGERPRINT="\$\(openssl x509/);
+  assert.match(handoff, /npm run bilateral:relay -- \\/);
+  assert.match(handoff, /npm run bilateral:coordinator -- \\/);
+  assert.match(handoff, /npm run bilateral:console -- \\/);
+  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$IRIS_LAUNCH_MANIFEST" \\\n  --state "\$IRIS_SUPERVISOR_STATE"/);
+  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$BILLIE_LAUNCH_MANIFEST" \\\n  --state "\$BILLIE_SUPERVISOR_STATE"/);
+  assert.match(handoff, /export FUNDING_RECORD_FILE="\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json"/);
+  assert.match(handoff, /npm run bilateral:fund -- \\\n  --funding-record "\$FUNDING_RECORD_FILE" \\\n  --journal-directory "\$FUNDING_JOURNAL_DIR" \\\n  --keystore "\$SEPOLIA_TREASURY_KEYSTORE" \\\n  --rpc-url-file "\$SEPOLIA_RPC_URL_FILE"/);
+  assert.match(handoff, /four freshly generated addresses[\s\S]*`0\.01 Sepolia ETH` each/i);
+  assert.match(handoff, /0\.05[\s\S]*sufficient\s+only if preflight still reports balance\/nonce safe/i);
+  assert.match(handoff, /no manual address\s+copying/i);
+  assert.match(handoff, /PAYER_MANDATE_READY[\s\S]*PAYMENT_REQUEST_READY[\s\S]*PAYMENT_REQUEST_MATCHED/);
+  assert.match(handoff, /Iris `PROPOSED`[\s\S]*Billie `ACCEPTED`[\s\S]*Iris `ACKNOWLEDGED`/);
+  assert.match(handoff, /marker-complete role files[\s\S]*verifier files/i);
+  assert.match(handoff, /`AUTHORIZED` only from fresh\s+aggregate verifier/i);
+  assert.match(handoff, /paymentMoved:false/);
+  assert.match(handoff, /relay\/watcher\/console fields are advisory/i);
+  assert.match(handoff, /missing, duplicate, reordered, expired, malformed,\s+mismatched/i);
+  assert.match(handoff, /dirty\/wrong SHA[\s\S]*wrong Node[\s\S]*wrong role\/manifest[\s\S]*secret exposure/i);
+  assert.match(handoff, /changed TLS fingerprint\/relay binding/i);
+  assert.match(handoff, /funding mismatch\/nonzero recipient nonce/i);
+  assert.match(handoff, /nonzero\s+process exit[\s\S]*absent\s+completion marker/i);
+  assert.match(handoff, /any authority claim from relay\/watcher\/console\/coordinator\/role/i);
+  assert.ok(
+    handoff.includes("node scripts/verify-bilateral-results.mjs \\"),
+  );
+  assert.match(handoff, /SEPOLIA_RPC_URL="\$\(node --input-type=module/);
+  assert.match(handoff, /process\.stdout\.write\(\(await readFile\(process\.env\.SEPOLIA_RPC_URL_FILE/);
+  assert.match(handoff, /implementation-complete and rehearsal-ready[\s\S]*live-demo validated/i);
+  assert.match(handoff, /only a\s+successful 3-computer run with exact fresh evidence may be called `live-demo validated`/i);
+  assert.match(handoff, /user eventual actions are only funding four generated addresses and\s+starting two physical supervisors/i);
+  assert.match(handoff, /operator owns everything else/i);
+  assert.match(handoff, /private\/live artifacts remain ignored\/outside Git/i);
+  assert.doesNotMatch(handoff, /helper is deployed/i);
+});
+
+test("documentation checker rejects live handoff drift", async (t) => {
+  const cases = [
+    [
+      LIVE_HANDOFF_RELEASE_SHA,
+      "76f585d1e729326b5d749a61937c3971d4f34050",
+      "pinned executable release SHA",
+    ],
+    [
+      "`PAYMENT_REQUEST_MATCHED`",
+      "`PAYMENT_READY`",
+      "commercial intent marker",
+    ],
+    [
+      "funds exactly four freshly generated addresses with\n`0.01 Sepolia ETH` each",
+      "funds addresses with Sepolia ETH",
+      "four-address allocation",
+    ],
+    [
+      "Only a\nsuccessful 3-computer run with exact fresh evidence may be called `live-demo validated`",
+      "this release is live-demo validated",
+      "readiness distinction",
+    ],
+    [
+      "console.error(\"SAFE_SEPOLIA_TREASURY_CHECK_FAILED\");",
+      "console.error(payload.error.message);",
+      "sanitized treasury preflight failure",
+    ],
+    [
+      "`192.0.2.10` is a documentation-only placeholder",
+      "`192.0.2.10` is ready to use",
+      "routable relay placeholder",
+    ],
+    [
+      "SEPOLIA_RPC_URL=\"$(node --input-type=module <<'NODE'",
+      "export SEPOLIA_RPC_URL=https://example.invalid",
+      "safe verifier RPC URL derivation",
+    ],
+  ];
+
+  for (const [expected, replacement, diagnostic] of cases) {
+    await t.test(diagnostic, async () => {
+      const directory = await temporaryDocumentationFixture(t);
+      const path = join(
+        directory,
+        "docs/runbooks/bilateral-demo-live-handoff.md",
+      );
+      const contents = await readFile(path, "utf8");
+      assert.ok(contents.includes(expected));
+      await writeFile(
+        path,
+        contents.split(expected).join(replacement),
+      );
+      assert.ok(
+        (
+          await checkDocumentation({
+            rootDirectory: directory,
+          })
+        ).some(
+          (failure) =>
+            failure.includes("bilateral-demo-live-handoff.md") &&
+            failure.includes(diagnostic),
+        ),
+      );
+    });
+  }
 });
 
 test("turnkey bilateral docs pin the mandate, console, funding, and readiness contract", async () => {
@@ -2338,6 +2496,6 @@ test("reports the true gated document count", async () => {
   assert.equal(exitCode, 0);
   assert.equal(
     stdout.text(),
-    "Documentation checks passed (9 gated documents).\n",
+    "Documentation checks passed (10 gated documents).\n",
   );
 });

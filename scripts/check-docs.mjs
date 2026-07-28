@@ -28,6 +28,7 @@ const BILATERAL_PUBLIC_DOCUMENTS = Object.freeze([
   "prompts/run-iris-bilateral-demo.md",
   "docs/runbooks/bilateral-demo-quick-start.md",
   "docs/runbooks/bilateral-demo-day.md",
+  "docs/runbooks/bilateral-demo-live-handoff.md",
 ]);
 const BILATERAL_COMPATIBILITY_DOCUMENTS = Object.freeze([
   "prompts/run-billy-bilateral-demo.md",
@@ -76,6 +77,13 @@ const REQUIRED_LINKS = Object.freeze({
     "../../prompts/run-iris-bilateral-demo.md",
     "https://clockchain-research.vercel.app/handshake/run",
   ]),
+  "docs/runbooks/bilateral-demo-live-handoff.md": Object.freeze([
+    "./bilateral-demo-day.md",
+    "./bilateral-demo-quick-start.md",
+    "../../prompts/run-billie-bilateral-demo.md",
+    "../../prompts/run-iris-bilateral-demo.md",
+    "https://clockchain-research.vercel.app/handshake/run",
+  ]),
 });
 const FAILURE_CODE_DOCUMENT = "DEMO.md";
 const FAILURE_CODE_ROW_PATTERN =
@@ -84,6 +92,12 @@ const OFFICIAL_REGISTRY =
   "0x8004A818BFB912233c491871b3d84c89A494BD9e";
 const OFFICIAL_REPOSITORY =
   "https://github.com/thetangstr/clockchain-handshake.git";
+const LIVE_HANDOFF_RELEASE_SHA =
+  "54d3476de9309d386fe3e903a843b473b3851c15";
+const LIVE_HANDOFF_HELPER_URL =
+  "https://clockchain-research.vercel.app/handshake/run";
+const LIVE_HANDOFF_TREASURY_ADDRESS =
+  "0x157a377e4181f3f87c7f6efed5ddc340ccc00dce";
 const FORBIDDEN_PRESENT_CAPABILITIES = Object.freeze([
   "court-grade",
   "trustless",
@@ -204,6 +218,12 @@ const CANONICAL_SAFETY_SECTIONS = Object.freeze({
     }),
   ]),
   "docs/runbooks/bilateral-demo-quick-start.md": Object.freeze([
+    Object.freeze({
+      label: "bilateral safety summary",
+      text: BILATERAL_SAFETY_SECTION,
+    }),
+  ]),
+  "docs/runbooks/bilateral-demo-live-handoff.md": Object.freeze([
     Object.freeze({
       label: "bilateral safety summary",
       text: BILATERAL_SAFETY_SECTION,
@@ -385,6 +405,31 @@ const FUNDING_COMMAND = `npm run bilateral:fund -- \\
   --journal-directory "$FUNDING_JOURNAL_DIR" \\
   --keystore "$SEPOLIA_TREASURY_KEYSTORE" \\
   --rpc-url-file "$SEPOLIA_RPC_URL_FILE"`;
+const RELAY_COMMAND = `npm run bilateral:relay -- \\
+  --host "\${RELAY_LISTEN_HOST:-$RELAY_ADVERTISED_IP}" \\
+  --port "$RELAY_PORT" \\
+  --repository-sha "$BILATERAL_REPOSITORY_SHA" \\
+  --state "$BILATERAL_RELEASE_ROOT/relay-state" \\
+  --tls-certificate "$RELAY_TLS_CERTIFICATE" \\
+  --tls-private-key "$RELAY_TLS_PRIVATE_KEY"`;
+const COORDINATOR_COMMAND = `npm run bilateral:coordinator -- \\
+  --clockchain-token-file "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \\
+  --operator-key-id "$OPERATOR_KEY_ID" \\
+  --operator-private-key "$OPERATOR_PRIVATE_KEY_FILE" \\
+  --release-root "$BILATERAL_RELEASE_ROOT" \\
+  --relay-url "https://$RELAY_ADVERTISED_IP:$RELAY_PORT" \\
+  --repository-sha "$BILATERAL_REPOSITORY_SHA" \\
+  --rpc-url-file "$SEPOLIA_RPC_URL_FILE" \\
+  --tls-certificate "$RELAY_TLS_CERTIFICATE" \\
+  --tls-fingerprint "$RELAY_TLS_FINGERPRINT"`;
+const CONSOLE_COMMAND = `npm run bilateral:console -- \\
+  --state-root "$BILATERAL_RELEASE_ROOT"`;
+const IRIS_SUPERVISOR_COMMAND = `npm run bilateral:supervisor -- \\
+  --launch-manifest "$IRIS_LAUNCH_MANIFEST" \\
+  --state "$IRIS_SUPERVISOR_STATE"`;
+const BILLIE_SUPERVISOR_COMMAND = `npm run bilateral:supervisor -- \\
+  --launch-manifest "$BILLIE_LAUNCH_MANIFEST" \\
+  --state "$BILLIE_SUPERVISOR_STATE"`;
 
 function bilateralContractFailures(relativePath, contents) {
   const failures = [];
@@ -763,7 +808,7 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "pinned reviewed release SHA",
-        /\b76f585d1e729326b5d749a61937c3971d4f34050\b/,
+        new RegExp(`\\b${LIVE_HANDOFF_RELEASE_SHA}\\b`),
       ],
       [
         "Node.js 22 on all computers",
@@ -771,7 +816,10 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "clean exact SHA on all computers",
-        /\bclean\b[^.\n]*\b76f585d1e729326b5d749a61937c3971d4f34050\b[^.\n]*\ball three computers\b/i,
+        new RegExp(
+          String.raw`\bclean\b[^.\n]*\b${LIVE_HANDOFF_RELEASE_SHA}\b[^.\n]*\ball three computers\b`,
+          "i",
+        ),
       ],
       [
         "fixed operator role",
@@ -859,6 +907,126 @@ function bilateralContractFailures(relativePath, contents) {
         /\bdo not claim physical rehearsal passed\b/i,
       ],
     ],
+    "docs/runbooks/bilateral-demo-live-handoff.md": [
+      [
+        "pinned executable release SHA",
+        new RegExp(`\\b${LIVE_HANDOFF_RELEASE_SHA}\\b`),
+      ],
+      [
+        "canonical helper URL",
+        new RegExp(LIVE_HANDOFF_HELPER_URL.replaceAll(".", "\\.")),
+      ],
+      [
+        "public treasury address",
+        new RegExp(LIVE_HANDOFF_TREASURY_ADDRESS, "i"),
+      ],
+      [
+        "clean detached checkout on all computers",
+        /\bclean detached checkout\b[\s\S]*\bNode\.js 22\b[\s\S]*\bnpm ci --ignore-scripts\b[\s\S]*\ball three computers\b/i,
+      ],
+      [
+        "operator private kit path",
+        /\.context\/bilateral-live-2026-07-28\//,
+      ],
+      [
+        "treasury private kit path",
+        /\.context\/sepolia-funding\//,
+      ],
+      ["0700/0600 permissions", /\b0700\b[\s\S]*\b0600\b/],
+      [
+        "secret prohibition",
+        /\bNever print, read, paste, or inspect\s+private contents with an agent\b[\s\S]*\bNo token, invitation, capability, private key,\s+TLS key, RPC URL, or live evidence value\b/i,
+      ],
+      [
+        "safe RPC file read",
+        /readFile\(process\.env\.SEPOLIA_RPC_URL_FILE/,
+      ],
+      [
+        "safe balance JSON-RPC calls",
+        /\beth_chainId\b[\s\S]*\beth_getBalance\b[\s\S]*\beth_getTransactionCount\b/,
+      ],
+      [
+        "no RPC URL printing",
+        /\bmust not print the RPC URL\b/i,
+      ],
+      [
+        "sanitized treasury preflight failure",
+        /try \{\n  const rpcUrl = \(await readFile\(process\.env\.SEPOLIA_RPC_URL_FILE[\s\S]*\bSAFE_SEPOLIA_TREASURY_CHECK_FAILED\b/,
+      ],
+      [
+        "decimal chain ID and nonce",
+        /chainId: BigInt\(chainIdHex\)\.toString\(10\)[\s\S]*nonce: BigInt\(nonceHex\)\.toString\(10\)/,
+      ],
+      [
+        "routable relay placeholder",
+        /\b192\.0\.2\.10` is a documentation-only placeholder\b[\s\S]*\breplace it with a numeric LAN IP reachable by both role computers\b[\s\S]*\b127\.0\.0\.1\b[\s\S]*\bdocumentation range\b[\s\S]*\bnon-routable address\b/i,
+      ],
+      [
+        "relay certificate generation",
+        /\bopenssl req -x509 -newkey rsa:3072 -nodes\b[\s\S]*\bsubjectAltName=IP:\$RELAY_ADVERTISED_IP\b[\s\S]*\bRELAY_TLS_FINGERPRINT="\$\(openssl x509\b/,
+      ],
+      [
+        "exact startup order",
+        /\brelay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor\b/,
+      ],
+      [
+        "coordinator-owned funding record",
+        /\bexport FUNDING_RECORD_FILE="\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json"/,
+      ],
+      [
+        "four-address allocation",
+        /\bfunds exactly four freshly generated addresses with\s+`0\.01 Sepolia ETH` each\b/i,
+      ],
+      [
+        "safe 0.05 budget",
+        /\b0\.05 Sepolia ETH\b[\s\S]*\bsufficient\s+only\s+if\s+preflight\s+still\s+reports\s+balance\/nonce\s+safe\b/i,
+      ],
+      [
+        "no manual address copying",
+        /\bno manual address\s+copying\b/i,
+      ],
+      [
+        "commercial intent marker",
+        /\bPAYER_MANDATE_READY\b[\s\S]*\bPAYMENT_REQUEST_READY\b[\s\S]*\bPAYMENT_REQUEST_MATCHED\b/,
+      ],
+      [
+        "three protocol anchors",
+        /Iris `PROPOSED`[\s\S]*Billie `ACCEPTED`[\s\S]*Iris `ACKNOWLEDGED`/,
+      ],
+      [
+        "marker-complete role files",
+        /\bmarker-complete role files\b[\s\S]*\bverifier files\b/i,
+      ],
+      [
+        "verifier-only AUTHORIZED",
+        /`AUTHORIZED` only from fresh\s+aggregate verifier/i,
+      ],
+      ["paymentMoved:false", /\bpaymentMoved:false\b/],
+      [
+        "advisory console/relay",
+        /\bRelay\/watcher\/console fields are advisory\b/,
+      ],
+      [
+        "evidence recheck",
+        /SEPOLIA_RPC_URL="\$\(node --input-type=module[\s\S]*process\.stdout\.write\(\(await readFile\(process\.env\.SEPOLIA_RPC_URL_FILE[\s\S]*node scripts\/verify-bilateral-results\.mjs[\s\S]*--clockchain-token-file "\$OPERATOR_CLOCKCHAIN_TOKEN_FILE"[\s\S]*--rpc-url "\$SEPOLIA_RPC_URL"/,
+      ],
+      [
+        "readiness distinction",
+        /\bimplementation-complete and rehearsal-ready\b[\s\S]*only a\s+successful 3-computer run with exact fresh evidence may be called `live-demo validated`/i,
+      ],
+      [
+        "handoff action boundary",
+        /\buser eventual actions are only funding four generated addresses and\s+starting two physical supervisors\b[\s\S]*\boperator owns everything else\b/i,
+      ],
+      [
+        "ignored private artifacts",
+        /\bPrivate\/live artifacts remain ignored\/outside Git\b/,
+      ],
+      [
+        "stop list",
+        /\bmissing, duplicate, reordered, expired, malformed,\s+mismatched\b[\s\S]*\bdirty\/wrong SHA\b[\s\S]*\bwrong Node\b[\s\S]*\bwrong role\/manifest\b[\s\S]*\bsecret exposure\b[\s\S]*\bchanged TLS fingerprint\/relay binding\b[\s\S]*\bfunding mismatch\/nonzero recipient nonce\b[\s\S]*\bnonzero process exit\b[\s\S]*\babsent\s+completion marker\b[\s\S]*\bany authority claim from relay\/watcher\/console\/coordinator\/role\b/i,
+      ],
+    ],
   };
   for (const [label, pattern] of pathRequirements[relativePath] ?? []) {
     if (!pattern.test(contents)) {
@@ -935,6 +1103,15 @@ function bilateralContractFailures(relativePath, contents) {
       ["exact role CLI", IRIS_ROLE_COMMAND],
       ["exact verifier CLI", VERIFIER_COMMAND],
       ["reusable bilateral funding command", FUNDING_COMMAND],
+    ],
+    "docs/runbooks/bilateral-demo-live-handoff.md": [
+      ["exact relay CLI", RELAY_COMMAND],
+      ["exact coordinator CLI", COORDINATOR_COMMAND],
+      ["exact console CLI", CONSOLE_COMMAND],
+      ["exact Iris supervisor CLI", IRIS_SUPERVISOR_COMMAND],
+      ["exact Billie supervisor CLI", BILLIE_SUPERVISOR_COMMAND],
+      ["reusable bilateral funding command", FUNDING_COMMAND],
+      ["exact verifier CLI", VERIFIER_COMMAND],
     ],
   };
   for (
@@ -1026,6 +1203,33 @@ function bilateralContractFailures(relativePath, contents) {
     ) {
       failures.push(
         `${relativePath}: primary flow must keygen, commit the public key, verify, then freeze the release SHA in that order.`,
+      );
+    }
+  }
+  if (relativePath === "docs/runbooks/bilateral-demo-live-handoff.md") {
+    const contentsWithoutPermittedReadiness = contents.replace(
+      /Only a\s+successful 3-computer run with exact fresh evidence may be called `live-demo validated`/i,
+      "",
+    );
+    if (
+      /\b(?:is|as|called|counts as)\s+`?live-demo validated`?\b/i.test(
+        contentsWithoutPermittedReadiness,
+      )
+    ) {
+      failures.push(
+        `${relativePath}: missing bilateral readiness distinction.`,
+      );
+    }
+    if (/payload\.error\.message|\$\{method\}/.test(contents)) {
+      failures.push(
+        `${relativePath}: missing bilateral sanitized treasury preflight failure.`,
+      );
+    }
+    if (
+      /\bexport\s+SEPOLIA_RPC_URL=https?:\/\//i.test(contents)
+    ) {
+      failures.push(
+        `${relativePath}: missing bilateral safe verifier RPC URL derivation.`,
       );
     }
   }
@@ -1345,7 +1549,13 @@ function nonofficialRegistryFailures(
   )) {
     if (
       match[0].toLowerCase() !==
-      OFFICIAL_REGISTRY.toLowerCase()
+        OFFICIAL_REGISTRY.toLowerCase() &&
+      !(
+        relativePath ===
+          "docs/runbooks/bilateral-demo-live-handoff.md" &&
+        match[0].toLowerCase() ===
+          LIVE_HANDOFF_TREASURY_ADDRESS.toLowerCase()
+      )
     ) {
       failures.push(
         `${relativePath}: references non-official registry address "${match[0]}".`,

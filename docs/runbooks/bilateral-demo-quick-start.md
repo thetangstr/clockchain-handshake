@@ -20,9 +20,9 @@ Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and
 
 ## Before everyone starts
 
-- Use immutable repository SHA `76f585d1e729326b5d749a61937c3971d4f34050`.
+- Use immutable repository SHA `54d3476de9309d386fe3e903a843b473b3851c15`.
 - Confirm Node.js 22 is installed on all three computers.
-- Confirm a clean checkout of exact SHA `76f585d1e729326b5d749a61937c3971d4f34050` on all three computers.
+- Confirm a clean checkout of exact SHA `54d3476de9309d386fe3e903a843b473b3851c15` on all three computers.
 - Confirm the operator Mac can reach both role computers over the advertised relay IP.
 - Publish no secrets, live evidence, or manifest contents.
 - Do not claim physical rehearsal passed; report only fresh verifier output and public status words.
