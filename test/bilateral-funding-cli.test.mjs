@@ -160,7 +160,6 @@ function makeClients({
       }
       if (viemReceipt) {
         return {
-          chainId: 11155111,
           from: FUNDING_ADDRESS,
           status: receiptStatus,
           to: transaction.to,

@@ -408,7 +408,6 @@ function normalizeReceipt(value) {
     fail("BILATERAL_FUNDING_INVALID_CLIENT");
   }
   return Object.freeze({
-    chainId: value.chainId,
     from: normalizeAddress(value.from),
     status: value.status,
     to: normalizeAddress(value.to),
@@ -488,7 +487,6 @@ function validatedReceipt(receipt, transaction) {
     normalizedReceipt.transactionHash !== normalizedTransaction.hash ||
     normalizedReceipt.from !== normalizedTransaction.from ||
     normalizedReceipt.to !== normalizedTransaction.to ||
-    normalizedReceipt.chainId !== 11155111 ||
     normalizedTransaction.chainId !== 11155111
   ) {
     fail("BILATERAL_FUNDING_REVERTED_TRANSACTION");
