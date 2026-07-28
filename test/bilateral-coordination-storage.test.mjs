@@ -49,6 +49,8 @@ import {
   verifyCoordinationEnrollment,
 } from "../src/bilateral/coordination/enrollment.mjs";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
+import { payerMandateDigest, PAYER_MANDATE_SCHEMA, signPayerMandate } from "../src/bilateral/payer-mandate.mjs";
+import { paymentRequestDigest, PAYMENT_REQUEST_SCHEMA, signPaymentRequest } from "../src/bilateral/payment-request.mjs";
 import {
   PARTY_RESULT_SCHEMA,
   partySignatureBytes,
@@ -86,6 +88,18 @@ const PREFLIGHT_KEY_ENROLLMENT_SIGNATURE_DOMAIN =
   "clockchain.bilateral-preflight-key-enrollment-signature/v1\n";
 const TOKEN_COMMITMENT_SIGNATURE_DOMAIN =
   "clockchain.bilateral-token-commitment-signature/v1\n";
+const INBOX_PAYER = privateKeyToAccount(`0x${"1".repeat(64)}`);
+const INBOX_PAYEE = privateKeyToAccount(`0x${"2".repeat(64)}`);
+const INBOX_REQUEST_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
+async function inboxArtifacts() {
+  const payer = { address: INBOX_PAYER.address.toLowerCase(), agentId: "101" };
+  const payee = { address: INBOX_PAYEE.address.toLowerCase(), agentId: "202" };
+  const mandate = await signPayerMandate({ mandate: { amount: { currency: "USD", value: "100" }, expiresAtMs: "1785297600000", invoiceReferencePrefix: "TREL-", issuedAtMs: "1785294000000", payee, payer, paymentMoved: false, protocol: "clockchain.bilateral-authorization/v1", purpose: "freight-services", releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, requestEndpoint: `/v1/sessions/${SESSION_ID}/payment-requests`, schema: PAYER_MANDATE_SCHEMA, sessionId: SESSION_ID, subjectRun: "stakeholder" }, signMessage: (bytes) => INBOX_PAYER.signMessage({ message: { raw: bytes } }) });
+  const request = await signPaymentRequest({ request: { amount: { currency: "USD", value: "100" }, createdAtMs: "1785294300000", expiresAtMs: "1785297000000", invoiceReference: "TREL-2026-0001", mandateDigest: payerMandateDigest(mandate), payee, payer, paymentMoved: false, protocol: "clockchain.bilateral-authorization/v1", purpose: "freight-services", releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, requestId: INBOX_REQUEST_ID, schema: PAYMENT_REQUEST_SCHEMA, sessionId: SESSION_ID, subjectRun: "stakeholder" }, signMessage: (bytes) => INBOX_PAYEE.signMessage({ message: { raw: bytes } }) });
+  const mandateBytes = canonicalBytes(mandate); const requestBytes = canonicalBytes(request);
+  return { mandate: mandateBytes, mandateDigest: sha256(mandateBytes), request: requestBytes, requestDigest: sha256(requestBytes) };
+}
 
 const keyPair = generateKeyPairSync("ed25519");
 const PRIVATE_KEY_PEM = keyPair.privateKey.export({
@@ -1135,6 +1149,26 @@ test("pins the closed artifact policy and storage bounds", () => {
     COORDINATION_OWNER_LOCK_LIMITATION,
     "Node.js 22 provides no kernel advisory file lock; simultaneous removal of both hard-linked owner lease paths is outside this store's exclusion guarantee.",
   );
+});
+
+test("durably binds one canonical mandate and request per session run", async (t) => {
+  const root = await privateRoot(t);
+  const artifacts = await inboxArtifacts();
+  const store = await openCoordinationStore({ now: () => NOW_MS, repositorySha: REPOSITORY_SHA, root });
+  const mandate = { bytes: artifacts.mandate, digest: artifacts.mandateDigest, sessionId: SESSION_ID, subjectRun: "stakeholder" };
+  const request = { bytes: artifacts.request, digest: artifacts.requestDigest, requestId: INBOX_REQUEST_ID, sessionId: SESSION_ID, subjectRun: "stakeholder" };
+  await store.putPayerMandate(mandate);
+  await store.putPayerMandate(mandate);
+  await store.putPaymentRequest(request);
+  await store.putPaymentRequest(request);
+  assert.deepEqual((await store.readPayerMandate({ sessionId: SESSION_ID, subjectRun: "stakeholder" })).bytes, artifacts.mandate);
+  assert.deepEqual((await store.readPaymentRequest({ requestId: INBOX_REQUEST_ID, sessionId: SESSION_ID })).bytes, artifacts.request);
+  await assert.rejects(store.putPayerMandate({ ...mandate, bytes: Buffer.from(artifacts.mandate.subarray(0, -1)), digest: artifacts.mandateDigest }));
+  await store.close();
+  const reopened = await openCoordinationStore({ now: () => NOW_MS, repositorySha: REPOSITORY_SHA, root });
+  t.after(() => reopened.close().catch(() => {}));
+  assert.equal((await reopened.readPayerMandate({ sessionId: SESSION_ID, subjectRun: "stakeholder" })).digest, artifacts.mandateDigest);
+  assert.equal((await reopened.readPaymentRequest({ requestId: INBOX_REQUEST_ID, sessionId: SESSION_ID })).digest, artifacts.requestDigest);
 });
 
 test("accepts only exact coordination enrollments and signed descriptors while other schemas fail closed", async () => {

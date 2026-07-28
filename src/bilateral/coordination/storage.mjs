@@ -3659,7 +3659,7 @@ export async function openCoordinationStore(input) {
     async function putPayerMandate(value) {
       return serialize(async () => {
         const data = readExactData(value, ["bytes", "digest", "sessionId", "subjectRun"]);
-        const binding = inboxBinding(data, false);
+        const binding = inboxBinding({ digest: data.digest, sessionId: data.sessionId, subjectRun: data.subjectRun }, false);
         const bytes = Buffer.from(data.bytes);
         const metadata = await validateRelayArtifact({ artifactType: "payer-mandate", bytes, expectedDigest: binding.digest, secretCanaries: [] });
         await writeArtifact(root, fileSystem, metadata.digest, bytes);
@@ -3670,7 +3670,7 @@ export async function openCoordinationStore(input) {
     async function putPaymentRequest(value) {
       return serialize(async () => {
         const data = readExactData(value, ["bytes", "digest", "requestId", "sessionId", "subjectRun"]);
-        const binding = inboxBinding(data, true);
+        const binding = inboxBinding({ digest: data.digest, requestId: data.requestId, sessionId: data.sessionId, subjectRun: data.subjectRun }, true);
         const bytes = Buffer.from(data.bytes);
         const metadata = await validateRelayArtifact({ artifactType: "payment-request", bytes, expectedDigest: binding.digest, secretCanaries: [] });
         await writeArtifact(root, fileSystem, metadata.digest, bytes);
