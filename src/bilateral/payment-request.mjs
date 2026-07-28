@@ -75,7 +75,12 @@ function printable(value, max = 128) {
 }
 
 function decimal(value) {
-  if (typeof value !== "string" || !DECIMAL_PATTERN.test(value)) invalid();
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 16 ||
+    !DECIMAL_PATTERN.test(value)
+  ) invalid();
   try { if (BigInt(value) > BigInt(Number.MAX_SAFE_INTEGER)) invalid(); } catch { invalid(); }
 }
 
@@ -178,7 +183,7 @@ export async function verifyPaymentRequest({ envelope, mandateEnvelope, expected
     nowMs,
   });
   if (
-    verified.request.mandateDigest !== payerMandateDigest(mandateEnvelope) ||
+    verified.request.mandateDigest !== payerMandateDigest(mandate) ||
     verified.signature.address !== verified.request.payee.address ||
     nowMs < Number(verified.request.createdAtMs) || nowMs >= Number(verified.request.expiresAtMs) ||
     BigInt(verified.request.createdAtMs) < BigInt(mandate.mandate.issuedAtMs) ||

@@ -22,6 +22,7 @@ const PAYEE_ADDRESS = PAYEE.address.toLowerCase();
 const SESSION_ID = "11111111-2222-4333-8444-555555555555";
 const ISSUED_AT_MS = "1785294000000";
 const EXPIRES_AT_MS = "1785297600000";
+const OVERLONG_DECIMAL = "1".repeat(100_000);
 
 function mandate(overrides = {}) {
   return {
@@ -102,6 +103,10 @@ test("rejects malformed, noncanonical, and hostile mandate payloads", () => {
     mandate({ subjectRun: "release" }),
     mandate({ requestEndpoint: "/v1/sessions/not-the-session/payment-requests" }),
     mandate({ paymentMoved: true }),
+    mandate({ amount: { currency: "USD", value: OVERLONG_DECIMAL } }),
+    mandate({ issuedAtMs: OVERLONG_DECIMAL }),
+    mandate({ expiresAtMs: OVERLONG_DECIMAL }),
+    mandate({ payer: { address: PAYER_ADDRESS, agentId: OVERLONG_DECIMAL } }),
   ];
   for (const value of cases) assert.throws(() => validatePayerMandate(value));
 

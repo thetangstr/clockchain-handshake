@@ -25,6 +25,7 @@ const IMPOSTOR = privateKeyToAccount(`0x${"3".repeat(64)}`);
 const PAYER_ADDRESS = PAYER.address.toLowerCase();
 const PAYEE_ADDRESS = PAYEE.address.toLowerCase();
 const SESSION_ID = "11111111-2222-4333-8444-555555555555";
+const OVERLONG_DECIMAL = "1".repeat(100_000);
 
 function mandate() {
   return {
@@ -120,6 +121,28 @@ test("digest changes for different signed bytes and remains stable for byte-iden
   assert.notEqual(paymentRequestDigest(first), paymentRequestDigest(changed));
 });
 
+test("request digest remains bound to the verified mandate snapshot across an await", async () => {
+  const originalEnvelope = await signedMandate();
+  const mutableEnvelope = structuredClone(originalEnvelope);
+  const mutatedEnvelope = structuredClone(originalEnvelope);
+  mutatedEnvelope.mandate.expiresAtMs = "1785297500000";
+  const envelope = await signedRequest(mutableEnvelope, {
+    mandateDigest: payerMandateDigest(mutatedEnvelope),
+  });
+
+  const verification = verifyPaymentRequest({
+    envelope,
+    mandateEnvelope: mutableEnvelope,
+    expected: expected(),
+    nowMs: 1785294400000,
+  });
+  queueMicrotask(() => {
+    mutableEnvelope.mandate.expiresAtMs = mutatedEnvelope.mandate.expiresAtMs;
+  });
+
+  await assert.rejects(verification);
+});
+
 test("verification rejects every independently mismatched expected request binding", async () => {
   const mandateEnvelope = await signedMandate();
   const envelope = await signedRequest(mandateEnvelope);
@@ -170,6 +193,10 @@ test("payment request validation rejects malformed fields and hostile nested val
     request(mandateEnvelope, { sessionId: "not-a-uuid" }),
     request(mandateEnvelope, { expiresAtMs: 1785297000000 }),
     request(mandateEnvelope, { createdAtMs: "1785297000000" }),
+    request(mandateEnvelope, { amount: { currency: "USD", value: OVERLONG_DECIMAL } }),
+    request(mandateEnvelope, { createdAtMs: OVERLONG_DECIMAL }),
+    request(mandateEnvelope, { expiresAtMs: OVERLONG_DECIMAL }),
+    request(mandateEnvelope, { payee: { address: PAYEE_ADDRESS, agentId: OVERLONG_DECIMAL } }),
   ];
   for (const value of cases) assert.throws(() => validatePaymentRequest(value));
   for (const nestedKey of ["amount", "payer", "payee"]) {
