@@ -3,10 +3,17 @@ import { createConsoleServer } from "../src/bilateral/coordination/console-serve
 import { createStateRootProjection } from "../src/bilateral/coordination/console-server.mjs";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 
+function parsePort(value) {
+  if (typeof value !== "string" || !/^(?:[1-9][0-9]{0,4})$/.test(value)) throw new Error("Console arguments failed safely.");
+  const port = Number(value);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error("Console arguments failed safely.");
+  return port;
+}
+
 export function parseConsoleArguments(argv) {
   const allowed = new Set(["--allow-lan", "--host", "--port", "--state-root", "--tls-certificate", "--tls-key"]); const values = Object.create(null);
   for (let index = 0; index < argv.length; index += 1) { const flag = argv[index]; if (!allowed.has(flag) || Object.hasOwn(values, flag)) throw new Error("Console arguments failed safely."); if (flag === "--allow-lan") { values[flag] = true; continue; } const value = argv[++index]; if (typeof value !== "string" || value.length === 0 || value.includes("\0")) throw new Error("Console arguments failed safely."); values[flag] = value; }
-  if (typeof values["--state-root"] !== "string") throw new Error("Console arguments failed safely."); const host = values["--host"] ?? "127.0.0.1"; const port = Number(values["--port"] ?? "8787"); if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error("Console arguments failed safely."); const lan = host !== "127.0.0.1" && host !== "::1" && host !== "localhost";
+  if (typeof values["--state-root"] !== "string") throw new Error("Console arguments failed safely."); const host = values["--host"] ?? "127.0.0.1"; const port = parsePort(values["--port"] ?? "8787"); const lan = host !== "127.0.0.1" && host !== "::1" && host !== "localhost";
   if (lan && (!values["--allow-lan"] || !values["--tls-certificate"] || !values["--tls-key"])) throw new Error("Console arguments failed safely."); if (!lan && (values["--allow-lan"] || values["--tls-certificate"] || values["--tls-key"])) throw new Error("Console arguments failed safely.");
   return Object.freeze({ allowLan: lan, host, port, stateRoot: values["--state-root"], tlsCertificate: values["--tls-certificate"] ?? null, tlsKey: values["--tls-key"] ?? null });
 }

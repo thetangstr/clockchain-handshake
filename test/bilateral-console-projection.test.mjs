@@ -32,11 +32,18 @@ test("projection is closed, redacted, ordered, and labels pre-protocol evidence"
 test("projection conveys structured console status without widening top-level keys", () => {
   const input = base();
   input.lifecycleView.health = {
-    operator: "console-canary",
-    payer: "console-canary",
-    payee: "console-canary",
-    relay: "console-canary",
-    watcher: "console-canary",
+    schema: "clockchain.bilateral-console-health/v1",
+    observedAtMs: "1785294299000",
+    expiresAtMs: "1785297600000",
+    actors: {
+      operator: "READY",
+      payer: "READY",
+      payee: "READY",
+    },
+    services: {
+      relay: "READY",
+      watcher: "READY",
+    },
   };
   input.lifecycleView.failure = {
     active: true,
@@ -96,6 +103,53 @@ test("projection conveys structured console status without widening top-level ke
   assert.equal(value.verifier.advisory, false);
   assert.equal(value.verifier.status, "AUTH" + "ORIZED");
   assert.equal(JSON.stringify(value).includes("console-canary"), false);
+});
+
+test("projection does not fabricate ready health from intents, phase, or anchors", () => {
+  const value = buildConsoleProjection(base());
+
+  assert.equal(value.actors.operator.health, "UNAVAILABLE");
+  assert.equal(value.actors.payer.health, "UNAVAILABLE");
+  assert.equal(value.actors.payee.health, "UNAVAILABLE");
+  assert.equal(value.session.observations.relay.health, "UNAVAILABLE");
+  assert.equal(value.session.observations.watcher.health, "UNAVAILABLE");
+});
+
+test("projection accepts only exact fresh closed health input", () => {
+  for (const mutate of [
+    (input) => { input.lifecycleView.health.observedAtMs = "1785294299000 "; },
+    (input) => { input.lifecycleView.health.expiresAtMs = "1e999"; },
+    (input) => { input.lifecycleView.health.expiresAtMs = "1785294300000"; },
+    (input) => { input.lifecycleView.health.actors.payer = "ok"; },
+    (input) => { input.lifecycleView.health.services.watcher = "console-canary"; },
+    (input) => { input.lifecycleView.health.extra = "console-canary"; },
+    (input) => { input.lifecycleView.health.actors.extra = "console-canary"; },
+    (input) => { delete input.lifecycleView.health.services; },
+  ]) {
+    const input = base();
+    input.lifecycleView.health = {
+      schema: "clockchain.bilateral-console-health/v1",
+      observedAtMs: "1785294299000",
+      expiresAtMs: "1785297600000",
+      actors: {
+        operator: "READY",
+        payer: "READY",
+        payee: "READY",
+      },
+      services: {
+        relay: "READY",
+        watcher: "READY",
+      },
+    };
+    mutate(input);
+    const value = buildConsoleProjection(input);
+    assert.notEqual(value.actors.operator.health, "READY");
+    assert.notEqual(value.actors.payer.health, "READY");
+    assert.notEqual(value.actors.payee.health, "READY");
+    assert.notEqual(value.session.observations.relay.health, "READY");
+    assert.notEqual(value.session.observations.watcher.health, "READY");
+    assert.equal(JSON.stringify(value).includes("console-canary"), false);
+  }
 });
 
 test("projection fails closed and never emits authorization from advisory or mismatched evidence", () => {
@@ -160,6 +214,21 @@ test("projection requires three distinct anchor digests", () => {
   const value = buildConsoleProjection(input);
   assert.deepEqual(value.anchors.map((anchor) => anchor.digest), [digest("1"), digest("1"), digest("3")]);
   assert.equal(value.verifier.status, "PENDING");
+});
+
+test("projection requires canonical string anchor blocks before authorization", () => {
+  for (const [label, block] of [
+    ["number", 10],
+    ["exponent", "1e3"],
+    ["object", { value: "10" }],
+    ["unsafe", String(BigInt(Number.MAX_SAFE_INTEGER) + 1n)],
+    ["leading zero", "010"],
+  ]) {
+    const input = base();
+    input.watcherSnapshot.anchors[0].block = block;
+    const value = buildConsoleProjection(input);
+    assert.equal(value.verifier.status, "PENDING", label);
+  }
 });
 
 test("projection requires bounded decimal expiration timestamps", () => {

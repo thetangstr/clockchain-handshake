@@ -8,8 +8,11 @@ const PHASES = new Set([...RELEASE_STATES, "UNAVAILABLE"]);
 const FAILURE_CODES = new Set(["RECOVERY_REQUIRED", "TERMINAL_FAILURE", "ABORTED"]);
 const FAILURE_RUNS = new Set(["release", "rehearsal", "stakeholder"]);
 const VERIFIER_PUBLICATION_SCHEMA = "clockchain.bilateral-verifier-publication/v1";
+const HEALTH_SCHEMA = "clockchain.bilateral-console-health/v1";
 const MAX_SAFE_MS = BigInt(Number.MAX_SAFE_INTEGER);
 const HEALTH = new Set(["READY", "WAITING", "FAILED", "UNAVAILABLE"]);
+const HEALTH_ACTOR_KEYS = Object.freeze(["operator", "payer", "payee"]);
+const HEALTH_SERVICE_KEYS = Object.freeze(["relay", "watcher"]);
 const ANCHOR_DETAILS = Object.freeze([
   Object.freeze({ actor: "Iris", sequence: 1, stage: "proposal" }),
   Object.freeze({ actor: "Billie", sequence: 2, stage: "acceptance" }),
@@ -19,18 +22,49 @@ const ANCHOR_DETAILS = Object.freeze([
 function digest(value) { return typeof value === "string" && SHA64.test(value) ? value : null; }
 function object(value) { return value !== null && typeof value === "object" && !Array.isArray(value) ? value : Object.create(null); }
 function booleanFact(value) { return value === true; }
-function derivedHealth(ready) {
-  const value = ready ? "READY" : "WAITING";
-  return HEALTH.has(value) ? value : "UNAVAILABLE";
+function exactKeys(value, keys) {
+  const names = Object.keys(value);
+  return names.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+function healthStatus(value) {
+  return typeof value === "string" && HEALTH.has(value) ? value : null;
+}
+function unavailableHealth() {
+  return Object.freeze({
+    actors: Object.freeze({
+      operator: "UNAVAILABLE",
+      payer: "UNAVAILABLE",
+      payee: "UNAVAILABLE",
+    }),
+    services: Object.freeze({
+      relay: "UNAVAILABLE",
+      watcher: "UNAVAILABLE",
+    }),
+  });
 }
 function timestamp(value) {
   if (typeof value !== "string" || value.length === 0 || value.length > 16 || !/^(?:0|[1-9][0-9]*)$/.test(value)) return null;
   const parsed = BigInt(value);
   return parsed <= MAX_SAFE_MS ? parsed : null;
 }
+function healthSnapshot(value, now) {
+  const snapshot = object(value);
+  const actors = object(snapshot.actors);
+  const services = object(snapshot.services);
+  if (!exactKeys(snapshot, ["schema", "observedAtMs", "expiresAtMs", "actors", "services"]) || snapshot.schema !== HEALTH_SCHEMA || !exactKeys(actors, HEALTH_ACTOR_KEYS) || !exactKeys(services, HEALTH_SERVICE_KEYS)) return unavailableHealth();
+  const observedAt = timestamp(snapshot.observedAtMs); const expiresAt = timestamp(snapshot.expiresAtMs);
+  if (now === null || observedAt === null || expiresAt === null || observedAt >= expiresAt || now < observedAt || now >= expiresAt) return unavailableHealth();
+  const actorHealth = Object.fromEntries(HEALTH_ACTOR_KEYS.map((key) => [key, healthStatus(actors[key])]));
+  const serviceHealth = Object.fromEntries(HEALTH_SERVICE_KEYS.map((key) => [key, healthStatus(services[key])]));
+  if ([...Object.values(actorHealth), ...Object.values(serviceHealth)].some((status) => status === null)) return unavailableHealth();
+  return Object.freeze({
+    actors: Object.freeze(actorHealth),
+    services: Object.freeze(serviceHealth),
+  });
+}
 function anchor(value, index) {
   const item = object(value);
-  if (item.kind !== ANCHORS[index] || item.verified !== true || digest(item.digest) === null || !/^(?:0|[1-9][0-9]*)$/.test(String(item.block))) return null;
+  if (item.kind !== ANCHORS[index] || item.verified !== true || digest(item.digest) === null || timestamp(item.block) === null) return null;
   const details = ANCHOR_DETAILS[index];
   return Object.freeze({ actor: details.actor, block: String(item.block), digest: item.digest, kind: item.kind, sequence: details.sequence, stage: details.stage, verified: true });
 }
@@ -63,18 +97,12 @@ export function buildConsoleProjection(input) {
   const deadlineExpires = mandateExpires !== null && requestExpires !== null ? (mandateExpires < requestExpires ? mandateExpires : requestExpires) : null;
   const freshness = now === null || deadlineExpires === null ? "UNAVAILABLE" : now < deadlineExpires ? "FRESH" : "EXPIRED";
   const watcherBindings = { descriptorDigest: digest(watcher.descriptorDigest), packageDigests: { payer: digest(watcher.packageDigests?.payer), payee: digest(watcher.packageDigests?.payee) } };
-  const healthSummary = Object.freeze({
-    operator: derivedHealth(sessionBound),
-    payer: derivedHealth(mandateReceived),
-    payee: derivedHealth(requestReceived),
-    relay: derivedHealth(PHASES.has(lifecycle.state) && lifecycle.state !== "UNAVAILABLE"),
-    watcher: derivedHealth(ordered),
-  });
+  const healthSummary = healthSnapshot(lifecycle.health, now);
   const session = Object.freeze({
     advisory: true,
     observations: Object.freeze({
-      relay: Object.freeze({ advisory: true, health: healthSummary.relay, label: "relay advisory" }),
-      watcher: Object.freeze({ advisory: true, health: healthSummary.watcher, label: "watcher advisory" }),
+      relay: Object.freeze({ advisory: true, health: healthSummary.services.relay, label: "relay advisory" }),
+      watcher: Object.freeze({ advisory: true, health: healthSummary.services.watcher, label: "watcher advisory" }),
     }),
     releaseId,
     repositorySha,
@@ -86,9 +114,9 @@ export function buildConsoleProjection(input) {
   const phase = PHASES.has(lifecycle.state) ? lifecycle.state : "UNAVAILABLE";
   return Object.freeze({
     actors: Object.freeze({
-      operator: Object.freeze({ health: healthSummary.operator, label: "Operator", role: "operator" }),
-      payer: Object.freeze({ health: healthSummary.payer, label: "Iris", role: "payer" }),
-      payee: Object.freeze({ health: healthSummary.payee, label: "Billie", role: "payee" }),
+      operator: Object.freeze({ health: healthSummary.actors.operator, label: "Operator", role: "operator" }),
+      payer: Object.freeze({ health: healthSummary.actors.payer, label: "Iris", role: "payer" }),
+      payee: Object.freeze({ health: healthSummary.actors.payee, label: "Billie", role: "payee" }),
     }),
     anchors,
     deadline: Object.freeze({ expiresAtMs: deadlineExpires === null ? null : deadlineExpires.toString(), freshness, nowMs: Number.isSafeInteger(value.nowMs) ? value.nowMs : null }),

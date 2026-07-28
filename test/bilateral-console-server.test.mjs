@@ -55,6 +55,29 @@ test("console CLI requires state root and LAN acknowledgement with TLS files", (
   for (const args of [["--host", "0.0.0.0", "--state-root", "/private/state"], ["--allow-lan", "--host", "0.0.0.0", "--state-root", "/private/state"], ["--state-root", "/private/state", "--token", "no"]]) assert.throws(() => parseConsoleArguments(args));
 });
 
+test("console CLI accepts only canonical decimal ports", () => {
+  assert.equal(parseConsoleArguments(["--state-root", "/private/state", "--port", "1"]).port, 1);
+  assert.equal(parseConsoleArguments(["--state-root", "/private/state", "--port", "65535"]).port, 65535);
+  for (const port of [
+    "0",
+    "65536",
+    "01",
+    "1.5",
+    "1e3",
+    "0x50",
+    "+1",
+    "-1",
+    " 1",
+    "1 ",
+  ]) {
+    assert.throws(
+      () => parseConsoleArguments(["--state-root", "/private/state", "--port", port]),
+      /Console arguments failed safely/,
+      port,
+    );
+  }
+});
+
 test("state-root projection re-reads bounded canonical state on every request", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "console-state-")); await chmod(root, 0o700); t.after(() => import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true })));
   const file = join(root, "console-state.json"); const state = (phase) => ({ lifecycleView: { releaseId: "release-a", repositorySha: "a".repeat(40), sessionId: "11111111-2222-4333-8444-555555555555", state: phase }, mandate: {}, nowMs: 0, request: {}, verifierPublication: null, watcherSnapshot: {} });
@@ -65,6 +88,18 @@ test("state-root projection re-reads bounded canonical state on every request", 
   assert.equal(projection().phase.value, "STAKEHOLDER_RUNNING");
   await writeFile(file, '{"token":"canary"}\n', { mode: 0o600 });
   assert.throws(projection);
+});
+
+test("state-root projection permits exact nested lifecycle health without widening top-level keys", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "console-state-health-")); await chmod(root, 0o700); t.after(() => import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true })));
+  const file = join(root, "console-state.json");
+  await writeFile(
+    file,
+    `${JSON.stringify({ lifecycleView: { health: { schema: "clockchain.bilateral-console-health/v1", observedAtMs: "1", expiresAtMs: "3", actors: { operator: "READY", payer: "WAITING", payee: "UNAVAILABLE" }, services: { relay: "READY", watcher: "WAITING" } } }, mandate: {}, nowMs: 2, request: {}, verifierPublication: null, watcherSnapshot: {} })}\n`,
+    { mode: 0o600 },
+  );
+  const projection = createStateRootProjection({ stateRoot: root });
+  assert.equal(projection().actors.operator.health, "READY");
 });
 
 test("state-root projection rejects a symlinked console-state file", async (t) => {
