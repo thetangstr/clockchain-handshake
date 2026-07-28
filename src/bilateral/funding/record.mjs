@@ -7,9 +7,15 @@ export const PARTICIPANT_MAXIMUM_WEI = 20_000_000_000_000_000n;
 const FUNDING_RECORD_KEYS = Object.freeze([
   "addresses",
   "paymentMoved",
+  "participants",
   "schema",
 ]);
 const PARTICIPANT_FACT_KEYS = Object.freeze([
+  "address",
+  "balanceWei",
+  "nonce",
+]);
+const RECORDED_PARTICIPANT_KEYS = Object.freeze([
   "address",
   "balanceWei",
   "nonce",
@@ -140,6 +146,36 @@ function requireBigint(value, code) {
   return value;
 }
 
+function validateRecordedParticipants(value, addresses) {
+  const participantData = snapshotDenseDataArray(
+    value,
+    4,
+    "BILATERAL_FUNDING_INVALID_RECORD",
+  );
+
+  const participants = [];
+  for (let index = 0; index < participantData.length; index += 1) {
+    const participant = snapshotExactDataObject(
+      participantData[index],
+      RECORDED_PARTICIPANT_KEYS,
+      "BILATERAL_FUNDING_INVALID_RECORD",
+    );
+    if (
+      participant.address !== addresses[index] ||
+      participant.balanceWei !== "0" ||
+      participant.nonce !== "0"
+    ) {
+      fail("BILATERAL_FUNDING_INVALID_RECORD");
+    }
+    participants.push(Object.freeze({
+      address: participant.address,
+      balanceWei: "0",
+      nonce: "0",
+    }));
+  }
+  return Object.freeze(participants);
+}
+
 export function validateFundingRecord(value) {
   const snapshot = snapshotExactDataObject(
     value,
@@ -163,9 +199,14 @@ export function validateFundingRecord(value) {
   for (const address of addressData) {
     addresses.push(validateAddress(address, seen));
   }
+  const frozenAddresses = Object.freeze(addresses);
   return Object.freeze({
-    addresses: Object.freeze(addresses),
+    addresses: frozenAddresses,
     paymentMoved: false,
+    participants: validateRecordedParticipants(
+      snapshot.participants,
+      frozenAddresses,
+    ),
     schema: FUNDING_RECORD_SCHEMA,
   });
 }

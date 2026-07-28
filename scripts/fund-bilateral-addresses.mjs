@@ -479,6 +479,12 @@ function validateFundingNonceAgainstJournal(journal, fundingNonce) {
   }
 }
 
+function assertNoUnresolvedJournalTransfers(journal) {
+  if (journal.document.transfers.some((transfer) => transfer.state !== "FUNDED")) {
+    fail("BILATERAL_FUNDING_AMBIGUOUS_RECOVERY");
+  }
+}
+
 function validatedReceipt(receipt, transaction) {
   const normalizedReceipt = normalizeReceipt(receipt);
   const normalizedTransaction = normalizeTransaction(transaction, transaction.from);
@@ -726,6 +732,7 @@ async function runMain(arguments_ = process.argv.slice(2), dependencies = {}) {
     journalDirectory: parsed.journalDirectory,
   });
   journal = await recoverJournal({ binding, journal, publicClient });
+  assertNoUnresolvedJournalTransfers(journal);
 
   const [participants, funding] = await Promise.all([
     participantFacts(publicClient, record.addresses),

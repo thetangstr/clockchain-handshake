@@ -50,6 +50,11 @@ async function fixture(overrides = {}) {
   const record = overrides.record ?? {
     addresses: [...RECIPIENTS],
     paymentMoved: false,
+    participants: RECIPIENTS.map((address) => ({
+      address,
+      balanceWei: "0",
+      nonce: "0",
+    })),
     schema: "clockchain.bilateral-funding-addresses/v1",
   };
   const recordFile = await privatePath("funding-addresses.json", `${JSON.stringify(record)}\n`);
@@ -94,6 +99,7 @@ function makeClients({
   balances = RECIPIENTS.map(() => 0n),
   fundingBalance = 100_000_000_000_000_000n,
   fundingNonce = 7,
+  initialTransactions = [],
   receiptStatus = "success",
   viemReceipt = false,
 } = {}) {
@@ -102,6 +108,13 @@ function makeClients({
   let mutableFundingBalance = fundingBalance;
   let mutableFundingNonce = fundingNonce;
   const transactions = new Map();
+  for (const transaction of initialTransactions) {
+    transactions.set(transaction.hash, {
+      chainId: 11155111,
+      from: FUNDING_ADDRESS,
+      ...transaction,
+    });
+  }
   const publicClient = {
     async getBalance({ address }) {
       calls.push(["getBalance", address]);
@@ -448,6 +461,84 @@ test("discovers durable journal state before recovery and never broadcasts twice
     secondClients.calls.some(([method]) => method === "getTransactionBySenderNonce"),
     true,
   );
+});
+
+test("fails closed when recovery leaves any prior funding transfer unresolved", async () => {
+  const fixture_ = await fixture();
+  const firstClients = makeClients();
+  await assert.rejects(
+    runFixture(fixture_, firstClients, {
+      createClients: async () => ({
+        publicClient: firstClients.publicClient,
+        walletClient: {
+          async sendTransaction(transaction) {
+            firstClients.calls.push(["sendTransaction", transaction.to, transaction.nonce]);
+            return `0x${"a".repeat(64)}`;
+          },
+        },
+      }),
+    }),
+    BilateralFundingError,
+  );
+  const observedJournal = JSON.parse(
+    await readFile(join(fixture_.journalDirectory, "funding-journal.json"), "utf8"),
+  );
+  assert.equal(observedJournal.transfers[0].state, "TRANSACTION_OBSERVED");
+
+  const secondClients = makeClients({
+    fundingNonce: 8,
+    initialTransactions: [{
+      hash: `0x${"a".repeat(64)}`,
+      nonce: 7,
+      to: RECIPIENTS[0],
+      valueWei: 10_000_000_000_000_000n,
+    }],
+  });
+  await assert.rejects(runFixture(fixture_, secondClients), BilateralFundingError);
+
+  assert.deepEqual(
+    secondClients.calls.filter(([method]) => method === "sendTransaction"),
+    [],
+  );
+  assert.equal(
+    secondClients.calls.some(
+      ([method, address]) => method === "getBalance" && address === RECIPIENTS[1],
+    ),
+    false,
+  );
+});
+
+test("keeps partial settled journal recovery idempotent without resending funded recipients", async () => {
+  const fixture_ = await fixture();
+  const firstClients = makeClients({
+    balances: [
+      0n,
+      10_000_000_000_000_000n,
+      10_000_000_000_000_000n,
+      10_000_000_000_000_000n,
+    ],
+  });
+  await runFixture(fixture_, firstClients);
+
+  const secondClients = makeClients({
+    balances: RECIPIENTS.map(() => 10_000_000_000_000_000n),
+    fundingNonce: 8,
+  });
+  const { summary } = await runFixture(fixture_, secondClients);
+
+  assert.deepEqual(
+    secondClients.calls.filter(([method]) => method === "sendTransaction"),
+    [],
+  );
+  assert.deepEqual(summary.adopted, RECIPIENTS);
+  assert.deepEqual(summary.transfers, [
+    {
+      address: RECIPIENTS[0],
+      fundingNonce: "7",
+      transactionHash: `0x${"1".repeat(64)}`,
+      valueWei: "10000000000000000",
+    },
+  ]);
 });
 
 test("top-level CLI output never includes arbitrary thrown RPC or client messages", async () => {

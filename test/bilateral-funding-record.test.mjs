@@ -19,6 +19,28 @@ const RECORD = Object.freeze({
     "0x4444444444444444444444444444444444444444",
   ]),
   paymentMoved: false,
+  participants: Object.freeze([
+    Object.freeze({
+      address: "0x1111111111111111111111111111111111111111",
+      balanceWei: "0",
+      nonce: "0",
+    }),
+    Object.freeze({
+      address: "0x2222222222222222222222222222222222222222",
+      balanceWei: "0",
+      nonce: "0",
+    }),
+    Object.freeze({
+      address: "0x3333333333333333333333333333333333333333",
+      balanceWei: "0",
+      nonce: "0",
+    }),
+    Object.freeze({
+      address: "0x4444444444444444444444444444444444444444",
+      balanceWei: "0",
+      nonce: "0",
+    }),
+  ]),
   schema: "clockchain.bilateral-funding-addresses/v1",
 });
 
@@ -26,6 +48,7 @@ function mutableRecord() {
   return {
     addresses: [...RECORD.addresses],
     paymentMoved: false,
+    participants: RECORD.participants.map((participant) => ({ ...participant })),
     schema: RECORD.schema,
   };
 }
@@ -80,9 +103,14 @@ test("validateFundingRecord returns an immutable exact copy of the canonical rec
   assert.ok(Object.isFrozen(validated.addresses));
 
   input.addresses[0] = RECORD.addresses[1];
+  input.participants[0].address = RECORD.addresses[1];
   assert.equal(validated.addresses[0], RECORD.addresses[0]);
+  assert.equal(validated.participants[0].address, RECORD.addresses[0]);
   assert.throws(() => {
     validated.addresses[0] = RECORD.addresses[1];
+  }, TypeError);
+  assert.throws(() => {
+    validated.participants[0].balanceWei = "1";
   }, TypeError);
 });
 
@@ -92,6 +120,30 @@ test("validateFundingRecord rejects malformed funding records fail-closed", () =
     { ...mutableRecord(), extra: true },
     { ...mutableRecord(), paymentMoved: true },
     { ...mutableRecord(), addresses: RECORD.addresses.slice(0, 3) },
+    {
+      ...mutableRecord(),
+      participants: RECORD.participants.slice(0, 3),
+    },
+    {
+      ...mutableRecord(),
+      participants: RECORD.participants.map((participant, index) =>
+        index === 0 ? { ...participant, balanceWei: "1" } : participant,
+      ),
+    },
+    {
+      ...mutableRecord(),
+      participants: RECORD.participants.map((participant, index) =>
+        index === 0 ? { ...participant, nonce: "1" } : participant,
+      ),
+    },
+    {
+      ...mutableRecord(),
+      participants: RECORD.participants.map((participant, index) =>
+        index === 0
+          ? { ...participant, address: RECORD.addresses[1] }
+          : participant,
+      ),
+    },
     {
       ...mutableRecord(),
       addresses: [
@@ -135,6 +187,36 @@ test("funding thresholds are the exact committed wei envelope", () => {
   assert.equal(PARTICIPANT_MINIMUM_WEI, 5_000_000_000_000_000n);
   assert.equal(PARTICIPANT_TARGET_WEI, 10_000_000_000_000_000n);
   assert.equal(PARTICIPANT_MAXIMUM_WEI, 20_000_000_000_000_000n);
+});
+
+test("planFundingTransfers sends exactly 0.01 ETH to each clean zero-admission recipient", () => {
+  const record = validateFundingRecord(mutableRecord());
+  const plan = planFundingTransfers({
+    feePerTransferWei: 25n,
+    fundingBalanceWei: 40_000_000_000_000_100n,
+    fundingNonce: 3n,
+    participantFacts: record.addresses.map((address) => ({
+      address,
+      balanceWei: 0n,
+      nonce: 0n,
+    })),
+    record,
+  });
+
+  assert.deepEqual(plan.adopted, []);
+  assert.equal(plan.totalValueWei, 40_000_000_000_000_000n);
+  assert.deepEqual(
+    plan.transfers.map(({ address, fundingNonce, valueWei }) => ({
+      address,
+      fundingNonce,
+      valueWei,
+    })),
+    record.addresses.map((address, index) => ({
+      address,
+      fundingNonce: 3n + BigInt(index),
+      valueWei: 10_000_000_000_000_000n,
+    })),
+  );
 });
 
 test("planFundingTransfers tops up only below-floor participants and adopts in-band balances", () => {
