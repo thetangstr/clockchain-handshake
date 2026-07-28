@@ -126,6 +126,10 @@ const STORE_METHODS = Object.freeze([
   "close",
   "consumeCapability",
   "getArtifact",
+  "putPayerMandate",
+  "putPaymentRequest",
+  "readPayerMandate",
+  "readPaymentRequest",
   "putArtifact",
   "readVerifierPublication",
   "readEnrollment",
@@ -994,6 +998,8 @@ function emptyState() {
     capabilities: new Map(),
     eventDigests: new Map(),
     events: [],
+    payerMandates: new Map(),
+    paymentRequests: new Map(),
     senders: new Map(),
     sessions: new Map(),
     verifierPublications: new Map(),
@@ -1017,6 +1023,8 @@ function cloneState(state) {
     ),
     eventDigests: new Map(state.eventDigests),
     events: [...state.events],
+    payerMandates: new Map(state.payerMandates),
+    paymentRequests: new Map(state.paymentRequests),
     senders: new Map(
       [...state.senders].map(([key, sender]) => [
         key,
@@ -1451,6 +1459,15 @@ function payloadFor(type, value) {
   return Object.freeze({ type, value });
 }
 
+function inboxBinding(value, request) {
+  const keys = request ? ["digest", "requestId", "sessionId", "subjectRun"] : ["digest", "sessionId", "subjectRun"];
+  const data = readExactData(value, keys);
+  const binding = { digest: assertSha256(data.digest), sessionId: assertSessionId(data.sessionId), subjectRun: data.subjectRun };
+  if (!["rehearsal", "stakeholder"].includes(binding.subjectRun)) fail();
+  if (request) binding.requestId = assertSessionId(data.requestId);
+  return Object.freeze(binding);
+}
+
 function validatePayload(payload, state, repositorySha) {
   const data = readExactData(payload, ["type", "value"]);
   if (data.type === "CAPABILITY_REGISTERED") {
@@ -1513,6 +1530,8 @@ function validatePayload(payload, state, repositorySha) {
       verifiedEventPublication(data.value, repositorySha, state),
     );
   }
+  if (data.type === "PAYER_MANDATE_PUT") return payloadFor(data.type, inboxBinding(data.value, false));
+  if (data.type === "PAYMENT_REQUEST_PUT") return payloadFor(data.type, inboxBinding(data.value, true));
   fail();
 }
 
@@ -1557,6 +1576,23 @@ function applyPayload(
     const accepted = applyEvent(state, payload.value.event, loading);
     state.verifierPublications.set(key, payload.value.publication);
     return accepted;
+  }
+  if (payload.type === "PAYER_MANDATE_PUT") {
+    const key = `${payload.value.sessionId}:${payload.value.subjectRun}`;
+    const existing = state.payerMandates.get(key);
+    if (existing !== undefined && existing.digest !== payload.value.digest) fail(loading ? undefined : "PAYER_MANDATE_CONFLICT");
+    state.payerMandates.set(key, payload.value);
+    return payload.value;
+  }
+  if (payload.type === "PAYMENT_REQUEST_PUT") {
+    const key = `${payload.value.sessionId}:${payload.value.requestId}`;
+    const existing = state.paymentRequests.get(key);
+    if (existing !== undefined && existing.digest !== payload.value.digest) fail(loading ? undefined : "PAYMENT_REQUEST_CONFLICT");
+    for (const candidate of state.paymentRequests.values()) {
+      if (candidate.sessionId === payload.value.sessionId && candidate.subjectRun === payload.value.subjectRun && candidate.digest !== payload.value.digest) fail(loading ? undefined : "PAYMENT_REQUEST_CONFLICT");
+    }
+    state.paymentRequests.set(key, payload.value);
+    return payload.value;
   }
   fail();
 }
@@ -1637,6 +1673,8 @@ function stateSummary(state) {
     eventDigests: state.events.map(
       (event) => event.eventDigest,
     ),
+    payerMandates: [...state.payerMandates.values()].sort((left, right) => left.sessionId.localeCompare(right.sessionId) || left.subjectRun.localeCompare(right.subjectRun)),
+    paymentRequests: [...state.paymentRequests.values()].sort((left, right) => left.sessionId.localeCompare(right.sessionId) || left.requestId.localeCompare(right.requestId)),
     sessions: [...state.sessions.entries()]
       .map(([sessionId, releaseId]) => ({
         releaseId,
@@ -3618,6 +3656,53 @@ export async function openCoordinationStore(input) {
       });
     }
 
+    async function putPayerMandate(value) {
+      return serialize(async () => {
+        const data = readExactData(value, ["bytes", "digest", "sessionId", "subjectRun"]);
+        const binding = inboxBinding(data, false);
+        const bytes = Buffer.from(data.bytes);
+        const metadata = await validateRelayArtifact({ artifactType: "payer-mandate", bytes, expectedDigest: binding.digest, secretCanaries: [] });
+        await writeArtifact(root, fileSystem, metadata.digest, bytes);
+        return appendPayload(payloadFor("PAYER_MANDATE_PUT", binding));
+      });
+    }
+
+    async function putPaymentRequest(value) {
+      return serialize(async () => {
+        const data = readExactData(value, ["bytes", "digest", "requestId", "sessionId", "subjectRun"]);
+        const binding = inboxBinding(data, true);
+        const bytes = Buffer.from(data.bytes);
+        const metadata = await validateRelayArtifact({ artifactType: "payment-request", bytes, expectedDigest: binding.digest, secretCanaries: [] });
+        await writeArtifact(root, fileSystem, metadata.digest, bytes);
+        return appendPayload(payloadFor("PAYMENT_REQUEST_PUT", binding));
+      });
+    }
+
+    async function readPayerMandate(value) {
+      return serialize(async () => {
+        const data = readExactData(value, ["sessionId", "subjectRun"]);
+        const sessionId = assertSessionId(data.sessionId);
+        if (!["rehearsal", "stakeholder"].includes(data.subjectRun)) fail();
+        const binding = state.payerMandates.get(`${sessionId}:${data.subjectRun}`);
+        if (binding === undefined) return null;
+        const bytes = await readArtifact(root, fileSystem, binding.digest);
+        await validateRelayArtifact({ artifactType: "payer-mandate", bytes, expectedDigest: binding.digest, secretCanaries: [] });
+        return Object.freeze({ bytes, digest: binding.digest, sessionId, subjectRun: data.subjectRun });
+      });
+    }
+
+    async function readPaymentRequest(value) {
+      return serialize(async () => {
+        const data = readExactData(value, ["requestId", "sessionId"]);
+        const sessionId = assertSessionId(data.sessionId); const requestId = assertSessionId(data.requestId);
+        const binding = state.paymentRequests.get(`${sessionId}:${requestId}`);
+        if (binding === undefined) return null;
+        const bytes = await readArtifact(root, fileSystem, binding.digest);
+        await validateRelayArtifact({ artifactType: "payment-request", bytes, expectedDigest: binding.digest, secretCanaries: [] });
+        return Object.freeze({ bytes, digest: binding.digest, requestId, sessionId, subjectRun: binding.subjectRun });
+      });
+    }
+
     async function getArtifact(value) {
       return serialize(async () => {
         assertOpen();
@@ -3687,6 +3772,10 @@ export async function openCoordinationStore(input) {
       close,
       consumeCapability,
       getArtifact,
+      putPayerMandate,
+      putPaymentRequest,
+      readPayerMandate,
+      readPaymentRequest,
       putArtifact,
       readEnrollment,
       readCapabilitySet,
