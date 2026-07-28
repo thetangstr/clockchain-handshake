@@ -32,6 +32,7 @@ import {
   createOperatorRelayClient,
   createPinnedOperatorHttpsTransport,
   createPinnedOperatorHttpsTransportForTesting,
+  OPERATOR_CLIENT_MAX_RESPONSE_BYTES,
 } from "../src/bilateral/coordination/operator-client.mjs";
 import { CoordinationClientError } from "../src/bilateral/coordination/client.mjs";
 
@@ -416,6 +417,150 @@ test("operator transport rejects malformed response headers and noncanonical res
       transport.request({ body: null, method: "GET", path: `/v1/sessions/${SESSION_ID}/view` }),
       { code: "COORDINATION_OPERATOR_CLIENT_INVALID" },
       label,
+    );
+  }
+});
+
+test("operator transport types only exact safe missing-session view responses", async (t) => {
+  const tls = await certificate(t);
+  const missing = canonicalBytes({
+    code: "COORDINATION_SESSION_NOT_FOUND",
+    paymentMoved: false,
+  });
+  const cases = [
+    {
+      body: missing,
+      headers: { "content-length": String(missing.length), "content-type": "text/plain" },
+      statusCode: 404,
+      expected: "COORDINATION_OPERATOR_CLIENT_INVALID",
+      label: "content-type",
+    },
+    {
+      body: missing,
+      headers: { "content-type": "application/json" },
+      statusCode: 404,
+      expected: "COORDINATION_OPERATOR_CLIENT_INVALID",
+      label: "missing content-length",
+    },
+    {
+      body: missing,
+      headers: [
+        ["content-length", String(missing.length)],
+        ["content-length", String(missing.length)],
+        ["content-type", "application/json"],
+      ],
+      statusCode: 404,
+      expected: "COORDINATION_TRANSPORT_AMBIGUOUS",
+      label: "duplicate content-length",
+    },
+    {
+      body: missing,
+      headers: { "content-length": String(OPERATOR_CLIENT_MAX_RESPONSE_BYTES + 1), "content-type": "application/json" },
+      statusCode: 404,
+      expected: "COORDINATION_OPERATOR_CLIENT_INVALID",
+      label: "oversized content-length",
+    },
+    {
+      body: missing,
+      headers: { "content-length": String(missing.length), "content-type": "application/json", "transfer-encoding": "chunked" },
+      statusCode: 404,
+      expected: "COORDINATION_TRANSPORT_AMBIGUOUS",
+      label: "transfer-encoding",
+    },
+    {
+      body: missing,
+      headers: { "content-encoding": "identity", "content-length": String(missing.length), "content-type": "application/json" },
+      statusCode: 404,
+      expected: "COORDINATION_OPERATOR_CLIENT_INVALID",
+      label: "content-encoding",
+    },
+    {
+      body: missing,
+      headers: { "content-length": String(missing.length), "content-type": "application/json", location: "/v1/sessions" },
+      statusCode: 404,
+      expected: "COORDINATION_OPERATOR_CLIENT_INVALID",
+      label: "location",
+    },
+    {
+      body: missing,
+      headers: { "content-length": String(missing.length), "content-type": "application/json", upgrade: "h2c" },
+      statusCode: 404,
+      expected: "COORDINATION_OPERATOR_CLIENT_INVALID",
+      label: "upgrade",
+    },
+    {
+      body: Buffer.from(`${missing.toString("utf8")}\n`, "utf8"),
+      headers: null,
+      statusCode: 404,
+      expected: "COORDINATION_OPERATOR_CLIENT_INVALID",
+      label: "noncanonical JSON",
+    },
+    {
+      body: canonicalBytes({ code: "COORDINATION_SESSION_NOT_FOUND", extra: false, paymentMoved: false }),
+      headers: null,
+      statusCode: 404,
+      expected: "COORDINATION_OPERATOR_CLIENT_INVALID",
+      label: "extra field",
+    },
+    {
+      body: canonicalBytes({ code: "COORDINATION_SESSION_NOT_FOUND" }),
+      headers: null,
+      statusCode: 404,
+      expected: "COORDINATION_OPERATOR_CLIENT_INVALID",
+      label: "missing field",
+    },
+    {
+      body: canonicalBytes({ code: "COORDINATION_RELAY_REQUEST_INVALID", paymentMoved: false }),
+      headers: null,
+      statusCode: 404,
+      expected: "COORDINATION_OPERATOR_CLIENT_INVALID",
+      label: "wrong code",
+    },
+    {
+      body: canonicalBytes({ code: "COORDINATION_SESSION_NOT_FOUND", paymentMoved: true }),
+      headers: null,
+      statusCode: 404,
+      expected: "COORDINATION_OPERATOR_CLIENT_INVALID",
+      label: "payment moved",
+    },
+    {
+      body: missing,
+      headers: null,
+      statusCode: 404,
+      expected: "COORDINATION_SESSION_NOT_FOUND",
+      label: "exact missing session",
+    },
+    {
+      abort: true,
+      body: missing.subarray(0, missing.length - 1),
+      headers: { "content-length": String(missing.length), "content-type": "application/json" },
+      statusCode: 404,
+      expected: "COORDINATION_TRANSPORT_AMBIGUOUS",
+      label: "truncated body",
+    },
+  ];
+  let requestCount = 0;
+  const server = https.createServer({ cert: tls.pem, key: tls.key }, (request, response) => {
+    request.resume();
+    const item = cases[requestCount++];
+    const body = item.body;
+    const headers = item.headers ?? {
+      "content-length": String(body.length),
+      "content-type": "application/json",
+    };
+    response.writeHead(item.statusCode, headers);
+    response.write(body);
+    if (item.abort) response.destroy();
+    else response.end();
+  });
+  const port = await listen(server, t);
+  const transport = testTransport(tls, port, { bodyMs: 50, connectMs: 50, headerMs: 50, totalMs: 200 });
+
+  for (const item of cases) {
+    await assert.rejects(
+      transport.request({ body: null, method: "GET", path: `/v1/sessions/${SESSION_ID}/view` }),
+      { code: item.expected },
+      item.label,
     );
   }
 });

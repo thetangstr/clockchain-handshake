@@ -60,6 +60,7 @@ const ARTIFACT_TYPES = new Set([
 const PUBLICATION_KEYS = Object.freeze([
   "paymentMoved", "publicationDigest", "releaseId", "repositorySha", "schema", "sessionId", "status", "subjectRun",
 ]);
+const MISSING_SESSION_RESPONSE_KEYS = Object.freeze(["code", "paymentMoved"]);
 const VIEW_KEYS = Object.freeze(["facts", "paymentMoved", "releaseId", "repositorySha", "sessionId", "state"]);
 const CAPABILITY_RECEIPT_KEYS = Object.freeze([
   "capabilities", "paymentMoved", "registrationDigest", "releaseId", "repositorySha", "requestDigest", "schema", "sessionId",
@@ -292,14 +293,14 @@ function createPinnedOperatorHttpsTransportInternal(input, timing) {
           const artifact = request.method === "GET" && /^\/v1\/artifacts\//.test(request.path);
           const sessionView = request.method === "GET" && /^\/v1\/sessions\/[0-9a-f-]{36}\/view$/.test(request.path);
           const expectedType = artifact ? "application/octet-stream" : "application/json";
-          if (incoming.statusCode === 404 && sessionView) return fail(new OperatorRelayClientError("COORDINATION_SESSION_NOT_FOUND"));
-          if (incoming.statusCode !== 200 || contentLengths.length !== 1 || contentTypes.length !== 1 || contentTypes[0] !== expectedType || !DECIMAL_PATTERN.test(contentLengths[0]) || Number(contentLengths[0]) > OPERATOR_CLIENT_MAX_RESPONSE_BYTES || ["content-encoding", "location", "transfer-encoding", "upgrade"].some((name) => rawHeaderValues(incoming.rawHeaders, name).length !== 0)) return fail(new OperatorRelayClientError());
+          const missingSessionView = incoming.statusCode === 404 && sessionView;
+          if ((!missingSessionView && incoming.statusCode !== 200) || contentLengths.length !== 1 || contentTypes.length !== 1 || contentTypes[0] !== expectedType || !DECIMAL_PATTERN.test(contentLengths[0]) || Number(contentLengths[0]) > OPERATOR_CLIENT_MAX_RESPONSE_BYTES || ["content-encoding", "location", "transfer-encoding", "upgrade"].some((name) => rawHeaderValues(incoming.rawHeaders, name).length !== 0)) return fail(new OperatorRelayClientError());
           const chunks = []; let length = 0;
           bodyTimer = setTimeout(() => fail(new OperatorRelayClientError("COORDINATION_TRANSPORT_AMBIGUOUS")), timing.bodyMs);
           incoming.on("data", (chunk) => { clearTimeout(bodyTimer); bodyTimer = setTimeout(() => fail(new OperatorRelayClientError("COORDINATION_TRANSPORT_AMBIGUOUS")), timing.bodyMs); length += chunk.length; if (length > Number(contentLengths[0]) || length > OPERATOR_CLIENT_MAX_RESPONSE_BYTES) fail(new OperatorRelayClientError()); else chunks.push(Buffer.from(chunk)); });
           incoming.once("aborted", () => fail(new OperatorRelayClientError("COORDINATION_TRANSPORT_AMBIGUOUS")));
           incoming.once("error", () => fail(new OperatorRelayClientError("COORDINATION_TRANSPORT_AMBIGUOUS")));
-          incoming.once("end", () => { const body = Buffer.concat(chunks); if (body.length !== Number(contentLengths[0]) || incoming.complete !== true) return fail(new OperatorRelayClientError("COORDINATION_TRANSPORT_AMBIGUOUS")); try { if (expectedType === "application/json") canonicalJson(body); } catch (error) { return fail(error); } finish(Object.freeze({ body, contentType: expectedType, statusCode: 200 })); });
+          incoming.once("end", () => { const body = Buffer.concat(chunks); if (body.length !== Number(contentLengths[0]) || incoming.complete !== true) return fail(new OperatorRelayClientError("COORDINATION_TRANSPORT_AMBIGUOUS")); try { if (missingSessionView) { const missing = exact(canonicalJson(body), MISSING_SESSION_RESPONSE_KEYS); if (missing.code !== "COORDINATION_SESSION_NOT_FOUND" || missing.paymentMoved !== false) invalid(); return fail(new OperatorRelayClientError("COORDINATION_SESSION_NOT_FOUND")); } if (expectedType === "application/json") canonicalJson(body); } catch (error) { return fail(error); } finish(Object.freeze({ body, contentType: expectedType, statusCode: 200 })); });
         });
         handle.once("socket", (socket) => socket.once("secureConnect", () => { secure = true; clearTimeout(connectTimer); headerTimer = setTimeout(() => fail(new OperatorRelayClientError("COORDINATION_TRANSPORT_AMBIGUOUS")), timing.headerMs); }));
         handle.once("error", () => fail(new OperatorRelayClientError(secure ? "COORDINATION_TRANSPORT_AMBIGUOUS" : "COORDINATION_OPERATOR_CLIENT_INVALID")));
