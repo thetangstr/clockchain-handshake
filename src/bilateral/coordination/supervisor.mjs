@@ -31,6 +31,8 @@ const DURABLE_CHECKPOINT_KEYS = new Set(["activeLaunchState", "authenticatedEven
 const CHILD_JOURNAL_PHASES = new Set(["BEFORE_CHILD", "CHILD_COMPLETE", "ARTIFACT_STORED", "EVENT_APPENDED", "TRANSITION_COMPLETE"]);
 const TOKEN_BOUND_PHASES = new Set(["TOKEN_READY", "DESCRIPTOR_WRITING", "DESCRIPTOR_ACCEPTED", "BEFORE_CHILD", "CHILD_COMPLETE", "ARTIFACT_STORED", "EVENT_APPENDED", "RECOVERY_REQUIRED", "TRANSITION_COMPLETE"]);
 const ENROLLMENT_READINESS_SCHEMA = "clockchain.bilateral-enrollment-readiness/v1";
+const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function invalid() { throw new Error("Coordination supervisor operation failed safely."); }
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
@@ -103,6 +105,30 @@ function requestIdForRun(localState, dependencies, subjectRun) {
   const digest = sha256(Buffer.from(`${localState.sessionId}:${subjectRun}`, "utf8"));
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
 }
+function intakeBindingFor(localState) {
+  const binding = localState.intakeBinding ?? localState.intentJournal;
+  if (localState.intakeBinding !== undefined && !dataExact(binding, ["intakeDigest", "intakeRequestId"])) invalid();
+  const digest = Object.getOwnPropertyDescriptor(binding ?? {}, "intakeDigest");
+  const requestId = Object.getOwnPropertyDescriptor(binding ?? {}, "intakeRequestId");
+  if (
+    !binding ||
+    typeof binding !== "object" ||
+    digest?.enumerable !== true ||
+    requestId?.enumerable !== true ||
+    !Object.hasOwn(digest, "value") ||
+    !Object.hasOwn(requestId, "value") ||
+    !DIGEST_PATTERN.test(digest.value) ||
+    !UUID_PATTERN.test(requestId.value)
+  ) invalid();
+  return Object.freeze({
+    intakeDigest: digest.value,
+    intakeRequestId: requestId.value,
+  });
+}
+function sameIntakeBinding(left, right) {
+  return left?.intakeDigest === right?.intakeDigest &&
+    left?.intakeRequestId === right?.intakeRequestId;
+}
 function eventFor(events, role, kind, subjectRun) {
   return events.find((event) => event?.role === role && event.kind === kind && event.subjectRun === subjectRun);
 }
@@ -133,10 +159,12 @@ function nowMs(dependencies) {
   if (!Number.isSafeInteger(value) || value < 0) invalid();
   return value;
 }
-function mandateFor({ localState, parties, policy, subjectRun, timeMs }) {
+function mandateFor({ intakeBinding, localState, parties, policy, subjectRun, timeMs }) {
   return Object.freeze({
     amount: policy.amount,
     expiresAtMs: String(timeMs + 3_600_000),
+    intakeDigest: intakeBinding.intakeDigest,
+    intakeRequestId: intakeBinding.intakeRequestId,
     invoiceReferencePrefix: policy.invoiceReferencePrefix,
     issuedAtMs: String(Math.max(0, timeMs - 1)),
     payee: parties.payee,
@@ -152,11 +180,13 @@ function mandateFor({ localState, parties, policy, subjectRun, timeMs }) {
     subjectRun,
   });
 }
-function requestFor({ localState, mandateEnvelope, parties, policy, requestId, subjectRun, timeMs }) {
+function requestFor({ intakeBinding, localState, mandateEnvelope, parties, policy, requestId, subjectRun, timeMs }) {
   return Object.freeze({
     amount: policy.amount,
     createdAtMs: String(timeMs),
     expiresAtMs: String(timeMs + 1_800_000),
+    intakeDigest: intakeBinding.intakeDigest,
+    intakeRequestId: intakeBinding.intakeRequestId,
     invoiceReference: `${policy.invoiceReferencePrefix}001`,
     mandateDigest: payerMandateDigest(mandateEnvelope),
     payee: parties.payee,
@@ -173,8 +203,10 @@ function requestFor({ localState, mandateEnvelope, parties, policy, requestId, s
   });
 }
 function exactIntentJournal({ mandateBytes, mandateEnvelope, requestBytes = undefined, requestEnvelope = undefined, requestId = undefined, stage, subjectRun }) {
-  const value = { mandateDigest: payerMandateDigest(mandateEnvelope), mandateRawDigest: sha256(mandateBytes), stage, subjectRun };
+  const binding = intakeBindingFor({ intentJournal: mandateEnvelope.mandate });
+  const value = { intakeDigest: binding.intakeDigest, intakeRequestId: binding.intakeRequestId, mandateDigest: payerMandateDigest(mandateEnvelope), mandateRawDigest: sha256(mandateBytes), stage, subjectRun };
   if (requestBytes !== undefined && requestEnvelope !== undefined) {
+    if (!sameIntakeBinding(requestEnvelope.request, binding)) invalid();
     value.requestDigest = paymentRequestDigest(requestEnvelope);
     value.requestRawDigest = sha256(requestBytes);
   }
@@ -198,7 +230,7 @@ async function retryPayerMandatePublication({ client, dependencies, localState, 
   const path = localState[subjectRun]?.mandatePath ?? runArtifactPath(localState[subjectRun], "payer-mandate.json");
   const bytes = await dependencies.readArtifactFile({ path });
   const envelope = parseCanonicalEnvelope(bytes, localState.intentJournal.mandateRawDigest);
-  if (payerMandateDigest(envelope) !== localState.intentJournal.mandateDigest) invalid();
+  if (payerMandateDigest(envelope) !== localState.intentJournal.mandateDigest || !sameIntakeBinding(envelope.mandate, intakeBindingFor(localState))) invalid();
   const acknowledgement = await client.publishPayerMandate({ bytes, subjectRun });
   if (!acknowledgement || acknowledgement.digest !== localState.intentJournal.mandateRawDigest) invalid();
   return Object.freeze({ ...localState, intentJournal: Object.freeze({ ...localState.intentJournal, stage: "PAYER_MANDATE_PUBLISHED" }), paymentMoved: false, phase: "EVENT_PROCESSED" });
@@ -208,7 +240,7 @@ async function retryPaymentRequestSubmission({ client, dependencies, localState,
   const path = localState[subjectRun]?.requestPath ?? runArtifactPath(localState[subjectRun], "payment-request.json");
   const bytes = await dependencies.readArtifactFile({ path });
   const envelope = parseCanonicalEnvelope(bytes, localState.intentJournal.requestRawDigest);
-  if (paymentRequestDigest(envelope) !== localState.intentJournal.requestDigest || envelope.request.requestId !== localState.intentJournal.requestId) invalid();
+  if (paymentRequestDigest(envelope) !== localState.intentJournal.requestDigest || envelope.request.requestId !== localState.intentJournal.requestId || !sameIntakeBinding(envelope.request, intakeBindingFor(localState))) invalid();
   const receipt = await client.submitPaymentRequest({ bytes });
   if (!receipt || receipt.paymentMoved !== false || receipt.rawEnvelopeDigest !== localState.intentJournal.requestRawDigest || receipt.paymentRequestDigest !== localState.intentJournal.requestDigest || receipt.requestId !== localState.intentJournal.requestId || receipt.sessionId !== localState.sessionId || receipt.subjectRun !== subjectRun) invalid();
   return Object.freeze({ ...localState, intentJournal: Object.freeze({ ...localState.intentJournal, stage: "PAYMENT_REQUEST_SUBMITTED" }), paymentMoved: false, phase: "EVENT_PROCESSED" });
@@ -217,7 +249,8 @@ async function publishPayerMandatePhase({ client, dependencies, localState, repl
   if (typeof client?.publishPayerMandate !== "function" || typeof dependencies.signPayerMandate !== "function") invalid();
   const parties = await resolveRunParties({ client, dependencies, enrollmentSet: replay.enrollmentSet, events: replay.events, localState, subjectRun });
   const timeMs = nowMs(dependencies);
-  const mandate = mandateFor({ localState, parties, policy: intentPolicy(localState, subjectRun), subjectRun, timeMs });
+  const intakeBinding = intakeBindingFor(localState);
+  const mandate = mandateFor({ intakeBinding, localState, parties, policy: intentPolicy(localState, subjectRun), subjectRun, timeMs });
   const envelope = await dependencies.signPayerMandate({ invitationPath: localState[subjectRun]?.invitationPath, localState, mandate, subjectRun });
   const bytes = canonicalBytes(envelope);
   const readyJournal = exactIntentJournal({ mandateBytes: bytes, mandateEnvelope: envelope, stage: "PAYER_MANDATE_READY_TO_PUBLISH", subjectRun });
@@ -234,12 +267,13 @@ async function submitPaymentRequestPhase({ client, dependencies, localState, rep
   const parties = await resolveRunParties({ client, dependencies, enrollmentSet: replay.enrollmentSet, events: replay.events, localState, subjectRun });
   const timeMs = nowMs(dependencies);
   const policy = intentPolicy(localState, subjectRun);
+  const intakeBinding = intakeBindingFor(localState);
   const mandateBytes = await client.readPayerMandate({ payer: parties.payer, payee: parties.payee, subjectRun });
   if (!Buffer.isBuffer(mandateBytes)) invalid();
   const mandateEvent = eventFor(replay.events, "payer", "PAYER_MANDATE_READY", subjectRun);
-  const mandateEnvelope = await verifyPayerMandate({ envelope: parseCanonicalEnvelope(mandateBytes, mandateEvent.artifactDigest), expected: { ...policy, payer: parties.payer, payee: parties.payee, releaseId: localState.releaseId, repositorySha: localState.repositorySha, requestEndpoint: `/v1/sessions/${localState.sessionId}/payment-requests`, sessionId: localState.sessionId, subjectRun }, nowMs: timeMs });
+  const mandateEnvelope = await verifyPayerMandate({ envelope: parseCanonicalEnvelope(mandateBytes, mandateEvent.artifactDigest), expected: { ...policy, ...intakeBinding, payer: parties.payer, payee: parties.payee, releaseId: localState.releaseId, repositorySha: localState.repositorySha, requestEndpoint: `/v1/sessions/${localState.sessionId}/payment-requests`, sessionId: localState.sessionId, subjectRun }, nowMs: timeMs });
   const requestId = requestIdForRun(localState, dependencies, subjectRun);
-  const request = requestFor({ localState, mandateEnvelope, parties, policy, requestId, subjectRun, timeMs });
+  const request = requestFor({ intakeBinding, localState, mandateEnvelope, parties, policy, requestId, subjectRun, timeMs });
   const envelope = await dependencies.signPaymentRequest({ invitationPath: localState[subjectRun]?.invitationPath, localState, request, subjectRun });
   const bytes = canonicalBytes(envelope);
   const readyJournal = exactIntentJournal({ mandateBytes, mandateEnvelope, requestBytes: bytes, requestEnvelope: envelope, requestId, stage: "PAYMENT_REQUEST_READY_TO_SUBMIT", subjectRun });
@@ -256,6 +290,7 @@ async function matchPaymentRequestPhase({ client, dependencies, localState, repl
   const parties = await resolveRunParties({ client, dependencies, enrollmentSet: replay.enrollmentSet, events: replay.events, localState, subjectRun });
   const timeMs = nowMs(dependencies);
   const policy = intentPolicy(localState, subjectRun);
+  const intakeBinding = intakeBindingFor(localState);
   const mandateBytes = await client.readPayerMandate({ payer: parties.payer, payee: parties.payee, subjectRun });
   if (!Buffer.isBuffer(mandateBytes)) invalid();
   const mandateEvent = eventFor(replay.events, "payer", "PAYER_MANDATE_READY", subjectRun);
@@ -264,7 +299,7 @@ async function matchPaymentRequestPhase({ client, dependencies, localState, repl
   const requestBytes = await client.getArtifact({ artifactType: "payment-request", digest: requestEvent.artifactDigest });
   if (!Buffer.isBuffer(requestBytes)) invalid();
   const mandateEnvelope = parseCanonicalEnvelope(mandateBytes, mandateEvent.artifactDigest);
-  const requestEnvelope = await verifyPaymentRequest({ envelope: parseCanonicalEnvelope(requestBytes, requestEvent.artifactDigest), mandateEnvelope, expected: { ...policy, payer: parties.payer, payee: parties.payee, releaseId: localState.releaseId, repositorySha: localState.repositorySha, sessionId: localState.sessionId, subjectRun }, nowMs: timeMs });
+  const requestEnvelope = await verifyPaymentRequest({ envelope: parseCanonicalEnvelope(requestBytes, requestEvent.artifactDigest), mandateEnvelope, expected: { ...policy, ...intakeBinding, payer: parties.payer, payee: parties.payee, releaseId: localState.releaseId, repositorySha: localState.repositorySha, sessionId: localState.sessionId, subjectRun }, nowMs: timeMs });
   const requestId = requestEnvelope.request.requestId;
   const routedBytes = await client.readPaymentRequest({ payer: parties.payer, payee: parties.payee, requestId, subjectRun });
   if (!Buffer.isBuffer(routedBytes) || !routedBytes.equals(requestBytes)) invalid();
@@ -368,9 +403,9 @@ function validateDurableCheckpointShape(checkpoint, activeLaunchState, stateRoot
   const intent = checkpoint.intentJournal;
   if (intent !== undefined) {
     const keys = intent.requestDigest === undefined
-      ? ["mandateDigest", "mandateRawDigest", "stage", "subjectRun"]
-      : ["mandateDigest", "mandateRawDigest", "requestDigest", "requestId", "requestRawDigest", "stage", "subjectRun"];
-    if (!dataExact(intent, keys) || !/^[0-9a-f]{64}$/.test(intent.mandateDigest) || !/^[0-9a-f]{64}$/.test(intent.mandateRawDigest) || !["PAYER_MANDATE_READY_TO_PUBLISH", "PAYER_MANDATE_PUBLISHED", "PAYMENT_REQUEST_READY_TO_SUBMIT", "PAYMENT_REQUEST_SUBMITTED", "PAYMENT_REQUEST_MATCHED"].includes(intent.stage) || !["rehearsal", "stakeholder"].includes(intent.subjectRun)) invalid();
+      ? ["intakeDigest", "intakeRequestId", "mandateDigest", "mandateRawDigest", "stage", "subjectRun"]
+      : ["intakeDigest", "intakeRequestId", "mandateDigest", "mandateRawDigest", "requestDigest", "requestId", "requestRawDigest", "stage", "subjectRun"];
+    if (!dataExact(intent, keys) || !DIGEST_PATTERN.test(intent.intakeDigest) || !UUID_PATTERN.test(intent.intakeRequestId) || !/^[0-9a-f]{64}$/.test(intent.mandateDigest) || !/^[0-9a-f]{64}$/.test(intent.mandateRawDigest) || !["PAYER_MANDATE_READY_TO_PUBLISH", "PAYER_MANDATE_PUBLISHED", "PAYMENT_REQUEST_READY_TO_SUBMIT", "PAYMENT_REQUEST_SUBMITTED", "PAYMENT_REQUEST_MATCHED"].includes(intent.stage) || !["rehearsal", "stakeholder"].includes(intent.subjectRun)) invalid();
     if (intent.requestDigest !== undefined && (!/^[0-9a-f]{64}$/.test(intent.requestDigest) || !/^[0-9a-f]{64}$/.test(intent.requestRawDigest) || typeof intent.requestId !== "string")) invalid();
   }
   if (checkpoint.recovery !== undefined) {

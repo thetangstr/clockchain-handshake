@@ -187,6 +187,8 @@ function replayThroughIdentities(fixture) {
 
 const payerIntentAccount = privateKeyToAccount(`0x${"5".repeat(64)}`);
 const payeeIntentAccount = privateKeyToAccount(`0x${"6".repeat(64)}`);
+const INTAKE_DIGEST = "b".repeat(64);
+const INTAKE_REQUEST_ID = "22222222-3333-4444-8555-666666666666";
 
 test("pins the supervisor schema and closed role-run command policy", () => {
   assert.equal(SUPERVISOR_STATE_SCHEMA, "clockchain.bilateral-supervisor-state/v1");
@@ -360,6 +362,10 @@ test("the long-lived supervisor accepts a descriptor without treating it as a ch
       async writeState(value) { persisted = value; },
     },
     localState: {
+      intakeBinding: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
+      },
       operatorPublicKey: raw(fixture.operator),
       processedEventDigests,
       rehearsal: { descriptorPath: "/state/rehearsal/descriptor.json" },
@@ -473,6 +479,10 @@ test("payer publishes one signed mandate from identity-bound parties before desc
       async writeState(value) { writes.push(value); },
     },
     localState: {
+      intakeBinding: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
+      },
       operatorPublicKey: raw(fixture.operator),
       processedEventDigests,
       rehearsal: {
@@ -504,12 +514,16 @@ test("payer publishes one signed mandate from identity-bound parties before desc
   assert.equal(envelope.mandate.payer.agentId, payer.agentId);
   assert.equal(envelope.mandate.payee.address, payee.address);
   assert.equal(envelope.mandate.payee.agentId, payee.agentId);
+  assert.equal(envelope.mandate.intakeDigest, INTAKE_DIGEST);
+  assert.equal(envelope.mandate.intakeRequestId, INTAKE_REQUEST_ID);
   assert.deepEqual(envelope.mandate.amount, DEMO_INTENT_POLICY.amount);
   assert.equal(envelope.mandate.invoiceReferencePrefix, DEMO_INTENT_POLICY.invoiceReferencePrefix);
   assert.equal(envelope.mandate.paymentMoved, false);
   assert.equal(envelope.mandate.purpose, DEMO_INTENT_POLICY.purpose);
   assert.equal(writes.at(-1).intentJournal.mandateDigest, payerMandateDigest(envelope));
   assert.equal(writes.at(-1).intentJournal.mandateRawDigest, sha256(publications[0].bytes));
+  assert.equal(writes.at(-1).intentJournal.intakeDigest, INTAKE_DIGEST);
+  assert.equal(writes.at(-1).intentJournal.intakeRequestId, INTAKE_REQUEST_ID);
 });
 
 test("payee verifies Iris mandate and submits one Billie-signed payment request", async () => {
@@ -524,6 +538,8 @@ test("payee verifies Iris mandate and submits one Billie-signed payment request"
     mandate: {
       amount: { currency: "USD", value: "100" },
       expiresAtMs: "1785297900000",
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
       invoiceReferencePrefix: "invoice-",
       issuedAtMs: "1785294299999",
       payee: { address: payee.address, agentId: payee.agentId },
@@ -591,6 +607,10 @@ test("payee verifies Iris mandate and submits one Billie-signed payment request"
       async writeState(value) { writes.push(value); },
     },
     localState: {
+      intakeBinding: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
+      },
       operatorPublicKey: raw(fixture.operator),
       processedEventDigests: events.filter((event) => event.role === "operator").map((event) => event.eventDigest),
       rehearsal: {
@@ -611,8 +631,13 @@ test("payee verifies Iris mandate and submits one Billie-signed payment request"
   assert.deepEqual(submitted[0].bytes, stored[0]);
   const envelope = JSON.parse(submitted[0].bytes.toString("utf8"));
   assert.equal(envelope.request.mandateDigest, payerMandateDigest(mandateEnvelope));
+  assert.equal(envelope.request.intakeDigest, INTAKE_DIGEST);
+  assert.equal(envelope.request.intakeRequestId, INTAKE_REQUEST_ID);
+  assert.notEqual(envelope.request.requestId, envelope.request.intakeRequestId);
   assert.equal(envelope.request.paymentMoved, false);
   assert.equal(writes.at(-1).intentJournal.mandateRawDigest, sha256(mandateBytes));
+  assert.equal(writes.at(-1).intentJournal.intakeDigest, INTAKE_DIGEST);
+  assert.equal(writes.at(-1).intentJournal.intakeRequestId, INTAKE_REQUEST_ID);
   assert.equal(writes.at(-1).intentJournal.requestDigest, paymentRequestDigest(envelope));
   assert.equal(writes.at(-1).intentJournal.requestRawDigest, sha256(submitted[0].bytes));
 });
@@ -629,6 +654,8 @@ test("payer verifies the exact Billie request before appending PAYMENT_REQUEST_M
     mandate: {
       amount: { currency: "USD", value: "100" },
       expiresAtMs: "1785297900000",
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
       invoiceReferencePrefix: "invoice-",
       issuedAtMs: "1785294299999",
       payee: { address: payee.address, agentId: payee.agentId },
@@ -650,6 +677,8 @@ test("payer verifies the exact Billie request before appending PAYMENT_REQUEST_M
       amount: { currency: "USD", value: "100" },
       createdAtMs: "1785294300000",
       expiresAtMs: "1785297600000",
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
       invoiceReference: "invoice-001",
       mandateDigest: payerMandateDigest(mandateEnvelope),
       payee: { address: payee.address, agentId: payee.agentId },
@@ -704,6 +733,10 @@ test("payer verifies the exact Billie request before appending PAYMENT_REQUEST_M
       async writeState(value) { writes.push(value); },
     },
     localState: {
+      intakeBinding: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
+      },
       operatorPublicKey: raw(fixture.operator),
       processedEventDigests: events.filter((event) => event.role === "operator").map((event) => event.eventDigest),
       rehearsal: {
@@ -722,6 +755,8 @@ test("payer verifies the exact Billie request before appending PAYMENT_REQUEST_M
   });
   assert.deepEqual(appended, [{ artifactDigest: null, kind: "PAYMENT_REQUEST_MATCHED", subjectRun: "rehearsal" }]);
   assert.equal(writes.at(-1).intentJournal.mandateRawDigest, sha256(mandateBytes));
+  assert.equal(writes.at(-1).intentJournal.intakeDigest, INTAKE_DIGEST);
+  assert.equal(writes.at(-1).intentJournal.intakeRequestId, INTAKE_REQUEST_ID);
   assert.equal(writes.at(-1).intentJournal.requestRawDigest, sha256(requestBytes));
 });
 
@@ -738,6 +773,8 @@ test("payer discovers Billie's unpredictable requestId from the authenticated pa
     mandate: {
       amount: { currency: "USD", value: "100" },
       expiresAtMs: "1785297900000",
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
       invoiceReferencePrefix: "invoice-",
       issuedAtMs: "1785294299999",
       payee: { address: payee.address, agentId: payee.agentId },
@@ -759,6 +796,8 @@ test("payer discovers Billie's unpredictable requestId from the authenticated pa
       amount: { currency: "USD", value: "100" },
       createdAtMs: "1785294300000",
       expiresAtMs: "1785297600000",
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
       invoiceReference: "invoice-001",
       mandateDigest: payerMandateDigest(mandateEnvelope),
       payee: { address: payee.address, agentId: payee.agentId },
@@ -811,6 +850,10 @@ test("payer discovers Billie's unpredictable requestId from the authenticated pa
       async writeState() {},
     },
     localState: {
+      intakeBinding: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
+      },
       operatorPublicKey: raw(fixture.operator),
       processedEventDigests: events.filter((event) => event.role === "operator").map((event) => event.eventDigest),
       rehearsal: {
@@ -841,6 +884,8 @@ test("payer rejects payment-request route bytes that differ from the authenticat
     mandate: {
       amount: { currency: "USD", value: "100" },
       expiresAtMs: "1785297900000",
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
       invoiceReferencePrefix: "invoice-",
       issuedAtMs: "1785294299999",
       payee: { address: payee.address, agentId: payee.agentId },
@@ -861,6 +906,8 @@ test("payer rejects payment-request route bytes that differ from the authenticat
     amount: { currency: "USD", value: "100" },
     createdAtMs: "1785294300000",
     expiresAtMs: "1785297600000",
+    intakeDigest: INTAKE_DIGEST,
+    intakeRequestId: INTAKE_REQUEST_ID,
     invoiceReference: "invoice-001",
     mandateDigest: payerMandateDigest(mandateEnvelope),
     payee: { address: payee.address, agentId: payee.agentId },
@@ -918,6 +965,10 @@ test("payer rejects payment-request route bytes that differ from the authenticat
       async writeState() {},
     },
     localState: {
+      intakeBinding: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
+      },
       operatorPublicKey: raw(fixture.operator),
       processedEventDigests: events.filter((event) => event.role === "operator").map((event) => event.eventDigest),
       rehearsal: {
@@ -947,6 +998,8 @@ test("retries payer mandate publication from durable bytes without re-signing", 
     mandate: {
       amount: { currency: "USD", value: "100" },
       expiresAtMs: "1785297900000",
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
       invoiceReferencePrefix: "invoice-",
       issuedAtMs: "1785294299999",
       payee: { address: payee.address, agentId: payee.agentId },
@@ -989,6 +1042,8 @@ test("retries payer mandate publication from durable bytes without re-signing", 
     },
     localState: {
       intentJournal: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
         mandateDigest: payerMandateDigest(mandateEnvelope),
         mandateRawDigest: sha256(mandateBytes),
         stage: "PAYER_MANDATE_READY_TO_PUBLISH",
@@ -1035,6 +1090,8 @@ test("fails closed when durable mandate retry bytes differ from the journal", as
     },
     localState: {
       intentJournal: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
         mandateDigest: "b".repeat(64),
         mandateRawDigest: sha256(original),
         stage: "PAYER_MANDATE_READY_TO_PUBLISH",
@@ -1064,6 +1121,8 @@ test("retries payment-request submission from durable bytes without re-signing o
     mandate: {
       amount: { currency: "USD", value: "100" },
       expiresAtMs: "1785297900000",
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
       invoiceReferencePrefix: "invoice-",
       issuedAtMs: "1785294299999",
       payee: { address: payee.address, agentId: payee.agentId },
@@ -1086,6 +1145,8 @@ test("retries payment-request submission from durable bytes without re-signing o
       amount: { currency: "USD", value: "100" },
       createdAtMs: "1785294300000",
       expiresAtMs: "1785297600000",
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
       invoiceReference: "invoice-001",
       mandateDigest: payerMandateDigest(mandateEnvelope),
       payee: { address: payee.address, agentId: payee.agentId },
@@ -1127,6 +1188,8 @@ test("retries payment-request submission from durable bytes without re-signing o
     },
     localState: {
       intentJournal: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
         mandateDigest: payerMandateDigest(mandateEnvelope),
         mandateRawDigest: sha256(mandateBytes),
         requestDigest: paymentRequestDigest(requestEnvelope),
@@ -1170,6 +1233,8 @@ test("fails closed when durable payment-request retry bytes differ from the jour
     },
     localState: {
       intentJournal: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
         mandateDigest: "b".repeat(64),
         mandateRawDigest: "c".repeat(64),
         requestDigest: "d".repeat(64),

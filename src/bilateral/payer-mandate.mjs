@@ -10,7 +10,8 @@ export const PAYER_MANDATE_ENVELOPE_SCHEMA =
   "clockchain.bilateral-payer-mandate-envelope/v1";
 
 const MANDATE_KEYS = Object.freeze([
-  "amount", "expiresAtMs", "invoiceReferencePrefix", "issuedAtMs", "payee",
+  "amount", "expiresAtMs", "intakeDigest", "intakeRequestId",
+  "invoiceReferencePrefix", "issuedAtMs", "payee",
   "payer", "paymentMoved", "protocol", "purpose", "releaseId",
   "repositorySha", "requestEndpoint", "schema", "sessionId", "subjectRun",
 ]);
@@ -19,13 +20,15 @@ const AMOUNT_KEYS = Object.freeze(["currency", "value"]);
 const ENVELOPE_KEYS = Object.freeze(["mandate", "schema", "signature"]);
 const SIGNATURE_KEYS = Object.freeze(["address", "algorithm", "value"]);
 const EXPECTED_KEYS = Object.freeze([
-  "amount", "invoiceReferencePrefix", "payee", "payer", "purpose", "releaseId",
-  "repositorySha", "requestEndpoint", "sessionId", "subjectRun",
+  "amount", "intakeDigest", "intakeRequestId", "invoiceReferencePrefix",
+  "payee", "payer", "purpose", "releaseId", "repositorySha",
+  "requestEndpoint", "sessionId", "subjectRun",
 ]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 const DECIMAL_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
+const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 const SIGNATURE_PATTERN = /^0x[0-9a-f]{130}$/;
 const PRINTABLE_PATTERN = /^[ -~]+$/;
 
@@ -107,6 +110,8 @@ function mandateSnapshot(value) {
   decimal(result.expiresAtMs);
   if (
     BigInt(result.issuedAtMs) >= BigInt(result.expiresAtMs) ||
+    !DIGEST_PATTERN.test(result.intakeDigest) ||
+    !UUID_PATTERN.test(result.intakeRequestId) ||
     !printable(result.invoiceReferencePrefix) ||
     !printable(result.purpose) || !printable(result.releaseId) ||
     !SHA_PATTERN.test(result.repositorySha) || !UUID_PATTERN.test(result.sessionId) ||
@@ -145,6 +150,8 @@ function expectedSnapshot(value) {
   const payee = party(result.payee);
   if (
     !printable(result.invoiceReferencePrefix) || !printable(result.purpose) ||
+    !DIGEST_PATTERN.test(result.intakeDigest) ||
+    !UUID_PATTERN.test(result.intakeRequestId) ||
     !printable(result.releaseId) || !SHA_PATTERN.test(result.repositorySha) ||
     !UUID_PATTERN.test(result.sessionId) ||
     !["rehearsal", "stakeholder"].includes(result.subjectRun) ||

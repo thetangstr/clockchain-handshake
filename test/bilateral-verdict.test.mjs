@@ -93,6 +93,8 @@ const REPOSITORY_SHA =
   "0123456789abcdef0123456789abcdef01234567";
 const PROMPT_SHA256 =
   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const INTAKE_DIGEST = "b".repeat(64);
+const INTAKE_REQUEST_ID = "22222222-3333-4444-8555-666666666666";
 
 async function writePublishedVerdict(directory, verdict, options = {}) {
   const json = Buffer.from(`${JSON.stringify(verdict, null, 2)}\n`, "utf8");
@@ -341,6 +343,8 @@ async function intentEnvelopes() {
   const mandate = {
     amount: { currency: "USD", value: "100" },
     expiresAtMs: "1784923800000",
+    intakeDigest: INTAKE_DIGEST,
+    intakeRequestId: INTAKE_REQUEST_ID,
     invoiceReferencePrefix: "INV-",
     issuedAtMs: "1784923100000",
     payee: { address: PAYEE.address.toLowerCase(), agentId: "8678" },
@@ -364,6 +368,8 @@ async function intentEnvelopes() {
       amount: mandate.amount,
       createdAtMs: "1784923150000",
       expiresAtMs: "1784923700000",
+      intakeDigest: mandate.intakeDigest,
+      intakeRequestId: mandate.intakeRequestId,
       invoiceReference: "INV-0001",
       mandateDigest: payerMandateDigest(mandateEnvelope),
       payee: mandate.payee,
@@ -954,6 +960,9 @@ test("rejects descriptor-bound invalid intent signatures and windows before I/O"
   const requestPastMandate = await signedIntentVariant(fixture, {
     requestOverrides: { expiresAtMs: "1784923900000" },
   });
+  const requestMismatchedIntake = await signedIntentVariant(fixture, {
+    requestOverrides: { intakeDigest: "c".repeat(64) },
+  });
   const scenarios = [
     {
       mandateEnvelope: corruptedIntentSignature(
@@ -976,6 +985,10 @@ test("rejects descriptor-bound invalid intent signatures and windows before I/O"
     {
       ...requestPastMandate,
       name: "request ends after mandate",
+    },
+    {
+      ...requestMismatchedIntake,
+      name: "request intake differs from mandate intake",
     },
   ];
   for (const scenario of scenarios) {

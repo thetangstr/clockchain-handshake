@@ -20,6 +20,8 @@ const IMPOSTOR = privateKeyToAccount(`0x${"3".repeat(64)}`);
 const PAYER_ADDRESS = PAYER.address.toLowerCase();
 const PAYEE_ADDRESS = PAYEE.address.toLowerCase();
 const SESSION_ID = "11111111-2222-4333-8444-555555555555";
+const INTAKE_DIGEST = "b".repeat(64);
+const INTAKE_REQUEST_ID = "22222222-3333-4444-8555-666666666666";
 const ISSUED_AT_MS = "1785294000000";
 const EXPIRES_AT_MS = "1785297600000";
 const OVERLONG_DECIMAL = "1".repeat(100_000);
@@ -28,6 +30,8 @@ function mandate(overrides = {}) {
   return {
     amount: { currency: "USD", value: "100" },
     expiresAtMs: EXPIRES_AT_MS,
+    intakeDigest: INTAKE_DIGEST,
+    intakeRequestId: INTAKE_REQUEST_ID,
     invoiceReferencePrefix: "TREL-",
     issuedAtMs: ISSUED_AT_MS,
     payee: { address: PAYEE_ADDRESS, agentId: "202" },
@@ -49,6 +53,8 @@ function expected(overrides = {}) {
   const value = mandate();
   return {
     amount: value.amount,
+    intakeDigest: value.intakeDigest,
+    intakeRequestId: value.intakeRequestId,
     invoiceReferencePrefix: value.invoiceReferencePrefix,
     payee: value.payee,
     payer: value.payer,
@@ -92,7 +98,11 @@ test("signs the exact payer-owned mandate without any protocol write", async () 
 test("rejects malformed, noncanonical, and hostile mandate payloads", () => {
   const cases = [
     (() => { const value = mandate(); delete value.purpose; return value; })(),
+    (() => { const value = mandate(); delete value.intakeDigest; return value; })(),
     mandate({ unknown: "no" }),
+    mandate({ intakeDigest: "B".repeat(64) }),
+    mandate({ intakeDigest: "b".repeat(63) }),
+    mandate({ intakeRequestId: "not-a-uuid" }),
     mandate({ amount: { currency: "USD", value: "0100" } }),
     mandate({ expiresAtMs: 1785297600000 }),
     mandate({ payer: { address: PAYER_ADDRESS.toUpperCase(), agentId: "101" } }),
@@ -141,6 +151,8 @@ test("verification rejects every independently mismatched expected mandate bindi
   const otherSessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
   const cases = [
     ["amount", { amount: { currency: "USD", value: "99" } }],
+    ["intakeDigest", { intakeDigest: "c".repeat(64) }],
+    ["intakeRequestId", { intakeRequestId: "33333333-4444-4555-8666-777777777777" }],
     ["invoiceReferencePrefix", { invoiceReferencePrefix: "OTHER-" }],
     ["payee", { payee: { address: PAYER_ADDRESS, agentId: "202" } }],
     ["payer", { payer: { address: PAYEE_ADDRESS, agentId: "101" } }],
@@ -161,6 +173,23 @@ test("verification rejects every independently mismatched expected mandate bindi
   delete partial.subjectRun;
   await assert.rejects(verifyPayerMandate({ envelope, expected: partial, nowMs: 1785294300000 }));
   await assert.rejects(verifyPayerMandate({ envelope, expected: {}, nowMs: 1785294300000 }));
+});
+
+test("mandate signing bytes, digest, and signature cover the intake binding", async () => {
+  const envelope = await signed();
+  const changedDigest = await signed({ intakeDigest: "c".repeat(64) });
+  const changedRequestId = await signed({ intakeRequestId: "33333333-4444-4555-8666-777777777777" });
+  assert.notDeepEqual(payerMandateSigningBytes(envelope.mandate), payerMandateSigningBytes(changedDigest.mandate));
+  assert.notDeepEqual(payerMandateSigningBytes(envelope.mandate), payerMandateSigningBytes(changedRequestId.mandate));
+  assert.notEqual(payerMandateDigest(envelope), payerMandateDigest(changedDigest));
+  assert.notEqual(payerMandateDigest(envelope), payerMandateDigest(changedRequestId));
+
+  const tampered = structuredClone(envelope);
+  tampered.mandate.intakeDigest = "c".repeat(64);
+  await assert.rejects(verifyPayerMandate({ envelope: tampered, expected: expected({ intakeDigest: "c".repeat(64) }), nowMs: 1785294300000 }));
+  tampered.mandate.intakeDigest = INTAKE_DIGEST;
+  tampered.mandate.intakeRequestId = "33333333-4444-4555-8666-777777777777";
+  await assert.rejects(verifyPayerMandate({ envelope: tampered, expected: expected({ intakeRequestId: tampered.mandate.intakeRequestId }), nowMs: 1785294300000 }));
 });
 
 test("verification rejects a valid signature recovered from the wrong signer", async () => {

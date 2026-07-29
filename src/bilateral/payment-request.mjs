@@ -14,17 +14,19 @@ export const PAYMENT_REQUEST_ENVELOPE_SCHEMA =
   "clockchain.bilateral-payment-request-envelope/v1";
 
 const REQUEST_KEYS = Object.freeze([
-  "amount", "createdAtMs", "expiresAtMs", "invoiceReference", "mandateDigest",
-  "payee", "payer", "paymentMoved", "protocol", "purpose", "releaseId",
-  "repositorySha", "requestId", "schema", "sessionId", "subjectRun",
+  "amount", "createdAtMs", "expiresAtMs", "intakeDigest",
+  "intakeRequestId", "invoiceReference", "mandateDigest", "payee", "payer",
+  "paymentMoved", "protocol", "purpose", "releaseId", "repositorySha",
+  "requestId", "schema", "sessionId", "subjectRun",
 ]);
 const PARTY_KEYS = Object.freeze(["address", "agentId"]);
 const AMOUNT_KEYS = Object.freeze(["currency", "value"]);
 const ENVELOPE_KEYS = Object.freeze(["request", "schema", "signature"]);
 const SIGNATURE_KEYS = Object.freeze(["address", "algorithm", "value"]);
 const EXPECTED_KEYS = Object.freeze([
-  "amount", "invoiceReferencePrefix", "payee", "payer", "purpose", "releaseId",
-  "repositorySha", "sessionId", "subjectRun",
+  "amount", "intakeDigest", "intakeRequestId", "invoiceReferencePrefix",
+  "payee", "payer", "purpose", "releaseId", "repositorySha", "sessionId",
+  "subjectRun",
 ]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
@@ -107,6 +109,8 @@ function requestSnapshot(value) {
   decimal(result.expiresAtMs);
   if (
     BigInt(result.createdAtMs) >= BigInt(result.expiresAtMs) ||
+    !DIGEST_PATTERN.test(result.intakeDigest) ||
+    !UUID_PATTERN.test(result.intakeRequestId) ||
     !printable(result.invoiceReference) || !DIGEST_PATTERN.test(result.mandateDigest) ||
     !printable(result.purpose) || !printable(result.releaseId) ||
     !SHA_PATTERN.test(result.repositorySha) || !UUID_PATTERN.test(result.requestId) ||
@@ -136,6 +140,8 @@ function expectedSnapshot(value) {
   const payee = party(result.payee);
   if (
     !printable(result.invoiceReferencePrefix) || !printable(result.purpose) ||
+    !DIGEST_PATTERN.test(result.intakeDigest) ||
+    !UUID_PATTERN.test(result.intakeRequestId) ||
     !printable(result.releaseId) || !SHA_PATTERN.test(result.repositorySha) ||
     !UUID_PATTERN.test(result.sessionId) || !["rehearsal", "stakeholder"].includes(result.subjectRun)
   ) invalid();
@@ -192,6 +198,9 @@ export async function verifyPaymentRequest({ envelope, mandateEnvelope, expected
   ) invalid();
   for (const key of ["amount", "payer", "payee", "purpose", "releaseId", "repositorySha", "sessionId", "subjectRun"]) {
     if (!same(verified.request[key], binding[key]) || !same(verified.request[key], mandate.mandate[key])) invalid();
+  }
+  for (const key of ["intakeDigest", "intakeRequestId"]) {
+    if (verified.request[key] !== binding[key] || verified.request[key] !== mandate.mandate[key]) invalid();
   }
   let recovered;
   try {

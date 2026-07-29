@@ -1068,6 +1068,8 @@ function mandateExpectedContext(descriptor, mandateEnvelope) {
   }
   return Object.freeze({
     amount: descriptorIntentAmount(descriptor, mandate),
+    intakeDigest: mandate.intakeDigest,
+    intakeRequestId: mandate.intakeRequestId,
     invoiceReferencePrefix: mandate.invoiceReferencePrefix,
     payee: Object.freeze({
       address: descriptor.payee.address,
