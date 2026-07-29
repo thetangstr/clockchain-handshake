@@ -19,27 +19,27 @@ aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that
 Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and
 `ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`. The protocol does not download message bytes from Clockchain.
 
-Current MCP status: the hosted server is `https://mcp.clockchain.network/mcp`
-and its source lives in the separate specs repository at `packages/mcp-server`.
-It does not yet expose a general payer-mandate discovery tool. In this manual
-demo, the signed session mandate is delivered through the authenticated
-coordination relay.
+This demo uses a Payer-owned local TLS MCP `/mcp` endpoint for payment intake.
+The hosted Clockchain MCP server is not used for `request_payment`. Requestor
+asks Payer's local MCP for payment, receives exact `HANDSHAKE_REQUIRED`, and
+only then the Requestor wrapper starts the supervisor that follows Payer's
+signed mandate.
 
 ## Release and computers
 
-Pinned executable Handshake release SHA:
-`034cdbe4bff8999819d3834f94da5286470b8a99`.
+`BILATERAL_REPOSITORY_SHA` is the operator-provided exact reviewed
+40-character SHA. The external public page later pins the final immutable SHA;
+this handoff/helper is a documentation and test layer and does not alter
+executable runtime bytes.
 
-This later handoff/helper is a documentation and test layer for executable SHA 034cdbe4bff8999819d3834f94da5286470b8a99; operators checkout the exact executable SHA, and it does not alter executable runtime bytes.
-
-A clean detached checkout of immutable repository SHA
-`034cdbe4bff8999819d3834f94da5286470b8a99`, Node.js 22, and
+A clean detached checkout of the operator-provided immutable repository SHA,
+Node.js 22, and
 `npm ci --ignore-scripts` is required on all three computers. Stop on a dirty
 worktree, wrong SHA, branch checkout, wrong Node.js major version, dependency
 install drift, or any extra command.
 
 The startup control order is exactly:
-`relay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor`.
+`relay -> coordinator -> console -> funding readiness -> Payer local MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
 
 `implementation-complete and rehearsal-ready` means local code, tests, docs, and
 release packaging are ready, but the physical funded run has not passed. Only a
@@ -126,7 +126,15 @@ Set path placeholders locally. Do not paste private values.
 ```sh
 export OPERATOR_KEY_ID="bilateral-demo-2026-07-28"
 export OPERATOR_PRIVATE_KEY_FILE=".context/operator-keys/$OPERATOR_KEY_ID.ed25519.pem"
-export BILATERAL_REPOSITORY_SHA="034cdbe4bff8999819d3834f94da5286470b8a99"
+export BILATERAL_REPOSITORY_SHA="${BILATERAL_REPOSITORY_SHA:?set operator-provided exact reviewed 40-character SHA}"
+printf '%s\n' "$BILATERAL_REPOSITORY_SHA" | grep -Eq '^[0-9a-f]{40}$'
+export BILATERAL_REPOSITORY_URL="https://github.com/thetangstr/clockchain-handshake.git"
+git clone --no-checkout "$BILATERAL_REPOSITORY_URL" clockchain-handshake
+cd clockchain-handshake
+git fetch --depth 1 origin "$BILATERAL_REPOSITORY_SHA"
+git checkout --detach "$BILATERAL_REPOSITORY_SHA"
+test "$(git rev-parse HEAD)" = "$BILATERAL_REPOSITORY_SHA"
+npm ci --ignore-scripts
 export REPOSITORY_ROOT="$(pwd)"
 export BILATERAL_OPERATOR_ROOT="$HOME/.clockchain/bilateral/$BILATERAL_REPOSITORY_SHA"
 export BILATERAL_RELEASE_ROOT="$BILATERAL_OPERATOR_ROOT/release"
@@ -158,6 +166,10 @@ openssl req -x509 -newkey rsa:3072 -nodes \
 chmod 0600 "$RELAY_TLS_PRIVATE_KEY"
 RELAY_TLS_FINGERPRINT="$(openssl x509 -in "$RELAY_TLS_CERTIFICATE" -outform DER | openssl dgst -sha256 -binary | xxd -p -c 256)"
 ```
+
+Payer, not the operator, generates the Payer MCP TLS private key on the Payer
+machine under Payer's private state. The operator never creates, receives,
+reads, prints, or stores that private key.
 
 Terminal 1 - relay:
 
@@ -201,21 +213,64 @@ surfaces, not authority sources.
 Payer supervisor:
 
 ```sh
+export PAYER_MCP_HOST="${PAYER_MCP_HOST:?set exact numeric Payer IP reachable from Requestor; same computer 127.0.0.1, two computers Payer LAN IP}"
+export PAYER_MCP_PORT="9443"
+mkdir -p "$PAYER_SUPERVISOR_STATE/tls"
+chmod 0700 "$PAYER_SUPERVISOR_STATE" "$PAYER_SUPERVISOR_STATE/tls"
+export PAYER_MCP_TLS_CERTIFICATE="$PAYER_SUPERVISOR_STATE/tls/payer-mcp.crt"
+export PAYER_MCP_TLS_PRIVATE_KEY="$PAYER_SUPERVISOR_STATE/tls/payer-mcp.key"
+printf '%s\n' "$PAYER_MCP_HOST" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+test "$PAYER_MCP_HOST" != "0.0.0.0"
+openssl req -x509 -newkey rsa:3072 -nodes \
+  -keyout "$PAYER_MCP_TLS_PRIVATE_KEY" \
+  -out "$PAYER_MCP_TLS_CERTIFICATE" \
+  -subj "/CN=$PAYER_MCP_HOST" \
+  -addext "subjectAltName=IP:$PAYER_MCP_HOST" \
+  -days 1
+chmod 0600 "$PAYER_MCP_TLS_PRIVATE_KEY"
+chmod 0600 "$PAYER_MCP_TLS_CERTIFICATE"
+PAYER_MCP_TLS_FINGERPRINT="$(openssl x509 -in "$PAYER_MCP_TLS_CERTIFICATE" -outform DER | openssl dgst -sha256 -binary | xxd -p -c 256)"
+printf '%s\n' "$PAYER_MCP_TLS_FINGERPRINT" | grep -Eq '^[0-9a-f]{64}$'
+
 npm run bilateral:supervisor -- \
   --launch-manifest "$PAYER_LAUNCH_MANIFEST" \
-  --state "$PAYER_SUPERVISOR_STATE"
+  --state "$PAYER_SUPERVISOR_STATE" \
+  --payer-mcp-host "$PAYER_MCP_HOST" \
+  --payer-mcp-port "$PAYER_MCP_PORT" \
+  --payer-mcp-tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
+  --payer-mcp-tls-private-key "$PAYER_MCP_TLS_PRIVATE_KEY"
 ```
 
-Requestor supervisor:
+`PAYER_MCP_HOST` must be the exact numeric Payer IP reachable from Requestor:
+same computer uses `127.0.0.1`; two computers use the Payer LAN IP. Never bind
+Payer MCP to `0.0.0.0`. The Payer MCP certificate SAN must match the exact
+`PAYER_MCP_HOST`. The private key stays on Payer and is never read or printed.
+
+Wait for exact `PAYER_MCP_READY`. The status line includes the public MCP URL.
+Transfer only that public URL, the public TLS certificate, and the lowercase
+64-hex certificate fingerprint to Requestor. Never transfer the MCP capability,
+manifest contents, TLS private key, invitation, token, participant key,
+checkpoint bytes, or live evidence.
+
+Requestor request-payment wrapper:
 
 ```sh
-npm run bilateral:supervisor -- \
+REQUESTOR_INTAKE_REQUEST_ID="$(node -e 'console.log(require("node:crypto").randomUUID())')"
+npm run bilateral:request-payment -- \
   --launch-manifest "$REQUESTOR_LAUNCH_MANIFEST" \
-  --state "$REQUESTOR_SUPERVISOR_STATE"
+  --intake-request-id "$REQUESTOR_INTAKE_REQUEST_ID" \
+  --mcp-url "$PAYER_MCP_URL" \
+  --state "$REQUESTOR_SUPERVISOR_STATE" \
+  --tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
+  --tls-fingerprint "$PAYER_MCP_TLS_FINGERPRINT"
 ```
 
+Requestor must visibly receive exact `HANDSHAKE_REQUIRED`; the wrapper alone
+then starts the Requestor supervisor and stays attached. Requestor must not run
+`npm run bilateral:supervisor` directly.
+
 The user eventual actions are only funding four generated addresses and
-starting two physical supervisors. Human operator owns everything else.
+starting two physical role sessions. Human operator owns everything else.
 
 ## Funding command
 

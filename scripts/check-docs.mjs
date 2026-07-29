@@ -88,7 +88,7 @@ const OFFICIAL_REGISTRY =
   "0x8004A818BFB912233c491871b3d84c89A494BD9e";
 const OFFICIAL_REPOSITORY =
   "https://github.com/thetangstr/clockchain-handshake.git";
-const LIVE_HANDOFF_RELEASE_SHA =
+const RETIRED_LIVE_HANDOFF_RELEASE_SHA =
   "034cdbe4bff8999819d3834f94da5286470b8a99";
 const LIVE_HANDOFF_HELPER_URL =
   "https://clockchain-research.vercel.app/handshake/run";
@@ -306,9 +306,9 @@ const BILATERAL_COMMON_REQUIREMENTS = Object.freeze([
       /\bThe protocol does not download message bytes from Clockchain\.|\bcommercial-intent evidence, not\s+authorization anchors\b/i,
   }),
   Object.freeze({
-    label: "current MCP mandate-discovery gap",
+    label: "local Payer MCP intake",
     pattern:
-      /https:\/\/mcp\.clockchain\.network\/mcp[\s\S]*packages\/mcp-server[\s\S]*does not yet expose a general\s+payer-mandate discovery tool[\s\S]*authenticated\s+coordination relay/i,
+      /\bPayer-owned local TLS MCP `\/mcp` endpoint for payment intake\b[\s\S]*\bhosted Clockchain MCP server is not used for `request_payment`/i,
   }),
 ]);
 const PAYER_ROLE_COMMAND = `node bin/handshake-propose.mjs \\
@@ -427,13 +427,26 @@ const CONSOLE_COMMAND = `npm run bilateral:console -- \\
   --state-root "$BILATERAL_RELEASE_ROOT"`;
 const PAYER_SUPERVISOR_COMMAND = `npm run bilateral:supervisor -- \\
   --launch-manifest "$PAYER_LAUNCH_MANIFEST" \\
-  --state "$PAYER_SUPERVISOR_STATE"`;
-const REQUESTOR_SUPERVISOR_COMMAND = `npm run bilateral:supervisor -- \\
+  --state "$PAYER_SUPERVISOR_STATE" \\
+  --payer-mcp-host "$PAYER_MCP_HOST" \\
+  --payer-mcp-port "$PAYER_MCP_PORT" \\
+  --payer-mcp-tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \\
+  --payer-mcp-tls-private-key "$PAYER_MCP_TLS_PRIVATE_KEY"`;
+const REQUESTOR_REQUEST_PAYMENT_COMMAND = `npm run bilateral:request-payment -- \\
   --launch-manifest "$REQUESTOR_LAUNCH_MANIFEST" \\
-  --state "$REQUESTOR_SUPERVISOR_STATE"`;
+  --intake-request-id "$REQUESTOR_INTAKE_REQUEST_ID" \\
+  --mcp-url "$PAYER_MCP_URL" \\
+  --state "$REQUESTOR_SUPERVISOR_STATE" \\
+  --tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \\
+  --tls-fingerprint "$PAYER_MCP_TLS_FINGERPRINT"`;
 
 function bilateralContractFailures(relativePath, contents) {
   const failures = [];
+  if (/https:\/\/mcp\.clockchain\.network\/mcp/i.test(contents)) {
+    failures.push(
+      `${relativePath}: must not describe hosted Clockchain MCP as the payment-intake entry point; use the Payer-owned local TLS MCP /mcp flow.`,
+    );
+  }
   for (const { label, pattern } of BILATERAL_COMMON_REQUIREMENTS) {
     if (!pattern.test(contents)) {
       failures.push(
@@ -445,21 +458,23 @@ function bilateralContractFailures(relativePath, contents) {
     "prompts/run-requestor-bilateral-demo.md": [
       [
         "Stakeholder 2 role card",
-        /\bYou are Stakeholder 2, Requestor, the payment requestor\.\s+Start only the\s+requestor\s+supervisor\./,
+        /\bYou are Stakeholder 2, Requestor, the payment requestor\./,
       ],
       ["Requestor machine role", /\bRequestor\b[^.]*\brequestor\b/i],
       [
         "automatic signed request",
-        /\bdiscovers and understands\b[^.]*\bPayer's signed mandate\b[^.]*\bRequestor's conforming signed\s+payment\s+request\b/i,
+        /\brequesting payments\b[\s\S]*\bfollowing the payer's required\s+protocol\b[\s\S]*\bHANDSHAKE_REQUIRED\b/i,
       ],
       [
         "automated supervisor session",
         /\bAutomated supervisor session\b/i,
       ],
       [
-        "exact supervisor command",
-        /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$REQUESTOR_LAUNCH_MANIFEST" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE"/,
+        "exact request-payment command",
+        /npm run bilateral:request-payment -- \\\n  --launch-manifest "\$REQUESTOR_LAUNCH_MANIFEST" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --mcp-url "\$PAYER_MCP_URL" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE" \\\n  --tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --tls-fingerprint "\$PAYER_MCP_TLS_FINGERPRINT"/,
       ],
+      ["no direct supervisor startup", /\bDo not start `npm run bilateral:supervisor` directly\b/i],
+      ["HANDSHAKE_REQUIRED gate", /\bHANDSHAKE_REQUIRED\b[\s\S]*\bwrapper\b[\s\S]*\bstarts the Requestor\s+supervisor\b/i],
       ["two-run supervisor lifetime", /\bstays alive\b[^.]*\bboth runs\b/i],
       ["closed command policy", /\bmust not improvise commands\b/i],
       ["non-authorizing role", /\bcannot declare authorization\b/i],
@@ -498,7 +513,7 @@ function bilateralContractFailures(relativePath, contents) {
     "prompts/run-payer-bilateral-demo.md": [
       [
         "Stakeholder 1 role card",
-        /\bYou are Stakeholder 1, Payer, the mandate-owning payer\. Start only the payer\s+supervisor\./,
+        /\bYou are Stakeholder 1, Payer, the mandate-owning payer\./,
       ],
       ["Payer machine role", /\bPayer\b[^.]*\bpayer\b/i],
       ["Payer mandate ownership", /\bmandate-owning payer\b/i],
@@ -512,7 +527,12 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact supervisor command",
-        /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE"/,
+        /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/,
+      ],
+      ["PAYER_MCP_READY gate", /\bPAYER_MCP_READY\b/],
+      [
+        "safe public MCP handoff",
+        /\bshare only the public MCP URL,\s+public TLS certificate, and lowercase 64-hex certificate fingerprint\b/i,
       ],
       ["two-run supervisor lifetime", /\bstays alive\b[^.]*\bboth runs\b/i],
       ["closed command policy", /\bmust not improvise commands\b/i],
@@ -568,7 +588,11 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact startup order",
-        /\brelay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor\b/,
+        /\brelay -> coordinator -> console -> funding readiness -> Payer local MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+      ],
+      [
+        "local Payer MCP only",
+        /\bPayer-owned local TLS MCP `\/mcp` endpoint\b/i,
       ],
       ["automated primary flow", /\bAutomated primary flow\b/i],
       [
@@ -592,8 +616,8 @@ function bilateralContractFailures(relativePath, contents) {
         /\bautomatically create\b[^.]*\bPayer-signed mandate\b[^.]*\bRequestor-signed request\b/i,
       ],
       [
-        "two supervisor sessions",
-        /\bstart exactly two supervisor sessions\b/i,
+        "two role sessions",
+        /\bstart exactly two role sessions\b/i,
       ],
       [
         "four-address funding action",
@@ -807,15 +831,12 @@ function bilateralContractFailures(relativePath, contents) {
         /^## Before everyone starts[\s\S]*^## Fixed role assignment[\s\S]*^## Human operator checklist[\s\S]*^## Payer checklist[\s\S]*^## Requestor checklist[\s\S]*^## Funding and execution order[\s\S]*^## What counts as success[\s\S]*^## Immediate stop conditions/m,
       ],
       [
-        "pinned reviewed release SHA",
-        new RegExp(`\\b${LIVE_HANDOFF_RELEASE_SHA}\\b`),
+        "operator-provided reviewed release SHA",
+        /\boperator-provided exact reviewed\s+40-character immutable repository SHA\s+in `BILATERAL_REPOSITORY_SHA`/i,
       ],
       [
         "release relationship",
-        new RegExp(
-          `later handoff/helper is a documentation and test layer for executable SHA ${LIVE_HANDOFF_RELEASE_SHA}[\\s\\S]*operators checkout the exact executable SHA[\\s\\S]*does not alter executable runtime bytes`,
-          "i",
-        ),
+        /\bexternal public page later pins the final\s+immutable SHA\b[\s\S]*\bdoes not alter\s+executable runtime bytes\b/i,
       ],
       [
         "Node.js 22 on all computers",
@@ -823,10 +844,7 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "clean exact SHA on all computers",
-        new RegExp(
-          String.raw`\bclean\b[^.\n]*\b${LIVE_HANDOFF_RELEASE_SHA}\b[^.\n]*\ball three computers\b`,
-          "i",
-        ),
+        /\bclean detached checkout\b[^.]*\boperator-provided SHA\b[^.]*\ball\s+three computers\b[\s\S]*\bgit clone --no-checkout\b[\s\S]*\bgit fetch --depth 1\b[\s\S]*\bgit checkout --detach\b[\s\S]*\bnpm ci --ignore-scripts\b/i,
       ],
       [
         "fixed operator role",
@@ -838,7 +856,11 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact startup order",
-        /\brelay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor\b/,
+        /\brelay -> coordinator -> console -> funding readiness -> Payer local MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+      ],
+      [
+        "local Payer MCP only",
+        /\bPayer-owned local TLS MCP `\/mcp` endpoint\b/i,
       ],
       [
         "read-only advisory console",
@@ -916,8 +938,12 @@ function bilateralContractFailures(relativePath, contents) {
     ],
     "docs/runbooks/bilateral-demo-live-handoff.md": [
       [
-        "pinned executable release SHA",
-        new RegExp(`\\b${LIVE_HANDOFF_RELEASE_SHA}\\b`),
+        "no retired executable release SHA",
+        new RegExp(`^(?![\\s\\S]*\\b${RETIRED_LIVE_HANDOFF_RELEASE_SHA}\\b)[\\s\\S]*$`),
+      ],
+      [
+        "operator-provided repository SHA",
+        /`BILATERAL_REPOSITORY_SHA` is the operator-provided exact reviewed\s+40-character SHA\b/i,
       ],
       [
         "canonical helper URL",
@@ -973,8 +999,20 @@ function bilateralContractFailures(relativePath, contents) {
         /\bopenssl req -x509 -newkey rsa:3072 -nodes\b[\s\S]*\bsubjectAltName=IP:\$RELAY_ADVERTISED_IP\b[\s\S]*\bRELAY_TLS_FINGERPRINT="\$\(openssl x509\b/,
       ],
       [
+        "Payer MCP exact IP",
+        /\bPAYER_MCP_HOST\b[^.\n]*\bexact numeric Payer IP\b[^.\n]*\breachable from Requestor\b[\s\S]*\bsame computer\b[^.\n]*\b127\.0\.0\.1\b[\s\S]*\btwo computers\b[^.\n]*\bPayer LAN IP\b[\s\S]*\btest "\$PAYER_MCP_HOST" != "0\.0\.0\.0"/i,
+      ],
+      [
+        "Payer MCP certificate generation",
+        /\bsubjectAltName=IP:\$PAYER_MCP_HOST\b[\s\S]*chmod 0600 "\$PAYER_MCP_TLS_CERTIFICATE"[\s\S]*PAYER_MCP_TLS_FINGERPRINT="\$\(openssl x509 -in "\$PAYER_MCP_TLS_CERTIFICATE" -outform DER \| openssl dgst -sha256 -binary \| xxd -p -c 256\)"[\s\S]*\bgrep -Eq '\^\[0-9a-f\]\{64\}\$'/,
+      ],
+      [
         "exact startup order",
-        /\brelay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor\b/,
+        /\brelay -> coordinator -> console -> funding readiness -> Payer local MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+      ],
+      [
+        "local Payer MCP only",
+        /\bPayer-owned local TLS MCP `\/mcp` endpoint\b/i,
       ],
       [
         "coordinator-owned funding record",
@@ -1011,10 +1049,7 @@ function bilateralContractFailures(relativePath, contents) {
       ["paymentMoved:false", /\bpaymentMoved:false\b/],
       [
         "release relationship",
-        new RegExp(
-          `later handoff/helper is a documentation and test layer for executable SHA ${LIVE_HANDOFF_RELEASE_SHA}[\\s\\S]*operators checkout the exact executable SHA[\\s\\S]*does not alter executable runtime bytes`,
-          "i",
-        ),
+        /\bexternal public page later pins the final immutable SHA\b[\s\S]*\bdoes not alter\s+executable runtime bytes\b/i,
       ],
       [
         "advisory console/relay",
@@ -1030,7 +1065,7 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "handoff action boundary",
-        /\buser eventual actions are only funding four generated addresses and\s+starting two physical supervisors\b[\s\S]*\boperator owns everything else\b/i,
+        /\buser eventual actions are only funding four generated addresses and\s+starting two physical role sessions\b[\s\S]*\boperator owns everything else\b/i,
       ],
       [
         "ignored private artifacts",
@@ -1123,7 +1158,7 @@ function bilateralContractFailures(relativePath, contents) {
       ["exact coordinator CLI", COORDINATOR_COMMAND],
       ["exact console CLI", CONSOLE_COMMAND],
       ["exact Payer supervisor CLI", PAYER_SUPERVISOR_COMMAND],
-      ["exact Requestor supervisor CLI", REQUESTOR_SUPERVISOR_COMMAND],
+      ["exact Requestor request-payment CLI", REQUESTOR_REQUEST_PAYMENT_COMMAND],
       ["reusable bilateral funding command", FUNDING_COMMAND],
       ["exact verifier CLI", VERIFIER_COMMAND],
     ],
@@ -1256,7 +1291,7 @@ function bilateralNamingAndMovementFailures(
 ) {
   const failures = [];
   if (
-    /\bRequestor(?:,|\s+is|\s+as|\s+[—-])[^.\n]*\bpayer\b/i.test(
+    /\bRequestor(?:,|\s+is|\s+as|\s+[—-])[^.\n]*\bpayer\b(?!')/i.test(
       contents,
     )
   ) {
@@ -1371,7 +1406,7 @@ function readmeRoleplayFailures(contents) {
   }
   if (
     !contents.includes(
-      "relay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor",
+      "relay -> coordinator -> console -> funding readiness -> Payer local MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED",
     )
   ) {
     failures.push(

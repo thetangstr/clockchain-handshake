@@ -18,18 +18,21 @@ aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that
 Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and
 `ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`. The protocol does not download message bytes from Clockchain.
 
-Current MCP status: the hosted server is `https://mcp.clockchain.network/mcp`
-and its source lives in the separate specs repository at `packages/mcp-server`.
-It does not yet expose a general payer-mandate discovery tool. In this manual
-demo, the signed session mandate is delivered through the authenticated
-coordination relay.
+This demo uses a Payer-owned local TLS MCP `/mcp` endpoint for payment intake.
+The hosted Clockchain MCP server is not used for `request_payment`. Requestor
+asks Payer's local MCP for payment, receives exact `HANDSHAKE_REQUIRED`, and
+only then the Requestor wrapper starts the supervisor that follows Payer's
+signed mandate.
 
 ## Before everyone starts
 
-- Use immutable repository SHA `034cdbe4bff8999819d3834f94da5286470b8a99` as the executable release.
-- This later handoff/helper is a documentation and test layer for executable SHA 034cdbe4bff8999819d3834f94da5286470b8a99; operators checkout the exact executable SHA, and it does not alter executable runtime bytes.
+- Use the operator-provided exact reviewed 40-character immutable repository SHA
+  in `BILATERAL_REPOSITORY_SHA` as the executable release. The external public page later pins the final
+  immutable SHA; this handoff/helper does not alter executable runtime bytes.
 - Confirm Node.js 22 is installed on all three computers.
-- Confirm a clean checkout of exact SHA `034cdbe4bff8999819d3834f94da5286470b8a99` on all three computers.
+- Confirm a clean detached checkout of the exact operator-provided SHA on all
+  three computers after `git clone --no-checkout`, `git fetch --depth 1`,
+  `git checkout --detach`, and `npm ci --ignore-scripts`.
 - Confirm the operator Mac can reach both role computers over the advertised relay IP.
 - Publish no secrets, live evidence, or manifest contents.
 - Do not claim physical rehearsal passed; report only fresh verifier output and public status words.
@@ -51,6 +54,9 @@ coordination relay.
   operator console. Keep all three terminals attached.
 - Wait until both role computers are ready because launch manifests expire after 60 minutes.
 - Deliver `payer.launch.json` only Payer through Payer's private channel.
+- Wait for Payer to report exact `PAYER_MCP_READY`, then transfer only the public
+  MCP URL, public TLS certificate, and lowercase 64-hex certificate fingerprint
+  to Requestor.
 - Deliver `payee.launch.json` only Requestor through Requestor's private channel.
 - Keep `funding-addresses.json` coordinator-owned and use that file directly for funding.
 
@@ -58,37 +64,49 @@ coordination relay.
 
 - Use the Payer prompt and only the Payer private state directory.
 - Confirm the clean exact reviewed SHA and Node.js 22 before running the supervisor.
-- Use only `payer.launch.json`.
+- Use only `payer.launch.json` plus Payer-owned local MCP TLS files.
+- Start Payer's local MCP/supervisor first and wait for exact `PAYER_MCP_READY`.
 - Stop if Requestor's manifest, operator files, funding files, token files, or private bytes are visible.
 - Payer may reach local `PROPOSED` and `ACKNOWLEDGED`; Payer never emits `AUTHORIZED`.
 
 ## Requestor checklist
 
 - Use the Requestor prompt and only the Requestor private state directory.
-- Confirm the clean exact reviewed SHA and Node.js 22 before running the supervisor.
-- Use only `payee.launch.json`.
+- Confirm the clean exact reviewed SHA and Node.js 22 before running the
+  request-payment wrapper.
+- Use only `payee.launch.json` plus Payer's public MCP URL, public TLS
+  certificate, and lowercase 64-hex certificate fingerprint.
+- Do not start `npm run bilateral:supervisor` directly. Start
+  `npm run bilateral:request-payment`, require exact `HANDSHAKE_REQUIRED`, and
+  let the wrapper start the Requestor supervisor.
 - Stop if Payer's manifest, operator files, funding files, token files, or private bytes are visible.
 - Requestor may reach local `ACCEPTED`; Requestor never emits `AUTHORIZED`.
 
 ## Funding and execution order
 
 The startup control order is exactly:
-`relay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor`.
-Funding at this point means validating and arming the reusable Sepolia
-treasury lane; transfers wait for the coordinator's signed address record.
+`relay -> coordinator -> console -> funding readiness -> Payer local MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
+Funding readiness means validating and arming the reusable Sepolia treasury
+lane; the funding batch transfers only after the coordinator's signed address
+record is ready.
 
 1. Human operator starts relay.
 2. Human operator starts coordinator after relay readiness.
 3. Human operator starts the loopback-default read-only advisory console.
 4. Human operator validates and arms the reusable Sepolia treasury funding lane.
-5. Human operator delivers `payer.launch.json` only to Payer. Payer starts the payer supervisor.
-6. Human operator delivers `payee.launch.json` only to Requestor. Requestor starts the requestor supervisor.
-7. The supervisors automatically create the Payer-signed mandate and matching
+5. Human operator delivers `payer.launch.json` only to Payer. Payer starts the
+   Payer-owned local TLS MCP/supervisor.
+6. Payer waits for exact `PAYER_MCP_READY` and shares only the public MCP URL,
+   public TLS certificate, and lowercase 64-hex certificate fingerprint.
+7. Human operator delivers `payee.launch.json` only to Requestor. Requestor
+   starts `npm run bilateral:request-payment`, receives exact
+   `HANDSHAKE_REQUIRED`, and the wrapper starts the Requestor supervisor.
+8. The supervisors automatically create the Payer-signed mandate and matching
    Requestor-signed request; no operator-authored terms or manual artifact copy is allowed.
-8. Coordinator writes coordinator-owned `funding-addresses.json`.
-9. Human operator runs `npm run bilateral:fund` once to make exactly four
+9. Coordinator writes coordinator-owned `funding-addresses.json`.
+10. Human operator runs `npm run bilateral:fund` once to make exactly four
    `0.01 Sepolia ETH` allocations from the reusable treasury.
-10. The protocol order is `PROPOSED` -> `ACCEPTED` -> `ACKNOWLEDGED` -> operator verification -> `AUTHORIZED`.
+11. The protocol order is `PROPOSED` -> `ACCEPTED` -> `ACKNOWLEDGED` -> operator verification -> `AUTHORIZED`.
 
 ## What counts as success
 

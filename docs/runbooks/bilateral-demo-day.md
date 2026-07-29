@@ -20,11 +20,11 @@ aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that
 Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and
 `ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`. The protocol does not download message bytes from Clockchain.
 
-Current MCP status: the hosted server is `https://mcp.clockchain.network/mcp`
-and its source lives in the separate specs repository at `packages/mcp-server`.
-It does not yet expose a general payer-mandate discovery tool. In this manual
-demo, the signed session mandate is delivered through the authenticated
-coordination relay.
+This demo uses a Payer-owned local TLS MCP `/mcp` endpoint for payment intake.
+The hosted Clockchain MCP server is not used for `request_payment`. Requestor
+asks Payer's local MCP for payment, receives exact `HANDSHAKE_REQUIRED`, and
+only then the Requestor wrapper starts the supervisor that follows Payer's
+signed mandate.
 
 Only the operator's fresh aggregate-verifier process may issue the final
 `AUTHORIZED` verdict after independently refetching all three Clockchain
@@ -44,10 +44,10 @@ live-validated. Only a funded physical run whose fresh aggregate verifier
 publishes independently re-verifiable evidence is live-validated.
 
 The startup control order is exactly:
-`relay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor`.
-The funding stage validates and arms the reusable Sepolia treasury lane before
-either role starts; the transfers wait for the coordinator's signed four-address
-record.
+`relay -> coordinator -> console -> funding readiness -> Payer local MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
+The funding readiness stage validates and arms the reusable Sepolia treasury
+lane before either role starts; the actual funding batch waits for the
+coordinator's signed four-address record.
 
 All three computers use Node.js 22, `npm ci --ignore-scripts`, and a clean
 detached checkout of one reviewed 40-character SHA. Stop if any worktree is
@@ -139,6 +139,10 @@ chmod 0600 "$RELAY_TLS_PRIVATE_KEY"
 RELAY_TLS_FINGERPRINT="$(openssl x509 -in "$RELAY_TLS_CERTIFICATE" -outform DER | openssl dgst -sha256 -binary | xxd -p -c 256)"
 ```
 
+Payer, not the operator, generates the Payer MCP TLS private key on the Payer
+machine under Payer's private state. The operator never creates, receives,
+reads, prints, or stores that private key.
+
 Start the relay and coordinator from the operator Mac in separate terminals.
 Keep both processes attached and stop on any nonzero exit.
 
@@ -184,7 +188,7 @@ read-only and advisory: it projects sanitized validated state but cannot
 control the relay, change commercial terms, or authorize a session. Relay and
 watcher observations remain advisory even when displayed there.
 
-Before either role supervisor starts, validate the already configured reusable
+Before either role process starts, validate the already configured reusable
 Sepolia treasury paths and keep the funding command staged. Do not send a
 transfer until the coordinator publishes the signed address record:
 
@@ -204,25 +208,68 @@ detached checkout of the reviewed 40-character SHA.
 
 The user has exactly two kinds of demo-day action:
 
-1. Start exactly two supervisor sessions: Payer once with `payer.launch.json`
-   and Requestor once with `payee.launch.json`.
+1. Start exactly two role sessions: Payer once with `payer.launch.json` and
+   Requestor once with `payee.launch.json`.
 2. Fund the four displayed addresses with the reusable Sepolia treasury command.
 
-Start the role supervisors in this order without waiting for Payer completion. Payer machine:
+Start Payer first and do not start Requestor until Payer prints exact
+`PAYER_MCP_READY`. Payer machine:
 
 ```sh
+export PAYER_MCP_HOST="${PAYER_MCP_HOST:?set exact numeric Payer IP reachable from Requestor; same computer 127.0.0.1, two computers Payer LAN IP}"
+export PAYER_MCP_PORT="9443"
+mkdir -p "$PAYER_SUPERVISOR_STATE/tls"
+chmod 0700 "$PAYER_SUPERVISOR_STATE" "$PAYER_SUPERVISOR_STATE/tls"
+export PAYER_MCP_TLS_CERTIFICATE="$PAYER_SUPERVISOR_STATE/tls/payer-mcp.crt"
+export PAYER_MCP_TLS_PRIVATE_KEY="$PAYER_SUPERVISOR_STATE/tls/payer-mcp.key"
+printf '%s\n' "$PAYER_MCP_HOST" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+test "$PAYER_MCP_HOST" != "0.0.0.0"
+openssl req -x509 -newkey rsa:3072 -nodes \
+  -keyout "$PAYER_MCP_TLS_PRIVATE_KEY" \
+  -out "$PAYER_MCP_TLS_CERTIFICATE" \
+  -subj "/CN=$PAYER_MCP_HOST" \
+  -addext "subjectAltName=IP:$PAYER_MCP_HOST" \
+  -days 1
+chmod 0600 "$PAYER_MCP_TLS_PRIVATE_KEY"
+chmod 0600 "$PAYER_MCP_TLS_CERTIFICATE"
+PAYER_MCP_TLS_FINGERPRINT="$(openssl x509 -in "$PAYER_MCP_TLS_CERTIFICATE" -outform DER | openssl dgst -sha256 -binary | xxd -p -c 256)"
+printf '%s\n' "$PAYER_MCP_TLS_FINGERPRINT" | grep -Eq '^[0-9a-f]{64}$'
+
 npm run bilateral:supervisor -- \
   --launch-manifest "$PAYER_LAUNCH_MANIFEST" \
-  --state "$PAYER_SUPERVISOR_STATE"
+  --state "$PAYER_SUPERVISOR_STATE" \
+  --payer-mcp-host "$PAYER_MCP_HOST" \
+  --payer-mcp-port "$PAYER_MCP_PORT" \
+  --payer-mcp-tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
+  --payer-mcp-tls-private-key "$PAYER_MCP_TLS_PRIVATE_KEY"
 ```
 
-Immediately after Payer starts, Requestor machine:
+`PAYER_MCP_HOST` must be the exact numeric Payer IP reachable from Requestor:
+same computer uses `127.0.0.1`; two computers use the Payer LAN IP. Never bind
+Payer MCP to `0.0.0.0`. The Payer MCP certificate SAN must match the exact
+`PAYER_MCP_HOST`. The private key stays on Payer and is never read or printed.
+
+After exact `PAYER_MCP_READY`, transfer only the public MCP URL, public TLS
+certificate, and lowercase 64-hex certificate fingerprint to Requestor. Never
+transfer the MCP capability, manifest contents, TLS private key, invitation,
+token, participant key, checkpoint bytes, or live evidence.
+
+Requestor machine:
 
 ```sh
-npm run bilateral:supervisor -- \
+REQUESTOR_INTAKE_REQUEST_ID="$(node -e 'console.log(require("node:crypto").randomUUID())')"
+npm run bilateral:request-payment -- \
   --launch-manifest "$REQUESTOR_LAUNCH_MANIFEST" \
-  --state "$REQUESTOR_SUPERVISOR_STATE"
+  --intake-request-id "$REQUESTOR_INTAKE_REQUEST_ID" \
+  --mcp-url "$PAYER_MCP_URL" \
+  --state "$REQUESTOR_SUPERVISOR_STATE" \
+  --tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
+  --tls-fingerprint "$PAYER_MCP_TLS_FINGERPRINT"
 ```
+
+Requestor must visibly receive exact `HANDSHAKE_REQUIRED`; the wrapper alone
+then starts the Requestor supervisor and stays attached. Requestor must not run
+`npm run bilateral:supervisor` directly.
 
 The same Payer and Requestor processes remain alive across both runs. Each supervisor
 creates two invitations and one token per role for both runs. After both

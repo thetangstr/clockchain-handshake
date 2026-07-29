@@ -1,7 +1,6 @@
 # Run Payer bilateral Clockchain role
 
-You are Stakeholder 1, Payer, the mandate-owning payer. Start only the payer
-supervisor.
+You are Stakeholder 1, Payer, the mandate-owning payer.
 
 The supervisor publishes and maintains Payer's reusable signed payment mandate
 for incoming payment requests in this authenticated session. Payer evaluates any
@@ -24,11 +23,10 @@ authorization anchors. The only Clockchain authorization anchors are exactly:
 
 For a session that the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and `ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`.
 
-Current MCP status: the hosted server is `https://mcp.clockchain.network/mcp`
-and its source lives in the separate specs repository at `packages/mcp-server`.
-It does not yet expose a general payer-mandate discovery tool. In this manual
-demo, the signed session mandate is delivered through the authenticated
-coordination relay.
+This demo uses a Payer-owned local TLS MCP `/mcp` endpoint for payment intake.
+The hosted Clockchain MCP server is not used for `request_payment`. Requestor
+first asks Payer's local MCP for payment; Payer's MCP tells Requestor that it
+must complete the handshake before payment can be considered.
 
 Only the operator's fresh aggregate verifier may emit the authorizing verdict.
 Payer may report local progress and marker-complete public artifact digests, but
@@ -37,15 +35,62 @@ aggregation, descriptor creation, or aggregate verification from this prompt.
 
 ## Automated Supervisor Session
 
-The operator privately provides one role-specific launch-manifest path and one
-fresh private state directory. Start Payer's one long-lived supervisor exactly
-once:
+The public repository is
+`https://github.com/thetangstr/clockchain-handshake.git`. Before handling any
+private material, confirm that you are Payer and confirm the exact
+operator-provided immutable 40-character SHA:
 
 ```sh
+export BILATERAL_REPOSITORY_SHA="${BILATERAL_REPOSITORY_SHA:?set operator-provided exact reviewed 40-character SHA}"
+printf '%s\n' "$BILATERAL_REPOSITORY_SHA" | grep -Eq '^[0-9a-f]{40}$'
+git clone --no-checkout https://github.com/thetangstr/clockchain-handshake.git clockchain-handshake
+cd clockchain-handshake
+git fetch --depth 1 origin "$BILATERAL_REPOSITORY_SHA"
+git checkout --detach "$BILATERAL_REPOSITORY_SHA"
+test "$(git rev-parse HEAD)" = "$BILATERAL_REPOSITORY_SHA"
+npm ci --ignore-scripts
+```
+
+Keep Payer's private state root separate from the
+operator and Requestor roots.
+
+The operator privately provides one role-specific launch-manifest path and one
+fresh private state directory. Generate the local TLS MCP certificate and
+private key under Payer's private state, with the certificate SAN matching the
+exact numeric Payer IP reachable from Requestor. Same computer uses
+`127.0.0.1`; two computers use the Payer LAN IP. Never bind Payer MCP to
+`0.0.0.0`, and never read or print the private key.
+
+```sh
+export PAYER_MCP_HOST="${PAYER_MCP_HOST:?set exact numeric Payer IP reachable from Requestor; same computer 127.0.0.1, two computers Payer LAN IP}"
+export PAYER_MCP_PORT="9443"
+mkdir -p "$PAYER_SUPERVISOR_STATE/tls"
+chmod 0700 "$PAYER_SUPERVISOR_STATE" "$PAYER_SUPERVISOR_STATE/tls"
+export PAYER_MCP_TLS_CERTIFICATE="$PAYER_SUPERVISOR_STATE/tls/payer-mcp.crt"
+export PAYER_MCP_TLS_PRIVATE_KEY="$PAYER_SUPERVISOR_STATE/tls/payer-mcp.key"
+printf '%s\n' "$PAYER_MCP_HOST" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+test "$PAYER_MCP_HOST" != "0.0.0.0"
+openssl req -x509 -newkey rsa:3072 -nodes \
+  -keyout "$PAYER_MCP_TLS_PRIVATE_KEY" \
+  -out "$PAYER_MCP_TLS_CERTIFICATE" \
+  -subj "/CN=$PAYER_MCP_HOST" \
+  -addext "subjectAltName=IP:$PAYER_MCP_HOST" \
+  -days 1
+chmod 0600 "$PAYER_MCP_TLS_PRIVATE_KEY"
+chmod 0600 "$PAYER_MCP_TLS_CERTIFICATE"
+PAYER_MCP_TLS_FINGERPRINT="$(openssl x509 -in "$PAYER_MCP_TLS_CERTIFICATE" -outform DER | openssl dgst -sha256 -binary | xxd -p -c 256)"
+printf '%s\n' "$PAYER_MCP_TLS_FINGERPRINT" | grep -Eq '^[0-9a-f]{64}$'
+
 npm run bilateral:supervisor -- \
   --launch-manifest "$PAYER_LAUNCH_MANIFEST" \
-  --state "$PAYER_SUPERVISOR_STATE"
+  --state "$PAYER_SUPERVISOR_STATE" \
+  --payer-mcp-host "$PAYER_MCP_HOST" \
+  --payer-mcp-port "$PAYER_MCP_PORT" \
+  --payer-mcp-tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
+  --payer-mcp-tls-private-key "$PAYER_MCP_TLS_PRIVATE_KEY"
 ```
+
+Start Payer's one long-lived supervisor exactly once.
 
 The supervisor stays alive across both runs: rehearsal first, then stakeholder.
 It creates and retains Payer's coordination key, preflight key, one token, and
@@ -59,6 +104,12 @@ The launch manifest binds the exact relay URL and TLS certificate fingerprint.
 The supervisor pins that fingerprint before sending or receiving coordination
 events. A missing or changed TLS binding stops the session.
 
+Wait for exact `PAYER_MCP_READY`. Stay attached. Share only the public MCP URL,
+public TLS certificate, and lowercase 64-hex certificate fingerprint through
+the operator-approved public channel. Never share the MCP capability, launch
+manifest contents, private TLS key, invitation, token, participant key,
+checkpoint bytes, or live evidence.
+
 Use a clean detached checkout of the reviewed 40-character SHA with Node.js 22
 and `npm ci --ignore-scripts`. Do not inspect secret bytes, do not switch roles,
 do not create extra sessions, do not fund addresses, do not run the watcher or verifier, and do not declare authorization.
@@ -71,6 +122,14 @@ The operator privately sets:
   lowercase hexadecimal characters.
 - `PAYER_LAUNCH_MANIFEST`: Payer's operator-signed launch manifest.
 - `PAYER_SUPERVISOR_STATE`: Payer's mode-`0700` private supervisor state root.
+- `PAYER_MCP_HOST`: exact numeric Payer IP reachable from Requestor. Use
+  `127.0.0.1` only when both roles run on the same computer; use the Payer LAN
+  IP for two computers. Never use `0.0.0.0`.
+- `PAYER_MCP_PORT`: Payer-owned local MCP bind port.
+- `PAYER_MCP_TLS_CERTIFICATE`: Payer-generated local MCP public TLS certificate
+  path under Payer's private state.
+- `PAYER_MCP_TLS_PRIVATE_KEY`: Payer-generated local MCP private TLS key path
+  under Payer's private state.
 - `PAYER_INVITATION_FILE`: Payer's reserved mode-`0600` invitation, used only by
   approved repository commands.
 - `PAYER_CLOCKCHAIN_TOKEN_FILE`: token path under Payer's private state root.

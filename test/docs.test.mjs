@@ -59,7 +59,7 @@ const PUBLISHED_TRANSACTIONS = Object.freeze([
   "0x6981f9250589fc550a68e6ee2b0146323066c64332c3542e4bbb6d9f9f47c676",
   "0xbb9435c8f9d46f0f57e0aab6208610f2b4c37177b33d27319f1b0311db16b160",
 ]);
-const LIVE_HANDOFF_RELEASE_SHA =
+const RETIRED_LIVE_HANDOFF_RELEASE_SHA =
   "034cdbe4bff8999819d3834f94da5286470b8a99";
 const LIVE_HANDOFF_HELPER_URL =
   "https://clockchain-research.vercel.app/handshake/run";
@@ -201,7 +201,7 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
     );
     assert.match(
       contents,
-      /https:\/\/mcp\.clockchain\.network\/mcp[\s\S]*packages\/mcp-server[\s\S]*does not yet expose a general\s+payer-mandate discovery tool[\s\S]*authenticated\s+coordination relay/i,
+      /\bPayer-owned local TLS MCP `\/mcp` endpoint for payment intake\b[\s\S]*\bhosted Clockchain MCP server is not used for `request_payment`/i,
       relativePath,
     );
   }
@@ -320,13 +320,6 @@ test("automated bilateral happy path limits the user to four fundings and two su
       /^## Operator-authorized recovery appendix$/m,
       1,
     )[0];
-    assert.match(
-      primaryPrompt,
-      new RegExp(
-        String.raw`npm run bilateral:supervisor --\s*\\?\s*--launch-manifest[\s\S]*--state`,
-      ),
-      role,
-    );
     assert.doesNotMatch(
       primaryPrompt,
       /probe-bilateral-rendezvous|register-bilateral-identity/,
@@ -335,7 +328,22 @@ test("automated bilateral happy path limits the user to four fundings and two su
     assert.match(primaryPrompt, /stays alive[^.]*both runs/i, role);
     assert.match(primaryPrompt, /must not improvise commands/i, role);
     assert.match(primaryPrompt, /cannot declare authorization/i, role);
+    assert.doesNotMatch(primaryPrompt, /https:\/\/mcp\.clockchain\.network\/mcp/i, role);
   }
+  assert.match(
+    payer,
+    /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/,
+  );
+  assert.doesNotMatch(payer, /npm run bilateral:request-payment/);
+  assert.match(payer, /\bPAYER_MCP_READY\b/);
+  assert.match(payer, /share only the public MCP URL,\s+public TLS certificate, and lowercase 64-hex certificate fingerprint/i);
+  assert.doesNotMatch(payer, /\bcapability\b[^.\n]*\bshare/i);
+  assert.match(
+    requestor,
+    /npm run bilateral:request-payment -- \\\n  --launch-manifest "\$REQUESTOR_LAUNCH_MANIFEST" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --mcp-url "\$PAYER_MCP_URL" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE" \\\n  --tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --tls-fingerprint "\$PAYER_MCP_TLS_FINGERPRINT"/,
+  );
+  assert.match(requestor, /\bHANDSHAKE_REQUIRED\b[\s\S]*\bwrapper\b[\s\S]*\bstarts the Requestor\s+supervisor/i);
+  assert.doesNotMatch(requestor, /Start Requestor's one long-lived supervisor exactly\s+once[\s\S]*npm run bilateral:supervisor/i);
   assert.match(primaryRunbook, /fund (?:the )?four displayed addresses/i);
   assert.match(
     primaryRunbook,
@@ -350,7 +358,7 @@ test("automated bilateral happy path limits the user to four fundings and two su
   assert.match(primaryRunbook, /code.*prompt.*change.*abort/i);
   assert.doesNotMatch(
     primaryRunbook,
-    /copy .*artifact|transfer .*private key|start four/i,
+    /copy (?!is allowed|belongs|or extra)[^.]*private artifact|transfer .*private key to|start four/i,
   );
   const scripts = JSON.parse(packageText).scripts;
   assert.equal(
@@ -365,10 +373,15 @@ test("automated bilateral happy path limits the user to four fundings and two su
     scripts["bilateral:supervisor"],
     "node bin/handshake-supervisor.mjs",
   );
+  assert.equal(
+    scripts["bilateral:request-payment"],
+    "node bin/handshake-request-payment.mjs",
+  );
   for (const value of [
     scripts["bilateral:coordinator"],
     scripts["bilateral:relay"],
     scripts["bilateral:supervisor"],
+    scripts["bilateral:request-payment"],
   ]) {
     assert.doesNotMatch(value, /fake|test/i);
   }
@@ -408,6 +421,21 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /RELAY_ADVERTISED_IP[^.\n]*numeric IP[^.\n]*reachable by both role computers/i);
   assert.match(primaryRunbook, /subjectAltName=IP:\$RELAY_ADVERTISED_IP/);
   assert.match(primaryRunbook, /RELAY_TLS_FINGERPRINT=.*openssl x509/i);
+  assert.match(primaryRunbook, /PAYER_MCP_HOST[^.\n]*exact numeric Payer IP[^.\n]*reachable from Requestor/i);
+  assert.match(primaryRunbook, /same computer[^.\n]*127\.0\.0\.1/i);
+  assert.match(primaryRunbook, /two computers[^.\n]*Payer LAN IP/i);
+  assert.doesNotMatch(primaryRunbook, /export PAYER_MCP_HOST="127\.0\.0\.1"/);
+  assert.match(primaryRunbook, /test "\$PAYER_MCP_HOST" != "0\.0\.0\.0"/);
+  assert.doesNotMatch(primaryRunbook, /export PAYER_MCP_HOST="0\.0\.0\.0"/);
+  assert.doesNotMatch(primaryRunbook, /PAYER_MCP_TLS_PRIVATE_KEY="\$BILATERAL_RELEASE_ROOT/);
+  assert.match(primaryRunbook, /Payer machine:[\s\S]*export PAYER_MCP_TLS_PRIVATE_KEY="\$PAYER_SUPERVISOR_STATE\/tls\/payer-mcp\.key"/);
+  assert.match(primaryRunbook, /subjectAltName=IP:\$PAYER_MCP_HOST/);
+  assert.match(primaryRunbook, /chmod 0600 "\$PAYER_MCP_TLS_CERTIFICATE"/);
+  assert.doesNotMatch(primaryRunbook, /chmod 0644 "\$PAYER_MCP_TLS_CERTIFICATE"/);
+  assert.match(primaryRunbook, /PAYER_MCP_TLS_FINGERPRINT="\$\(openssl x509 -in "\$PAYER_MCP_TLS_CERTIFICATE" -outform DER \| openssl dgst -sha256 -binary \| xxd -p -c 256\)"/);
+  assert.match(primaryRunbook, /printf '%s\\n' "\$PAYER_MCP_TLS_FINGERPRINT" \| grep -Eq '\^\[0-9a-f\]\{64\}\$'/);
+  assert.doesNotMatch(primaryRunbook, /cat "\$PAYER_MCP_TLS_PRIVATE_KEY"|openssl rsa -in "\$PAYER_MCP_TLS_PRIVATE_KEY" -text/);
+  assert.match(primaryRunbook, /REQUESTOR_INTAKE_REQUEST_ID="\$\(node -e 'console\.log\(require\("node:crypto"\)\.randomUUID\(\)\)'\)"/);
   assert.match(primaryRunbook, /https:\/\/\$RELAY_ADVERTISED_IP:\$RELAY_PORT/);
   assert.match(primaryRunbook, /127\.0\.0\.1[^.\n]*must not be the advertised relay address/i);
   assert.match(primaryRunbook, /--host "\$\{RELAY_LISTEN_HOST:-\$RELAY_ADVERTISED_IP\}"/);
@@ -419,6 +447,12 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /payee\.launch\.json[^.\n]*only to Requestor/i);
   assert.match(primaryRunbook, /launch manifests expire after 60 minutes/i);
   assert.match(primaryRunbook, /npm run bilateral:fund -- \\/);
+  assert.match(
+    primaryRunbook,
+    /relay -> coordinator -> console -> funding readiness -> Payer local MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED/,
+  );
+  assert.match(primaryRunbook, /\bPayer-owned local TLS MCP `\/mcp` endpoint\b/i);
+  assert.doesNotMatch(primaryRunbook, /https:\/\/mcp\.clockchain\.network\/mcp/i);
   assert.match(primaryRunbook, /--funding-record "\$FUNDING_RECORD_FILE"/);
   assert.match(primaryRunbook, /--journal-directory "\$FUNDING_JOURNAL_DIR"/);
   assert.match(primaryRunbook, /--keystore "\$SEPOLIA_TREASURY_KEYSTORE"/);
@@ -432,6 +466,8 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /export OPERATOR_KEY_ID="bilateral-demo-2026-07-28"/);
   assert.match(primaryRunbook, /Commit only `docs\/operator-keys\/\$OPERATOR_KEY_ID\.pub`/);
   assert.match(primaryRunbook, /run `npm run verify`, then freeze `BILATERAL_REPOSITORY_SHA`/i);
+  assert.doesNotMatch(primaryRunbook, /git clone --no-checkout "\$BILATERAL_REPOSITORY_URL" clockchain-handshake/);
+  assert.doesNotMatch(primaryRunbook, /cd clockchain-handshake/);
   assert.doesNotMatch(primaryRunbook, /OPERATOR_KEY_ID="bilateral-demo-\$BILATERAL_REPOSITORY_SHA"/);
   assert.match(primaryRunbook, /Terminal 1 - relay/i);
   assert.match(primaryRunbook, /Terminal 2 - coordinator/i);
@@ -454,8 +490,18 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /test "\$\(stat -f '%Lp' "\$SEPOLIA_RPC_URL_FILE"\)" = "600"/);
   assert.match(primaryRunbook, /already prepared repo-private `\$REPOSITORY_ROOT\/\.context\/bilateral-live-2026-07-28\/sepolia-rpc\.url`/);
   assert.doesNotMatch(primaryRunbook, /printf '%s\\n' "\$SEPOLIA_RPC_URL" > "\$SEPOLIA_RPC_URL_FILE"/);
-  assert.match(requestor, /You are Stakeholder 2, Requestor, the payment requestor\.\s+Start only the\s+requestor\s+supervisor\./);
-  assert.match(payer, /You are Stakeholder 1, Payer, the mandate-owning payer\. Start only the payer\s+supervisor\./);
+  assert.match(requestor, /You are Stakeholder 2, Requestor, the payment requestor\./);
+  assert.match(requestor, /\bDo not start `npm run bilateral:supervisor` directly\b/i);
+  assert.match(requestor, /\bHANDSHAKE_REQUIRED\b/);
+  assert.match(payer, /You are Stakeholder 1, Payer, the mandate-owning payer\./);
+  assert.match(payer, /\bPAYER_MCP_READY\b/);
+  assert.match(payer, /mkdir -p "\$PAYER_SUPERVISOR_STATE\/tls"/);
+  assert.match(payer, /export PAYER_MCP_TLS_PRIVATE_KEY="\$PAYER_SUPERVISOR_STATE\/tls\/payer-mcp\.key"/);
+  assert.match(payer, /subjectAltName=IP:\$PAYER_MCP_HOST/);
+  assert.match(payer, /chmod 0600 "\$PAYER_MCP_TLS_CERTIFICATE"/);
+  assert.doesNotMatch(payer, /chmod 0644 "\$PAYER_MCP_TLS_CERTIFICATE"/);
+  assert.match(payer, /PAYER_MCP_TLS_FINGERPRINT="\$\(openssl x509 -in "\$PAYER_MCP_TLS_CERTIFICATE" -outform DER \| openssl dgst -sha256 -binary \| xxd -p -c 256\)"/);
+  assert.doesNotMatch(payer, /PAYER_MCP_TLS_PRIVATE_KEY="\$BILATERAL_RELEASE_ROOT/);
   for (const prompt of [requestor, payer]) {
     assert.match(prompt, /do not inspect secret bytes/i);
     assert.match(prompt, /do not switch roles/i);
@@ -483,9 +529,9 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
   );
   assert.match(
     quickStart,
-    new RegExp(LIVE_HANDOFF_RELEASE_SHA),
+    /operator-provided exact reviewed\s+40-character immutable repository SHA\s+in `BILATERAL_REPOSITORY_SHA`/i,
   );
-  assert.match(quickStart, new RegExp(`later handoff/helper is a documentation and test layer for executable SHA ${LIVE_HANDOFF_RELEASE_SHA}[\\s\\S]*operators checkout the exact executable SHA`, "i"));
+  assert.match(quickStart, /external public page later pins the final\s+immutable SHA/i);
   assert.match(quickStart, /does not alter executable runtime bytes/i);
   assert.match(
     quickStart,
@@ -493,10 +539,7 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
   );
   assert.match(
     quickStart,
-    new RegExp(
-      String.raw`clean[^.\n]*${LIVE_HANDOFF_RELEASE_SHA}[^.\n]*all three computers`,
-      "i",
-    ),
+    /clean detached checkout[^.]*operator-provided SHA[^.]*all\s+three computers[\s\S]*git clone --no-checkout[\s\S]*git fetch --depth 1[\s\S]*git checkout --detach[\s\S]*npm ci --ignore-scripts/i,
   );
   assert.match(
     quickStart,
@@ -558,11 +601,12 @@ test("live bilateral handoff pins the public operator checklist without secrets"
     "utf8",
   );
   const startupOrder =
-    "relay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor";
+    "relay -> coordinator -> console -> funding readiness -> Payer local MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED";
 
-  assert.match(handoff, new RegExp(LIVE_HANDOFF_RELEASE_SHA));
-  assert.match(handoff, new RegExp(`later handoff/helper is a documentation and test layer for executable SHA ${LIVE_HANDOFF_RELEASE_SHA}[\\s\\S]*operators checkout the exact executable SHA`, "i"));
-  assert.match(handoff, /does not alter executable runtime bytes/i);
+  assert.doesNotMatch(handoff, new RegExp(RETIRED_LIVE_HANDOFF_RELEASE_SHA));
+  assert.match(handoff, /BILATERAL_REPOSITORY_SHA[^.\n]*operator-provided exact reviewed 40-character SHA/i);
+  assert.match(handoff, /external public page later pins the final immutable SHA/i);
+  assert.match(handoff, /does not alter\s+executable runtime bytes/i);
   assert.match(handoff, new RegExp(LIVE_HANDOFF_HELPER_URL.replaceAll(".", "\\.")));
   assert.match(handoff, new RegExp(LIVE_HANDOFF_TREASURY_ADDRESS, "i"));
   assert.match(handoff, /clean detached checkout[\s\S]*Node\.js 22[\s\S]*npm ci --ignore-scripts[\s\S]*all three computers/i);
@@ -589,11 +633,27 @@ test("live bilateral handoff pins the public operator checklist without secrets"
   assert.match(handoff, /openssl req -x509 -newkey rsa:3072 -nodes/);
   assert.match(handoff, /subjectAltName=IP:\$RELAY_ADVERTISED_IP/);
   assert.match(handoff, /RELAY_TLS_FINGERPRINT="\$\(openssl x509/);
+  assert.match(handoff, /PAYER_MCP_HOST[^.\n]*exact numeric Payer IP[^.\n]*reachable from Requestor/i);
+  assert.match(handoff, /same computer[^.\n]*127\.0\.0\.1/i);
+  assert.match(handoff, /two computers[^.\n]*Payer LAN IP/i);
+  assert.doesNotMatch(handoff, /export PAYER_MCP_HOST="127\.0\.0\.1"/);
+  assert.match(handoff, /test "\$PAYER_MCP_HOST" != "0\.0\.0\.0"/);
+  assert.doesNotMatch(handoff, /export PAYER_MCP_HOST="0\.0\.0\.0"/);
+  assert.doesNotMatch(handoff, /PAYER_MCP_TLS_PRIVATE_KEY="\$BILATERAL_RELEASE_ROOT/);
+  assert.match(handoff, /Payer supervisor:[\s\S]*export PAYER_MCP_TLS_PRIVATE_KEY="\$PAYER_SUPERVISOR_STATE\/tls\/payer-mcp\.key"/);
+  assert.match(handoff, /subjectAltName=IP:\$PAYER_MCP_HOST/);
+  assert.match(handoff, /chmod 0600 "\$PAYER_MCP_TLS_CERTIFICATE"/);
+  assert.doesNotMatch(handoff, /chmod 0644 "\$PAYER_MCP_TLS_CERTIFICATE"/);
+  assert.match(handoff, /PAYER_MCP_TLS_FINGERPRINT="\$\(openssl x509 -in "\$PAYER_MCP_TLS_CERTIFICATE" -outform DER \| openssl dgst -sha256 -binary \| xxd -p -c 256\)"/);
+  assert.match(handoff, /REQUESTOR_INTAKE_REQUEST_ID="\$\(node -e 'console\.log\(require\("node:crypto"\)\.randomUUID\(\)\)'\)"/);
   assert.match(handoff, /npm run bilateral:relay -- \\/);
   assert.match(handoff, /npm run bilateral:coordinator -- \\/);
   assert.match(handoff, /npm run bilateral:console -- \\/);
-  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE"/);
-  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$REQUESTOR_LAUNCH_MANIFEST" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE"/);
+  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/);
+  assert.match(handoff, /\bwait\b[\s\S]*\bPAYER_MCP_READY\b/i);
+  assert.match(handoff, /npm run bilateral:request-payment -- \\\n  --launch-manifest "\$REQUESTOR_LAUNCH_MANIFEST" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --mcp-url "\$PAYER_MCP_URL" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE" \\\n  --tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --tls-fingerprint "\$PAYER_MCP_TLS_FINGERPRINT"/);
+  assert.match(handoff, /\bHANDSHAKE_REQUIRED\b[\s\S]*\bRequestor supervisor\b/i);
+  assert.doesNotMatch(handoff, /https:\/\/mcp\.clockchain\.network\/mcp/i);
   assert.match(handoff, /export FUNDING_RECORD_FILE="\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json"/);
   assert.match(handoff, /npm run bilateral:fund -- \\\n  --funding-record "\$FUNDING_RECORD_FILE" \\\n  --journal-directory "\$FUNDING_JOURNAL_DIR" \\\n  --keystore "\$SEPOLIA_TREASURY_KEYSTORE" \\\n  --rpc-url-file "\$SEPOLIA_RPC_URL_FILE"/);
   assert.match(handoff, /four freshly generated addresses[\s\S]*`0\.01 Sepolia ETH` each/i);
@@ -618,7 +678,7 @@ test("live bilateral handoff pins the public operator checklist without secrets"
   assert.match(handoff, /process\.stdout\.write\(\(await readFile\(process\.env\.SEPOLIA_RPC_URL_FILE/);
   assert.match(handoff, /implementation-complete and rehearsal-ready[\s\S]*live-demo validated/i);
   assert.match(handoff, /only a\s+successful 3-computer run with exact fresh evidence may be called `live-demo validated`/i);
-  assert.match(handoff, /user eventual actions are only funding four generated addresses and\s+starting two physical supervisors/i);
+  assert.match(handoff, /user eventual actions are only funding four generated addresses and\s+starting two physical role sessions/i);
   assert.match(handoff, /operator owns everything else/i);
   assert.match(handoff, /private\/live artifacts remain ignored\/outside Git/i);
   assert.doesNotMatch(handoff, /helper is deployed/i);
@@ -627,9 +687,9 @@ test("live bilateral handoff pins the public operator checklist without secrets"
 test("documentation checker rejects live handoff drift", async (t) => {
   const cases = [
     [
-      LIVE_HANDOFF_RELEASE_SHA,
-      "76f585d1e729326b5d749a61937c3971d4f34050",
-      "pinned executable release SHA",
+      "`BILATERAL_REPOSITORY_SHA` is the operator-provided exact reviewed\n40-character SHA",
+      "`BILATERAL_REPOSITORY_SHA` is a branch name",
+      "operator-provided repository SHA",
     ],
     [
       "`PAYMENT_REQUEST_MATCHED`",
@@ -728,7 +788,7 @@ test("turnkey bilateral docs pin the mandate, console, funding, and readiness co
   const helperUrl =
     "https://clockchain-research.vercel.app/handshake/run";
   const startupOrder =
-    "relay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor";
+    "relay -> coordinator -> console -> funding readiness -> Payer local MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED";
 
   assert.match(
     payerPrompt,
@@ -775,7 +835,7 @@ test("turnkey bilateral docs pin the mandate, console, funding, and readiness co
   ]) {
     assert.doesNotMatch(
       document,
-      /\bRequestor(?:,|\s+is|\s+as|\s+[—-])[^.\n]*\bpayer\b/i,
+      /\bRequestor(?:,|\s+is|\s+as|\s+[—-])[^.\n]*\bpayer\b(?!')/i,
     );
     assert.doesNotMatch(
       document,

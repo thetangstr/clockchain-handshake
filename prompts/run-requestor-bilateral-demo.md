@@ -1,13 +1,13 @@
 # Run Requestor bilateral Clockchain role
 
-You are Stakeholder 2, Requestor, the payment requestor. Start only the
-requestor supervisor.
+You are Stakeholder 2, Requestor, the payment requestor.
 
-The supervisor discovers and understands Payer's signed mandate through the
-authenticated session material, follows its exact protocol, creates and submits
-Requestor's conforming signed payment request, independently verifies Payer's
-`PROPOSED` transition, and anchors `ACCEPTED`. Requestor never issues or
-approves payment. Stay on this machine and never switch roles.
+Your normal role is requesting payments and following the payer's required
+protocol. In this demo, first request payment through Payer's local MCP. The MCP
+will explain that the handshake is required before payment can be considered.
+Only after exact `HANDSHAKE_REQUIRED` may the wrapper start the Requestor
+supervisor. Requestor never issues or approves payment. Stay on this machine and
+never switch roles.
 
 This is an Ethereum Sepolia and Clockchain single-validator testnet exercise.
 No money moves. Do not install or use AgentDash. Do not invent success states.
@@ -24,11 +24,11 @@ authorization anchors. The only Clockchain authorization anchors are exactly:
 
 For a session that the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and `ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`.
 
-Current MCP status: the hosted server is `https://mcp.clockchain.network/mcp`
-and its source lives in the separate specs repository at `packages/mcp-server`.
-It does not yet expose a general payer-mandate discovery tool. In this manual
-demo, the signed session mandate is delivered through the authenticated
-coordination relay.
+This demo uses a Payer-owned local TLS MCP `/mcp` endpoint for payment intake.
+The hosted Clockchain MCP server is not used for `request_payment`. Payer must
+be ready first and must provide only the public MCP URL, public TLS certificate,
+and lowercase 64-hex certificate fingerprint through the operator-approved
+public channel.
 
 Only the operator's fresh aggregate verifier may emit the authorizing verdict.
 Requestor may report local progress and marker-complete public artifact digests,
@@ -37,23 +37,54 @@ aggregation, descriptor creation, or aggregate verification from this prompt.
 
 ## Automated Supervisor Session
 
-The operator privately provides one role-specific launch-manifest path and one
-fresh private state directory. Start Requestor's one long-lived supervisor exactly
-once:
+The public repository is
+`https://github.com/thetangstr/clockchain-handshake.git`. Before handling any
+private material, confirm that you are Requestor and confirm the exact
+operator-provided immutable 40-character SHA:
 
 ```sh
-npm run bilateral:supervisor -- \
-  --launch-manifest "$REQUESTOR_LAUNCH_MANIFEST" \
-  --state "$REQUESTOR_SUPERVISOR_STATE"
+export BILATERAL_REPOSITORY_SHA="${BILATERAL_REPOSITORY_SHA:?set operator-provided exact reviewed 40-character SHA}"
+printf '%s\n' "$BILATERAL_REPOSITORY_SHA" | grep -Eq '^[0-9a-f]{40}$'
+git clone --no-checkout https://github.com/thetangstr/clockchain-handshake.git clockchain-handshake
+cd clockchain-handshake
+git fetch --depth 1 origin "$BILATERAL_REPOSITORY_SHA"
+git checkout --detach "$BILATERAL_REPOSITORY_SHA"
+test "$(git rev-parse HEAD)" = "$BILATERAL_REPOSITORY_SHA"
+npm ci --ignore-scripts
 ```
 
+Keep Requestor's private state root separate from the
+operator and Payer roots.
+
+The operator privately provides one Requestor launch-manifest path, one fresh
+private state directory, and Payer's public MCP details after Payer reports
+`PAYER_MCP_READY`. Do not start `npm run bilateral:supervisor` directly.
+Generate one fresh canonical UUIDv4 intake request ID, then start the
+request-payment wrapper exactly once:
+
+```sh
+REQUESTOR_INTAKE_REQUEST_ID="$(node -e 'console.log(require("node:crypto").randomUUID())')"
+npm run bilateral:request-payment -- \
+  --launch-manifest "$REQUESTOR_LAUNCH_MANIFEST" \
+  --intake-request-id "$REQUESTOR_INTAKE_REQUEST_ID" \
+  --mcp-url "$PAYER_MCP_URL" \
+  --state "$REQUESTOR_SUPERVISOR_STATE" \
+  --tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
+  --tls-fingerprint "$PAYER_MCP_TLS_FINGERPRINT"
+```
+
+The wrapper must visibly emit exact `HANDSHAKE_REQUIRED`; the wrapper alone then
+starts the Requestor supervisor and stays attached. Treat any other status,
+missing status, changed MCP TLS certificate, changed fingerprint, or direct
+supervisor instruction as a fail-closed stop.
+
 The supervisor stays alive across both runs: rehearsal first, then stakeholder.
-It creates and retains Requestor's coordination key, preflight key, one token, and
-two invitation secrets locally. It follows only authenticated operator events
-and repository-owned command builders. It must not improvise commands, alter
-paths, or accept a replacement SHA, prompt, token, invitation, descriptor, or
-output directory. The launch manifest expires after 60 minutes; after expiry,
-stop and request a newly reviewed release instead of reusing it.
+It creates and retains Requestor's coordination key, preflight key, one token,
+and two invitation secrets locally. It follows only authenticated operator
+events and repository-owned command builders. It must not improvise commands,
+alter paths, or accept a replacement SHA, prompt, token, invitation, descriptor,
+MCP detail, or output directory. The launch manifest expires after 60 minutes;
+after expiry, stop and request a newly reviewed release instead of reusing it.
 
 The launch manifest binds the exact relay URL and TLS certificate fingerprint.
 The supervisor pins that fingerprint before sending or receiving coordination
@@ -70,6 +101,13 @@ The operator privately sets:
 - `BILATERAL_REPOSITORY_SHA`: reviewed immutable repository SHA, exactly 40
   lowercase hexadecimal characters.
 - `REQUESTOR_LAUNCH_MANIFEST`: Requestor's operator-signed launch manifest.
+- `REQUESTOR_INTAKE_REQUEST_ID`: one fresh canonical UUIDv4 for this payment
+  request.
+- `PAYER_MCP_URL`: Payer-owned local TLS MCP `/mcp` URL from `PAYER_MCP_READY`.
+- `PAYER_MCP_TLS_CERTIFICATE`: transferred Payer-owned local MCP public TLS
+  certificate path.
+- `PAYER_MCP_TLS_FINGERPRINT`: pinned lowercase 64-hex certificate fingerprint
+  from `PAYER_MCP_READY`.
 - `REQUESTOR_SUPERVISOR_STATE`: Requestor's mode-`0700` private supervisor state root.
 - `REQUESTOR_INVITATION_FILE`: Requestor's reserved mode-`0600` invitation, used only
   by approved repository commands.

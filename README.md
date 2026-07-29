@@ -52,11 +52,11 @@ establishes that Requestor followed Payer's signed mandate, Payer anchored `PROP
 bytes from Clockchain. Every transition and verdict preserves
 `paymentMoved: false`.
 
-Current MCP status: the hosted server is `https://mcp.clockchain.network/mcp`
-and its source lives in the separate specs repository at `packages/mcp-server`.
-It does not yet expose a general payer-mandate discovery tool. In this manual
-demo, the signed session mandate is delivered through the authenticated
-coordination relay.
+The payment-intake path uses a Payer-owned local TLS MCP `/mcp` endpoint. The
+hosted Clockchain MCP service is not used for `request_payment`. Requestor asks
+Payer's local MCP for payment, receives `HANDSHAKE_REQUIRED`, and only then the
+Requestor wrapper starts the long-lived supervisor that follows the signed
+mandate through the relay-backed handshake.
 
 Runner local state is not operator authorization. Neither role runner nor the
 read-only watcher may emit `AUTHORIZED`; only the operator's fresh aggregate
@@ -70,20 +70,24 @@ The automated demo-day surface is CLI-first:
 npm run bilateral:relay -- <operator relay paths and pinned release SHA>
 npm run bilateral:coordinator -- <operator-local paths and pinned release SHA>
 npm run bilateral:console -- --state-root <operator release root>
-npm run bilateral:supervisor -- --launch-manifest <role manifest> --state <private state directory>
+npm run bilateral:supervisor -- --launch-manifest <payer manifest> --state <payer private state> --payer-mcp-host <host> --payer-mcp-port <port> --payer-mcp-tls-certificate <public cert> --payer-mcp-tls-private-key <private key>
+npm run bilateral:request-payment -- --launch-manifest <requestor manifest> --intake-request-id <uuidv4> --mcp-url <payer local mcp url> --state <requestor private state> --tls-certificate <payer public cert> --tls-fingerprint <lowercase sha256>
 ```
 
 The startup control order is:
-`relay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor`.
+`relay -> coordinator -> console -> funding readiness -> Payer local MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
 Here, funding means validating and arming the reusable Sepolia treasury lane
-before either role starts. After enrollment reveals the four fresh addresses,
-the operator executes exactly four `0.01 Sepolia ETH` allocations.
+before either role starts. The actual funding batch waits for the coordinator's
+signed address record. After enrollment reveals the four fresh addresses, the
+operator executes exactly four `0.01 Sepolia ETH` allocations.
 
-Run the supervisor command once on Payer and once on Requestor. Those two processes
-span the rehearsal and stakeholder runs. After they enroll, the coordinator
-displays four signed public addresses; funding those four addresses is the
-user's only other action. Low-level preparation and exact-input recovery
-commands are confined to the runbook's operator-authorized recovery appendix.
+Run the Payer supervisor command once, then run the Requestor request-payment
+wrapper once after `PAYER_MCP_READY`; the wrapper starts the Requestor
+supervisor. Those two role processes span the rehearsal and stakeholder runs.
+After they enroll, the coordinator displays four signed public addresses;
+funding those four addresses is the user's only other action. Low-level
+preparation and exact-input recovery commands are confined to the runbook's
+operator-authorized recovery appendix.
 
 Passing deterministic checks makes this release rehearsal-ready, not
 live-validated. Only a funded physical rehearsal whose fresh aggregate
