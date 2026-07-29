@@ -1,6 +1,6 @@
-import { createHash, X509Certificate } from "node:crypto";
+import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { chmod, lstat, mkdir, open } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import https from "node:https";
 import net from "node:net";
 import { join, resolve } from "node:path";
@@ -23,6 +23,8 @@ const MAX_RESPONSE_BYTES = 65_536;
 const REQUEST_TIMEOUT_MS = 10_000;
 const ACCEPT = "application/json, text/event-stream";
 const JSON_CONTENT_TYPE = "application/json";
+const expectedUid = process.getuid?.();
+const TEMPORARY_INTAKE_FILE = /^\.requestor-mcp-intake-[0-9a-f]{32}\.tmp$/;
 
 function fail() {
   throw new Error("Requestor MCP client failed safely.");
@@ -39,6 +41,49 @@ function deepFreeze(value) {
     Object.freeze(value);
   }
   return value;
+}
+
+function sameIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function hasPrivateDirectoryMetadata(metadata) {
+  return metadata.isDirectory() && !metadata.isSymbolicLink() && metadata.uid === expectedUid && (metadata.mode & 0o777) === 0o700;
+}
+
+function hasPrivateFileMetadata(metadata) {
+  return metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1 && metadata.uid === expectedUid && (metadata.mode & 0o777) === 0o600;
+}
+
+async function createPrivateStateRoot(rootPath) {
+  if (typeof rootPath !== "string" || expectedUid === undefined) fail();
+  try {
+    const existing = await lstat(rootPath);
+    if (!hasPrivateDirectoryMetadata(existing)) fail();
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    await mkdir(rootPath, { mode: 0o700 });
+  }
+  const before = await lstat(rootPath);
+  if (!hasPrivateDirectoryMetadata(before)) fail();
+  const handle = await open(rootPath, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = await handle.stat();
+    if (!sameIdentity(before, opened) || !hasPrivateDirectoryMetadata(opened)) fail();
+    const assertPinned = async () => {
+      const current = await lstat(rootPath);
+      const live = await handle.stat();
+      if (!sameIdentity(before, current) || !sameIdentity(before, live) || !hasPrivateDirectoryMetadata(current) || !hasPrivateDirectoryMetadata(live)) fail();
+    };
+    await assertPinned();
+    for (const entry of await readdir(rootPath)) {
+      if (TEMPORARY_INTAKE_FILE.test(entry)) fail();
+    }
+    return Object.freeze({ assertPinned, handle, rootPath });
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
 }
 
 function exactObject(value, keys) {
@@ -364,21 +409,45 @@ function validateTools(response) {
 }
 
 async function persistRequestorIntake({ result, stateRoot }) {
-  await mkdir(stateRoot, { mode: 0o700, recursive: true });
-  await chmod(stateRoot, 0o700);
-  const metadata = await lstat(stateRoot);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink() || (metadata.mode & 0o777) !== 0o700) fail();
   const path = join(stateRoot, REQUESTOR_MCP_INTAKE_FILE_NAME);
-  if (resolve(path) !== path || !path.startsWith(`${stateRoot}/`)) fail();
+  const temporary = join(stateRoot, `.requestor-mcp-intake-${randomBytes(16).toString("hex")}.tmp`);
+  let handle;
+  if (resolve(path) !== path || !path.startsWith(`${stateRoot}/`) || resolve(temporary) !== temporary || !temporary.startsWith(`${stateRoot}/`)) fail();
+  const root = await createPrivateStateRoot(stateRoot);
   const bytes = Buffer.from(canonicalBytes(result).toString("utf8"), "utf8");
-  const handle = await open(path, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600);
   try {
+    await root.assertPinned();
+    handle = await open(temporary, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | (fsConstants.O_NOFOLLOW ?? 0), 0o600);
+    const openedTemporary = await handle.stat();
+    if (!hasPrivateFileMetadata(openedTemporary)) fail();
     await handle.writeFile(bytes);
-  } finally {
+    await handle.sync();
     await handle.close();
+    handle = undefined;
+    await root.assertPinned();
+    await link(temporary, path);
+    await unlink(temporary);
+    await root.assertPinned();
+    await root.handle.sync();
+    const finalMetadata = await lstat(path);
+    if (!hasPrivateFileMetadata(finalMetadata) || finalMetadata.size !== bytes.length) fail();
+    const readbackHandle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    try {
+      const openedFinal = await readbackHandle.stat();
+      if (!sameIdentity(finalMetadata, openedFinal) || !hasPrivateFileMetadata(openedFinal)) fail();
+      const buffer = Buffer.alloc(bytes.length + 1);
+      const { bytesRead } = await readbackHandle.read(buffer, 0, buffer.length, 0);
+      if (bytesRead !== bytes.length || !buffer.subarray(0, bytesRead).equals(bytes)) fail();
+      const parsed = parseJson(buffer.subarray(0, bytesRead).toString("utf8"));
+      if (!isDeepStrictEqual(parsed, result) || canonicalBytes(parsed).toString("utf8") !== bytes.toString("utf8")) fail();
+    } finally {
+      await readbackHandle.close();
+    }
+  } finally {
+    if (handle) await handle.close();
+    await unlink(temporary).catch(() => {});
+    await root.handle.close();
   }
-  const file = await lstat(path);
-  if (!file.isFile() || file.isSymbolicLink() || file.nlink !== 1 || (file.mode & 0o777) !== 0o600) fail();
 }
 
 export async function requestPaymentThroughPayerMcp(input) {

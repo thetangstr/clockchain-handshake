@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, X509Certificate } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -121,6 +121,57 @@ test("pinned Requestor client completes exact MCP lifecycle, persists public int
   const persisted = await readFile(join(stateRoot, REQUESTOR_MCP_INTAKE_FILE_NAME), "utf8");
   assert.equal(persisted.includes(CAPABILITY), false);
   assert.deepEqual(JSON.parse(persisted), result);
+});
+
+test("client rejects symlink state root before chmod or persistence can mutate the target", async (t) => {
+  const server = await makeServer(t);
+  const root = await mkdtemp(join(tmpdir(), "requestor-mcp-client-symlink-"));
+  const target = join(root, "target");
+  const stateRoot = join(root, "state-link");
+  await chmod(root, 0o700);
+  await mkdir(target, { mode: 0o755 });
+  await symlink(target, stateRoot);
+  const before = await lstat(target);
+  t.after(() => rm(root, { force: true, recursive: true }));
+
+  await assert.rejects(
+    requestPaymentThroughPayerMcp({
+      capability: CAPABILITY,
+      intakeRequestId: INTAKE_REQUEST_ID,
+      mcpUrl: server.url,
+      repositorySha: REPOSITORY_SHA,
+      stateRoot,
+      tlsCertificatePem: server.tlsCertificatePem,
+      tlsFingerprint: server.fingerprint,
+    }),
+    /Requestor MCP client failed safely/,
+  );
+  const after = await lstat(target);
+  assert.equal(after.mode & 0o777, before.mode & 0o777);
+  await assert.rejects(readFile(join(target, REQUESTOR_MCP_INTAKE_FILE_NAME)), { code: "ENOENT" });
+});
+
+test("client validates durable canonical readback before returning success", async (t) => {
+  const server = await makeServer(t);
+  const stateRoot = await mkdtemp(join(tmpdir(), "requestor-mcp-client-readback-"));
+  await chmod(stateRoot, 0o700);
+  t.after(() => rm(stateRoot, { force: true, recursive: true }));
+  const resultPath = join(stateRoot, REQUESTOR_MCP_INTAKE_FILE_NAME);
+  await writeFile(resultPath, "partial", { mode: 0o600 });
+
+  await assert.rejects(
+    requestPaymentThroughPayerMcp({
+      capability: CAPABILITY,
+      intakeRequestId: INTAKE_REQUEST_ID,
+      mcpUrl: server.url,
+      repositorySha: REPOSITORY_SHA,
+      stateRoot,
+      tlsCertificatePem: server.tlsCertificatePem,
+      tlsFingerprint: server.fingerprint,
+    }),
+    /Requestor MCP client failed safely/,
+  );
+  assert.equal(await readFile(resultPath, "utf8"), "partial");
 });
 
 test("client rejects transport, lifecycle, schema, result, duplicate-key, and cleanup failures before persisting", async (t) => {

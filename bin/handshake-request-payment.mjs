@@ -2,6 +2,7 @@
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { readLaunchManifest } from "../src/bilateral/coordination/manifest.mjs";
@@ -19,7 +20,22 @@ export const REQUEST_PAYMENT_CLI_FLAGS = Object.freeze([
 ]);
 const execFileAsync = promisify(execFile);
 const FAILURE_LINE = '{"code":"REQUEST_PAYMENT_FAILED","paymentMoved":false}\n';
+const HANDSHAKE_REQUIRED_LINE = '{"paymentMoved":false,"status":"HANDSHAKE_REQUIRED"}\n';
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
+const REQUEST_PAYMENT_REPOSITORY_ROOT = resolve(fileURLToPath(new URL("../", import.meta.url)));
+const GIT_ENV = Object.freeze(Object.assign(Object.create(null), {
+  GIT_ATTR_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_NO_REPLACE_OBJECTS: "1",
+  GIT_OPTIONAL_LOCKS: "0",
+  GIT_TERMINAL_PROMPT: "0",
+  LANG: "C",
+  LC_ALL: "C",
+  PATH: "/usr/bin:/bin",
+}));
+const GIT_PREFIX = Object.freeze(["--no-pager", "--no-replace-objects", "-c", "core.attributesFile=/dev/null", "-c", "core.excludesFile=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false", "-C"]);
 
 function fail() {
   throw new Error("Request payment startup failed safely.");
@@ -59,23 +75,20 @@ function absolutePrivatePath(value) {
   return value;
 }
 
-async function inspectRepository(repositoryRoot = process.cwd()) {
+async function inspectRepository(repositoryRoot = REQUEST_PAYMENT_REPOSITORY_ROOT) {
   const cwd = resolve(repositoryRoot);
   const git = (arguments_) => execFileAsync("/usr/bin/git", arguments_, {
     cwd,
     encoding: "utf8",
-    env: {
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_TERMINAL_PROMPT: "0",
-      PATH: "/usr/bin:/bin",
-    },
+    env: GIT_ENV,
     maxBuffer: 8192,
   });
-  const { stdout: head } = await git(["rev-parse", "--verify", "HEAD^{commit}"]);
-  const { stdout: status } = await git(["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"]);
+  const run = (arguments_) => git([...GIT_PREFIX, cwd, ...arguments_]);
+  const { stdout: head } = await run(["rev-parse", "--verify", "HEAD^{commit}"]);
+  const { stdout: status } = await run(["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"]);
   let detached = false;
   try {
-    await git(["symbolic-ref", "-q", "HEAD"]);
+    await run(["symbolic-ref", "-q", "HEAD"]);
   } catch (error) {
     detached = error?.code === 1;
   }
@@ -94,7 +107,7 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
     const parsed = parseArguments(arguments_);
     const inspect = dependencies.inspectRepository ?? inspectRepository;
     if (typeof inspect !== "function") fail();
-    const verifiedHead = validateRepositoryProof(await inspect(process.cwd()));
+    const verifiedHead = validateRepositoryProof(await inspect(REQUEST_PAYMENT_REPOSITORY_ROOT));
     const reader = dependencies.readLaunchManifest ?? readLaunchManifest;
     const manifest = await reader(parsed.launchManifestPath);
     if (
@@ -117,7 +130,7 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
       tlsFingerprint: parsed.tlsFingerprint,
     });
     if (intakeResult?.status !== "HANDSHAKE_REQUIRED" || intakeResult.paymentMoved !== false) fail();
-    const writeStatus = dependencies.writeStatus ?? ((value) => process.stdout.write(createSupervisorStatusLine(value)));
+    const writeStatus = dependencies.writeStatus ?? (() => process.stdout.write(HANDSHAKE_REQUIRED_LINE));
     writeStatus(Object.freeze({ paymentMoved: false, status: "HANDSHAKE_REQUIRED" }));
     const supervisor = dependencies.runSupervisor ?? (async (input) => runSupervisor({
       launchManifestPath: input.launchManifestPath,

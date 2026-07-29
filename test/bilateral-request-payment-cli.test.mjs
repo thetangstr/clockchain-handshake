@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
@@ -12,6 +13,7 @@ const CAPABILITY = "ab".repeat(32);
 const REPOSITORY_SHA = "abcdef0123456789abcdef0123456789abcdef01";
 const INTAKE_REQUEST_ID = "00000000-0000-4000-8000-000000000000";
 const execFileAsync = promisify(execFile);
+const REPOSITORY_ROOT = resolve(fileURLToPath(new URL("../", import.meta.url)));
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "request-payment-cli-"));
@@ -96,6 +98,44 @@ test("Requestor CLI exposes exactly six options, validates clean immutable state
   ]);
 });
 
+test("Requestor CLI default success path emits fixed secret-free HANDSHAKE_REQUIRED line and starts supervisor", async () => {
+  const fx = await fixture();
+  const writes = [];
+  const originalWrite = process.stdout.write;
+  process.stdout.write = function patchedWrite(chunk, ...rest) {
+    writes.push(String(chunk));
+    return true;
+  };
+  try {
+    const result = await main(fx.args, {
+      async inspectRepository() {
+        return { clean: true, detached: true, head: REPOSITORY_SHA };
+      },
+      async readLaunchManifest() {
+        return {
+          payerMcpIntakeCapability: CAPABILITY,
+          repositorySha: REPOSITORY_SHA,
+          role: "payee",
+        };
+      },
+      async readTextFile() {
+        return "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n";
+      },
+      async requestPayment() {
+        return { paymentMoved: false, status: "HANDSHAKE_REQUIRED" };
+      },
+      async runSupervisor() {
+        return { paymentMoved: false, supervisor: "started" };
+      },
+    });
+    assert.deepEqual(result, { paymentMoved: false, supervisor: "started" });
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+  assert.deepEqual(writes, ['{"paymentMoved":false,"status":"HANDSHAKE_REQUIRED"}\n']);
+  assert.equal(writes.join("").includes(CAPABILITY), false);
+});
+
 test("spawned Requestor CLI failure emits exact secret-free REQUEST_PAYMENT_FAILED line and no stack", async () => {
   await assert.rejects(
     execFileAsync(process.execPath, ["bin/handshake-request-payment.mjs"], {
@@ -137,6 +177,56 @@ test("Requestor CLI verifies clean detached HEAD before reading manifest, TLS, o
     /Request payment startup failed safely/,
   );
   assert.deepEqual(calls, ["inspectRepository"]);
+});
+
+test("Requestor CLI verifies the module repository root before private reads even when cwd is a separate clean checkout", async (t) => {
+  const fx = await fixture();
+  const otherRoot = await mkdtemp(join(tmpdir(), "request-payment-clean-cwd-"));
+  t.after(() => execFileSync("/bin/rm", ["-rf", otherRoot]));
+  execFileSync("/usr/bin/git", ["init"], { cwd: otherRoot, stdio: "ignore" });
+  execFileSync("/usr/bin/git", ["config", "user.email", "fixture@example.invalid"], { cwd: otherRoot });
+  execFileSync("/usr/bin/git", ["config", "user.name", "fixture"], { cwd: otherRoot });
+  await writeFile(join(otherRoot, "README.md"), "clean other repo\n");
+  execFileSync("/usr/bin/git", ["add", "."], { cwd: otherRoot });
+  execFileSync("/usr/bin/git", ["commit", "-m", "other repo"], { cwd: otherRoot, stdio: "ignore" });
+  const otherHead = execFileSync("/usr/bin/git", ["rev-parse", "HEAD"], { cwd: otherRoot, encoding: "utf8" }).trim();
+  execFileSync("/usr/bin/git", ["checkout", "--detach", otherHead], { cwd: otherRoot, stdio: "ignore" });
+
+  const originalCwd = process.cwd();
+  process.chdir(otherRoot);
+  try {
+    const calls = [];
+    await assert.rejects(
+      main(fx.args, {
+        async readLaunchManifest() {
+          calls.push("readLaunchManifest");
+          return {
+            payerMcpIntakeCapability: CAPABILITY,
+            repositorySha: otherHead,
+            role: "payee",
+          };
+        },
+        async readTextFile() {
+          calls.push("readTextFile");
+          return "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n";
+        },
+        async requestPayment() {
+          calls.push("requestPayment");
+          return { paymentMoved: false, status: "HANDSHAKE_REQUIRED" };
+        },
+        async runSupervisor() {
+          calls.push("runSupervisor");
+        },
+      }),
+      /Request payment startup failed safely/,
+    );
+    assert.equal(calls.includes("readTextFile"), false);
+    assert.equal(calls.includes("requestPayment"), false);
+    assert.equal(calls.includes("runSupervisor"), false);
+  } finally {
+    process.chdir(originalCwd);
+  }
+  assert.equal(REPOSITORY_ROOT.endsWith("riyadh-v3"), true);
 });
 
 test("Requestor CLI binds manifest repositorySha to verified clean detached HEAD before private capability use", async () => {
