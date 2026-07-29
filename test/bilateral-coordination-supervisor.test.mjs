@@ -12,6 +12,7 @@ import { coordinationEnrollmentSignaturePreimage, verifyCoordinationEnrollment }
 import { parseCoordinationEnrollmentSet } from "../src/bilateral/coordination/enrollment.mjs";
 import { payerMandateDigest, signPayerMandate } from "../src/bilateral/payer-mandate.mjs";
 import { paymentRequestDigest, signPaymentRequest } from "../src/bilateral/payment-request.mjs";
+import { DEMO_INTENT_POLICY } from "../src/bilateral/demo-intent-policy.mjs";
 
 import {
   SUPERVISOR_COMMAND_POLICY,
@@ -204,6 +205,16 @@ test("pins the supervisor schema and closed role-run command policy", () => {
     event: { kind: "START_REHEARSAL", repositorySha: "a".repeat(40), role: "operator", subjectRun: "rehearsal" },
     localState: { repositorySha: "a".repeat(40), role: "payer", tokenPath: "/state/token", rehearsal: { descriptorPath: "/state/rehearsal/descriptor", invitationPath: "/state/rehearsal/invitation", resultDirectory: "/state/rehearsal/result" } },
   }), { args: ["--clockchain-token-file", "/state/token", "--descriptor", "/state/rehearsal/descriptor", "--invitation", "/state/rehearsal/invitation", "--output", "/state/rehearsal/result", "--i-understand-this-writes-to-clockchain"], command: "bin/handshake-propose.mjs" });
+});
+
+test("supervisor demo intent policy comes from the shared frozen module", () => {
+  assert.deepEqual(DEMO_INTENT_POLICY, {
+    amount: { currency: "USD", value: "100" },
+    invoiceReferencePrefix: "invoice-",
+    purpose: "Handshake demo",
+  });
+  assert.equal(Object.isFrozen(DEMO_INTENT_POLICY), true);
+  assert.equal(Object.isFrozen(DEMO_INTENT_POLICY.amount), true);
 });
 
 test("bootstraps only through the pinned dependency contract", async () => {

@@ -12,6 +12,7 @@ import { validateRelayArtifactWithFacts as defaultValidateRelayArtifactWithFacts
 import { readAndSignTokenCommitment as defaultReadAndSignTokenCommitment, verifyTokenCommitment } from "./preflight.mjs";
 import { payerMandateDigest, verifyPayerMandate } from "../payer-mandate.mjs";
 import { paymentRequestDigest, verifyPaymentRequest } from "../payment-request.mjs";
+import { DEMO_INTENT_POLICY } from "../demo-intent-policy.mjs";
 
 export const SUPERVISOR_STATE_SCHEMA = "clockchain.bilateral-supervisor-state/v1";
 export const SUPERVISOR_COMMAND_POLICY = Object.freeze({
@@ -85,11 +86,6 @@ function descriptorJournal({ event, stage }) {
 function sameDescriptorJournal(value, event, stage) {
   return value && value.artifactDigest === event.artifactDigest && value.eventDigest === event.eventDigest && value.stage === stage && value.subjectRun === event.subjectRun;
 }
-const DEMO_INTENT_POLICY = Object.freeze({
-  amount: Object.freeze({ currency: "USD", value: "100" }),
-  invoiceReferencePrefix: "invoice-",
-  purpose: "Handshake demo",
-});
 function partyFromIdentity(identity) {
   if (!identity || typeof identity.address !== "string" || typeof identity.agentId !== "string") invalid();
   return Object.freeze({ address: identity.address, agentId: identity.agentId });
