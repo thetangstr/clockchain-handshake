@@ -246,6 +246,7 @@ test("rejects pathname replacement during exclusive create", async (t) => {
       }
       return (await import("node:fs/promises")).open(path, flags, mode);
     },
+    link: async (...args) => (await import("node:fs/promises")).link(...args),
     readdir,
     rename: async (...args) => (await import("node:fs/promises")).rename(...args),
     unlink: async (...args) => (await import("node:fs/promises")).unlink(...args),
@@ -255,4 +256,34 @@ test("rejects pathname replacement during exclusive create", async (t) => {
     request: validInput(),
     response: buildPaymentIntakeToolResult({ repositorySha: REPOSITORY_SHA, toolInput: validInput() }),
   }));
+});
+
+test("rejects a final-path record injected between scan and finalization without overwriting it", async (t) => {
+  const root = await tempRoot(t);
+  const finalPath = await recordPath(root);
+  const injectedBytes = Buffer.from("{}", "utf8");
+  let injected = false;
+  const fileSystem = {
+    lstat,
+    mkdir,
+    open: async (...args) => (await import("node:fs/promises")).open(...args),
+    async link(source, destination) {
+      if (destination === finalPath && !injected) {
+        injected = true;
+        await writeFile(finalPath, injectedBytes, { mode: 0o600 });
+      }
+      return (await import("node:fs/promises")).link(source, destination);
+    },
+    readdir,
+    rename: async (...args) => (await import("node:fs/promises")).rename(...args),
+    unlink: async (...args) => (await import("node:fs/promises")).unlink(...args),
+  };
+  const store = await createPayerMcpIntakeStore({ fileSystem, repositorySha: REPOSITORY_SHA, stateRoot: root });
+  await assertStoreRejects(store.writeIntake({
+    request: validInput(),
+    response: buildPaymentIntakeToolResult({ repositorySha: REPOSITORY_SHA, toolInput: validInput() }),
+  }));
+  assert.equal(injected, true);
+  assert.deepEqual(await readFile(finalPath), injectedBytes);
+  assert.deepEqual(await readdir(join(root, PAYER_MCP_INTAKE_DIRECTORY_NAME)), [`${INTAKE_REQUEST_ID}.json`]);
 });

@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { canonicalBytes } from "../canonical.mjs";
@@ -225,8 +225,8 @@ function validateRecord({ record, repositorySha }) {
 }
 
 function defaultFileSystem(value) {
-  if (value === undefined) return Object.freeze({ lstat, mkdir, open, readdir, rename, unlink });
-  const keys = ["lstat", "mkdir", "open", "readdir", "rename", "unlink"];
+  if (value === undefined) return Object.freeze({ link, lstat, mkdir, open, readdir, unlink });
+  const keys = ["link", "lstat", "mkdir", "open", "readdir", "unlink"];
   if (!value || keys.some((key) => typeof value[key] !== "function")) fail();
   return value;
 }
@@ -354,7 +354,9 @@ async function writeExclusiveRecord({ bytes, path, root, fs }) {
     await handle.close();
     handle = undefined;
     await root.assertPinned();
-    await fs.rename(temporary, path);
+    await fs.link(temporary, path);
+    await root.handle.sync();
+    await fs.unlink(temporary);
     await root.handle.sync();
     const readback = await readStableFile(path, fs);
     if (!readback.equals(bytes)) fail();
