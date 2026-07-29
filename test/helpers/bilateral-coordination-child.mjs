@@ -20,8 +20,10 @@ import { createGitInspector, createProductionSupervisorDependencies } from "../.
 import { createCoordinatorRuntimeDependencies, loadOrCreateCoordinatorRelease, parseCoordinatorArguments, readCoordinatorRuntimeConfig } from "../../src/bilateral/coordination/coordinator-runtime.mjs";
 import { runCoordinator as runProductionCoordinator } from "../../src/bilateral/coordination/coordinator.mjs";
 import { validateRelayArtifactWithFacts } from "../../src/bilateral/coordination/artifact.mjs";
+import { requestPaymentThroughPayerMcp } from "../../src/bilateral/local-mcp/client.mjs";
 import { main as proposeMain } from "../../bin/handshake-propose.mjs";
 import { main as acceptMain } from "../../bin/handshake-accept.mjs";
+import { main as requestPaymentMain } from "../../bin/handshake-request-payment.mjs";
 import { main as preflightMain } from "../../scripts/probe-bilateral-rendezvous.mjs";
 import { runCli as registrationRunCli } from "../../scripts/register-bilateral-identity.mjs";
 import { buildDefaultVerifierInput, main as verifierMain } from "../../scripts/verify-bilateral-results.mjs";
@@ -131,8 +133,28 @@ function validFake(value) {
     && Number.isInteger(value.port);
 }
 
+function validPayerMcpServer(value) {
+  return value === null || exact(value, ["host", "port", "tlsCertificatePath", "tlsPrivateKeyPath"])
+    && value.host === "127.0.0.1"
+    && Number.isInteger(value.port)
+    && value.port >= 0
+    && value.port <= 65_535
+    && absolute(value.tlsCertificatePath)
+    && absolute(value.tlsPrivateKeyPath);
+}
+
+function validRequestPayment(value) {
+  return value === null || exact(value, ["intakeRequestId", "mcpUrl", "tlsCertificatePath", "tlsFingerprint"])
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.intakeRequestId)
+    && typeof value.mcpUrl === "string"
+    && value.mcpUrl.startsWith("https://127.0.0.1:")
+    && value.mcpUrl.endsWith("/mcp")
+    && absolute(value.tlsCertificatePath)
+    && /^[0-9a-f]{64}$/.test(value.tlsFingerprint);
+}
+
 function validRoleConfiguration(value, role) {
-  if (!exact(value, ["agentIds", "clockMs", "controlBarrier", "fake", "launchManifestPath", "preflightFake", "repositoryRoot", "role", "scenario", "schema", "sepoliaRpc", "startBarrier", "stateRoot", "token"])
+  if (!exact(value, ["agentIds", "clockMs", "controlBarrier", "fake", "launchManifestPath", "payerMcpServer", "preflightFake", "repositoryRoot", "requestPayment", "role", "scenario", "schema", "sepoliaRpc", "startBarrier", "stateRoot", "token"])
     || value.schema !== ROLE_SCHEMA
     || value.role !== role
     || !validFake(value.fake)
@@ -151,8 +173,12 @@ function validRoleConfiguration(value, role) {
     || !/^[1-9][0-9]*$/.test(value.agentIds.rehearsal)
     || !/^[1-9][0-9]*$/.test(value.agentIds.stakeholder)
     || value.agentIds.rehearsal === value.agentIds.stakeholder || !Number.isSafeInteger(value.clockMs) || value.clockMs < 0
-    || !PROCESS_SCENARIOS.has(value.scenario)) fail();
+    || !PROCESS_SCENARIOS.has(value.scenario)
+    || !validPayerMcpServer(value.payerMcpServer)
+    || !validRequestPayment(value.requestPayment)) fail();
   if (value.controlBarrier !== null && (!exact(value.controlBarrier, ["ready", "release"]) || !absolute(value.controlBarrier.ready) || !absolute(value.controlBarrier.release))) fail();
+  if ((role === "payer") !== (value.payerMcpServer !== null)) fail();
+  if ((role === "payee") !== (value.requestPayment !== null)) fail();
   return value;
 }
 
@@ -223,7 +249,7 @@ function supervisorLauncher(value, role, owners, inspector) {
   const roleRunner = boundedRoleRunner(value, role, owners);
   const registration = async (args) => {
     const run = args[args.indexOf("--output") + 1].endsWith("/rehearsal/identity") ? "rehearsal" : "stakeholder";
-    const displayName = role === "payer" ? "Iris" : "Billie";
+    const displayName = role === "payer" ? "Payer" : "Requestor";
     const agentId = value.agentIds[run];
     const stableHash = (label) => `0x${createHash("sha256").update(`${role}:${run}:${label}`).digest("hex")}`;
     const dependencies = {
@@ -349,6 +375,7 @@ async function runSupervisorRole(value, role) {
   const tokenPath = await ensureRoleToken(configuration);
   const production = await createProductionSupervisorDependencies({
     launchManifestPath: configuration.launchManifestPath,
+    ...(configuration.payerMcpServer === null ? {} : { payerMcpServerOptions: configuration.payerMcpServer }),
     repositoryRoot: configuration.repositoryRoot,
     sepoliaRpc: async () => "0x0",
     stateRoot: configuration.stateRoot,
@@ -491,6 +518,46 @@ async function runSupervisorRole(value, role) {
       }
       return production.signPaymentRequest(changed);
     };
+  }
+  if (role === "payee" && configuration.requestPayment !== null) {
+    const requestArguments = [
+      "--launch-manifest", configuration.launchManifestPath,
+      "--intake-request-id", configuration.requestPayment.intakeRequestId,
+      "--mcp-url", configuration.requestPayment.mcpUrl,
+      "--state", configuration.stateRoot,
+      "--tls-certificate", configuration.requestPayment.tlsCertificatePath,
+      "--tls-fingerprint", configuration.requestPayment.tlsFingerprint,
+    ];
+    await requestPaymentMain(requestArguments, {
+      runSupervisor: async ({ launchManifestPath, stateRoot }) => {
+        if (launchManifestPath !== configuration.launchManifestPath || stateRoot !== configuration.stateRoot) fail();
+        const manifest = await production.readLaunchManifest(configuration.launchManifestPath);
+        const retry = await requestPaymentThroughPayerMcp({
+          capability: manifest.payerMcpIntakeCapability,
+          intakeRequestId: configuration.requestPayment.intakeRequestId,
+          mcpUrl: configuration.requestPayment.mcpUrl,
+          repositorySha: manifest.repositorySha,
+          stateRoot: configuration.stateRoot,
+          tlsCertificatePem: await readFile(configuration.requestPayment.tlsCertificatePath, "utf8"),
+          tlsFingerprint: configuration.requestPayment.tlsFingerprint,
+        });
+        if (retry?.paymentMoved !== false || retry.status !== "HANDSHAKE_REQUIRED") fail();
+        process.stdout.write(`${canonicalJson({ paymentMoved: false, status: "REQUESTOR_SUPERVISOR_START" })}\n`);
+        const supervisor = await createRoleSupervisor({
+          dependencies,
+          launchManifestPath: configuration.launchManifestPath,
+          stateRoot: configuration.stateRoot,
+        });
+        await supervisor.bootstrap();
+        await writeExclusive(configuration.startBarrier.ready, {
+          role,
+          schema: ROLE_SCHEMA,
+          stage: "bootstrap-complete",
+        });
+        return supervisor.run();
+      },
+    });
+    return;
   }
   const supervisor = await createRoleSupervisor({
     dependencies,
@@ -699,7 +766,7 @@ function validCoordinatorRole(value) {
 }
 
 function validCoordinatorConfiguration(value) {
-  if (!exact(value, ["arguments", "barrier", "children", "clockMs", "coordinatorFirst", "fake", "preflightFake", "repositoryRoot", "report", "scenario", "schema"])
+  if (!exact(value, ["arguments", "barrier", "children", "clockMs", "coordinatorFirst", "fake", "payerMcp", "preflightFake", "repositoryRoot", "report", "scenario", "schema"])
     || value.schema !== COORDINATOR_SCHEMA
     || typeof value.coordinatorFirst !== "boolean"
     || !Array.isArray(value.arguments)
@@ -717,6 +784,12 @@ function validCoordinatorConfiguration(value) {
     || !absolute(value.children.verifier.configPath)
     || !validLogs(value.children.verifier.logs)
     || !validFake(value.fake)
+    || !exact(value.payerMcp, ["certificatePath", "fingerprint", "host", "intakeRequestId", "privateKeyPath"])
+    || value.payerMcp.host !== "127.0.0.1"
+    || !absolute(value.payerMcp.certificatePath)
+    || !absolute(value.payerMcp.privateKeyPath)
+    || /^[0-9a-f]{64}$/.test(value.payerMcp.fingerprint) !== true
+    || /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.payerMcp.intakeRequestId) !== true
     || !validFake(value.preflightFake)
     || !absolute(value.repositoryRoot)
     || !absolute(value.report) || !Number.isSafeInteger(value.clockMs) || value.clockMs < 0
@@ -832,7 +905,7 @@ async function waitForLaunchManifests(release) {
   }
 }
 
-function supervisorConfiguration(value, role, release) {
+function supervisorConfiguration(value, role, release, requestPayment = null) {
   const child = value.children[role];
   const manifest = release.manifests?.find((entry) => entry.role === role);
   if (!manifest || !absolute(manifest.path)) fail();
@@ -842,8 +915,15 @@ function supervisorConfiguration(value, role, release) {
     controlBarrier: value.barrier,
     fake: value.fake,
     launchManifestPath: manifest.path,
+    payerMcpServer: role === "payer" ? Object.freeze({
+      host: value.payerMcp.host,
+      port: 0,
+      tlsCertificatePath: value.payerMcp.certificatePath,
+      tlsPrivateKeyPath: value.payerMcp.privateKeyPath,
+    }) : null,
     preflightFake: value.preflightFake,
     repositoryRoot: value.repositoryRoot,
+    requestPayment,
     role,
     scenario: value.scenario,
     schema: ROLE_SCHEMA,
@@ -852,6 +932,59 @@ function supervisorConfiguration(value, role, release) {
     stateRoot: child.stateRoot,
     token: child.token,
   });
+}
+
+async function waitForJsonLine(path, predicate, child) {
+  const deadline = Date.now() + BARRIER_DEADLINE_MS;
+  let offset = 0;
+  let tail = "";
+  while (Date.now() < deadline) {
+    try {
+      const text = await readFile(path, "utf8");
+      if (text.length < offset) fail();
+      const chunk = text.slice(offset);
+      offset = text.length;
+      const lines = `${tail}${chunk}`.split("\n");
+      tail = lines.pop() ?? "";
+      for (const line of lines) {
+        if (line.length === 0) continue;
+        let parsed;
+        try { parsed = JSON.parse(line); } catch { continue; }
+        const result = predicate(parsed);
+        if (result) return result;
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    if (childExited(child)) fail();
+    await sleep(20);
+  }
+  fail();
+}
+
+async function waitForPayerMcpReady(path, child) {
+  return waitForJsonLine(path, (line) => {
+    if (line?.paymentMoved === false && line.role === "payer" && line.status === "PAYER_MCP_READY") {
+      if (typeof line.url !== "string") fail();
+      return line;
+    }
+    return null;
+  }, child);
+}
+
+async function waitForRequestorSupervisorStart(path, child) {
+  const seen = [];
+  await waitForJsonLine(path, (line) => {
+    if (line?.paymentMoved === false && line.status === "HANDSHAKE_REQUIRED") {
+      seen.push(line);
+    }
+    if (line?.paymentMoved === false && line.status === "REQUESTOR_SUPERVISOR_START") {
+      if (seen.length !== 1) fail();
+      return line;
+    }
+    return null;
+  }, child);
+  return seen[0];
 }
 
 async function descriptorOwners(path) {
@@ -877,6 +1010,7 @@ async function runProductionCoordinatorChild(input) {
   let runtime;
   let payerProcess = null;
   let payeeProcess = null;
+  const mcpMilestones = [];
   let drainWatchers = async () => {};
   try {
     await phase("coordinator-runtime");
@@ -943,17 +1077,29 @@ async function runProductionCoordinatorChild(input) {
     coordinatorFirstRun?.catch(() => {});
     await phase("coordinator-role-start");
     if (!resumed) {
-      for (const role of ["payer", "payee"]) {
-        const child = value.children[role];
-        await writeOrReuseExact(child.configPath, supervisorConfiguration(value, role, release));
-        const process_ = await start({ logs: child.logs, mode: role, path: child.configPath });
-        if (role === "payer") payerProcess = process_;
-        else payeeProcess = process_;
-        active.add(process_);
-      }
+      await writeOrReuseExact(value.children.payer.configPath, supervisorConfiguration(value, "payer", release));
+      payerProcess = await start({ logs: value.children.payer.logs, mode: "payer", path: value.children.payer.configPath });
+      active.add(payerProcess);
       await phase("coordinator-role-bootstrap");
-      await Promise.all(["payer", "payee"].map((role) => waitForRoleBootstrap(privateRoleBarrier(value, role).ready, role)));
-      for (const role of ["payer", "payee"]) await writeOrReuseExact(privateRoleBarrier(value, role).release, { release: true });
+      await waitForRoleBootstrap(privateRoleBarrier(value, "payer").ready, "payer");
+      await writeOrReuseExact(privateRoleBarrier(value, "payer").release, { release: true });
+      const payerMcpReady = await waitForPayerMcpReady(value.children.payer.logs.stdout, payerProcess);
+      mcpMilestones.push(Object.freeze({ paymentMoved: false, sequence: "0", stage: "PAYER_MCP_READY", url: payerMcpReady.url }));
+      const requestPayment = Object.freeze({
+        intakeRequestId: value.payerMcp.intakeRequestId,
+        mcpUrl: payerMcpReady.url,
+        tlsCertificatePath: value.payerMcp.certificatePath,
+        tlsFingerprint: value.payerMcp.fingerprint,
+      });
+      await writeOrReuseExact(value.children.payee.configPath, supervisorConfiguration(value, "payee", release, requestPayment));
+      payeeProcess = await start({ logs: value.children.payee.logs, mode: "payee", path: value.children.payee.configPath });
+      active.add(payeeProcess);
+      await waitForRequestorSupervisorStart(value.children.payee.logs.stdout, payeeProcess);
+      await waitForRoleBootstrap(privateRoleBarrier(value, "payee").ready, "payee");
+      mcpMilestones.push(
+        Object.freeze({ paymentMoved: false, sequence: "1", stage: "HANDSHAKE_REQUIRED" }),
+        Object.freeze({ paymentMoved: false, sequence: "2", stage: "REQUESTOR_SUPERVISOR_START" }),
+      );
     }
     const base = coordinatorDependencies;
     await phase("coordinator-enrollment");
@@ -1088,6 +1234,7 @@ async function runProductionCoordinatorChild(input) {
       payer: { pid: payerProcess?.pid ?? null },
       payee: { pid: payeeProcess?.pid ?? null },
       paymentMoved: false,
+      mcpMilestones,
       readCountersAfterVerifier: afterVerifier,
       readCountersBeforeVerifier: beforeVerifier,
       release: { releaseId: current.releaseId, repositorySha: current.repositorySha, sessionId: current.sessionId },

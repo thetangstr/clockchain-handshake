@@ -23,6 +23,7 @@ const CONSOLE_VERIFICATION_PASSED = "VERIFICATION_PASSED";
 const PROCESS_PHASE_DEADLINE_MS = 90_000;
 const FAKE_CLOCKCHAIN_BASE_TIME_MS = 1_784_923_200_000;
 const SHARED_TEST_CLOCK_MS = FAKE_CLOCKCHAIN_BASE_TIME_MS - 1_000;
+const PAYER_MCP_INTAKE_REQUEST_ID = "11111111-2222-4333-8444-555555555555";
 assert.equal(new Date(FAKE_CLOCKCHAIN_BASE_TIME_MS).toISOString(), "2026-07-24T20:00:00.000Z");
 assert.equal(SHARED_TEST_CLOCK_MS < FAKE_CLOCKCHAIN_BASE_TIME_MS, true);
 const PROCESS_FAILURE_SCENARIOS = Object.freeze([
@@ -137,13 +138,16 @@ async function waitForPrivateMarker(path, expected, output) {
       return;
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
-      if (output?.child.exitCode !== null) {
+      if (output?.child.exitCode !== null || output?.child.signalCode !== null) {
         throw new Error(`readiness process exited: ${output.output().stderr}`);
       }
       await sleep(20);
     }
   }
-  throw new Error(`readiness missing before ${PROCESS_PHASE_DEADLINE_MS}ms: ${path}`);
+  throw new Error(
+    `readiness missing before ${PROCESS_PHASE_DEADLINE_MS}ms: ${path}; `
+    + `child=${output?.child.exitCode ?? "running"}/${output?.child.signalCode ?? "none"}`,
+  );
 }
 function spawned(args, options) {
   const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"], ...options });
@@ -226,6 +230,8 @@ function assertPaymentNeverMoved(value) { if (Array.isArray(value)) return value
 async function assertPrivateFile(path, { canonical = false, pretty = false } = {}) { const info = await lstat(path); assert.equal(info.isFile(), true); assert.equal(info.isSymbolicLink(), false); assert.equal(info.nlink, 1); assert.equal(info.mode & 0o777, 0o600); const bytes = await readFile(path); const text = bytes.toString("utf8"); if (canonical) assert.equal(text, canonicalJson(JSON.parse(text))); if (pretty) assert.equal(text, `${JSON.stringify(JSON.parse(text), null, 2)}\n`); return bytes; }
 async function assertRoot(path) { const info = await lstat(path); assert.equal(info.isDirectory(), true); assert.equal(info.isSymbolicLink(), false); assert.equal(info.mode & 0o777, 0o700); }
 async function assertCompletion(directory, marker, json, markdown) { const bytes = await assertPrivateFile(join(directory, marker)); const text = bytes.toString("utf8"); assert.equal(text, `${canonicalJson(JSON.parse(text))}\n`); const value = JSON.parse(text); assert.equal(value.jsonSha256, sha256(await readFile(join(directory, json)))); assert.equal(value.markdownSha256, sha256(await readFile(join(directory, markdown)))); }
+function parseJsonLines(text) { return text.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)); }
+function lastJsonLine(text, predicate = () => true) { return parseJsonLines(text).filter(predicate).at(-1); }
 
 test("process child is inert when directly discovered by node:test but rejects an empty CLI", async () => {
   const helper = new URL("helpers/bilateral-coordination-child.mjs", import.meta.url).pathname;
@@ -313,6 +319,7 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
     { cwd: clone },
   );
   const repositorySha = (await command("/usr/bin/git", ["rev-parse", "HEAD"], { cwd: clone })).stdout.trim();
+  await command("/usr/bin/git", ["update-ref", "--no-deref", "HEAD", repositorySha], { cwd: clone });
   assert.equal((await command("/usr/bin/git", ["status", "--porcelain=v1"], { cwd: clone })).stdout, "");
 
   const certificate = join(root, "relay-cert.pem");
@@ -320,6 +327,11 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
   await command("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", certificateKey, "-out", certificate, "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1", "-days", "1"]);
   await chmod(certificateKey, 0o600);
   const relayFingerprint = certificateFingerprint(await readFile(certificate));
+  const payerMcpCertificate = join(root, "payer-mcp-cert.pem");
+  const payerMcpCertificateKey = join(root, "payer-mcp-key.pem");
+  await command("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", payerMcpCertificateKey, "-out", payerMcpCertificate, "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1", "-days", "1"]);
+  await Promise.all([chmod(payerMcpCertificate, 0o600), chmod(payerMcpCertificateKey, 0o600)]);
+  const payerMcpFingerprint = certificateFingerprint(await readFile(payerMcpCertificate));
 
   const fakeState = join(root, "fake-state.json");
   const fakeListen = join(root, "fake-listen.json");
@@ -427,6 +439,13 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
     clockMs: SHARED_TEST_CLOCK_MS,
     coordinatorFirst,
     fake: fakeReady,
+    payerMcp: {
+      certificatePath: payerMcpCertificate,
+      fingerprint: payerMcpFingerprint,
+      host: "127.0.0.1",
+      intakeRequestId: PAYER_MCP_INTAKE_REQUEST_ID,
+      privateKeyPath: payerMcpCertificateKey,
+    },
     preflightFake: preflightFakeReady,
     repositoryRoot: clone,
     report,
@@ -478,11 +497,15 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   const session = await createProcessSession(t);
   const coordinator = session.startCoordinator();
   t.after(() => stopGroup(coordinator.child));
-  const coordinatorExit = await within(coordinator.wait(), PROCESS_PHASE_DEADLINE_MS);
-  const roleDiagnostics = await Promise.all(["payer", "payee", "verifier"].flatMap((name) => [
+  const readRoleDiagnostics = () => Promise.all(["payer", "payee", "verifier"].flatMap((name) => [
     readFile(session.logs[name].stdout, "utf8").catch(() => ""),
     readFile(session.logs[name].stderr, "utf8").catch(() => ""),
   ]));
+  const coordinatorExit = await within(coordinator.wait(), PROCESS_PHASE_DEADLINE_MS).catch(async (error) => {
+    const roleDiagnostics = await readRoleDiagnostics();
+    throw new Error(`${error.message}\ncoordinator=${JSON.stringify(coordinator.output())}\nroles=${roleDiagnostics.join("\n")}\nrelay=${JSON.stringify(session.relay.output())}`);
+  });
+  const roleDiagnostics = await readRoleDiagnostics();
   assert.deepEqual(
     { code: coordinatorExit.code, signal: coordinatorExit.signal },
     { code: 0, signal: null },
@@ -494,11 +517,15 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   const descriptorEnvelope = JSON.parse(await readFile(join(session.roleRoots.payer, "rehearsal", "descriptor.json"), "utf8"));
   const verdict = JSON.parse(await readFile(join(session.outputs.verifier, "bilateral-verdict.json"), "utf8"));
   const coordinatorReport = JSON.parse(await readFile(session.report, "utf8"));
+  assert.deepEqual(
+    coordinatorReport.mcpMilestones.map(({ stage }) => stage),
+    ["PAYER_MCP_READY", "HANDSHAKE_REQUIRED", "REQUESTOR_SUPERVISOR_START"],
+  );
   assert.match(coordinatorReport.release.releaseId, /^release-[0-9a-f]{16}$/);
   assert.equal(coordinatorReport.release.repositorySha, session.repositorySha);
   assert.match(coordinatorReport.release.sessionId, /^[0-9a-f-]{36}$/);
-  assert.equal(descriptorEnvelope.descriptor.payer.displayName, "Iris");
-  assert.equal(descriptorEnvelope.descriptor.payee.displayName, "Billie");
+  assert.equal(descriptorEnvelope.descriptor.payer.displayName, "Payer");
+  assert.equal(descriptorEnvelope.descriptor.payee.displayName, "Requestor");
   assert.ok(Array.isArray(coordinatorReport.authenticatedRelayEvents));
   assert.equal(coordinatorReport.coordinatorState, "REHEARSAL_VERIFIED");
   assert.match(coordinatorReport.verifierPublicationDigest, /^[0-9a-f]{64}$/);
@@ -604,10 +631,29 @@ test("real coordinator and supervisors gate one isolated three-transition proces
     assert.notEqual(transition.upperBoundMs, null);
     assert.ok(Number(transition.upperBoundMs) <= Number(payerResult.deadlineMs));
   }
-  const payerCli = JSON.parse(await readFile(session.logs.payer.stdout, "utf8"));
-  const payeeCli = JSON.parse(await readFile(session.logs.payee.stdout, "utf8"));
+  const payerCli = lastJsonLine(await readFile(session.logs.payer.stdout, "utf8"), (line) => Object.hasOwn(line, "state"));
+  const payeeCli = lastJsonLine(await readFile(session.logs.payee.stdout, "utf8"), (line) => Object.hasOwn(line, "state"));
   assert.equal(payerCli.state, "ACKNOWLEDGED");
   assert.equal(payeeCli.state, "ACCEPTED");
+  const payerIntakeRecord = JSON.parse(await readFile(join(session.roleRoots.payer, "payer-mcp-intake", `${PAYER_MCP_INTAKE_REQUEST_ID}.json`), "utf8"));
+  const requestorIntakeResult = JSON.parse(await readFile(join(session.roleRoots.payee, "payer-mcp-handshake-required.json"), "utf8"));
+  assert.equal(payerIntakeRecord.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
+  assert.equal(requestorIntakeResult.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
+  assert.equal(payerIntakeRecord.intakeDigest, requestorIntakeResult.intakeDigest);
+  const mandate = JSON.parse(await readFile(join(session.roleRoots.payer, "rehearsal", "payer-mandate.json"), "utf8"));
+  const request = JSON.parse(await readFile(join(session.roleRoots.payee, "rehearsal", "payment-request.json"), "utf8"));
+  assert.equal(mandate.mandate.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
+  assert.equal(request.request.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
+  assert.equal(mandate.mandate.intakeDigest, payerIntakeRecord.intakeDigest);
+  assert.equal(request.request.intakeDigest, payerIntakeRecord.intakeDigest);
+  await assert.rejects(
+    readFile(join(session.roleRoots.payer, "stakeholder", "payer-mandate.json"), "utf8"),
+    { code: "ENOENT" },
+  );
+  await assert.rejects(
+    readFile(join(session.roleRoots.payee, "stakeholder", "payment-request.json"), "utf8"),
+    { code: "ENOENT" },
+  );
   await assertCompletion(session.outputs.payer, ".party-result.complete.json", "party-result.json", "PARTY-RESULT.md");
   await assertCompletion(session.outputs.payee, ".party-result.complete.json", "party-result.json", "PARTY-RESULT.md");
   await assertCompletion(session.outputs.verifier, ".bilateral-verdict.complete.json", "bilateral-verdict.json", "BILATERAL-VERDICT.md");
@@ -775,10 +821,22 @@ test("relay restarts after mandate and after request fail closed without authori
       const session = await createProcessSession(t, { barrier: true, scenario });
       const coordinator = session.startCoordinator();
       t.after(() => stopGroup(coordinator.child));
-      await waitForPrivateMarker(session.barrier.ready, {
-        schema: COORDINATOR_SCHEMA,
-        stage,
-      }, coordinator);
+      try {
+        await waitForPrivateMarker(session.barrier.ready, {
+          schema: COORDINATOR_SCHEMA,
+          stage,
+        }, coordinator);
+      } catch (error) {
+        const phase = await readFile(`${session.report}.phase`, "utf8").catch(() => "");
+        const roleLogs = await Promise.all(["payer", "payee"].flatMap((role) => [
+          readFile(session.logs[role].stdout, "utf8").catch(() => ""),
+          readFile(session.logs[role].stderr, "utf8").catch(() => ""),
+        ]));
+        throw new Error(
+          `${scenario}: ${error.message}\nphase=${JSON.stringify(phase.trim())}`
+          + `\ncoordinator=${JSON.stringify(coordinator.output())}\nroles=${roleLogs.join("\\n")}`,
+        );
+      }
       await stop(session.relay.child);
       const restartedRelay = await session.restartRelay();
       await canonicalPrivateExclusive(session.barrier.release, { release: true });
