@@ -3,6 +3,8 @@ import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFile, mkdtemp, rm } from "node:fs/promises";
 import https from "node:https";
+import net from "node:net";
+import tls from "node:tls";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -122,7 +124,50 @@ async function request({ body, fixture, headers = {}, method = "POST", path = "/
   });
 }
 
+async function rawRequest({ fixture, rawHeaders, rawBody }) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: fixture.host, port: fixture.port }, () => {
+      const secure = tls.connect({
+        ca: fixture.certificate,
+        checkServerIdentity: () => undefined,
+        rejectUnauthorized: true,
+        servername: "",
+        socket,
+      });
+      secure.once("error", reject);
+      secure.once("secureConnect", () => {
+        secure.end([
+          "POST /mcp HTTP/1.1",
+          ...rawHeaders,
+          `Content-Length: ${Buffer.byteLength(rawBody)}`,
+          "",
+          rawBody,
+        ].join("\r\n"));
+      });
+      const chunks = [];
+      secure.on("data", (chunk) => chunks.push(chunk));
+      secure.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        const statusCode = Number(text.match(/^HTTP\/1\.1 ([0-9]{3})/)?.[1]);
+        resolve({ statusCode, text });
+      });
+    });
+    socket.once("error", reject);
+  });
+}
+
 const rpc = (id, method, params = {}) => ({ id, jsonrpc: "2.0", method, params });
+const initializeJson = (id = 1) => JSON.stringify(rpc(id, "initialize", { protocolVersion: PROTOCOL_VERSION }));
+
+function rawHeadersFor(fixture, overrides = []) {
+  return [
+    `Host: ${fixture.host}:${fixture.port}`,
+    "Accept: application/json, text/event-stream",
+    `Authorization: Bearer ${CAPABILITY}`,
+    "Content-Type: application/json",
+    ...overrides,
+  ];
+}
 
 async function initializedSession(t, fixture) {
   fixture ??= await makeFixture(t);
@@ -222,8 +267,31 @@ test("rejects unsafe transport boundary, host, path, headers, session, method, a
   assert.equal((await request({ body: rpc(1, "initialize", { protocolVersion: PROTOCOL_VERSION }), fixture, headers: { Origin: "https://example.invalid" } })).statusCode, 400);
   assert.equal((await request({ body: rpc(1, "initialize", { protocolVersion: PROTOCOL_VERSION }), fixture, headers: { Accept: "application/json" } })).statusCode, 400);
   assert.equal((await request({ body: rpc(1, "initialize", { protocolVersion: PROTOCOL_VERSION }), fixture, headers: { "Content-Type": "text/plain" } })).statusCode, 415);
+  for (const duplicate of [
+    [`Host: ${fixture.host}:${fixture.port}`],
+    [`Authorization: Bearer ${CAPABILITY}`],
+    ["Accept: application/json, text/event-stream"],
+    ["Content-Type: application/json"],
+    [`Content-Length: ${Buffer.byteLength(initializeJson())}`],
+    [`MCP-Protocol-Version: ${PROTOCOL_VERSION}`, `MCP-Protocol-Version: ${PROTOCOL_VERSION}`],
+  ]) {
+    assert.equal((await rawRequest({
+      fixture,
+      rawBody: initializeJson(),
+      rawHeaders: rawHeadersFor(fixture, duplicate),
+    })).statusCode, 400);
+  }
 
   const { sessionId } = await initializedSession(t, fixture);
+  assert.equal((await rawRequest({
+    fixture,
+    rawBody: JSON.stringify(rpc(99, "tools/list")),
+    rawHeaders: rawHeadersFor(fixture, [
+      `MCP-Protocol-Version: ${PROTOCOL_VERSION}`,
+      `MCP-Session-Id: ${sessionId}`,
+      `MCP-Session-Id: ${sessionId}`,
+    ]),
+  })).statusCode, 400);
   assert.equal((await request({ fixture, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": sessionId }, rawBody: "{" })).statusCode, 400);
   for (const body of [
     rpc(9, "initialize", { protocolVersion: PROTOCOL_VERSION }),
@@ -239,6 +307,31 @@ test("rejects unsafe transport boundary, host, path, headers, session, method, a
   assert.equal((await request({ body: rpc(13, "tools/list"), fixture, headers: { "MCP-Protocol-Version": "2024-01-01", "MCP-Session-Id": sessionId } })).statusCode, 400);
   assert.equal((await request({ body: rpc(14, "tools/list"), fixture, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": "wrong" } })).statusCode, 400);
   await fixture.server.stop();
+});
+
+test("rejects duplicate JSON keys before parsing can collapse request structure", async (t) => {
+  const fixture = await makeFixture(t);
+  for (const rawBody of [
+    `{"id":1,"id":2,"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"${PROTOCOL_VERSION}"}}`,
+    `{"id":1,"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"${PROTOCOL_VERSION}","protocolVersion":"${PROTOCOL_VERSION}"}}`,
+  ]) {
+    assert.equal((await request({ fixture, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION }, rawBody })).statusCode, 400);
+  }
+
+  const { sessionId } = await initializedSession(t, fixture);
+  const headers = { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": sessionId };
+  assert.equal((await request({ fixture, headers, rawBody: '{"id":2,"jsonrpc":"2.0","method":"tools/list","params":{},"params":{}}' })).statusCode, 400);
+  assert.equal((await request({ body: rpc(3, "tools/list"), fixture, headers })).statusCode, 200);
+  assert.equal((await request({
+    fixture,
+    headers,
+    rawBody: `{"id":4,"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"amount":{"currency":"USD","currency":"USD","value":"100"},"intakeRequestId":"${INTAKE_REQUEST_ID}","invoiceReference":"invoice-001","paymentMoved":false,"purpose":"Handshake demo","schema":"clockchain.payer-mcp-payment-intake/v1"},"name":"request_payment"}}`,
+  })).statusCode, 400);
+  assert.equal((await request({
+    fixture,
+    headers,
+    rawBody: `{"id":5,"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"amount":{"currency":"USD","value":"100"},"intakeRequestId":"${INTAKE_REQUEST_ID}","invoiceReference":"invoice-001","paymentMoved":false,"purpose":"Handshake demo","schema":"clockchain.payer-mcp-payment-intake/v1","schema":"clockchain.payer-mcp-payment-intake/v1"},"name":"request_payment"}}`,
+  })).statusCode, 400);
 });
 
 test("enforces the exact monotonic MCP session state machine", async (t) => {
@@ -325,4 +418,52 @@ test("uses generic capability failures, rate limits failed auth, caps session re
   }
   assert.equal((await request({ body: rpc(8, "tools/list"), fixture, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": sessionId } })).statusCode, 400);
   await fixture.server.stop();
+});
+
+test("stop clears session and failed-auth state, and failed listen can be retried", async (t) => {
+  let now = 1_000;
+  const fixture = await makeFixture(t, { nowMs: () => now });
+  const { sessionId } = await initializedSession(t, fixture);
+  for (let index = 0; index < 16; index += 1) {
+    await request({ body: rpc(index + 100, "initialize", { protocolVersion: PROTOCOL_VERSION }), fixture, headers: { Authorization: "Bearer bad" } });
+  }
+  assert.equal((await request({ body: rpc(200, "initialize", { protocolVersion: PROTOCOL_VERSION }), fixture, headers: { Authorization: "Bearer bad" } })).statusCode, 429);
+  await fixture.server.stop();
+  const restarted = { ...fixture, ...(await fixture.server.start()) };
+  assert.equal((await request({ body: rpc(201, "tools/list"), fixture: restarted, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": sessionId } })).statusCode, 400);
+  assert.equal((await request({ body: rpc(202, "initialize", { protocolVersion: PROTOCOL_VERSION }), fixture: restarted, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION } })).statusCode, 200);
+
+  let attempts = 0;
+  const retryServer = createPayerMcpServer({
+    capabilityDigest: CAPABILITY_DIGEST,
+    createHttpsServer() {
+      attempts += 1;
+      return {
+        address: () => ({ address: "127.0.0.1", family: "IPv4", port: 9443 }),
+        close: (callback) => callback(),
+        headersTimeout: 0,
+        listen(_port, _host, callback) {
+          if (attempts === 1) {
+            this._error(new Error("listen failed"));
+            return;
+          }
+          callback();
+        },
+        off() {},
+        once(event, listener) {
+          if (event === "error") this._error = listener;
+        },
+        requestTimeout: 0,
+      };
+    },
+    host: "127.0.0.1",
+    intakeStore: { writeIntake: async () => undefined },
+    port: 0,
+    repositorySha: REPOSITORY_SHA,
+    tlsCertificatePem: fixture.certificate,
+    tlsPrivateKeyPem: await readFile(join(fixture.root, "key.pem"), "utf8"),
+  });
+  await assert.rejects(retryServer.start());
+  assert.deepEqual(await retryServer.start(), { host: "127.0.0.1", port: 9443, url: "https://127.0.0.1:9443/mcp" });
+  await retryServer.stop();
 });

@@ -22,6 +22,15 @@ const CAPABILITY_PATTERN = /^[0-9a-f]{64}$/;
 const JSON_CONTENT_TYPE = "application/json";
 const JSON_ACCEPT = "application/json, text/event-stream";
 const GENERIC_FAILURE = Object.freeze({ error: "PAYER_MCP_PROTOCOL_FAILED", paymentMoved: false });
+const SINGLETON_HEADERS = new Set([
+  "accept",
+  "authorization",
+  "content-length",
+  "content-type",
+  "host",
+  "mcp-protocol-version",
+  "mcp-session-id",
+]);
 
 function fail() {
   throw new Error("Payer MCP server failed safely.");
@@ -137,6 +146,16 @@ function sessionId(bytes) {
 
 function validateCommonHeaders(req, expectedHost) {
   if (req.rawHeaders.length / 2 > MAX_HEADERS) return 431;
+  const seenHeaders = new Map();
+  for (let index = 0; index < req.rawHeaders.length; index += 2) {
+    const name = req.rawHeaders[index];
+    if (typeof name !== "string") return 400;
+    const key = name.toLowerCase();
+    seenHeaders.set(key, (seenHeaders.get(key) ?? 0) + 1);
+  }
+  for (const key of SINGLETON_HEADERS) {
+    if ((seenHeaders.get(key) ?? 0) > 1 || (req.headersDistinct?.[key]?.length ?? 0) > 1) return 400;
+  }
   if (req.url !== "/mcp") return 404;
   if (!["POST", "GET", "DELETE"].includes(req.method)) return 405;
   if (req.headers.host !== expectedHost) return 400;
@@ -161,6 +180,7 @@ async function readBody(req) {
 }
 
 function parseJsonRpc(text) {
+  rejectDuplicateJsonKeys(text);
   let value;
   try {
     value = JSON.parse(text);
@@ -168,6 +188,136 @@ function parseJsonRpc(text) {
     fail();
   }
   return value;
+}
+
+function rejectDuplicateJsonKeys(text) {
+  if (typeof text !== "string" || text.length === 0 || text.length > MAX_BODY_BYTES) fail();
+  let index = 0;
+  const whitespace = () => {
+    while (/[\t\n\r ]/.test(text[index] ?? "")) index += 1;
+  };
+  const parseString = () => {
+    if (text[index] !== "\"") fail();
+    index += 1;
+    let value = "";
+    while (index < text.length) {
+      const char = text[index];
+      if (char === "\"") {
+        index += 1;
+        return value;
+      }
+      if (char === "\\") {
+        index += 1;
+        const escaped = text[index];
+        if (escaped === undefined) fail();
+        if ("\"\\/".includes(escaped)) value += escaped;
+        else if (escaped === "b") value += "\b";
+        else if (escaped === "f") value += "\f";
+        else if (escaped === "n") value += "\n";
+        else if (escaped === "r") value += "\r";
+        else if (escaped === "t") value += "\t";
+        else if (escaped === "u") {
+          const hex = text.slice(index + 1, index + 5);
+          if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail();
+          value += String.fromCharCode(Number.parseInt(hex, 16));
+          index += 4;
+        } else {
+          fail();
+        }
+      } else {
+        if (char < " ") fail();
+        value += char;
+      }
+      index += 1;
+    }
+    fail();
+  };
+  const parseNumber = () => {
+    const start = index;
+    if (text[index] === "-") index += 1;
+    if (text[index] === "0") index += 1;
+    else if (/[1-9]/.test(text[index] ?? "")) {
+      while (/[0-9]/.test(text[index] ?? "")) index += 1;
+    } else fail();
+    if (text[index] === ".") {
+      index += 1;
+      if (!/[0-9]/.test(text[index] ?? "")) fail();
+      while (/[0-9]/.test(text[index] ?? "")) index += 1;
+    }
+    if (text[index] === "e" || text[index] === "E") {
+      index += 1;
+      if (text[index] === "+" || text[index] === "-") index += 1;
+      if (!/[0-9]/.test(text[index] ?? "")) fail();
+      while (/[0-9]/.test(text[index] ?? "")) index += 1;
+    }
+    if (index === start) fail();
+  };
+  const parseLiteral = (literal) => {
+    if (text.slice(index, index + literal.length) !== literal) fail();
+    index += literal.length;
+  };
+  const parseArray = () => {
+    index += 1;
+    whitespace();
+    if (text[index] === "]") {
+      index += 1;
+      return;
+    }
+    while (true) {
+      parseValue();
+      whitespace();
+      if (text[index] === "]") {
+        index += 1;
+        return;
+      }
+      if (text[index] !== ",") fail();
+      index += 1;
+      whitespace();
+    }
+  };
+  const parseObject = () => {
+    index += 1;
+    const keys = new Set();
+    whitespace();
+    if (text[index] === "}") {
+      index += 1;
+      return;
+    }
+    while (true) {
+      const key = parseString();
+      if (keys.has(key)) fail();
+      keys.add(key);
+      whitespace();
+      if (text[index] !== ":") fail();
+      index += 1;
+      parseValue();
+      whitespace();
+      if (text[index] === "}") {
+        index += 1;
+        return;
+      }
+      if (text[index] !== ",") fail();
+      index += 1;
+      whitespace();
+    }
+  };
+  function parseValue() {
+    whitespace();
+    const char = text[index];
+    if (char === "{") return parseObject();
+    if (char === "[") return parseArray();
+    if (char === "\"") {
+      parseString();
+      return;
+    }
+    if (char === "t") return parseLiteral("true");
+    if (char === "f") return parseLiteral("false");
+    if (char === "n") return parseLiteral("null");
+    return parseNumber();
+  }
+  parseValue();
+  whitespace();
+  if (index !== text.length) fail();
 }
 
 function hasDuplicateId(session, id) {
@@ -352,13 +502,19 @@ export function createPayerMcpServer({
   return Object.freeze({
     async start() {
       if (server) fail();
-      server = createHttpsServer({ cert: certificate, key: privateKey }, handleRequest);
-      server.headersTimeout = HEADER_TIMEOUT_MS;
-      server.requestTimeout = REQUEST_TIMEOUT_MS;
+      const candidate = createHttpsServer({ cert: certificate, key: privateKey }, handleRequest);
+      server = candidate;
+      candidate.headersTimeout = HEADER_TIMEOUT_MS;
+      candidate.requestTimeout = REQUEST_TIMEOUT_MS;
       await new Promise((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(bindPort, bindHost, () => {
-          server.off("error", reject);
+        const onError = (error) => {
+          if (server === candidate) server = undefined;
+          candidate.close?.(() => {});
+          reject(error);
+        };
+        candidate.once("error", onError);
+        candidate.listen(bindPort, bindHost, () => {
+          candidate.off("error", onError);
           resolve();
         });
       });
@@ -368,6 +524,8 @@ export function createPayerMcpServer({
       if (!server) return;
       const closing = server;
       server = undefined;
+      sessions.clear();
+      failedAuth.length = 0;
       await new Promise((resolve, reject) => closing.close((error) => error ? reject(error) : resolve()));
     },
   });
