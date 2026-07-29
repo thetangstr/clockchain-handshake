@@ -425,28 +425,45 @@ async function persistRequestorIntake({ result, stateRoot }) {
     await handle.close();
     handle = undefined;
     await root.assertPinned();
-    await link(temporary, path);
+    try {
+      await link(temporary, path);
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      await readAndValidatePersistedIntake({ bytes, path, result, root });
+      await unlink(temporary);
+      await root.assertPinned();
+      await root.handle.sync();
+      return;
+    }
     await unlink(temporary);
     await root.assertPinned();
     await root.handle.sync();
-    const finalMetadata = await lstat(path);
-    if (!hasPrivateFileMetadata(finalMetadata) || finalMetadata.size !== bytes.length) fail();
-    const readbackHandle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
-    try {
-      const openedFinal = await readbackHandle.stat();
-      if (!sameIdentity(finalMetadata, openedFinal) || !hasPrivateFileMetadata(openedFinal)) fail();
-      const buffer = Buffer.alloc(bytes.length + 1);
-      const { bytesRead } = await readbackHandle.read(buffer, 0, buffer.length, 0);
-      if (bytesRead !== bytes.length || !buffer.subarray(0, bytesRead).equals(bytes)) fail();
-      const parsed = parseJson(buffer.subarray(0, bytesRead).toString("utf8"));
-      if (!isDeepStrictEqual(parsed, result) || canonicalBytes(parsed).toString("utf8") !== bytes.toString("utf8")) fail();
-    } finally {
-      await readbackHandle.close();
-    }
+    await readAndValidatePersistedIntake({ bytes, path, result, root });
   } finally {
     if (handle) await handle.close();
     await unlink(temporary).catch(() => {});
     await root.handle.close();
+  }
+}
+
+async function readAndValidatePersistedIntake({ bytes, path, result, root }) {
+  await root.assertPinned();
+  const finalMetadata = await lstat(path);
+  if (!hasPrivateFileMetadata(finalMetadata) || finalMetadata.size !== bytes.length) fail();
+  const readbackHandle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const openedFinal = await readbackHandle.stat();
+    if (!sameIdentity(finalMetadata, openedFinal) || !hasPrivateFileMetadata(openedFinal)) fail();
+    const buffer = Buffer.alloc(bytes.length + 1);
+    const { bytesRead } = await readbackHandle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead !== bytes.length || !buffer.subarray(0, bytesRead).equals(bytes)) fail();
+    const parsed = parseJson(buffer.subarray(0, bytesRead).toString("utf8"));
+    if (!isDeepStrictEqual(parsed, result) || canonicalBytes(parsed).toString("utf8") !== bytes.toString("utf8")) fail();
+    const after = await lstat(path);
+    await root.assertPinned();
+    if (!sameIdentity(finalMetadata, after) || !hasPrivateFileMetadata(after) || after.size !== bytes.length) fail();
+  } finally {
+    await readbackHandle.close();
   }
 }
 

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash, X509Certificate } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import {
   REQUESTOR_MCP_INTAKE_FILE_NAME,
   requestPaymentThroughPayerMcp,
@@ -123,6 +124,32 @@ test("pinned Requestor client completes exact MCP lifecycle, persists public int
   assert.deepEqual(JSON.parse(persisted), result);
 });
 
+test("client accepts byte-identical persisted Requestor intake after crash-before-supervisor retry", async (t) => {
+  const server = await makeServer(t);
+  const stateRoot = await mkdtemp(join(tmpdir(), "requestor-mcp-client-retry-"));
+  await chmod(stateRoot, 0o700);
+  t.after(() => rm(stateRoot, { force: true, recursive: true }));
+  const input = {
+    capability: CAPABILITY,
+    intakeRequestId: INTAKE_REQUEST_ID,
+    mcpUrl: server.url,
+    repositorySha: REPOSITORY_SHA,
+    stateRoot,
+    tlsCertificatePem: server.tlsCertificatePem,
+    tlsFingerprint: server.fingerprint,
+  };
+
+  const first = await requestPaymentThroughPayerMcp(input);
+  const persistedPath = join(stateRoot, REQUESTOR_MCP_INTAKE_FILE_NAME);
+  const before = await readFile(persistedPath);
+  const second = await requestPaymentThroughPayerMcp(input);
+  const after = await readFile(persistedPath);
+
+  assert.deepEqual(second, first);
+  assert.equal(after.equals(before), true);
+  assert.equal(after.toString("utf8"), canonicalBytes(first).toString("utf8"));
+});
+
 test("client rejects symlink state root before chmod or persistence can mutate the target", async (t) => {
   const server = await makeServer(t);
   const root = await mkdtemp(join(tmpdir(), "requestor-mcp-client-symlink-"));
@@ -172,6 +199,57 @@ test("client validates durable canonical readback before returning success", asy
     /Requestor MCP client failed safely/,
   );
   assert.equal(await readFile(resultPath, "utf8"), "partial");
+});
+
+test("client rejects unsafe existing Requestor intake files without modifying them", async (t) => {
+  const server = await makeServer(t);
+  const valid = buildPaymentIntakeToolResult({
+    repositorySha: REPOSITORY_SHA,
+    toolInput: paymentInput(),
+  }).structuredContent;
+  const changed = structuredClone(valid);
+  changed.status = "AUTHORIZED";
+  const cases = [
+    { name: "changed", bytes: canonicalBytes(changed), mode: 0o600 },
+    { name: "noncanonical", bytes: Buffer.from(`${JSON.stringify(valid)}\n`, "utf8"), mode: 0o600 },
+    { name: "partial", bytes: Buffer.from("partial", "utf8"), mode: 0o600 },
+    { name: "wrong-mode", bytes: canonicalBytes(valid), mode: 0o644 },
+    { name: "symlink", bytes: canonicalBytes(valid), mode: 0o600, symlink: true },
+    { name: "hardlink", bytes: canonicalBytes(valid), mode: 0o600, hardlink: true },
+  ];
+  for (const candidate of cases) {
+    const root = await mkdtemp(join(tmpdir(), `requestor-mcp-client-existing-${candidate.name}-`));
+    const stateRoot = join(root, "state");
+    await mkdir(stateRoot, { mode: 0o700 });
+    const resultPath = join(stateRoot, REQUESTOR_MCP_INTAKE_FILE_NAME);
+    const backingPath = join(root, "backing");
+    if (candidate.symlink) {
+      await writeFile(backingPath, candidate.bytes, { mode: candidate.mode });
+      await symlink(backingPath, resultPath);
+    } else if (candidate.hardlink) {
+      await writeFile(backingPath, candidate.bytes, { mode: candidate.mode });
+      await link(backingPath, resultPath);
+    } else {
+      await writeFile(resultPath, candidate.bytes, { mode: candidate.mode });
+    }
+    const before = candidate.symlink ? await readFile(backingPath) : await readFile(resultPath);
+    t.after(() => rm(root, { force: true, recursive: true }));
+
+    await assert.rejects(
+      requestPaymentThroughPayerMcp({
+        capability: CAPABILITY,
+        intakeRequestId: INTAKE_REQUEST_ID,
+        mcpUrl: server.url,
+        repositorySha: REPOSITORY_SHA,
+        stateRoot,
+        tlsCertificatePem: server.tlsCertificatePem,
+        tlsFingerprint: server.fingerprint,
+      }),
+      /Requestor MCP client failed safely/,
+    );
+    const after = candidate.symlink ? await readFile(backingPath) : await readFile(resultPath);
+    assert.equal(after.equals(before), true, candidate.name);
+  }
 });
 
 test("client rejects transport, lifecycle, schema, result, duplicate-key, and cleanup failures before persisting", async (t) => {

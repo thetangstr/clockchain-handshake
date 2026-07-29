@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { createHash, X509Certificate } from "node:crypto";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +9,9 @@ import { test } from "node:test";
 import { promisify } from "node:util";
 
 import { main, REQUEST_PAYMENT_CLI_FLAGS } from "../bin/handshake-request-payment.mjs";
+import { createPayerMcpIntakeStore } from "../src/bilateral/local-mcp/intake-store.mjs";
+import { requestPaymentThroughPayerMcp } from "../src/bilateral/local-mcp/client.mjs";
+import { createPayerMcpServer } from "../src/bilateral/local-mcp/server.mjs";
 
 const CAPABILITY = "ab".repeat(32);
 const REPOSITORY_SHA = "abcdef0123456789abcdef0123456789abcdef01";
@@ -36,6 +40,54 @@ async function fixture() {
     manifestPath,
     root,
     stateRoot,
+  };
+}
+
+async function mcpFixture(t) {
+  const root = await mkdtemp(join(tmpdir(), "request-payment-cli-mcp-"));
+  await chmod(root, 0o700);
+  const certificatePath = join(root, "cert.pem");
+  const privateKeyPath = join(root, "key.pem");
+  execFileSync("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "ed25519",
+    "-keyout",
+    privateKeyPath,
+    "-out",
+    certificatePath,
+    "-nodes",
+    "-days",
+    "1",
+    "-subj",
+    "/CN=127.0.0.1",
+    "-addext",
+    "subjectAltName=IP:127.0.0.1",
+  ], { stdio: "ignore" });
+  const tlsCertificatePem = await readFile(certificatePath, "utf8");
+  const tlsPrivateKeyPem = await readFile(privateKeyPath, "utf8");
+  const capabilityDigest = createHash("sha256").update(Buffer.from(CAPABILITY, "hex")).digest("hex");
+  const server = createPayerMcpServer({
+    capabilityDigest,
+    host: "127.0.0.1",
+    intakeStore: await createPayerMcpIntakeStore({ repositorySha: REPOSITORY_SHA, stateRoot: root }),
+    port: 0,
+    randomBytes: () => Buffer.alloc(16, 9),
+    repositorySha: REPOSITORY_SHA,
+    tlsCertificatePem,
+    tlsPrivateKeyPem,
+  });
+  const listening = await server.start();
+  t.after(async () => {
+    await server.stop();
+    await rm(root, { force: true, recursive: true });
+  });
+  return {
+    ...listening,
+    fingerprint: createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex"),
+    root,
+    tlsCertificatePem,
   };
 }
 
@@ -134,6 +186,49 @@ test("Requestor CLI default success path emits fixed secret-free HANDSHAKE_REQUI
   }
   assert.deepEqual(writes, ['{"paymentMoved":false,"status":"HANDSHAKE_REQUIRED"}\n']);
   assert.equal(writes.join("").includes(CAPABILITY), false);
+});
+
+test("Requestor CLI retry after crash-before-supervisor accepts existing intake and starts supervisor once", async (t) => {
+  const fx = await fixture();
+  const mcp = await mcpFixture(t);
+  const args = fx.args.map((value, index) => {
+    if (fx.args[index - 1] === "--mcp-url") return mcp.url;
+    if (fx.args[index - 1] === "--tls-fingerprint") return mcp.fingerprint;
+    return value;
+  });
+  await writeFile(fx.certificatePath, mcp.tlsCertificatePem, { mode: 0o600 });
+  t.after(() => rm(fx.root, { force: true, recursive: true }));
+  let supervisorCalls = 0;
+  let crashBeforeSupervisor = true;
+  const dependencies = {
+    async inspectRepository() {
+      return { clean: true, detached: true, head: REPOSITORY_SHA };
+    },
+    async readLaunchManifest() {
+      return {
+        payerMcpIntakeCapability: CAPABILITY,
+        repositorySha: REPOSITORY_SHA,
+        role: "payee",
+      };
+    },
+    requestPayment: requestPaymentThroughPayerMcp,
+    async runSupervisor() {
+      supervisorCalls += 1;
+      return { paymentMoved: false, supervisor: "started" };
+    },
+    writeStatus() {
+      if (crashBeforeSupervisor) {
+        crashBeforeSupervisor = false;
+        throw new Error("simulated crash after persistence");
+      }
+    },
+  };
+
+  await assert.rejects(main(args, dependencies), /Request payment startup failed safely/);
+  assert.equal(supervisorCalls, 0);
+  const result = await main(args, dependencies);
+  assert.deepEqual(result, { paymentMoved: false, supervisor: "started" });
+  assert.equal(supervisorCalls, 1);
 });
 
 test("spawned Requestor CLI failure emits exact secret-free REQUEST_PAYMENT_FAILED line and no stack", async () => {
