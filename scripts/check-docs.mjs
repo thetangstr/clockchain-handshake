@@ -94,8 +94,6 @@ const OFFICIAL_REPOSITORY =
   "https://github.com/thetangstr/clockchain-handshake.git";
 const LIVE_HANDOFF_RELEASE_SHA =
   "034cdbe4bff8999819d3834f94da5286470b8a99";
-const LIVE_HANDOFF_POST_RUNTIME_SHA =
-  "bf1315ae4f3f62759219d2605997b76cc8faf869";
 const LIVE_HANDOFF_HELPER_URL =
   "https://clockchain-research.vercel.app/handshake/run";
 const LIVE_HANDOFF_TREASURY_ADDRESS =
@@ -815,7 +813,7 @@ function bilateralContractFailures(relativePath, contents) {
       [
         "release relationship",
         new RegExp(
-          `operators read the later handoff/helper at ${LIVE_HANDOFF_POST_RUNTIME_SHA}[\\s\\S]*checkout exact executable SHA ${LIVE_HANDOFF_RELEASE_SHA}[\\s\\S]*subsequent test/docs/site commits do not alter executable runtime bytes`,
+          `later handoff/helper is a documentation and test layer for executable SHA ${LIVE_HANDOFF_RELEASE_SHA}[\\s\\S]*operators checkout the exact executable SHA[\\s\\S]*does not alter executable runtime bytes`,
           "i",
         ),
       ],
@@ -1014,7 +1012,7 @@ function bilateralContractFailures(relativePath, contents) {
       [
         "release relationship",
         new RegExp(
-          `operators read the later handoff/helper at ${LIVE_HANDOFF_POST_RUNTIME_SHA}[\\s\\S]*checkout exact executable SHA ${LIVE_HANDOFF_RELEASE_SHA}[\\s\\S]*subsequent test/docs/site commits do not alter executable runtime bytes`,
+          `later handoff/helper is a documentation and test layer for executable SHA ${LIVE_HANDOFF_RELEASE_SHA}[\\s\\S]*operators checkout the exact executable SHA[\\s\\S]*does not alter executable runtime bytes`,
           "i",
         ),
       ],

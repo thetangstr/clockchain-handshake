@@ -24,7 +24,7 @@ Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and
 Pinned executable Handshake release SHA:
 `034cdbe4bff8999819d3834f94da5286470b8a99`.
 
-Operators read the later handoff/helper at bf1315ae4f3f62759219d2605997b76cc8faf869, but checkout exact executable SHA 034cdbe4bff8999819d3834f94da5286470b8a99; subsequent test/docs/site commits do not alter executable runtime bytes.
+This later handoff/helper is a documentation and test layer for executable SHA 034cdbe4bff8999819d3834f94da5286470b8a99; operators checkout the exact executable SHA, and it does not alter executable runtime bytes.
 
 A clean detached checkout of immutable repository SHA
 `034cdbe4bff8999819d3834f94da5286470b8a99`, Node.js 22, and
