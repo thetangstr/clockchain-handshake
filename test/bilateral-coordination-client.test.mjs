@@ -352,15 +352,30 @@ function sendExact(
 }
 
 function manifestInput(tls, overrides = {}) {
+  const role = overrides.role ?? "payer";
+  const payerMcpIntakeCapability = Buffer.alloc(
+    32,
+    0xcd,
+  ).toString("hex");
   return {
     expectedTlsFingerprint: tls.expectedFingerprint,
     nowMs: NOW_MS,
     operatorKeyId: OPERATOR_KEY_ID,
+    ...(role === "payee"
+      ? { payerMcpIntakeCapability }
+      : {
+          payerMcpIntakeCapabilityDigest: sha256(
+            Buffer.from(
+              payerMcpIntakeCapability,
+              "hex",
+            ),
+          ),
+        }),
     randomBytes: () => Buffer.from(FIXED_CAPABILITY),
     relayUrl: "https://127.0.0.1:8443",
     releaseId: RELEASE_ID,
     repositorySha: REPOSITORY_SHA,
-    role: "payer",
+    role,
     sessionId: SESSION_ID,
     tlsCertificatePem:
       tls.certificate.toString("utf8"),
@@ -384,6 +399,7 @@ test("creates the exact private launch manifest and public capability registrati
     "expiresAtMs",
     "issuedAtMs",
     "operatorKeyId",
+    "payerMcpIntakeCapabilityDigest",
     "protocol",
     "relayUrl",
     "releaseId",
@@ -398,6 +414,12 @@ test("creates the exact private launch manifest and public capability registrati
     LAUNCH_MANIFEST_SCHEMA,
   );
   assert.equal(manifest.protocol, BILATERAL_PROTOCOL);
+  assert.equal(manifest.payerMcpIntakeCapabilityDigest.length, 64);
+  assert.match(manifest.payerMcpIntakeCapabilityDigest, /^[0-9a-f]{64}$/);
+  assert.equal(
+    Object.hasOwn(manifest, "payerMcpIntakeCapability"),
+    false,
+  );
   assert.equal(manifest.bootstrapCapability.length, 64);
   assert.equal(
     manifest.bootstrapCapability,
@@ -444,6 +466,59 @@ test("creates distinct role-scoped 256-bit capabilities for one shared coordinat
   );
   assert.equal(payer.manifest.role, "payer");
   assert.equal(payee.manifest.role, "payee");
+});
+
+test("creates exact role-separated MCP intake capability material", async (t) => {
+  const tls = await tlsFixture(t);
+  const payerMcpIntakeCapability = Buffer.alloc(32, 0x9c).toString("hex");
+  const payee = manifestFixture(tls, {
+    payerMcpIntakeCapability,
+    randomBytes: () => Buffer.alloc(32, 0x41),
+    role: "payee",
+  });
+  const payer = manifestFixture(tls, {
+    payerMcpIntakeCapabilityDigest: sha256(Buffer.from(payerMcpIntakeCapability, "hex")),
+    randomBytes: () => Buffer.alloc(32, 0x42),
+    role: "payer",
+  });
+  assert.deepEqual(Object.keys(payee.manifest).sort(), [
+    "bootstrapCapability",
+    "expectedTlsFingerprint",
+    "expiresAtMs",
+    "issuedAtMs",
+    "operatorKeyId",
+    "payerMcpIntakeCapability",
+    "protocol",
+    "relayUrl",
+    "releaseId",
+    "repositorySha",
+    "role",
+    "schema",
+    "sessionId",
+    "tlsCertificatePem",
+  ]);
+  assert.deepEqual(Object.keys(payer.manifest).sort(), [
+    "bootstrapCapability",
+    "expectedTlsFingerprint",
+    "expiresAtMs",
+    "issuedAtMs",
+    "operatorKeyId",
+    "payerMcpIntakeCapabilityDigest",
+    "protocol",
+    "relayUrl",
+    "releaseId",
+    "repositorySha",
+    "role",
+    "schema",
+    "sessionId",
+    "tlsCertificatePem",
+  ]);
+  assert.equal(payee.manifest.payerMcpIntakeCapability, payerMcpIntakeCapability);
+  assert.equal(payer.manifest.payerMcpIntakeCapabilityDigest, sha256(Buffer.from(payerMcpIntakeCapability, "hex")));
+  assert.notEqual(payee.manifest.bootstrapCapability, payerMcpIntakeCapability);
+  assert.notEqual(payer.manifest.bootstrapCapability, payerMcpIntakeCapability);
+  assert.equal(Object.hasOwn(payee.manifest, "payerMcpIntakeCapabilityDigest"), false);
+  assert.equal(Object.hasOwn(payer.manifest, "payerMcpIntakeCapability"), false);
 });
 
 test("launch manifest creation rejects every non-exact or noncanonical field without invoking getters", async (t) => {
@@ -514,6 +589,39 @@ test("launch manifest creation rejects every non-exact or noncanonical field wit
       ...exact,
       nowMs: BigInt(NOW_MS),
     },
+    {
+      ...exact,
+      payerMcpIntakeCapability: "3".repeat(64),
+    },
+    {
+      ...exact,
+      payerMcpIntakeCapabilityDigest: "A".repeat(64),
+    },
+    {
+      ...exact,
+      payerMcpIntakeCapabilityDigest: "a".repeat(63),
+    },
+    (() => {
+      const { payerMcpIntakeCapabilityDigest: _digest, ...missing } = exact;
+      return missing;
+    })(),
+    {
+      ...manifestInput(tls, { role: "payee" }),
+      payerMcpIntakeCapabilityDigest: "4".repeat(64),
+    },
+    {
+      ...manifestInput(tls, { role: "payee" }),
+      payerMcpIntakeCapability: "A".repeat(64),
+    },
+    {
+      ...manifestInput(tls, { role: "payee" }),
+      payerMcpIntakeCapability: "a".repeat(63),
+    },
+    (() => {
+      const { payerMcpIntakeCapability: _capability, ...missing } =
+        manifestInput(tls, { role: "payee" });
+      return missing;
+    })(),
   ]) {
     assert.throws(
       () => createLaunchManifest(candidate),
@@ -546,6 +654,45 @@ test("launch manifest creation rejects every non-exact or noncanonical field wit
       return true;
     },
   );
+});
+
+test("manifest validation rejects opposite-role MCP intake material without invoking accessors", async (t) => {
+  const tls = await tlsFixture(t);
+  const payee = manifestFixture(tls, { role: "payee" }).manifest;
+  const payer = manifestFixture(tls, { role: "payer" }).manifest;
+  for (const candidate of [
+    { ...payee, payerMcpIntakeCapabilityDigest: "a".repeat(64) },
+    { ...payer, payerMcpIntakeCapability: "b".repeat(64) },
+    { ...payee, payerMcpIntakeCapability: payee.payerMcpIntakeCapability.toUpperCase() },
+    { ...payer, payerMcpIntakeCapabilityDigest: payer.payerMcpIntakeCapabilityDigest.toUpperCase() },
+    (() => {
+      const { payerMcpIntakeCapability: _capability, ...missing } = payee;
+      return missing;
+    })(),
+    (() => {
+      const { payerMcpIntakeCapabilityDigest: _digest, ...missing } = payer;
+      return missing;
+    })(),
+  ]) {
+    assert.throws(
+      () => validateLaunchManifest(candidate),
+      { code: "LAUNCH_MANIFEST_INVALID" },
+    );
+  }
+  let invoked = false;
+  const accessor = { ...payee };
+  Object.defineProperty(accessor, "payerMcpIntakeCapability", {
+    enumerable: true,
+    get() {
+      invoked = true;
+      throw new Error("mcp-intake-secret-canary");
+    },
+  });
+  assert.throws(
+    () => validateLaunchManifest(accessor),
+    { code: "LAUNCH_MANIFEST_INVALID" },
+  );
+  assert.equal(invoked, false);
 });
 
 test("isolates every alternate raw capability encoding from non-capability manifest fields", async (t) => {
@@ -2846,6 +2993,7 @@ test("bootstraps with one raw capability, retries only identical bytes, verifies
       "expiresAtMs",
       "issuedAtMs",
       "operatorKeyId",
+      "payerMcpIntakeCapabilityDigest",
       "paymentMoved",
       "protocol",
       "receiptBase64",
@@ -3038,6 +3186,44 @@ test("creates and independently validates an exact capability-free active launch
     JSON.stringify(exact),
     /bootstrapCapability|privateKey|token/i,
   );
+  assert.equal(
+    exact.payerMcpIntakeCapabilityDigest,
+    fixture.manifest.payerMcpIntakeCapabilityDigest,
+  );
+  assert.equal(
+    Object.hasOwn(exact, "payerMcpIntakeCapability"),
+    false,
+  );
+  const payeeFixture = await resumedClientFixture(
+    t,
+    async () => {
+      throw new Error("must not send");
+    },
+    {
+      capability: Buffer.alloc(32, 0xbc),
+      role: "payee",
+    },
+  );
+  assert.equal(
+    Object.hasOwn(
+      payeeFixture.activeLaunchState,
+      "payerMcpIntakeCapability",
+    ),
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(
+      payeeFixture.activeLaunchState,
+      "payerMcpIntakeCapabilityDigest",
+    ),
+    false,
+  );
+  assert.equal(
+    JSON.stringify(payeeFixture.activeLaunchState).includes(
+      payeeFixture.manifest.payerMcpIntakeCapability,
+    ),
+    false,
+  );
   const serializedState = JSON.stringify(exact);
   for (const representation of [
     fixture.capability.toString("hex"),
@@ -3139,6 +3325,7 @@ test("creates and independently validates an exact capability-free active launch
     expiresAtMs: String(Number(exact.expiresAtMs) + 1),
     issuedAtMs: String(Number(exact.issuedAtMs) + 1),
     operatorKeyId: "clockchain-demo-2027",
+    payerMcpIntakeCapabilityDigest: "3".repeat(64),
     paymentMoved: true,
     protocol: "clockchain-bilateral/v2",
     receiptBase64:

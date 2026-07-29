@@ -722,6 +722,7 @@ function pendingJournal(value, expectedContext) {
     return parsed;
   });
   if (entries[0].capabilityDigest === entries[1].capabilityDigest || entries[0].manifest.bootstrapCapability === entries[1].manifest.bootstrapCapability) invalid();
+  validateMcpIntakePair(entries);
   const registration = exact(data.registration, ["capabilities", "operatorKeyId", "paymentMoved", "releaseId", "repositorySha", "schema", "sessionId", "signature"]);
   const capabilities = {
     payee: { capabilityDigest: entries[0].capabilityDigest, expiresAtMs: entries[0].manifest.expiresAtMs },
@@ -730,6 +731,23 @@ function pendingJournal(value, expectedContext) {
   if (registration.operatorKeyId !== expectedContext.operatorKeyId || registration.paymentMoved !== false || !sameCanonical(registration.capabilities, capabilities)) invalid();
   if (data.receipt !== null) capabilitySetReceipt(data.receipt, registration);
   return deepFreeze({ context: expectedContext, entries, receipt: data.receipt, registration, schema: CAPABILITY_PENDING_SCHEMA });
+}
+
+function validateMcpIntakePair(entries) {
+  const payerMcpIntakeCapability =
+    entries[0].manifest.payerMcpIntakeCapability;
+  if (
+    typeof payerMcpIntakeCapability !== "string" ||
+    !/^[0-9a-f]{64}$/.test(payerMcpIntakeCapability) ||
+    Object.hasOwn(entries[0].manifest, "payerMcpIntakeCapabilityDigest") ||
+    Object.hasOwn(entries[1].manifest, "payerMcpIntakeCapability") ||
+    entries[1].manifest.payerMcpIntakeCapabilityDigest !==
+      digest(Buffer.from(payerMcpIntakeCapability, "hex")) ||
+    entries[0].manifest.bootstrapCapability ===
+      payerMcpIntakeCapability ||
+    entries[1].manifest.bootstrapCapability ===
+      payerMcpIntakeCapability
+  ) invalid();
 }
 
 async function existingManifestMatches({ fileSystem, manifest, path }) {
@@ -1624,7 +1642,26 @@ export async function createCoordinatorRelease(input) {
     const sessionId = dependencies.randomUUID();
     const releaseId = `release-${digest(Buffer.from(sessionId, "utf8")).slice(0, 16)}`;
     const nowMs = dependencies.now();
-    const generated = ["payee", "payer"].map((role) => dependencies.createLaunchManifest({ expectedTlsFingerprint: value.tlsFingerprint, nowMs, operatorKeyId: value.operatorKeyId, randomBytes: dependencies.randomBytes, relayUrl: value.relayUrl, releaseId, repositorySha: value.repositorySha, role, sessionId, tlsCertificatePem: value.tlsCertificatePem }));
+    let payerMcpIntakeCapability;
+    try { payerMcpIntakeCapability = dependencies.randomBytes(32); } catch { invalid(); }
+    if (!Buffer.isBuffer(payerMcpIntakeCapability) || payerMcpIntakeCapability.length !== 32) invalid();
+    const payerMcpIntakeCapabilityHex = payerMcpIntakeCapability.toString("hex");
+    const payerMcpIntakeCapabilityDigest = digest(payerMcpIntakeCapability);
+    const generated = ["payee", "payer"].map((role) => dependencies.createLaunchManifest({
+      expectedTlsFingerprint: value.tlsFingerprint,
+      nowMs,
+      operatorKeyId: value.operatorKeyId,
+      ...(role === "payee"
+        ? { payerMcpIntakeCapability: payerMcpIntakeCapabilityHex }
+        : { payerMcpIntakeCapabilityDigest }),
+      randomBytes: dependencies.randomBytes,
+      relayUrl: value.relayUrl,
+      releaseId,
+      repositorySha: value.repositorySha,
+      role,
+      sessionId,
+      tlsCertificatePem: value.tlsCertificatePem,
+    }));
     const draftEntries = generated.map(({ capabilityDigest, manifest }) => ({ capabilityDigest, manifest, role: manifest.role }));
     const capabilities = { payee: { capabilityDigest: draftEntries[0].capabilityDigest, expiresAtMs: draftEntries[0].manifest.expiresAtMs }, payer: { capabilityDigest: draftEntries[1].capabilityDigest, expiresAtMs: draftEntries[1].manifest.expiresAtMs } };
     let registration;
@@ -1643,6 +1680,7 @@ export async function createCoordinatorRelease(input) {
     entries[0].manifest.bootstrapCapability ===
       entries[1].manifest.bootstrapCapability
   ) invalid();
+  validateMcpIntakePair(entries);
   for (const entry of entries) {
     if (
       !SHA256_PATTERN.test(entry.capabilityDigest) ||

@@ -51,7 +51,7 @@ export const ACTIVE_LAUNCH_STATE_SIGNATURE_DOMAIN =
 export const UNUSED_CAPABILITY_LIFETIME_MS = 3_600_000;
 
 const MAX_MANIFEST_BYTES = 131_072;
-const CREATE_KEYS = Object.freeze([
+const CREATE_COMMON_KEYS = Object.freeze([
   "expectedTlsFingerprint",
   "nowMs",
   "operatorKeyId",
@@ -63,10 +63,10 @@ const CREATE_KEYS = Object.freeze([
   "sessionId",
   "tlsCertificatePem",
 ]);
-const CREATE_KEYS_WITHOUT_RANDOM = Object.freeze(
-  CREATE_KEYS.filter((key) => key !== "randomBytes"),
+const CREATE_COMMON_KEYS_WITHOUT_RANDOM = Object.freeze(
+  CREATE_COMMON_KEYS.filter((key) => key !== "randomBytes"),
 );
-const MANIFEST_KEYS = Object.freeze([
+const MANIFEST_COMMON_KEYS = Object.freeze([
   "bootstrapCapability",
   "expectedTlsFingerprint",
   "expiresAtMs",
@@ -81,7 +81,7 @@ const MANIFEST_KEYS = Object.freeze([
   "sessionId",
   "tlsCertificatePem",
 ]);
-const ACTIVE_STATE_KEYS = Object.freeze([
+const ACTIVE_STATE_COMMON_KEYS = Object.freeze([
   "capabilityDigest",
   "enrollmentBase64",
   "enrollmentDigest",
@@ -131,6 +131,10 @@ const ED25519_SPKI_PREFIX = Buffer.from(
 const DEFAULT_FILE_SYSTEM = Object.freeze({
   lstat,
   open,
+});
+const ROLE_MCP_FIELD = Object.freeze({
+  payee: "payerMcpIntakeCapability",
+  payer: "payerMcpIntakeCapabilityDigest",
 });
 
 export class LaunchManifestError extends Error {
@@ -199,6 +203,53 @@ function readExactData(value, keys) {
     });
   }
   return Object.freeze(result);
+}
+
+function readDataRole(value) {
+  if (!isPlainObject(value)) {
+    invalid();
+  }
+  let descriptor;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(
+      value,
+      "role",
+    );
+  } catch {
+    invalid();
+  }
+  if (
+    descriptor?.enumerable !== true ||
+    !Object.hasOwn(descriptor, "value") ||
+    (descriptor.value !== "payer" &&
+      descriptor.value !== "payee")
+  ) {
+    invalid();
+  }
+  return descriptor.value;
+}
+
+function manifestKeysForRole(role) {
+  return Object.freeze([
+    ...MANIFEST_COMMON_KEYS,
+    ROLE_MCP_FIELD[role],
+  ]);
+}
+
+function createKeysForRole(role, hasRandomBytes) {
+  const common = hasRandomBytes
+    ? CREATE_COMMON_KEYS
+    : CREATE_COMMON_KEYS_WITHOUT_RANDOM;
+  return Object.freeze([...common, ROLE_MCP_FIELD[role]]);
+}
+
+function activeStateKeysForRole(role) {
+  return role === "payer"
+    ? Object.freeze([
+        ...ACTIVE_STATE_COMMON_KEYS,
+        "payerMcpIntakeCapabilityDigest",
+      ])
+    : ACTIVE_STATE_COMMON_KEYS;
 }
 
 function stableBytes(value) {
@@ -339,7 +390,11 @@ function assertDecimalMs(value) {
 
 export function validateLaunchManifest(value) {
   try {
-    const data = readExactData(value, MANIFEST_KEYS);
+    const role = readDataRole(value);
+    const data = readExactData(
+      value,
+      manifestKeysForRole(role),
+    );
     const issuedAtMs = assertDecimalMs(data.issuedAtMs);
     const expiresAtMs = assertDecimalMs(data.expiresAtMs);
     if (
@@ -349,7 +404,6 @@ export function validateLaunchManifest(value) {
       !REPOSITORY_SHA_PATTERN.test(data.repositorySha) ||
       typeof data.operatorKeyId !== "string" ||
       !KEY_ID_PATTERN.test(data.operatorKeyId) ||
-      (data.role !== "payer" && data.role !== "payee") ||
       typeof data.sessionId !== "string" ||
       !UUID_PATTERN.test(data.sessionId) ||
       typeof data.bootstrapCapability !== "string" ||
@@ -358,6 +412,28 @@ export function validateLaunchManifest(value) {
       ) ||
       expiresAtMs - issuedAtMs !==
         UNUSED_CAPABILITY_LIFETIME_MS
+    ) {
+      invalid();
+    }
+    if (
+      data.role === "payee" &&
+      (typeof data.payerMcpIntakeCapability !==
+        "string" ||
+        !CAPABILITY_PATTERN.test(
+          data.payerMcpIntakeCapability,
+        ) ||
+        data.payerMcpIntakeCapability ===
+          data.bootstrapCapability)
+    ) {
+      invalid();
+    }
+    if (
+      data.role === "payer" &&
+      (typeof data.payerMcpIntakeCapabilityDigest !==
+        "string" ||
+        !SHA256_PATTERN.test(
+          data.payerMcpIntakeCapabilityDigest,
+        ))
     ) {
       invalid();
     }
@@ -390,6 +466,15 @@ export function validateLaunchManifest(value) {
     );
     return Object.freeze({
       bootstrapCapability: data.bootstrapCapability,
+      ...(data.role === "payee"
+        ? {
+            payerMcpIntakeCapability:
+              data.payerMcpIntakeCapability,
+          }
+        : {
+            payerMcpIntakeCapabilityDigest:
+              data.payerMcpIntakeCapabilityDigest,
+          }),
       ...publicProjection,
     });
   } catch (error) {
@@ -405,10 +490,12 @@ export function createLaunchManifest(input) {
     if (!isPlainObject(input)) {
       invalid();
     }
+    const role = readDataRole(input);
     const ownKeys = Reflect.ownKeys(input);
-    const keys = ownKeys.includes("randomBytes")
-      ? CREATE_KEYS
-      : CREATE_KEYS_WITHOUT_RANDOM;
+    const keys = createKeysForRole(
+      role,
+      ownKeys.includes("randomBytes"),
+    );
     const data = readExactData(input, keys);
     if (
       !Number.isSafeInteger(data.nowMs) ||
@@ -436,6 +523,28 @@ export function createLaunchManifest(input) {
     ) {
       invalid();
     }
+    if (
+      data.role === "payee" &&
+      (typeof data.payerMcpIntakeCapability !==
+        "string" ||
+        !CAPABILITY_PATTERN.test(
+          data.payerMcpIntakeCapability,
+        ) ||
+        data.payerMcpIntakeCapability ===
+          capability.toString("hex"))
+    ) {
+      invalid();
+    }
+    if (
+      data.role === "payer" &&
+      (typeof data.payerMcpIntakeCapabilityDigest !==
+        "string" ||
+        !SHA256_PATTERN.test(
+          data.payerMcpIntakeCapabilityDigest,
+        ))
+    ) {
+      invalid();
+    }
     const manifest = validateLaunchManifest({
       bootstrapCapability:
         capability.toString("hex"),
@@ -446,6 +555,15 @@ export function createLaunchManifest(input) {
       ),
       issuedAtMs: String(data.nowMs),
       operatorKeyId: data.operatorKeyId,
+      ...(data.role === "payee"
+        ? {
+            payerMcpIntakeCapability:
+              data.payerMcpIntakeCapability,
+          }
+        : {
+            payerMcpIntakeCapabilityDigest:
+              data.payerMcpIntakeCapabilityDigest,
+          }),
       protocol: BILATERAL_PROTOCOL,
       relayUrl: data.relayUrl,
       releaseId: data.releaseId,
@@ -565,9 +683,10 @@ function validateCoordinationIdentity(
 }
 
 function assertActiveStateStructure(value) {
+  const role = readDataRole(value);
   const data = readExactData(
     value,
-    ACTIVE_STATE_KEYS,
+    activeStateKeysForRole(role),
   );
   const issuedAtMs = assertDecimalMs(data.issuedAtMs);
   const expiresAtMs = assertDecimalMs(data.expiresAtMs);
@@ -585,7 +704,6 @@ function assertActiveStateStructure(value) {
     !REPOSITORY_SHA_PATTERN.test(data.repositorySha) ||
     typeof data.operatorKeyId !== "string" ||
     !KEY_ID_PATTERN.test(data.operatorKeyId) ||
-    (data.role !== "payer" && data.role !== "payee") ||
     typeof data.sessionId !== "string" ||
     !UUID_PATTERN.test(data.sessionId) ||
     expiresAtMs - issuedAtMs !==
@@ -594,6 +712,16 @@ function assertActiveStateStructure(value) {
     !BASE64_PATTERN.test(data.receiptBase64) ||
     typeof data.signature !== "string" ||
     !BASE64_PATTERN.test(data.signature)
+  ) {
+    invalid();
+  }
+  if (
+    data.role === "payer" &&
+    (typeof data.payerMcpIntakeCapabilityDigest !==
+      "string" ||
+      !SHA256_PATTERN.test(
+        data.payerMcpIntakeCapabilityDigest,
+      ))
   ) {
     invalid();
   }
@@ -656,6 +784,12 @@ function assertActiveStateStructure(value) {
     expiresAtMs: data.expiresAtMs,
     issuedAtMs: data.issuedAtMs,
     operatorKeyId: data.operatorKeyId,
+    ...(data.role === "payer"
+      ? {
+          payerMcpIntakeCapabilityDigest:
+            data.payerMcpIntakeCapabilityDigest,
+        }
+      : {}),
     paymentMoved: false,
     protocol: data.protocol,
     receiptBase64: data.receiptBase64,
@@ -776,6 +910,12 @@ export async function createActiveLaunchState(input) {
       expiresAtMs: manifest.expiresAtMs,
       issuedAtMs: manifest.issuedAtMs,
       operatorKeyId: manifest.operatorKeyId,
+      ...(manifest.role === "payer"
+        ? {
+            payerMcpIntakeCapabilityDigest:
+              manifest.payerMcpIntakeCapabilityDigest,
+          }
+        : {}),
       paymentMoved: false,
       protocol: manifest.protocol,
       receiptBase64: Buffer.from(
@@ -798,6 +938,15 @@ export async function createActiveLaunchState(input) {
       stableBytes(unsignedState),
       capability,
     );
+    if (manifest.role === "payee") {
+      assertCapabilityIsolated(
+        stableBytes(unsignedState),
+        Buffer.from(
+          manifest.payerMcpIntakeCapability,
+          "hex",
+        ),
+      );
+    }
     let signature;
     try {
       signature = signBytes(

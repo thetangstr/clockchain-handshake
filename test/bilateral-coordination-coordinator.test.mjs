@@ -207,10 +207,17 @@ function stateWriterInput(root, overrides = {}) {
           bootstrapCapability: input.role === "payee" ? "1".repeat(64) : "2".repeat(64),
           expectedTlsFingerprint: input.expectedTlsFingerprint,
           expiresAtMs: "20",
+          issuedAtMs: "10",
           operatorKeyId: input.operatorKeyId,
+          ...(input.role === "payee"
+            ? { payerMcpIntakeCapability: input.payerMcpIntakeCapability }
+            : { payerMcpIntakeCapabilityDigest: input.payerMcpIntakeCapabilityDigest }),
+          protocol: "clockchain.bilateral-authorization/v1",
+          relayUrl: input.relayUrl,
           releaseId: input.releaseId,
           repositorySha: input.repositorySha,
           role: input.role,
+          schema: "clockchain.bilateral-launch-manifest/v1",
           sessionId: input.sessionId,
           tlsCertificatePem: input.tlsCertificatePem,
         },
@@ -615,17 +622,24 @@ test("persists two private manifests only after one atomic two-role capability r
           bootstrapCapability: Buffer.alloc(32, input.role === "payee" ? 7 : 8).toString("hex"),
           expectedTlsFingerprint: input.expectedTlsFingerprint,
           expiresAtMs: "20",
+          issuedAtMs: "10",
           operatorKeyId: input.operatorKeyId,
+          ...(input.role === "payee"
+            ? { payerMcpIntakeCapability: input.payerMcpIntakeCapability }
+            : { payerMcpIntakeCapabilityDigest: input.payerMcpIntakeCapabilityDigest }),
+          protocol: "clockchain.bilateral-authorization/v1",
+          relayUrl: input.relayUrl,
           releaseId: input.releaseId,
           repositorySha: input.repositorySha,
           role: input.role,
+          schema: "clockchain.bilateral-launch-manifest/v1",
           sessionId: input.sessionId,
           tlsCertificatePem: input.tlsCertificatePem,
         }),
       }),
       now: () => 10,
       prepareCapabilityRegistration: async ({ capabilities }) => preparedRegistration(capabilities, "2".repeat(40)),
-      randomBytes: () => capability,
+      randomBytes: (size) => Buffer.alloc(size, 9),
       randomUUID: () => "8f953393-86d0-4f99-9d6a-102f525fbecd",
       registerCapabilitySet: async (value) => {
         registrations.push(value);
@@ -650,6 +664,67 @@ test("persists two private manifests only after one atomic two-role capability r
   assert.deepEqual(Object.keys(registrations[0].registration.capabilities), ["payee", "payer"]);
   assert.equal(JSON.stringify(registrations).includes(capability.toString("hex")), false);
   assert.equal(JSON.stringify(states).includes(capability.toString("hex")), false);
+});
+
+test("generates one release-bound MCP intake capability pair outside public coordinator surfaces", async (t) => {
+  const root = await privateRoot(t);
+  const tls = await tlsFixture(t);
+  const registrations = [];
+  let randomCall = 0;
+  const release = await createCoordinatorRelease({
+    dependencies: {
+      now: () => 10,
+      prepareCapabilityRegistration: async ({ capabilities }) => preparedRegistration(capabilities),
+      randomBytes: (size) => {
+        randomCall += 1;
+        return Buffer.alloc(size, randomCall);
+      },
+      randomUUID: () => SESSION_ID,
+      registerCapabilitySet: async (value) => {
+        registrations.push(value);
+        return capabilityReceipt(value);
+      },
+    },
+    operatorKeyId: "clockchain-demo-2026",
+    relayUrl: "https://127.0.0.1:8443",
+    releaseRoot: root,
+    repositorySha: REPOSITORY_SHA,
+    tlsCertificatePem: tls.certificate,
+    tlsFingerprint: tls.fingerprint,
+  });
+  const [payeeEntry, payerEntry] = release.manifests;
+  const rawIntake = payeeEntry.manifest.payerMcpIntakeCapability;
+  assert.match(rawIntake, /^[0-9a-f]{64}$/);
+  assert.equal(
+    payerEntry.manifest.payerMcpIntakeCapabilityDigest,
+    sha256(Buffer.from(rawIntake, "hex")),
+  );
+  assert.notEqual(rawIntake, payeeEntry.manifest.bootstrapCapability);
+  assert.notEqual(rawIntake, payerEntry.manifest.bootstrapCapability);
+  assert.equal(Object.hasOwn(payeeEntry.manifest, "payerMcpIntakeCapabilityDigest"), false);
+  assert.equal(Object.hasOwn(payerEntry.manifest, "payerMcpIntakeCapability"), false);
+  assert.deepEqual(
+    registrations[0].registration.capabilities,
+    {
+      payee: {
+        capabilityDigest: payeeEntry.capabilityDigest,
+        expiresAtMs: payeeEntry.manifest.expiresAtMs,
+      },
+      payer: {
+        capabilityDigest: payerEntry.capabilityDigest,
+        expiresAtMs: payerEntry.manifest.expiresAtMs,
+      },
+    },
+  );
+  const publicBytes = await readFile(join(root, "coordinator-state.json"));
+  for (const representation of [
+    rawIntake,
+    Buffer.from(rawIntake, "hex").toString("base64"),
+    Buffer.from(rawIntake, "hex").toString("base64url"),
+  ]) {
+    assert.equal(publicBytes.toString("utf8").includes(representation), false);
+    assert.equal(JSON.stringify(registrations).includes(representation), false);
+  }
 });
 
 test("composes the exact bound operator capability client calls", async (t) => {
@@ -699,17 +774,24 @@ test("reuses one durable private capability registration after a lost post respo
   const root = await privateRoot(t);
   const registrations = [];
   let generated = 0;
+  const generatedInputs = [];
   const input = stateWriterInput(root, {
     createLaunchManifest: (value) => {
       generated += 1;
+      generatedInputs.push(value);
       return {
         capabilityDigest: value.role === "payee" ? "a".repeat(64) : "b".repeat(64),
         manifest: {
           bootstrapCapability: value.role === "payee" ? "1".repeat(64) : "2".repeat(64),
           expectedTlsFingerprint: value.expectedTlsFingerprint,
-          expiresAtMs: "20", operatorKeyId: value.operatorKeyId,
+          expiresAtMs: "20", issuedAtMs: "10", operatorKeyId: value.operatorKeyId,
+          ...(value.role === "payee"
+            ? { payerMcpIntakeCapability: value.payerMcpIntakeCapability }
+            : { payerMcpIntakeCapabilityDigest: value.payerMcpIntakeCapabilityDigest }),
+          protocol: "clockchain.bilateral-authorization/v1",
+          relayUrl: value.relayUrl,
           releaseId: value.releaseId, repositorySha: value.repositorySha,
-          role: value.role, sessionId: value.sessionId,
+          role: value.role, schema: "clockchain.bilateral-launch-manifest/v1", sessionId: value.sessionId,
           tlsCertificatePem: value.tlsCertificatePem,
         },
       };
@@ -722,6 +804,11 @@ test("reuses one durable private capability registration after a lost post respo
   });
   await assert.rejects(createCoordinatorRelease(input), /lost response after durable relay post/);
   assert.equal(registrations.length, 1);
+  assert.match(generatedInputs[0].payerMcpIntakeCapability, /^[0-9a-f]{64}$/);
+  assert.equal(
+    generatedInputs[1].payerMcpIntakeCapabilityDigest,
+    sha256(Buffer.from(generatedInputs[0].payerMcpIntakeCapability, "hex")),
+  );
   await createCoordinatorRelease({
     ...input,
     dependencies: { ...input.dependencies, writeLaunchManifest: async () => {}, writeState: async () => {} },
