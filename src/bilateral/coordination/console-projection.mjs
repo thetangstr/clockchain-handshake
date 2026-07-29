@@ -24,9 +24,9 @@ const ACTIVE_RUN_BY_PHASE = Object.freeze({
   STAKEHOLDER_VERIFIED: "stakeholder",
 });
 const ANCHOR_DETAILS = Object.freeze([
-  Object.freeze({ actor: "Iris", sequence: 1, stage: "proposal" }),
-  Object.freeze({ actor: "Billie", sequence: 2, stage: "acceptance" }),
-  Object.freeze({ actor: "Iris", sequence: 3, stage: "acknowledgment" }),
+  Object.freeze({ actor: "Payer", sequence: 1, stage: "proposal" }),
+  Object.freeze({ actor: "Requestor", sequence: 2, stage: "acceptance" }),
+  Object.freeze({ actor: "Payer", sequence: 3, stage: "acknowledgment" }),
 ]);
 
 function digest(value) { return typeof value === "string" && SHA64.test(value) ? value : null; }
@@ -132,8 +132,8 @@ export function buildConsoleProjection(input) {
   return Object.freeze({
     actors: Object.freeze({
       operator: Object.freeze({ health: healthSummary.actors.operator, label: "Operator", role: "operator" }),
-      payer: Object.freeze({ health: healthSummary.actors.payer, label: "Iris", role: "payer" }),
-      payee: Object.freeze({ health: healthSummary.actors.payee, label: "Billie", role: "payee" }),
+      payer: Object.freeze({ health: healthSummary.actors.payer, label: "Payer", role: "payer" }),
+      payee: Object.freeze({ health: healthSummary.actors.payee, label: "Requestor", role: "payee" }),
     }),
     anchors,
     deadline: Object.freeze({ expiresAtMs: deadlineExpires === null ? null : deadlineExpires.toString(), freshness, nowMs: Number.isSafeInteger(value.nowMs) ? value.nowMs : null }),

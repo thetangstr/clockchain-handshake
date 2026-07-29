@@ -2,8 +2,8 @@
 
 Use this operator handoff with the [full runbook](./bilateral-demo-day.md), the
 [three-computer quick-start](./bilateral-demo-quick-start.md), the
-[Iris prompt](../../prompts/run-iris-bilateral-demo.md), and the
-[Billie prompt](../../prompts/run-billie-bilateral-demo.md). The canonical
+[Payer prompt](../../prompts/run-payer-bilateral-demo.md), and the
+[Requestor prompt](../../prompts/run-requestor-bilateral-demo.md). The canonical
 stakeholder helper route is
 [https://clockchain-research.vercel.app/handshake/run](https://clockchain-research.vercel.app/handshake/run).
 The route is the required public start surface; live session evidence never goes
@@ -16,8 +16,14 @@ or multi-validator. Every protocol and verdict artifact preserves paymentMoved: 
 
 Runner local state is not operator authorization. For a session that the fresh
 aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that
-Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and
-`ACKNOWLEDGED`, and Billie anchored `ACCEPTED`. The protocol does not download message bytes from Clockchain.
+Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and
+`ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`. The protocol does not download message bytes from Clockchain.
+
+Current MCP status: the hosted server is `https://mcp.clockchain.network/mcp`
+and its source lives in the separate specs repository at `packages/mcp-server`.
+It does not yet expose a general payer-mandate discovery tool. In this manual
+demo, the signed session mandate is delivered through the authenticated
+coordination relay.
 
 ## Release and computers
 
@@ -33,7 +39,7 @@ worktree, wrong SHA, branch checkout, wrong Node.js major version, dependency
 install drift, or any extra command.
 
 The startup control order is exactly:
-`relay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor`.
+`relay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor`.
 
 `implementation-complete and rehearsal-ready` means local code, tests, docs, and
 release packaging are ready, but the physical funded run has not passed. Only a
@@ -48,7 +54,7 @@ private contents with an agent. No token, invitation, capability, private key,
 TLS key, RPC URL, or live evidence value belongs in a chat, commit, document, or
 agent transcript.
 
-- Operator release/RPC material: repository-private `.context/bilateral-live-2026-07-28/`.
+- Human operator release/RPC material: repository-private `.context/bilateral-live-2026-07-28/`.
 - Treasury keystore and public metadata: repository-private `.context/sepolia-funding/`.
 - Directories that contain private material must be mode `0700`.
 - Secret files, keystores, RPC URL files, TLS private keys, tokens, invitations,
@@ -113,7 +119,7 @@ try {
 NODE
 ```
 
-## Operator startup
+## Human operator startup
 
 Set path placeholders locally. Do not paste private values.
 
@@ -192,24 +198,24 @@ surfaces, not authority sources.
 
 ## Role supervisors
 
-Iris payer supervisor:
+Payer supervisor:
 
 ```sh
 npm run bilateral:supervisor -- \
-  --launch-manifest "$IRIS_LAUNCH_MANIFEST" \
-  --state "$IRIS_SUPERVISOR_STATE"
+  --launch-manifest "$PAYER_LAUNCH_MANIFEST" \
+  --state "$PAYER_SUPERVISOR_STATE"
 ```
 
-Billie payee supervisor:
+Requestor supervisor:
 
 ```sh
 npm run bilateral:supervisor -- \
-  --launch-manifest "$BILLIE_LAUNCH_MANIFEST" \
-  --state "$BILLIE_SUPERVISOR_STATE"
+  --launch-manifest "$REQUESTOR_LAUNCH_MANIFEST" \
+  --state "$REQUESTOR_SUPERVISOR_STATE"
 ```
 
 The user eventual actions are only funding four generated addresses and
-starting two physical supervisors. Operator owns everything else.
+starting two physical supervisors. Human operator owns everything else.
 
 ## Funding command
 
@@ -242,9 +248,9 @@ Expected commercial-intent markers:
 
 Exact protocol anchors:
 
-1. Iris `PROPOSED`
-2. Billie `ACCEPTED`
-3. Iris `ACKNOWLEDGED`
+1. Payer `PROPOSED`
+2. Requestor `ACCEPTED`
+3. Payer `ACKNOWLEDGED`
 
 The role packages must be marker-complete role files, including
 `party-result.json`, `PARTY-RESULT.md`, and `.party-result.complete.json`.
@@ -265,8 +271,8 @@ node scripts/verify-bilateral-results.mjs \
   --clockchain-token-file "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \
   --descriptor "$BILATERAL_DESCRIPTOR_FILE" \
   --output "$VERDICT_OUTPUT_DIR" \
-  --payer-results "$IRIS_TRANSFERRED_RESULT_DIR" \
-  --payee-results "$BILLIE_TRANSFERRED_RESULT_DIR" \
+  --payer-results "$PAYER_TRANSFERRED_RESULT_DIR" \
+  --payee-results "$REQUESTOR_TRANSFERRED_RESULT_DIR" \
   --rpc-url "$SEPOLIA_RPC_URL"
 ```
 

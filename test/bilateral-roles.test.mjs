@@ -75,8 +75,8 @@ const PAYEE_ACCOUNT =
 const PAYER_ADDRESS = PAYER_ACCOUNT.address.toLowerCase();
 const PAYEE_ADDRESS = PAYEE_ACCOUNT.address.toLowerCase();
 const REPOSITORY_PROMPTS = Object.freeze({
-  payer: "# Iris role prompt\nUse the signed session.\n",
-  payee: "# Billie role prompt\nUse the signed session.\n",
+  payer: "# Payer role prompt\nUse the signed session.\n",
+  payee: "# Requestor role prompt\nUse the signed session.\n",
 });
 const REPOSITORY_PROMPT_DIGESTS = Object.freeze({
   payer: createHash("sha256")
@@ -103,13 +103,13 @@ function descriptor() {
     payee: {
       address: PAYEE_ADDRESS,
       agentId: "8678",
-      displayName: "Billie",
+      displayName: "Requestor",
       role: "payee",
     },
     payer: {
       address: PAYER_ADDRESS,
       agentId: "8677",
-      displayName: "Iris",
+      displayName: "Payer",
       role: "payer",
     },
     paymentMoved: false,
@@ -218,14 +218,15 @@ function triple(kind, record) {
 test("role module exposes generic protocol-role runners without persona exports", () => {
   assert.equal(typeof roleModule.runPayerRole, "function");
   assert.equal(typeof roleModule.runPayeeRole, "function");
+  assert.equal("runBillieRole" in roleModule, false);
   assert.equal("runBillyRole" in roleModule, false);
   assert.equal("runIrisRole" in roleModule, false);
 });
 
 test("role CLIs dispatch through generic protocol runners", async () => {
   const files = [
-    ["../bin/handshake-propose.mjs", "runPayerRole", "runBillyRole"],
-    ["../bin/handshake-accept.mjs", "runPayeeRole", "runIrisRole"],
+    ["../bin/handshake-propose.mjs", "runPayerRole", "runIrisRole"],
+    ["../bin/handshake-accept.mjs", "runPayeeRole", "runBillieRole"],
   ];
   for (const [relative, expected, rejected] of files) {
     const source = await readFile(
@@ -237,15 +238,15 @@ test("role CLIs dispatch through generic protocol runners", async () => {
   }
 });
 
-test("descriptor fixtures use Iris payer and Billie payee personas", () => {
-  assert.equal(descriptor().payer.displayName, "Iris");
-  assert.equal(descriptor().payee.displayName, "Billie");
+test("descriptor fixtures use generic display names while protocol keys stay stable", () => {
+  assert.equal(descriptor().payer.displayName, "Payer");
+  assert.equal(descriptor().payee.displayName, "Requestor");
 });
 
-test("actual mapped role prompts are canonical Iris payer and Billie payee surfaces", async () => {
+test("actual mapped role prompts are canonical Payer and Requestor surfaces", async () => {
   const paths = Object.freeze({
-    payer: "prompts/run-iris-bilateral-demo.md",
-    payee: "prompts/run-billie-bilateral-demo.md",
+    payer: "prompts/run-payer-bilateral-demo.md",
+    payee: "prompts/run-requestor-bilateral-demo.md",
   });
   const [payer, payee] = await Promise.all([
     readFile(join(ROLE_REPOSITORY_ROOT, paths.payer), "utf8"),
@@ -253,22 +254,22 @@ test("actual mapped role prompts are canonical Iris payer and Billie payee surfa
   ]);
   assert.match(
     payer,
-    /You are Stakeholder 1, Iris, the payer and mandate owner\./,
+    /You are Stakeholder 1, Payer, the mandate-owning payer\./,
   );
   assert.match(payer, /\bPROPOSED\b/);
   assert.match(payer, /\bACKNOWLEDGED\b/);
-  assert.doesNotMatch(payer, /\bIris\b[^.\n]*\bpayee\b/i);
-  assert.doesNotMatch(payer, /\bBilly\b[^.\n]*\bpayer\b/i);
+  assert.doesNotMatch(payer, /\bPayer\b[^.\n]*\bpayee\b/i);
+  assert.doesNotMatch(payer, /\bRequestor\b[^.\n]*\banchors `PROPOSED`\b/i);
 
   assert.match(
     payee,
-    /You are Stakeholder 2, Billie, the vendor and payee\./,
+    /You are Stakeholder 2, Requestor, the payment requestor\./,
   );
-  assert.match(payee, /\bvendor\b/i);
+  assert.match(payee, /\brequestor\b/i);
   assert.match(payee, /\bACCEPTED\b/);
-  assert.match(payee, /\bfollowed Iris's signed mandate\b/i);
-  assert.doesNotMatch(payee, /\bIris\b[^.\n]*\bpayee\b/i);
-  assert.doesNotMatch(payee, /\bBilly\b[^.\n]*\bpayer\b/i);
+  assert.match(payee, /\bfollowed Payer's signed mandate\b/i);
+  assert.doesNotMatch(payee, /\bPayer\b[^.\n]*\bpayee\b/i);
+  assert.doesNotMatch(payee, /\bRequestor\b[^.\n]*\banchors `PROPOSED`\b/i);
 
   await Promise.all(
     Object.values(paths).map((repositoryPath) =>
@@ -849,7 +850,7 @@ async function defaultBuilderFixture(t) {
   const bundle = await encryptInvitation(
     {
       address: PAYER_ADDRESS,
-      displayName: "Iris",
+      displayName: "Payer",
       privateKey,
     },
     code,
@@ -892,13 +893,13 @@ async function defaultBuilderFixture(t) {
         );
         if (
           request.repositoryPath ===
-          "prompts/run-iris-bilateral-demo.md"
+          "prompts/run-payer-bilateral-demo.md"
         ) {
           return Buffer.from(REPOSITORY_PROMPTS.payer);
         }
         if (
           request.repositoryPath ===
-          "prompts/run-billie-bilateral-demo.md"
+          "prompts/run-requestor-bilateral-demo.md"
         ) {
           return Buffer.from(REPOSITORY_PROMPTS.payee);
         }
@@ -1017,7 +1018,7 @@ test("default builder fails provenance closed before secrets, clients, or tokens
           repositoryPath,
         }) =>
           Buffer.from(
-            repositoryPath.includes("iris")
+            repositoryPath.includes("payer")
               ? `${REPOSITORY_PROMPTS.payer}mutated\n`
               : REPOSITORY_PROMPTS.payee,
           ),

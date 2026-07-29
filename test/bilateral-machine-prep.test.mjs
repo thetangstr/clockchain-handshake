@@ -399,7 +399,7 @@ async function invitationFixture(t, prefix) {
     `0x${randomBytes(32).toString("hex")}`;
   const address =
     privateKeyToAccount(privateKey).address;
-  const displayName = "Billy";
+  const displayName = "Requestor";
   const code = randomBytes(24).toString("base64url");
   const bundle = await encryptInvitation(
     { address, displayName, privateKey },
@@ -777,7 +777,7 @@ test("registration treats only an initial nofollow-open ENOENT as checkpoint abs
   const invitation = {
     address:
       "0x00112233445566778899aabbccddeeff00112233",
-    displayName: "Billy",
+    displayName: "Requestor",
   };
   const missing = await readCheckpoint(
     "/private/output",
@@ -1344,9 +1344,9 @@ test("prompt hash uses exact git-show bytes and the same canonical role binding 
     PROMPT_HASH_MODULE,
     "runCli",
   );
-  const payer = Buffer.from("Iris prompt\n", "utf8");
+  const payer = Buffer.from("Payer prompt\n", "utf8");
   const payee = Buffer.from(
-    "Billie prompt without trailing newline",
+    "Requestor prompt without trailing newline",
     "utf8",
   );
   const expected = createHash("sha256")
@@ -1369,7 +1369,7 @@ test("prompt hash uses exact git-show bytes and the same canonical role binding 
       output: (line) => lines.push(line),
       promptResolver: async (request) => {
         requests.push(request);
-        return request.repositoryPath.includes("iris")
+        return request.repositoryPath.includes("payer")
           ? payer
           : payee;
       },
@@ -1382,8 +1382,8 @@ test("prompt hash uses exact git-show bytes and the same canonical role binding 
   assert.deepEqual(
     requests.map(({ repositoryPath }) => repositoryPath),
     [
-      "prompts/run-iris-bilateral-demo.md",
-      "prompts/run-billie-bilateral-demo.md",
+      "prompts/run-payer-bilateral-demo.md",
+      "prompts/run-requestor-bilateral-demo.md",
     ],
   );
   assert.ok(
@@ -1417,14 +1417,14 @@ test("prompt hash default resolution accepts commits and rejects trees or invali
     { cwd: root },
   );
   await mkdir(join(root, "prompts"));
-  const payer = Buffer.from("Iris committed prompt\n");
-  const payee = Buffer.from("Billie committed prompt\n");
+  const payer = Buffer.from("Payer committed prompt\n");
+  const payee = Buffer.from("Requestor committed prompt\n");
   await writeFile(
-    join(root, "prompts/run-iris-bilateral-demo.md"),
+    join(root, "prompts/run-payer-bilateral-demo.md"),
     payer,
   );
   await writeFile(
-    join(root, "prompts/run-billie-bilateral-demo.md"),
+    join(root, "prompts/run-requestor-bilateral-demo.md"),
     payee,
   );
   await execFileAsync("git", ["add", "prompts"], {

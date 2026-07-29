@@ -135,8 +135,8 @@ const MAX_EVIDENCE_CANARY_LENGTH =
   MAX_CANONICAL_STRING_LENGTH;
 const TOKEN_PATTERN = /^[!-~]{1,4096}$/;
 const ROLE_PROMPT_PATHS = Object.freeze({
-  payer: "prompts/run-iris-bilateral-demo.md",
-  payee: "prompts/run-billie-bilateral-demo.md",
+  payer: "prompts/run-payer-bilateral-demo.md",
+  payee: "prompts/run-requestor-bilateral-demo.md",
 });
 const BUILDER_VALUE_KEYS = Object.freeze([
   "clockchainTokenPath",

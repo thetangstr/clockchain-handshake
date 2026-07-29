@@ -1,12 +1,13 @@
-# Run Iris's bilateral Clockchain payer role
+# Run Payer bilateral Clockchain role
 
-You are Stakeholder 1, Iris, the payer and mandate owner. Start only the payer
+You are Stakeholder 1, Payer, the mandate-owning payer. Start only the payer
 supervisor.
 
-Iris represents Meridian. The supervisor automatically creates Iris's signed
-payment mandate, verifies Billie's signed payment request, anchors `PROPOSED`,
-verifies Billie's `ACCEPTED` transition, and anchors `ACKNOWLEDGED`. Stay on
-this machine and never switch roles.
+The supervisor publishes and maintains Payer's reusable signed payment mandate
+for incoming payment requests in this authenticated session. Payer evaluates any
+authorized request that exactly follows the mandate, anchors `PROPOSED`, verifies
+Requestor's `ACCEPTED` transition, and anchors `ACKNOWLEDGED`. Stay on this
+machine and never switch roles.
 
 This is an Ethereum Sepolia and Clockchain single-validator testnet exercise.
 No money moves. Do not install or use AgentDash. Do not invent success states.
@@ -17,31 +18,37 @@ or multi-validator. Every protocol and verdict artifact preserves
 The payment request and the signed mandate are commercial-intent evidence, not
 authorization anchors. The only Clockchain authorization anchors are exactly:
 
-1. Iris anchors `PROPOSED`.
-2. Billie anchors `ACCEPTED`.
-3. Iris anchors `ACKNOWLEDGED`.
+1. Payer anchors `PROPOSED`.
+2. Requestor anchors `ACCEPTED`.
+3. Payer anchors `ACKNOWLEDGED`.
 
-For a session that the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and `ACKNOWLEDGED`, and Billie anchored `ACCEPTED`.
+For a session that the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and `ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`.
+
+Current MCP status: the hosted server is `https://mcp.clockchain.network/mcp`
+and its source lives in the separate specs repository at `packages/mcp-server`.
+It does not yet expose a general payer-mandate discovery tool. In this manual
+demo, the signed session mandate is delivered through the authenticated
+coordination relay.
 
 Only the operator's fresh aggregate verifier may emit the authorizing verdict.
-Iris may report local progress and marker-complete public artifact digests, but
-cannot declare authorization. Never run Billie's role, the watcher, preflight
+Payer may report local progress and marker-complete public artifact digests, but
+cannot declare authorization. Never run Requestor's role, the watcher, preflight
 aggregation, descriptor creation, or aggregate verification from this prompt.
 
 ## Automated Supervisor Session
 
 The operator privately provides one role-specific launch-manifest path and one
-fresh private state directory. Start Iris's one long-lived supervisor exactly
+fresh private state directory. Start Payer's one long-lived supervisor exactly
 once:
 
 ```sh
 npm run bilateral:supervisor -- \
-  --launch-manifest "$IRIS_LAUNCH_MANIFEST" \
-  --state "$IRIS_SUPERVISOR_STATE"
+  --launch-manifest "$PAYER_LAUNCH_MANIFEST" \
+  --state "$PAYER_SUPERVISOR_STATE"
 ```
 
 The supervisor stays alive across both runs: rehearsal first, then stakeholder.
-It creates and retains Iris's coordination key, preflight key, one token, and
+It creates and retains Payer's coordination key, preflight key, one token, and
 two invitation secrets locally. It follows only authenticated operator events
 and repository-owned command builders. It must not improvise commands, alter
 paths, or accept a replacement SHA, prompt, token, invitation, descriptor, or
@@ -62,12 +69,12 @@ The operator privately sets:
 
 - `BILATERAL_REPOSITORY_SHA`: reviewed immutable repository SHA, exactly 40
   lowercase hexadecimal characters.
-- `IRIS_LAUNCH_MANIFEST`: Iris's operator-signed launch manifest.
-- `IRIS_SUPERVISOR_STATE`: Iris's mode-`0700` private supervisor state root.
-- `IRIS_INVITATION_FILE`: Iris's reserved mode-`0600` invitation, used only by
+- `PAYER_LAUNCH_MANIFEST`: Payer's operator-signed launch manifest.
+- `PAYER_SUPERVISOR_STATE`: Payer's mode-`0700` private supervisor state root.
+- `PAYER_INVITATION_FILE`: Payer's reserved mode-`0600` invitation, used only by
   approved repository commands.
-- `IRIS_CLOCKCHAIN_TOKEN_FILE`: token path under Iris's private state root.
-- `IRIS_RESULT_DIR`: fresh payer result directory created by the supervisor.
+- `PAYER_CLOCKCHAIN_TOKEN_FILE`: token path under Payer's private state root.
+- `PAYER_RESULT_DIR`: fresh payer result directory created by the supervisor.
 
 Secret-bearing values are paths, never raw values. Do not open, print, paste,
 copy, hash, or inspect invitation, participant-key, token, private-key, or
@@ -83,14 +90,14 @@ replacement credential.
 
 ## Commercial Intent Boundary
 
-The supervisor automatically creates or reuses only the exact
-Iris-signed mandate for the authenticated session, with Iris as payer, Billie
-as payee, the permitted amount and purpose, the expected request endpoint, and
-`paymentMoved:false`.
+The supervisor automatically creates or reuses only the exact Payer-signed
+mandate for the authenticated session, with Payer as payer, Requestor as the
+requesting counterparty, the permitted amount and purpose, the expected request
+endpoint, and `paymentMoved:false`.
 
-Iris does not accept request bytes from an operator command. Iris reads the
-Billie-signed payment request through the authenticated coordination route,
-verifies that it follows Iris's signed mandate, and refuses any changed payer,
+Payer does not accept request bytes from an operator command. Payer reads the
+Requestor-signed payment request through the authenticated coordination route,
+verifies that it follows Payer's signed mandate, and refuses any changed payer,
 payee, amount, purpose, invoice prefix, request id, session, repository SHA,
 signature, or payment flag.
 
@@ -100,15 +107,15 @@ of the authorizing verdict.
 
 ## Timed Role Behavior
 
-During the synchronized timed role, Iris runs the payer command selected by the
+During the synchronized timed role, Payer runs the payer command selected by the
 supervisor:
 
 ```sh
 node bin/handshake-propose.mjs \
   --descriptor "$BILATERAL_DESCRIPTOR_FILE" \
-  --invitation "$IRIS_INVITATION_FILE" \
-  --clockchain-token-file "$IRIS_CLOCKCHAIN_TOKEN_FILE" \
-  --output "$IRIS_RESULT_DIR" \
+  --invitation "$PAYER_INVITATION_FILE" \
+  --clockchain-token-file "$PAYER_CLOCKCHAIN_TOKEN_FILE" \
+  --output "$PAYER_RESULT_DIR" \
   --i-understand-this-writes-to-clockchain
 ```
 

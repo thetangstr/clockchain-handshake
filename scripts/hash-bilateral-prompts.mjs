@@ -16,8 +16,8 @@ export const PROMPT_HASH_REPOSITORY_ROOT = dirname(
 const MAX_PROMPT_BYTES = 1_048_576;
 const REPOSITORY_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const PROMPT_PATHS = Object.freeze({
-  payer: "prompts/run-iris-bilateral-demo.md",
-  payee: "prompts/run-billie-bilateral-demo.md",
+  payer: "prompts/run-payer-bilateral-demo.md",
+  payee: "prompts/run-requestor-bilateral-demo.md",
 });
 const execFileAsync = promisify(execFile);
 

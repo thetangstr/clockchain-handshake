@@ -25,33 +25,38 @@ the exit it produces, and the next action for the operator.
 
 ## Bilateral payment-authorization demo
 
-The operator-led bilateral flow uses separate role computers. Iris is the
-payer. Billie is the payee. Start with the
+The operator-led bilateral flow uses separate role computers. Payer is the
+payer. Requestor is the payment requestor. Start with the
 [three-computer quick-start](docs/runbooks/bilateral-demo-quick-start.md), then
 use the [bilateral demo-day runbook](docs/runbooks/bilateral-demo-day.md) and
-deliver the machine-specific [Iris prompt](prompts/run-iris-bilateral-demo.md)
-and [Billie prompt](prompts/run-billie-bilateral-demo.md) from one reviewed
+deliver the machine-specific [Payer prompt](prompts/run-payer-bilateral-demo.md)
+and [Requestor prompt](prompts/run-requestor-bilateral-demo.md) from one reviewed
 immutable repository SHA. The public
 [live-demo helper](https://clockchain-research.vercel.app/handshake/run)
 explains the same workflow but never receives live evidence.
 
-Demo-day role mapping is fixed. Stakeholder 1 is Iris, the payer. Stakeholder 2
-is Billie, the payee. The operator runs the relay, coordinator, watcher,
+Demo-day role mapping is fixed. Stakeholder 1 is Payer, the payer. Stakeholder 2 is Requestor, the payment requestor. The human operator runs the relay, coordinator, watcher,
 read-only console, reusable Sepolia treasury, and fresh aggregate verifier from this Mac. The
 reusable Sepolia treasury is funding authority only for deterministic testnet
 gas top-ups through `npm run bilateral:fund`; it never signs participant
 registration, role, watcher, or verifier actions.
 
-The long-lived supervisors automatically create the Iris-signed mandate and
-the matching Billie-signed request without operator-authored commercial terms
-or manual artifact copying. Iris anchors an exact USD 100 proposal, Billie
-anchors an acceptance bound to that proposal, and Iris anchors the final
+The long-lived supervisors automatically create the Payer-signed mandate and
+the matching Requestor-signed request without operator-authored commercial terms
+or manual artifact copying. Payer anchors an exact USD 100 proposal, Requestor
+anchors an acceptance bound to that proposal, and Payer anchors the final
 acknowledgment. For a session that
 the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence
-establishes that Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and
-`ACKNOWLEDGED`, and Billie anchored `ACCEPTED`. The protocol does not download message
+establishes that Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and
+`ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`. The protocol does not download message
 bytes from Clockchain. Every transition and verdict preserves
 `paymentMoved: false`.
+
+Current MCP status: the hosted server is `https://mcp.clockchain.network/mcp`
+and its source lives in the separate specs repository at `packages/mcp-server`.
+It does not yet expose a general payer-mandate discovery tool. In this manual
+demo, the signed session mandate is delivered through the authenticated
+coordination relay.
 
 Runner local state is not operator authorization. Neither role runner nor the
 read-only watcher may emit `AUTHORIZED`; only the operator's fresh aggregate
@@ -69,12 +74,12 @@ npm run bilateral:supervisor -- --launch-manifest <role manifest> --state <priva
 ```
 
 The startup control order is:
-`relay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor`.
+`relay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor`.
 Here, funding means validating and arming the reusable Sepolia treasury lane
 before either role starts. After enrollment reveals the four fresh addresses,
 the operator executes exactly four `0.01 Sepolia ETH` allocations.
 
-Run the supervisor command once on Iris and once on Billie. Those two processes
+Run the supervisor command once on Payer and once on Requestor. Those two processes
 span the rehearsal and stakeholder runs. After they enroll, the coordinator
 displays four signed public addresses; funding those four addresses is the
 user's only other action. Low-level preparation and exact-input recovery

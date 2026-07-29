@@ -31,14 +31,13 @@ const PUBLIC_DOCUMENTS = Object.freeze([
   "prompts/run-turnkey-demo.md",
 ]);
 const BILATERAL_PUBLIC_DOCUMENTS = Object.freeze([
-  "prompts/run-iris-bilateral-demo.md",
-  "prompts/run-billie-bilateral-demo.md",
+  "prompts/run-payer-bilateral-demo.md",
+  "prompts/run-requestor-bilateral-demo.md",
   "docs/runbooks/bilateral-demo-quick-start.md",
   "docs/runbooks/bilateral-demo-day.md",
   "docs/runbooks/bilateral-demo-live-handoff.md",
 ]);
 const BILATERAL_COMPATIBILITY_DOCUMENTS = Object.freeze([
-  "prompts/run-billy-bilateral-demo.md",
 ]);
 const SUPPORT_FILES = Object.freeze([
   "package.json",
@@ -175,7 +174,7 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
       BILATERAL_PUBLIC_DOCUMENTS.length +
       BILATERAL_COMPATIBILITY_DOCUMENTS.length +
       SUPPORT_FILES.filter((path) => path === "invites/README.md").length,
-    10,
+    9,
   );
   for (const [relativePath, contents] of documents) {
     assert.match(contents, /Clockchain(?:®)?/);
@@ -192,7 +191,7 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
     );
     assert.match(
       contents,
-      /For\s+a\s+session\s+that\s+the\s+fresh\s+aggregate\s+verifier\s+marks\s+`AUTHORIZED`,\s+the\s+verified\s+evidence\s+establishes\s+that\s+Billie\s+followed\s+Iris's\s+signed\s+mandate,\s+Iris\s+anchored\s+`PROPOSED`\s+and\s+`ACKNOWLEDGED`,\s+and\s+Billie\s+anchored\s+`ACCEPTED`/i,
+      /For\s+a\s+session\s+that\s+the\s+fresh\s+aggregate\s+verifier\s+marks\s+`AUTHORIZED`,\s+the\s+verified\s+evidence\s+establishes\s+that\s+Requestor\s+followed\s+Payer's\s+signed\s+mandate,\s+Payer\s+anchored\s+`PROPOSED`\s+and\s+`ACKNOWLEDGED`,\s+and\s+Requestor\s+anchored\s+`ACCEPTED`/i,
       relativePath,
     );
     assert.match(
@@ -200,31 +199,36 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
       /protocol does not download message bytes from Clockchain|commercial-intent evidence, not\s+authorization anchors/i,
       relativePath,
     );
+    assert.match(
+      contents,
+      /https:\/\/mcp\.clockchain\.network\/mcp[\s\S]*packages\/mcp-server[\s\S]*does not yet expose a general\s+payer-mandate discovery tool[\s\S]*authenticated\s+coordination relay/i,
+      relativePath,
+    );
   }
 
-  const billie = documents.get(
-    "prompts/run-billie-bilateral-demo.md",
+  const requestor = documents.get(
+    "prompts/run-requestor-bilateral-demo.md",
   );
-  const iris = documents.get(
-    "prompts/run-iris-bilateral-demo.md",
+  const payer = documents.get(
+    "prompts/run-payer-bilateral-demo.md",
   );
   const runbook = documents.get(
     "docs/runbooks/bilateral-demo-day.md",
   );
-  assert.match(billie, /Billie[^.]*payee/i);
-  assert.match(billie, /node bin\/handshake-accept\.mjs/);
-  assert.match(billie, /ACCEPTED/);
-  assert.match(iris, /Iris[^.]*payer/i);
-  assert.match(iris, /node bin\/handshake-propose\.mjs/);
-  assert.match(iris, /ACKNOWLEDGED/);
-  for (const prompt of [billie, iris]) {
+  assert.match(requestor, /Requestor[^.]*requestor/i);
+  assert.match(requestor, /node bin\/handshake-accept\.mjs/);
+  assert.match(requestor, /ACCEPTED/);
+  assert.match(payer, /Payer[^.]*payer/i);
+  assert.match(payer, /node bin\/handshake-propose\.mjs/);
+  assert.match(payer, /ACKNOWLEDGED/);
+  for (const prompt of [requestor, payer]) {
     assert.match(
       prompt,
-      /--descriptor "\$BILATERAL_DESCRIPTOR_FILE" \\\n  --invitation "\$(?:BILLIE|IRIS)_INVITATION_FILE" \\\n  --clockchain-token-file "\$(?:BILLIE|IRIS)_CLOCKCHAIN_TOKEN_FILE" \\\n  --output "\$(?:BILLIE|IRIS)_RESULT_DIR" \\\n  --i-understand-this-writes-to-clockchain/,
+      /--descriptor "\$BILATERAL_DESCRIPTOR_FILE" \\\n  --invitation "\$(?:REQUESTOR|PAYER)_INVITATION_FILE" \\\n  --clockchain-token-file "\$(?:REQUESTOR|PAYER)_CLOCKCHAIN_TOKEN_FILE" \\\n  --output "\$(?:REQUESTOR|PAYER)_RESULT_DIR" \\\n  --i-understand-this-writes-to-clockchain/,
     );
     assert.doesNotMatch(
       prompt,
-      /--private-key(?:-file)?(?:[ =]|$)|_(?:BILLIE|IRIS)_PRIVATE_KEY_FILE|--acknowledge-agent-permission-risk/,
+      /--private-key(?:-file)?(?:[ =]|$)|_(?:REQUESTOR|PAYER)_PRIVATE_KEY_FILE|--acknowledge-agent-permission-risk/,
     );
   }
 
@@ -289,17 +293,17 @@ test("primary bilateral runbook requires exactly three ordered independently ver
 });
 
 test("automated bilateral happy path limits the user to four fundings and two supervisors", async () => {
-  const [runbook, billie, iris, packageText] = await Promise.all([
+  const [runbook, requestor, payer, packageText] = await Promise.all([
     readFile(
       join(ROOT_DIRECTORY, "docs/runbooks/bilateral-demo-day.md"),
       "utf8",
     ),
     readFile(
-      join(ROOT_DIRECTORY, "prompts/run-billie-bilateral-demo.md"),
+      join(ROOT_DIRECTORY, "prompts/run-requestor-bilateral-demo.md"),
       "utf8",
     ),
     readFile(
-      join(ROOT_DIRECTORY, "prompts/run-iris-bilateral-demo.md"),
+      join(ROOT_DIRECTORY, "prompts/run-payer-bilateral-demo.md"),
       "utf8",
     ),
     readFile(join(ROOT_DIRECTORY, "package.json"), "utf8"),
@@ -309,8 +313,8 @@ test("automated bilateral happy path limits the user to four fundings and two su
     1,
   )[0];
   for (const [prompt, role] of [
-    [billie, "Billie"],
-    [iris, "Iris"],
+    [requestor, "Requestor"],
+    [payer, "Payer"],
   ]) {
     const primaryPrompt = prompt.split(
       /^## Operator-authorized recovery appendix$/m,
@@ -371,7 +375,7 @@ test("automated bilateral happy path limits the user to four fundings and two su
 });
 
 test("bilateral roleplay docs require three machines and live relay readiness", async () => {
-  const [readme, runbook, quickStart, billie, iris] = await Promise.all([
+  const [readme, runbook, quickStart, requestor, payer] = await Promise.all([
     readFile(join(ROOT_DIRECTORY, "README.md"), "utf8"),
     readFile(
       join(ROOT_DIRECTORY, "docs/runbooks/bilateral-demo-day.md"),
@@ -385,11 +389,11 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
       "utf8",
     ),
     readFile(
-      join(ROOT_DIRECTORY, "prompts/run-billie-bilateral-demo.md"),
+      join(ROOT_DIRECTORY, "prompts/run-requestor-bilateral-demo.md"),
       "utf8",
     ),
     readFile(
-      join(ROOT_DIRECTORY, "prompts/run-iris-bilateral-demo.md"),
+      join(ROOT_DIRECTORY, "prompts/run-payer-bilateral-demo.md"),
       "utf8",
     ),
   ]);
@@ -398,9 +402,9 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
     1,
   )[0];
   assert.doesNotMatch(readme, /\b(?:roughly|about|approximately)\s+\d+\s*(?:-|–|to)\s*\d+\s+seconds\b/i);
-  assert.match(primaryRunbook, /Stakeholder 1\s+[—-]\s+Iris\s+[—-]\s+payer/);
-  assert.match(primaryRunbook, /Stakeholder 2\s+[—-]\s+Billie\s+[—-]\s+payee/);
-  assert.match(primaryRunbook, /Operator\s+[—-]\s+relay,\s+coordinator,\s+read-only console,\s+watcher,\s+funding wallet,\s+fresh aggregate verifier/i);
+  assert.match(primaryRunbook, /Stakeholder 1\s+[—-]\s+Payer\s+[—-]\s+payer/);
+  assert.match(primaryRunbook, /Stakeholder 2\s+[—-]\s+Requestor\s+[—-]\s+requestor/);
+  assert.match(primaryRunbook, /Human operator\s+[—-]\s+relay,\s+coordinator,\s+read-only console,\s+watcher,\s+funding wallet,\s+fresh aggregate verifier/i);
   assert.match(primaryRunbook, /RELAY_ADVERTISED_IP[^.\n]*numeric IP[^.\n]*reachable by both role computers/i);
   assert.match(primaryRunbook, /subjectAltName=IP:\$RELAY_ADVERTISED_IP/);
   assert.match(primaryRunbook, /RELAY_TLS_FINGERPRINT=.*openssl x509/i);
@@ -411,8 +415,8 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /chmod 0700 "\$BILATERAL_OPERATOR_ROOT" "\$BILATERAL_RELEASE_ROOT"/);
   assert.match(primaryRunbook, /chmod 0700 "\$BILATERAL_RELEASE_ROOT\/relay-state"/);
   assert.match(primaryRunbook, /test "\$\(stat -f '%Lp' "\$SEPOLIA_RPC_URL_FILE"\)" = "600"/);
-  assert.match(primaryRunbook, /payer\.launch\.json[^.\n]*only to Iris/i);
-  assert.match(primaryRunbook, /payee\.launch\.json[^.\n]*only to Billie/i);
+  assert.match(primaryRunbook, /payer\.launch\.json[^.\n]*only to Payer/i);
+  assert.match(primaryRunbook, /payee\.launch\.json[^.\n]*only to Requestor/i);
   assert.match(primaryRunbook, /launch manifests expire after 60 minutes/i);
   assert.match(primaryRunbook, /npm run bilateral:fund -- \\/);
   assert.match(primaryRunbook, /--funding-record "\$FUNDING_RECORD_FILE"/);
@@ -436,8 +440,8 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /\[three-computer quick-start\]\(\.\/bilateral-demo-quick-start\.md\)/i);
   assert.match(quickStart, /\[repository overview\]\(\.\.\/\.\.\/README\.md\)/i);
   assert.match(quickStart, /\[full runbook\]\(\.\.\/\.\.\/docs\/runbooks\/bilateral-demo-day\.md\)/i);
-  assert.match(quickStart, /\[Iris prompt\]\(\.\.\/\.\.\/prompts\/run-iris-bilateral-demo\.md\)/i);
-  assert.match(quickStart, /\[Billie prompt\]\(\.\.\/\.\.\/prompts\/run-billie-bilateral-demo\.md\)/i);
+  assert.match(quickStart, /\[Payer prompt\]\(\.\.\/\.\.\/prompts\/run-payer-bilateral-demo\.md\)/i);
+  assert.match(quickStart, /\[Requestor prompt\]\(\.\.\/\.\.\/prompts\/run-requestor-bilateral-demo\.md\)/i);
   assert.match(primaryRunbook, /export FUNDING_RECORD_FILE="\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json"/);
   assert.match(primaryRunbook, /coordinator-owned `\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json`/);
   assert.match(primaryRunbook, /export REPOSITORY_ROOT="\$\(pwd\)"/);
@@ -450,9 +454,9 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /test "\$\(stat -f '%Lp' "\$SEPOLIA_RPC_URL_FILE"\)" = "600"/);
   assert.match(primaryRunbook, /already prepared repo-private `\$REPOSITORY_ROOT\/\.context\/bilateral-live-2026-07-28\/sepolia-rpc\.url`/);
   assert.doesNotMatch(primaryRunbook, /printf '%s\\n' "\$SEPOLIA_RPC_URL" > "\$SEPOLIA_RPC_URL_FILE"/);
-  assert.match(billie, /You are Stakeholder 2, Billie, the vendor and payee\. Start only the payee\s+supervisor\./);
-  assert.match(iris, /You are Stakeholder 1, Iris, the payer and mandate owner\. Start only the payer\s+supervisor\./);
-  for (const prompt of [billie, iris]) {
+  assert.match(requestor, /You are Stakeholder 2, Requestor, the payment requestor\.\s+Start only the\s+requestor\s+supervisor\./);
+  assert.match(payer, /You are Stakeholder 1, Payer, the mandate-owning payer\. Start only the payer\s+supervisor\./);
+  for (const prompt of [requestor, payer]) {
     assert.match(prompt, /do not inspect secret bytes/i);
     assert.match(prompt, /do not switch roles/i);
     assert.match(prompt, /do not create extra sessions/i);
@@ -475,7 +479,7 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
 
   assert.match(
     quickStart,
-    /^## Before everyone starts[\s\S]*^## Fixed role assignment[\s\S]*^## Operator checklist[\s\S]*^## Iris checklist[\s\S]*^## Billie checklist[\s\S]*^## Funding and execution order[\s\S]*^## What counts as success[\s\S]*^## Immediate stop conditions/m,
+    /^## Before everyone starts[\s\S]*^## Fixed role assignment[\s\S]*^## Human operator checklist[\s\S]*^## Payer checklist[\s\S]*^## Requestor checklist[\s\S]*^## Funding and execution order[\s\S]*^## What counts as success[\s\S]*^## Immediate stop conditions/m,
   );
   assert.match(
     quickStart,
@@ -496,15 +500,15 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
   );
   assert.match(
     quickStart,
-    /Operator[^.\n]*relay[^.\n]*coordinator[^.\n]*read-only console[^.\n]*funding[^.\n]*watcher[^.\n]*fresh aggregate verifier/i,
+    /Human operator[^.\n]*relay[^.\n]*coordinator[^.\n]*read-only console[^.\n]*funding[^.\n]*watcher[^.\n]*fresh aggregate verifier/i,
   );
   assert.match(
     quickStart,
-    /Stakeholder 1[^.\n]*Iris[^.\n]*payer/i,
+    /Stakeholder 1[^.\n]*Payer[^.\n]*payer/i,
   );
   assert.match(
     quickStart,
-    /Stakeholder 2[^.\n]*Billie[^.\n]*payee/i,
+    /Stakeholder 2[^.\n]*Requestor[^.\n]*requestor/i,
   );
   assert.match(
     quickStart,
@@ -514,8 +518,8 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
     quickStart,
     /wait[^.\n]*both role computers[^.\n]*ready[^.\n]*manifests expire after 60 minutes/i,
   );
-  assert.match(quickStart, /payer\.launch\.json[^.\n]*only Iris/i);
-  assert.match(quickStart, /payee\.launch\.json[^.\n]*only Billie/i);
+  assert.match(quickStart, /payer\.launch\.json[^.\n]*only Payer/i);
+  assert.match(quickStart, /payee\.launch\.json[^.\n]*only Requestor/i);
   assert.match(
     quickStart,
     /coordinator-owned[^.\n]*funding-addresses\.json/i,
@@ -554,7 +558,7 @@ test("live bilateral handoff pins the public operator checklist without secrets"
     "utf8",
   );
   const startupOrder =
-    "relay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor";
+    "relay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor";
 
   assert.match(handoff, new RegExp(LIVE_HANDOFF_RELEASE_SHA));
   assert.match(handoff, new RegExp(`later handoff/helper is a documentation and test layer for executable SHA ${LIVE_HANDOFF_RELEASE_SHA}[\\s\\S]*operators checkout the exact executable SHA`, "i"));
@@ -588,15 +592,15 @@ test("live bilateral handoff pins the public operator checklist without secrets"
   assert.match(handoff, /npm run bilateral:relay -- \\/);
   assert.match(handoff, /npm run bilateral:coordinator -- \\/);
   assert.match(handoff, /npm run bilateral:console -- \\/);
-  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$IRIS_LAUNCH_MANIFEST" \\\n  --state "\$IRIS_SUPERVISOR_STATE"/);
-  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$BILLIE_LAUNCH_MANIFEST" \\\n  --state "\$BILLIE_SUPERVISOR_STATE"/);
+  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE"/);
+  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$REQUESTOR_LAUNCH_MANIFEST" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE"/);
   assert.match(handoff, /export FUNDING_RECORD_FILE="\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json"/);
   assert.match(handoff, /npm run bilateral:fund -- \\\n  --funding-record "\$FUNDING_RECORD_FILE" \\\n  --journal-directory "\$FUNDING_JOURNAL_DIR" \\\n  --keystore "\$SEPOLIA_TREASURY_KEYSTORE" \\\n  --rpc-url-file "\$SEPOLIA_RPC_URL_FILE"/);
   assert.match(handoff, /four freshly generated addresses[\s\S]*`0\.01 Sepolia ETH` each/i);
   assert.match(handoff, /0\.05[\s\S]*sufficient\s+only if preflight still reports balance\/nonce safe/i);
   assert.match(handoff, /no manual address\s+copying/i);
   assert.match(handoff, /PAYER_MANDATE_READY[\s\S]*PAYMENT_REQUEST_READY[\s\S]*PAYMENT_REQUEST_MATCHED/);
-  assert.match(handoff, /Iris `PROPOSED`[\s\S]*Billie `ACCEPTED`[\s\S]*Iris `ACKNOWLEDGED`/);
+  assert.match(handoff, /Payer `PROPOSED`[\s\S]*Requestor `ACCEPTED`[\s\S]*Payer `ACKNOWLEDGED`/);
   assert.match(handoff, /marker-complete role files[\s\S]*verifier files/i);
   assert.match(handoff, /`AUTHORIZED` only from fresh\s+aggregate verifier/i);
   assert.match(handoff, /paymentMoved:false/);
@@ -692,9 +696,8 @@ test("turnkey bilateral docs pin the mandate, console, funding, and readiness co
     readme,
     runbook,
     quickStart,
-    irisPrompt,
-    billiePrompt,
-    billyCompatibility,
+    payerPrompt,
+    requestorPrompt,
     promptHasher,
   ] = await Promise.all([
     readFile(join(ROOT_DIRECTORY, "README.md"), "utf8"),
@@ -710,15 +713,11 @@ test("turnkey bilateral docs pin the mandate, console, funding, and readiness co
       "utf8",
     ),
     readFile(
-      join(ROOT_DIRECTORY, "prompts/run-iris-bilateral-demo.md"),
+      join(ROOT_DIRECTORY, "prompts/run-payer-bilateral-demo.md"),
       "utf8",
     ),
     readFile(
-      join(ROOT_DIRECTORY, "prompts/run-billie-bilateral-demo.md"),
-      "utf8",
-    ),
-    readFile(
-      join(ROOT_DIRECTORY, "prompts/run-billy-bilateral-demo.md"),
+      join(ROOT_DIRECTORY, "prompts/run-requestor-bilateral-demo.md"),
       "utf8",
     ),
     readFile(
@@ -729,19 +728,19 @@ test("turnkey bilateral docs pin the mandate, console, funding, and readiness co
   const helperUrl =
     "https://clockchain-research.vercel.app/handshake/run";
   const startupOrder =
-    "relay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor";
+    "relay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor";
 
   assert.match(
-    irisPrompt,
-    /Iris, the payer and mandate owner/,
+    payerPrompt,
+    /Payer, the mandate-owning payer/,
   );
   assert.match(
-    billiePrompt,
-    /Billie, the vendor and payee/,
+    requestorPrompt,
+    /Requestor, the payment requestor/,
   );
   assert.match(
     runbook,
-    /Billie request[\s\S]*Iris mandate[\s\S]*PROPOSED[\s\S]*ACCEPTED[\s\S]*ACKNOWLEDGED/,
+    /Requestor request[\s\S]*Payer mandate[\s\S]*PROPOSED[\s\S]*ACCEPTED[\s\S]*ACKNOWLEDGED/,
   );
   assert.match(
     runbook,
@@ -755,7 +754,7 @@ test("turnkey bilateral docs pin the mandate, console, funding, and readiness co
   assert.match(runbook, /paymentMoved:false/);
   assert.match(
     runbook,
-    /automatically[^.]*Iris-signed mandate[^.]*Billie-signed request/i,
+    /automatically[^.]*Payer-signed mandate[^.]*Requestor-signed request/i,
   );
   assert.match(
     runbook,
@@ -771,31 +770,29 @@ test("turnkey bilateral docs pin the mandate, console, funding, and readiness co
     readme,
     runbook,
     quickStart,
-    irisPrompt,
-    billiePrompt,
-    billyCompatibility,
+    payerPrompt,
+    requestorPrompt,
   ]) {
     assert.doesNotMatch(
       document,
-      /\bBilly(?:,|\s+is|\s+as|\s+[—-])[^.\n]*\bpayer\b/i,
+      /\bRequestor(?:,|\s+is|\s+as|\s+[—-])[^.\n]*\bpayer\b/i,
     );
     assert.doesNotMatch(
       document,
-      /\bIris(?:,|\s+is|\s+as|\s+[—-])[^.\n]*\bpayee\b/i,
+      /\bPayer(?:,|\s+is|\s+as|\s+[—-])[^.\n]*\bpayee\b/i,
     );
     assert.doesNotMatch(
       document,
       /\bauthorization\b[^.\n]*(?:moved|moves|sent|sends|settled|settles|transferred|transfers)\b[^.\n]*\bpayment\b/i,
     );
+    assert.doesNotMatch(
+      document,
+      /\b(?:Iris|Billie|Billy|Meridian|Trellis)\b/,
+    );
   }
-  assert.match(billyCompatibility, /compatibility only/i);
-  assert.match(
-    billyCompatibility,
-    /run-billie-bilateral-demo\.md/,
-  );
   assert.match(
     promptHasher,
-    /payee:\s*"prompts\/run-billie-bilateral-demo\.md"/,
+    /payee:\s*"prompts\/run-requestor-bilateral-demo\.md"/,
   );
   assert.doesNotMatch(
     promptHasher,
@@ -876,7 +873,7 @@ test("documentation checker rejects bilateral manifest and funding drift", async
       "relay readiness before coordinator",
     ],
     [
-      "payer.launch.json only to Iris",
+      "payer.launch.json only to Payer",
       "payer.launch.json to both stakeholders",
       "private launch manifest delivery",
     ],
@@ -941,14 +938,14 @@ test("documentation checker rejects bilateral safety-contract drift", async (t) 
   const directory = await temporaryDocumentationFixture(t);
   const path = join(
     directory,
-    "prompts/run-iris-bilateral-demo.md",
+    "prompts/run-payer-bilateral-demo.md",
   );
   const contents = await readFile(path, "utf8");
   await writeFile(
     path,
     contents.replace(
-      "For a session that the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and `ACKNOWLEDGED`, and Billie anchored `ACCEPTED`.",
-      "Billie ignored Iris's signed mandate.",
+      "For a session that the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and `ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`.",
+      "Requestor ignored Payer's signed mandate.",
     ),
   );
 
@@ -959,7 +956,7 @@ test("documentation checker rejects bilateral safety-contract drift", async (t) 
       })
     ).some(
       (failure) =>
-        failure.includes("run-iris-bilateral-demo.md") &&
+        failure.includes("run-payer-bilateral-demo.md") &&
         failure.includes("honest reconstruction claim"),
     ),
   );
@@ -969,7 +966,7 @@ test("documentation checker rejects bilateral role CLI drift", async (t) => {
   const directory = await temporaryDocumentationFixture(t);
   const path = join(
     directory,
-    "prompts/run-billie-bilateral-demo.md",
+    "prompts/run-requestor-bilateral-demo.md",
   );
   const contents = await readFile(path, "utf8");
   await writeFile(
@@ -987,7 +984,7 @@ test("documentation checker rejects bilateral role CLI drift", async (t) => {
       })
     ).some(
       (failure) =>
-        failure.includes("run-billie-bilateral-demo.md") &&
+        failure.includes("run-requestor-bilateral-demo.md") &&
         failure.includes("exact role CLI"),
     ),
   );
@@ -2500,6 +2497,6 @@ test("reports the true gated document count", async () => {
   assert.equal(exitCode, 0);
   assert.equal(
     stdout.text(),
-    "Documentation checks passed (10 gated documents).\n",
+    "Documentation checks passed (9 gated documents).\n",
   );
 });

@@ -32,8 +32,8 @@ function setTimeline(anchors) {
 
 function render(projection) {
   setField("operator-health", `${text(projection.actors?.operator?.label)} ${text(projection.actors?.operator?.health)}`);
-  setField("iris-health", `${text(projection.actors?.payer?.label)} ${text(projection.actors?.payer?.health)}`);
-  setField("billie-health", `${text(projection.actors?.payee?.label)} ${text(projection.actors?.payee?.health)}`);
+  setField("payer-health", `${text(projection.actors?.payer?.label)} ${text(projection.actors?.payer?.health)}`);
+  setField("requestor-health", `${text(projection.actors?.payee?.label)} ${text(projection.actors?.payee?.health)}`);
   setField("request-status", `received ${booleanStatus(projection.request?.received)} digest ${text(projection.request?.digest)}`);
   setField("mandate-status", `received ${booleanStatus(projection.mandate?.received)} matched ${booleanStatus(projection.mandate?.matched)} digest ${text(projection.mandate?.digest)}`);
   setField("deadline-freshness", `${text(projection.deadline?.freshness)} until ${text(projection.deadline?.expiresAtMs)}`);
@@ -50,7 +50,7 @@ async function refresh() {
     if (!response.ok) throw new Error("unavailable");
     render(await response.json());
   } catch {
-    for (const id of ["operator-health", "iris-health", "billie-health", "request-status", "mandate-status", "deadline-freshness", "verifier-state", "relay-advisory", "watcher-advisory", "failure-recovery"]) setField(id, "unavailable");
+    for (const id of ["operator-health", "payer-health", "requestor-health", "request-status", "mandate-status", "deadline-freshness", "verifier-state", "relay-advisory", "watcher-advisory", "failure-recovery"]) setField(id, "unavailable");
     setTimeline([]);
   }
 }

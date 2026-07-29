@@ -122,12 +122,12 @@ test("projection conveys structured console status without widening top-level ke
   });
   assert.deepEqual(value.actors.payer, {
     health: "READY",
-    label: "Iris",
+    label: "Payer",
     role: "payer",
   });
   assert.deepEqual(value.actors.payee, {
     health: "READY",
-    label: "Billie",
+    label: "Requestor",
     role: "payee",
   });
   assert.equal(value.request.received, true);
@@ -141,9 +141,9 @@ test("projection conveys structured console status without widening top-level ke
       stage,
     })),
     [
-      { actor: "Iris", kind: "PROPOSED", sequence: 1, stage: "proposal" },
-      { actor: "Billie", kind: "ACCEPTED", sequence: 2, stage: "acceptance" },
-      { actor: "Iris", kind: "ACKNOWLEDGED", sequence: 3, stage: "acknowledgment" },
+      { actor: "Payer", kind: "PROPOSED", sequence: 1, stage: "proposal" },
+      { actor: "Requestor", kind: "ACCEPTED", sequence: 2, stage: "acceptance" },
+      { actor: "Payer", kind: "ACKNOWLEDGED", sequence: 3, stage: "acknowledgment" },
     ],
   );
   assert.equal(value.deadline.freshness, "FRESH");

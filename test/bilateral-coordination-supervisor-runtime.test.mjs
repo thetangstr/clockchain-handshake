@@ -376,13 +376,13 @@ test("production supervisor verifies valid enrollment receipts and binds each de
       payee: {
         address: payeeAddresses.rehearsal,
         agentId: "8678",
-        displayName: "Billie",
+        displayName: "Requestor",
         role: "payee",
       },
       payer: {
         address: payerAddresses.rehearsal,
         agentId: "8677",
-        displayName: "Iris",
+        displayName: "Payer",
         role: "payer",
       },
       paymentMoved: false,
@@ -589,8 +589,8 @@ test("creates invitation proofs once and rejects partial secrets", async () => {
   await assert.rejects(ensureInvitations(input));
 });
 
-test("creates canonical Iris payer and Billie payee invitation personas", async () => {
-  for (const [role, displayName] of [["payer", "Iris"], ["payee", "Billie"]]) {
+test("creates canonical Payer and Requestor invitation personas", async () => {
+  for (const [role, displayName] of [["payer", "Payer"], ["payee", "Requestor"]]) {
     const root = await mkdtemp(join(tmpdir(), `supervisor-${role}-persona-`));
     let creationArguments;
     const input = {

@@ -35,8 +35,8 @@ test("console UI renders structured public fields with textContent only", async 
 
   for (const id of [
     "operator-health",
-    "iris-health",
-    "billie-health",
+    "payer-health",
+    "requestor-health",
     "request-status",
     "mandate-status",
     "anchor-timeline",

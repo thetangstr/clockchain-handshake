@@ -1,7 +1,7 @@
 # Bilateral Clockchain demo-day runbook
 
-This operator runbook coordinates the [Iris payer prompt](../../prompts/run-iris-bilateral-demo.md),
-the [Billie payee prompt](../../prompts/run-billie-bilateral-demo.md), and the
+This operator runbook coordinates the [Payer prompt](../../prompts/run-payer-bilateral-demo.md),
+the [Requestor prompt](../../prompts/run-requestor-bilateral-demo.md), and the
 [repository overview](../../README.md). It covers preparation, rehearsal, and
 stakeholder execution; it does not replace deterministic verification.
 For the three-computer operator path, start with the
@@ -17,28 +17,34 @@ or multi-validator. Every protocol and verdict artifact preserves paymentMoved: 
 
 Runner local state is not operator authorization. For a session that the fresh
 aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that
-Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and
-`ACKNOWLEDGED`, and Billie anchored `ACCEPTED`. The protocol does not download message bytes from Clockchain.
+Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and
+`ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`. The protocol does not download message bytes from Clockchain.
+
+Current MCP status: the hosted server is `https://mcp.clockchain.network/mcp`
+and its source lives in the separate specs repository at `packages/mcp-server`.
+It does not yet expose a general payer-mandate discovery tool. In this manual
+demo, the signed session mandate is delivered through the authenticated
+coordination relay.
 
 Only the operator's fresh aggregate-verifier process may issue the final
 `AUTHORIZED` verdict after independently refetching all three Clockchain
-anchors. Iris's local `ACKNOWLEDGED`, Billie's local `ACCEPTED`, watcher output,
+anchors. Payer's local `ACKNOWLEDGED`, Requestor's local `ACCEPTED`, watcher output,
 a submitted transaction, or a narrative is never that verdict.
 
 ## Automated primary flow
 
 Role cards are fixed for the whole release:
 
-- Stakeholder 1 — Iris — payer.
-- Stakeholder 2 — Billie — payee.
-- Operator — relay, coordinator, read-only console, watcher, funding wallet, fresh aggregate verifier.
+- Stakeholder 1 — Payer — payer.
+- Stakeholder 2 - Requestor - requestor.
+- Human operator - relay, coordinator, read-only console, watcher, funding wallet, fresh aggregate verifier.
 
 Passing repository checks makes this release rehearsal-ready, not
 live-validated. Only a funded physical run whose fresh aggregate verifier
 publishes independently re-verifiable evidence is live-validated.
 
 The startup control order is exactly:
-`relay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor`.
+`relay -> coordinator -> console -> funding -> Payer supervisor -> Requestor supervisor`.
 The funding stage validates and arms the reusable Sepolia treasury lane before
 either role starts; the transfers wait for the coordinator's signed four-address
 record.
@@ -189,8 +195,8 @@ test -f "$SEPOLIA_RPC_URL_FILE"
 ```
 
 The coordinator publishes two private launch manifests under the release root.
-Launch manifests expire after 60 minutes. Privately transfer payer.launch.json only to Iris.
-Privately transfer payee.launch.json only to Billie through a separate private
+Launch manifests expire after 60 minutes. Privately transfer payer.launch.json only to Payer.
+Privately transfer payee.launch.json only to Requestor through a separate private
 channel. Never transfer the other role's manifest, an invitation, a token, a
 private key, the Sepolia RPC URL, or the treasury keystore. Each role machine
 uses its prompt, one manifest, one private state directory, and the same clean
@@ -198,36 +204,36 @@ detached checkout of the reviewed 40-character SHA.
 
 The user has exactly two kinds of demo-day action:
 
-1. Start exactly two supervisor sessions—Iris once with the payer launch
-   manifest and Billie once with the payee launch manifest.
+1. Start exactly two supervisor sessions: Payer once with `payer.launch.json`
+   and Requestor once with `payee.launch.json`.
 2. Fund the four displayed addresses with the reusable Sepolia treasury command.
 
-Start the role supervisors in this order. Iris machine:
+Start the role supervisors in this order without waiting for Payer completion. Payer machine:
 
 ```sh
 npm run bilateral:supervisor -- \
-  --launch-manifest "$IRIS_LAUNCH_MANIFEST" \
-  --state "$IRIS_SUPERVISOR_STATE"
+  --launch-manifest "$PAYER_LAUNCH_MANIFEST" \
+  --state "$PAYER_SUPERVISOR_STATE"
 ```
 
-Then Billie machine:
+Immediately after Payer starts, Requestor machine:
 
 ```sh
 npm run bilateral:supervisor -- \
-  --launch-manifest "$BILLIE_LAUNCH_MANIFEST" \
-  --state "$BILLIE_SUPERVISOR_STATE"
+  --launch-manifest "$REQUESTOR_LAUNCH_MANIFEST" \
+  --state "$REQUESTOR_SUPERVISOR_STATE"
 ```
 
-The same Iris and Billie processes remain alive across both runs. Each supervisor
+The same Payer and Requestor processes remain alive across both runs. Each supervisor
 creates two invitations and one token per role for both runs. After both
 authenticated enrollments, the coordinator displays exactly four signed public
 addresses and continuously checks their balances and nonce-zero status; there
 is no human “funding complete” signal.
 
-The long-lived supervisors automatically create the Iris-signed mandate and
-the matching Billie-signed request. No operator-authored commercial terms,
+The long-lived supervisors automatically create the Payer-signed mandate and
+the matching Requestor-signed request. No operator-authored commercial terms,
 manual intent-artifact copy, or extra role session belongs in the primary flow.
-The Billie request must match the Iris mandate before the sequence may continue:
+The Requestor request must match the Payer mandate before the sequence may continue:
 `PROPOSED` -> `ACCEPTED` -> `ACKNOWLEDGED`.
 
 Use the coordinator-owned `$BILATERAL_RELEASE_ROOT/funding-addresses.json` file
@@ -250,7 +256,7 @@ consumed invitation cannot be reused. Fresh invitations and a newly reviewed rel
 
 The coordinator then runs one signed physical-machine preflight for both runs,
 registers the rehearsal identities, creates the signed USD 100 descriptor,
-starts Billie before Iris, collects both marker-complete role packages, and
+starts Payer before Requestor, collects both marker-complete role packages, and
 launches a fresh aggregate verifier. Only a fresh aggregate verifier may output `AUTHORIZED`;
 no role, relay, watcher, coordinator, console, or narrative may do so. An exact
 rehearsal verifier pass unlocks the stakeholder
@@ -279,8 +285,8 @@ role session, or bypass the two-supervisor workflow.
 User/operator-only actions are funding the four public addresses, custody and
 private delivery of secret files, attesting that credentials and physical
 machines are separate, publishing the immutable repository SHA, synchronized
-start, artifact transfer, and authorizing a same-directory recovery. Iris and
-Billie agents may perform metadata-only path checks and invoke only their exact
+start, artifact transfer, and authorizing a same-directory recovery. Payer and
+Requestor agents may perform metadata-only path checks and invoke only their exact
 preparation and timed-role commands. They must not inspect secret bytes, fund
 wallets, attest separation, run the aggregate verifier, or improvise recovery.
 
@@ -312,9 +318,9 @@ commit.
 
 Assign roles once:
 
-- Billie machine: payee.
-- Iris machine: payer.
-- Operator machine: preparation, read-only watcher, artifact custody, and
+- Requestor machine: requestor.
+- Payer machine: payer.
+- Human operator machine: preparation, read-only watcher, artifact custody, and
   fresh aggregate verification.
 
 Use the official ERC-8004 Identity Registry at
@@ -329,8 +335,8 @@ public and secret directories:
 node scripts/create-invitations.mjs \
   --output-public "$INVITATION_PUBLIC_DIR" \
   --output-secret "$INVITATION_SECRET_DIR" \
-  --ids "billie-rehearsal,iris-rehearsal,billie-stakeholder,iris-stakeholder" \
-  --names "Billie Rehearsal,Iris Rehearsal,Billie Stakeholder,Iris Stakeholder"
+  --ids "requestor-rehearsal,payer-rehearsal,requestor-stakeholder,payer-stakeholder" \
+  --names "Requestor Rehearsal,Payer Rehearsal,Requestor Stakeholder,Payer Stakeholder"
 ```
 
 The JSON report contains only the four public addresses. Secret
@@ -343,10 +349,10 @@ inclusive. Before registration, require nonce zero and the funded balance
 inside that band. Registration intentionally consumes the nonce. Stop until all
 four addresses are funded:
 
-1. Billie rehearsal.
-2. Iris rehearsal.
-3. Billie stakeholder.
-4. Iris stakeholder.
+1. Requestor rehearsal.
+2. Payer rehearsal.
+3. Requestor stakeholder.
+4. Payer stakeholder.
 
 Each invitation contains the one role signing key for its reserved run. The
 approved registration CLI and later timed role may open that same invitation
@@ -378,25 +384,25 @@ operator uses its token only for watcher and verifier reads; the minting API doe
 not prove a capability-level read-only scope. Each output path and its intent
 marker must be absent, and each parent directory must be mode `0700`.
 
-Billie machine:
+Requestor machine:
 
 ```sh
 node scripts/mint-bilateral-token.mjs \
   --role payee \
-  --output "$BILLIE_CLOCKCHAIN_TOKEN_FILE" \
+  --output "$REQUESTOR_CLOCKCHAIN_TOKEN_FILE" \
   --repository-sha "$BILATERAL_REPOSITORY_SHA"
 ```
 
-Iris machine:
+Payer machine:
 
 ```sh
 node scripts/mint-bilateral-token.mjs \
   --role payer \
-  --output "$IRIS_CLOCKCHAIN_TOKEN_FILE" \
+  --output "$PAYER_CLOCKCHAIN_TOKEN_FILE" \
   --repository-sha "$BILATERAL_REPOSITORY_SHA"
 ```
 
-Operator machine:
+Human operator machine:
 
 ```sh
 node scripts/mint-bilateral-token.mjs \
@@ -411,26 +417,26 @@ is ambiguous and requires a new reviewed release plan, not another token call.
 Run one participant process on each physical machine. These are the only two
 pre-approved throwaway writes.
 
-Billie machine:
+Requestor machine:
 
 ```sh
 node scripts/probe-bilateral-rendezvous.mjs participant \
   --role payee \
   --plan "$PREFLIGHT_PLAN_FILE" \
-  --token-file "$BILLIE_CLOCKCHAIN_TOKEN_FILE" \
-  --participant-private-key "$BILLIE_PREFLIGHT_PRIVATE_KEY_FILE" \
-  --output "$BILLIE_PREFLIGHT_RESULT_DIR"
+  --token-file "$REQUESTOR_CLOCKCHAIN_TOKEN_FILE" \
+  --participant-private-key "$REQUESTOR_PREFLIGHT_PRIVATE_KEY_FILE" \
+  --output "$REQUESTOR_PREFLIGHT_RESULT_DIR"
 ```
 
-Iris machine:
+Payer machine:
 
 ```sh
 node scripts/probe-bilateral-rendezvous.mjs participant \
   --role payer \
   --plan "$PREFLIGHT_PLAN_FILE" \
-  --token-file "$IRIS_CLOCKCHAIN_TOKEN_FILE" \
-  --participant-private-key "$IRIS_PREFLIGHT_PRIVATE_KEY_FILE" \
-  --output "$IRIS_PREFLIGHT_RESULT_DIR"
+  --token-file "$PAYER_CLOCKCHAIN_TOKEN_FILE" \
+  --participant-private-key "$PAYER_PREFLIGHT_PRIVATE_KEY_FILE" \
+  --output "$PAYER_PREFLIGHT_RESULT_DIR"
 ```
 
 Each role sends its marker-complete `participant-report.json` directory to the
@@ -439,8 +445,8 @@ operator. The operator alone runs:
 ```sh
 node scripts/probe-bilateral-rendezvous.mjs aggregate \
   --plan "$PREFLIGHT_PLAN_FILE" \
-  --payer-report-dir "$IRIS_PREFLIGHT_RESULT_DIR" \
-  --payee-report-dir "$BILLIE_PREFLIGHT_RESULT_DIR" \
+  --payer-report-dir "$PAYER_PREFLIGHT_RESULT_DIR" \
+  --payee-report-dir "$REQUESTOR_PREFLIGHT_RESULT_DIR" \
   --operator-private-key "$OPERATOR_PRIVATE_KEY_FILE" \
   --output "$PREFLIGHT_AGGREGATE_DIR" \
   --attest-separate-credentials \
@@ -461,22 +467,22 @@ that machine's timed role. Do not mint a replacement token between phases.
 Registration happens before the descriptor is created and before timed M1.
 Each role machine runs its approved registration command.
 
-Billie machine:
+Requestor machine:
 
 ```sh
 node scripts/register-bilateral-identity.mjs \
-  --invitation "$BILLIE_INVITATION_FILE" \
-  --output "$BILLIE_REGISTRATION_DIR" \
+  --invitation "$REQUESTOR_INVITATION_FILE" \
+  --output "$REQUESTOR_REGISTRATION_DIR" \
   --repository-sha "$BILATERAL_REPOSITORY_SHA" \
   --i-understand-this-writes-to-sepolia
 ```
 
-Iris machine:
+Payer machine:
 
 ```sh
 node scripts/register-bilateral-identity.mjs \
-  --invitation "$IRIS_INVITATION_FILE" \
-  --output "$IRIS_REGISTRATION_DIR" \
+  --invitation "$PAYER_INVITATION_FILE" \
+  --output "$PAYER_REGISTRATION_DIR" \
   --repository-sha "$BILATERAL_REPOSITORY_SHA" \
   --i-understand-this-writes-to-sepolia
 ```
@@ -491,7 +497,7 @@ Transfer only the marker-complete, secret-free identity directories to the
 operator. Record the address, agent ID, and display name from each verified
 artifact. Do not transfer invitations or tokens.
 
-Compute the prompt-bundle digest from the exact committed Billie and Iris prompt
+Compute the prompt-bundle digest from the exact committed Requestor and Payer prompt
 bytes:
 
 ```sh
@@ -505,17 +511,17 @@ node scripts/create-session.mjs create \
   --amounts "USD:100" \
   --key-id "$OPERATOR_KEY_ID" \
   --output "$BILATERAL_DESCRIPTOR_FILE" \
-  --payer-address "$IRIS_ADDRESS" \
-  --payer-agent-id "$IRIS_AGENT_ID" \
-  --payer-name "$IRIS_DISPLAY_NAME" \
-  --payee-address "$BILLIE_ADDRESS" \
-  --payee-agent-id "$BILLIE_AGENT_ID" \
-  --payee-name "$BILLIE_DISPLAY_NAME" \
+  --payer-address "$PAYER_ADDRESS" \
+  --payer-agent-id "$PAYER_AGENT_ID" \
+  --payer-name "$PAYER_DISPLAY_NAME" \
+  --payee-address "$REQUESTOR_ADDRESS" \
+  --payee-agent-id "$REQUESTOR_AGENT_ID" \
+  --payee-name "$REQUESTOR_DISPLAY_NAME" \
   --prompt-sha256 "$BILATERAL_PROMPT_SHA256" \
   --repository-sha "$BILATERAL_REPOSITORY_SHA"
 ```
 
-Distribute the identical signed descriptor bytes to Iris, Billie, the watcher,
+Distribute the identical signed descriptor bytes to Payer, Requestor, the watcher,
 and the verifier. Compare the descriptor digest on all three machines. The
 descriptor, identities, role assignment, amount, prompt bundle, and repository
 SHA are immutable for that session.
@@ -536,34 +542,33 @@ Health, cached timestamps, and record status are disclosure only. The watcher
 never writes or authorizes.
 
 Confirm the same UTC clock, descriptor digest, and clean immutable checkout.
-For the synchronized start, start Billie first so she polls for the exact
-proposal, then start Iris immediately.
+For the synchronized start, start Payer first, then start Requestor immediately without waiting for Payer completion.
 
-Billie machine:
+Requestor machine:
 
 ```sh
 node bin/handshake-accept.mjs \
   --descriptor "$BILATERAL_DESCRIPTOR_FILE" \
-  --invitation "$BILLIE_INVITATION_FILE" \
-  --clockchain-token-file "$BILLIE_CLOCKCHAIN_TOKEN_FILE" \
-  --output "$BILLIE_RESULT_DIR" \
+  --invitation "$REQUESTOR_INVITATION_FILE" \
+  --clockchain-token-file "$REQUESTOR_CLOCKCHAIN_TOKEN_FILE" \
+  --output "$REQUESTOR_RESULT_DIR" \
   --i-understand-this-writes-to-clockchain
 ```
 
-Iris machine:
+Payer machine:
 
 ```sh
 node bin/handshake-propose.mjs \
   --descriptor "$BILATERAL_DESCRIPTOR_FILE" \
-  --invitation "$IRIS_INVITATION_FILE" \
-  --clockchain-token-file "$IRIS_CLOCKCHAIN_TOKEN_FILE" \
-  --output "$IRIS_RESULT_DIR" \
+  --invitation "$PAYER_INVITATION_FILE" \
+  --clockchain-token-file "$PAYER_CLOCKCHAIN_TOKEN_FILE" \
+  --output "$PAYER_RESULT_DIR" \
   --i-understand-this-writes-to-clockchain
 ```
 
 Fresh role result paths may be absent or empty owner-controlled mode-`0700`
 directories. Do not alter arguments, run a second writer, or manually advance a
-state. Expected local endpoints are Iris `ACKNOWLEDGED` and Billie `ACCEPTED`;
+state. Expected local endpoints are Payer `ACKNOWLEDGED` and Requestor `ACCEPTED`;
 neither is authorization.
 
 ## Phase 2: artifact transfer
@@ -575,7 +580,7 @@ Each role must publish exactly:
 - `.party-result.complete.json`
 
 Stop if the completion marker is absent. Transfer each whole result directory
-through an authenticated private channel. Keep Iris and Billie separate. Record
+through an authenticated private channel. Keep Payer and Requestor separate. Record
 and compare SHA-256 inventories before and after transfer. Never edit, rename,
 regenerate, or merge files. Do not transfer invitations, participant keys,
 tokens, checkpoints, secret canaries, or partial temporary files.
@@ -591,8 +596,8 @@ node scripts/verify-bilateral-results.mjs \
   --clockchain-token-file "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \
   --descriptor "$BILATERAL_DESCRIPTOR_FILE" \
   --output "$VERDICT_OUTPUT_DIR" \
-  --payer-results "$IRIS_TRANSFERRED_RESULT_DIR" \
-  --payee-results "$BILLIE_TRANSFERRED_RESULT_DIR" \
+  --payer-results "$PAYER_TRANSFERRED_RESULT_DIR" \
+  --payee-results "$REQUESTOR_TRANSFERRED_RESULT_DIR" \
   --rpc-url "$SEPOLIA_RPC_URL"
 ```
 

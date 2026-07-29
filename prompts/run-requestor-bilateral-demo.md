@@ -1,12 +1,13 @@
-# Run Billie's bilateral Clockchain payee role
+# Run Requestor bilateral Clockchain role
 
-You are Stakeholder 2, Billie, the vendor and payee. Start only the payee
-supervisor.
+You are Stakeholder 2, Requestor, the payment requestor. Start only the
+requestor supervisor.
 
-Billie represents Trellis. The supervisor automatically fetches and verifies
-Iris's signed mandate, creates and submits Billie's matching signed payment
-request, independently verifies Iris's `PROPOSED` transition, and anchors
-`ACCEPTED`. Stay on this machine and never switch roles.
+The supervisor discovers and understands Payer's signed mandate through the
+authenticated session material, follows its exact protocol, creates and submits
+Requestor's conforming signed payment request, independently verifies Payer's
+`PROPOSED` transition, and anchors `ACCEPTED`. Requestor never issues or
+approves payment. Stay on this machine and never switch roles.
 
 This is an Ethereum Sepolia and Clockchain single-validator testnet exercise.
 No money moves. Do not install or use AgentDash. Do not invent success states.
@@ -17,31 +18,37 @@ or multi-validator. Every protocol and verdict artifact preserves
 The payment request and the signed mandate are commercial-intent evidence, not
 authorization anchors. The only Clockchain authorization anchors are exactly:
 
-1. Iris anchors `PROPOSED`.
-2. Billie anchors `ACCEPTED`.
-3. Iris anchors `ACKNOWLEDGED`.
+1. Payer anchors `PROPOSED`.
+2. Requestor anchors `ACCEPTED`.
+3. Payer anchors `ACKNOWLEDGED`.
 
-For a session that the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and `ACKNOWLEDGED`, and Billie anchored `ACCEPTED`.
+For a session that the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and `ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`.
+
+Current MCP status: the hosted server is `https://mcp.clockchain.network/mcp`
+and its source lives in the separate specs repository at `packages/mcp-server`.
+It does not yet expose a general payer-mandate discovery tool. In this manual
+demo, the signed session mandate is delivered through the authenticated
+coordination relay.
 
 Only the operator's fresh aggregate verifier may emit the authorizing verdict.
-Billie may report local progress and marker-complete public artifact digests,
-but cannot declare authorization. Never run Iris's role, the watcher, preflight
+Requestor may report local progress and marker-complete public artifact digests,
+but cannot declare authorization. Never run Payer's role, the watcher, preflight
 aggregation, descriptor creation, or aggregate verification from this prompt.
 
 ## Automated Supervisor Session
 
 The operator privately provides one role-specific launch-manifest path and one
-fresh private state directory. Start Billie's one long-lived supervisor exactly
+fresh private state directory. Start Requestor's one long-lived supervisor exactly
 once:
 
 ```sh
 npm run bilateral:supervisor -- \
-  --launch-manifest "$BILLIE_LAUNCH_MANIFEST" \
-  --state "$BILLIE_SUPERVISOR_STATE"
+  --launch-manifest "$REQUESTOR_LAUNCH_MANIFEST" \
+  --state "$REQUESTOR_SUPERVISOR_STATE"
 ```
 
 The supervisor stays alive across both runs: rehearsal first, then stakeholder.
-It creates and retains Billie's coordination key, preflight key, one token, and
+It creates and retains Requestor's coordination key, preflight key, one token, and
 two invitation secrets locally. It follows only authenticated operator events
 and repository-owned command builders. It must not improvise commands, alter
 paths, or accept a replacement SHA, prompt, token, invitation, descriptor, or
@@ -62,12 +69,12 @@ The operator privately sets:
 
 - `BILATERAL_REPOSITORY_SHA`: reviewed immutable repository SHA, exactly 40
   lowercase hexadecimal characters.
-- `BILLIE_LAUNCH_MANIFEST`: Billie's operator-signed launch manifest.
-- `BILLIE_SUPERVISOR_STATE`: Billie's mode-`0700` private supervisor state root.
-- `BILLIE_INVITATION_FILE`: Billie's reserved mode-`0600` invitation, used only
+- `REQUESTOR_LAUNCH_MANIFEST`: Requestor's operator-signed launch manifest.
+- `REQUESTOR_SUPERVISOR_STATE`: Requestor's mode-`0700` private supervisor state root.
+- `REQUESTOR_INVITATION_FILE`: Requestor's reserved mode-`0600` invitation, used only
   by approved repository commands.
-- `BILLIE_CLOCKCHAIN_TOKEN_FILE`: token path under Billie's private state root.
-- `BILLIE_RESULT_DIR`: fresh payee result directory created by the supervisor.
+- `REQUESTOR_CLOCKCHAIN_TOKEN_FILE`: token path under Requestor's private state root.
+- `REQUESTOR_RESULT_DIR`: fresh requestor result directory created by the supervisor.
 
 Secret-bearing values are paths, never raw values. Do not open, print, paste,
 copy, hash, or inspect invitation, participant-key, token, private-key, or
@@ -83,14 +90,14 @@ replacement credential.
 
 ## Commercial Intent Boundary
 
-The supervisor automatically reads and verifies the exact Iris-signed mandate
-before it creates and submits Billie's request. The request must be
-Billie-signed, match the mandate amount, payer, payee, purpose, invoice prefix,
+The supervisor automatically reads and verifies the exact Payer-signed mandate
+before it creates and submits Requestor's request. The request must be
+Requestor-signed, match the mandate amount, payer, requestor, purpose, invoice prefix,
 session, repository SHA, and expiration bounds, and carry
 `paymentMoved:false`.
 
-Billie does not create Iris's mandate and does not approve payment. Billie
-submits a request and then follows the protocol required by Iris's mandate. The
+Requestor does not create Payer's mandate and does not approve payment. Requestor
+submits a request and then follows the protocol required by Payer's mandate. The
 request is not an authorization anchor; it is verified commercial-intent
 evidence that the operator descriptor commits to.
 
@@ -99,15 +106,15 @@ fresh verifier remains the only source of the authorizing verdict.
 
 ## Timed Role Behavior
 
-During the synchronized timed role, Billie runs the payee command selected by
-the supervisor:
+During the synchronized timed role, Requestor runs the requestor command selected
+by the supervisor:
 
 ```sh
 node bin/handshake-accept.mjs \
   --descriptor "$BILATERAL_DESCRIPTOR_FILE" \
-  --invitation "$BILLIE_INVITATION_FILE" \
-  --clockchain-token-file "$BILLIE_CLOCKCHAIN_TOKEN_FILE" \
-  --output "$BILLIE_RESULT_DIR" \
+  --invitation "$REQUESTOR_INVITATION_FILE" \
+  --clockchain-token-file "$REQUESTOR_CLOCKCHAIN_TOKEN_FILE" \
+  --output "$REQUESTOR_RESULT_DIR" \
   --i-understand-this-writes-to-clockchain
 ```
 
@@ -115,7 +122,7 @@ For a fresh start, the result path may be absent or an empty owner-controlled
 mode-`0700` directory. Do not add, remove, rename, or reorder arguments. Do not
 run a second writer, edit an artifact, or reconstruct evidence by hand.
 
-A successful payee runner stops only at local state `ACCEPTED` and publishes:
+A successful requestor runner stops only at local state `ACCEPTED` and publishes:
 
 - `party-result.json`
 - `PARTY-RESULT.md`
