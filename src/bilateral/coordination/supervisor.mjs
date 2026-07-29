@@ -655,7 +655,7 @@ export async function runSupervisor(input) {
     let waitingReported = false;
     let readyReported = false;
     for (;;) {
-      const ready = assertEnrollmentReadiness(await client.readEnrollmentReadiness({ sessionId: localState.sessionId, waitMs: 30000 }), localState);
+      const ready = assertEnrollmentReadiness(await client.readEnrollmentReadiness({ waitMs: 30000 }), localState);
       if (ready) {
         if (!readyReported && typeof dependencies.writeStatus === "function") {
           dependencies.writeStatus(Object.freeze({ paymentMoved: false, role: localState.role, status: "PEER_READY" }));

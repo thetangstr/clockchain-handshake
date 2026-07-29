@@ -42,9 +42,23 @@ function replayFixture({ payerInvitationAddress = `0x${"1".repeat(40)}`, payeeIn
 function immediateEnrollmentReadiness(fixture) {
   return async function readEnrollmentReadiness(value) {
     assert.deepEqual(value, {
-      sessionId: fixture.session,
       waitMs: 30000,
     });
+    return {
+      paymentMoved: false,
+      ready: true,
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      schema: "clockchain.bilateral-enrollment-readiness/v1",
+      sessionId: fixture.session,
+    };
+  };
+}
+
+function exactContractEnrollmentReadiness(fixture) {
+  return async function readEnrollmentReadiness(value) {
+    assert.deepEqual(Object.keys(value), ["waitMs"]);
+    assert.deepEqual(value, { waitMs: 30000 });
     return {
       paymentMoved: false,
       ready: true,
@@ -1380,6 +1394,33 @@ test("refreshes only complete authenticated event snapshots", async () => {
   assert.equal(result.view.state, "BOOTSTRAPPING");
 });
 
+test("polls enrollment readiness with the production client input contract", async () => {
+  const fixture = replayFixture();
+  const parsedEnrollmentSet = parseCoordinationEnrollmentSet(fixture.set);
+  const result = await runSupervisor({
+    client: {
+      readEnrollmentReadiness: exactContractEnrollmentReadiness(fixture),
+      async readEnrollmentSet() { return parsedEnrollmentSet; },
+      async readEvents(value) {
+        assert.deepEqual(value, { after: null, waitMs: 30000 });
+        return [];
+      },
+    },
+    dependencies: {
+      shouldContinue() { return false; },
+      verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
+    },
+    localState: {
+      operatorPublicKey: raw(fixture.operator),
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      role: "payer",
+      sessionId: fixture.session,
+    },
+  });
+  assert.equal(result.view.state, "BOOTSTRAPPING");
+});
+
 test("fails closed when the supervisor client lacks enrollment readiness", async () => {
   const fixture = replayFixture();
   const parsedEnrollmentSet = parseCoordinationEnrollmentSet(fixture.set);
@@ -1453,10 +1494,7 @@ test("waits for peer enrollment readiness before the authoritative enrollment se
     "enrollment-set",
     "events",
   ]);
-  assert.deepEqual(calls[0][1], {
-    sessionId: fixture.session,
-    waitMs: 30000,
-  });
+  assert.deepEqual(calls[0][1], { waitMs: 30000 });
   assert.deepEqual(status, [
     { paymentMoved: false, role: "payer", status: "WAITING_FOR_PEER" },
     { paymentMoved: false, role: "payer", status: "PEER_READY" },
