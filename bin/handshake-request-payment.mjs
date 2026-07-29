@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { promisify } from "node:util";
 
 import { readLaunchManifest } from "../src/bilateral/coordination/manifest.mjs";
-import { createGitInspector, createProductionSupervisorDependencies, createSupervisorStatusLine, verifyRepositoryState } from "../src/bilateral/coordination/supervisor-runtime.mjs";
+import { createProductionSupervisorDependencies } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { runSupervisor } from "../src/bilateral/coordination/supervisor.mjs";
 import { requestPaymentThroughPayerMcp } from "../src/bilateral/local-mcp/client.mjs";
 
@@ -15,6 +17,9 @@ export const REQUEST_PAYMENT_CLI_FLAGS = Object.freeze([
   "--tls-certificate",
   "--tls-fingerprint",
 ]);
+const execFileAsync = promisify(execFile);
+const FAILURE_LINE = '{"code":"REQUEST_PAYMENT_FAILED","paymentMoved":false}\n';
+const SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 function fail() {
   throw new Error("Request payment startup failed safely.");
@@ -54,23 +59,51 @@ function absolutePrivatePath(value) {
   return value;
 }
 
+async function inspectRepository(repositoryRoot = process.cwd()) {
+  const cwd = resolve(repositoryRoot);
+  const git = (arguments_) => execFileAsync("/usr/bin/git", arguments_, {
+    cwd,
+    encoding: "utf8",
+    env: {
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      PATH: "/usr/bin:/bin",
+    },
+    maxBuffer: 8192,
+  });
+  const { stdout: head } = await git(["rev-parse", "--verify", "HEAD^{commit}"]);
+  const { stdout: status } = await git(["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"]);
+  let detached = false;
+  try {
+    await git(["symbolic-ref", "-q", "HEAD"]);
+  } catch (error) {
+    detached = error?.code === 1;
+  }
+  const normalizedHead = head.trim();
+  if (!SHA_PATTERN.test(normalizedHead)) fail();
+  return Object.freeze({ clean: status === "", detached, head: normalizedHead });
+}
+
+function validateRepositoryProof(value) {
+  if (!value || value.clean !== true || value.detached !== true || typeof value.head !== "string" || !SHA_PATTERN.test(value.head)) fail();
+  return value.head;
+}
+
 export async function main(arguments_ = process.argv.slice(2), dependencies = {}) {
   try {
     const parsed = parseArguments(arguments_);
+    const inspect = dependencies.inspectRepository ?? inspectRepository;
+    if (typeof inspect !== "function") fail();
+    const verifiedHead = validateRepositoryProof(await inspect(process.cwd()));
     const reader = dependencies.readLaunchManifest ?? readLaunchManifest;
     const manifest = await reader(parsed.launchManifestPath);
     if (
       manifest?.role !== "payee" ||
       typeof manifest.payerMcpIntakeCapability !== "string" ||
-      typeof manifest.repositorySha !== "string"
+      manifest.repositorySha !== verifiedHead
     ) {
       fail();
     }
-    const verify = dependencies.verifyRepositoryState ?? ((repositorySha) => {
-      const inspector = createGitInspector(process.cwd());
-      return verifyRepositoryState({ repositorySha, probe: () => inspector.probe() });
-    });
-    if (await verify(manifest.repositorySha) !== true) fail();
     const readTextFile = dependencies.readTextFile ?? ((path) => readFile(path, "utf8"));
     const tlsCertificatePem = await readTextFile(parsed.tlsCertificatePath);
     const requestPayment = dependencies.requestPayment ?? requestPaymentThroughPayerMcp;
@@ -106,10 +139,7 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch(() => {
-    process.stdout.write(createSupervisorStatusLine({
-      code: "REQUEST_PAYMENT_FAILED",
-      paymentMoved: false,
-    }));
+    process.stdout.write(FAILURE_LINE);
     process.exitCode = 1;
   });
 }

@@ -325,8 +325,12 @@ function commonHeaders({ capability, sessionId, url }) {
 
 function validateJsonResponse(response, statusCode) {
   if (response?.statusCode !== statusCode) fail();
-  if (statusCode !== 202 && response.headers?.["content-type"] !== JSON_CONTENT_TYPE) fail();
+  if (response.headers?.["content-type"] !== JSON_CONTENT_TYPE) fail();
   if (typeof response.text === "string" && response.text.includes("text/event-stream")) fail();
+  if (typeof response.text === "string" && response.text !== "") {
+    const parsed = parseJson(response.text);
+    if (response.body !== null && response.body !== undefined && !isDeepStrictEqual(parsed, response.body)) fail();
+  }
   return response.body;
 }
 

@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 
 import { main, REQUEST_PAYMENT_CLI_FLAGS } from "../bin/handshake-request-payment.mjs";
 
 const CAPABILITY = "ab".repeat(32);
 const REPOSITORY_SHA = "abcdef0123456789abcdef0123456789abcdef01";
 const INTAKE_REQUEST_ID = "00000000-0000-4000-8000-000000000000";
+const execFileAsync = promisify(execFile);
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "request-payment-cli-"));
@@ -47,15 +50,14 @@ test("Requestor CLI exposes exactly six options, validates clean immutable state
         role: "payee",
       };
     },
+    async inspectRepository() {
+      calls.push(["inspectRepository"]);
+      return { clean: true, detached: true, head: REPOSITORY_SHA };
+    },
     async readTextFile(path) {
       calls.push(["readTextFile", path]);
       assert.equal(path, fx.certificatePath);
       return readFile(path, "utf8");
-    },
-    async verifyRepositoryState(repositorySha) {
-      calls.push(["verifyRepositoryState", repositorySha]);
-      assert.equal(repositorySha, REPOSITORY_SHA);
-      return true;
     },
     async requestPayment(input) {
       calls.push(["requestPayment", input.capability, input.stateRoot]);
@@ -85,13 +87,90 @@ test("Requestor CLI exposes exactly six options, validates clean immutable state
     "--tls-fingerprint",
   ]);
   assert.deepEqual(calls.map((entry) => entry[0]), [
+    "inspectRepository",
     "readLaunchManifest",
-    "verifyRepositoryState",
     "readTextFile",
     "requestPayment",
     "writeStatus",
     "runSupervisor",
   ]);
+});
+
+test("spawned Requestor CLI failure emits exact secret-free REQUEST_PAYMENT_FAILED line and no stack", async () => {
+  await assert.rejects(
+    execFileAsync(process.execPath, ["bin/handshake-request-payment.mjs"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    }),
+    (error) => {
+      assert.equal(error.code, 1);
+      assert.equal(error.stdout, '{"code":"REQUEST_PAYMENT_FAILED","paymentMoved":false}\n');
+      assert.equal(error.stderr, "");
+      assert.equal(error.stdout.includes(CAPABILITY), false);
+      assert.equal(error.stdout.includes("Error:"), false);
+      return true;
+    },
+  );
+});
+
+test("Requestor CLI verifies clean detached HEAD before reading manifest, TLS, or capability", async () => {
+  const fx = await fixture();
+  const calls = [];
+  await assert.rejects(
+    main(fx.args, {
+      async readLaunchManifest() {
+        calls.push("readLaunchManifest");
+        throw new Error("manifest read must be after repository proof");
+      },
+      async readTextFile() {
+        calls.push("readTextFile");
+        throw new Error("TLS read must be after repository proof");
+      },
+      async inspectRepository() {
+        calls.push("inspectRepository");
+        return { clean: false, detached: true, head: REPOSITORY_SHA };
+      },
+      async runSupervisor() {
+        calls.push("runSupervisor");
+      },
+    }),
+    /Request payment startup failed safely/,
+  );
+  assert.deepEqual(calls, ["inspectRepository"]);
+});
+
+test("Requestor CLI binds manifest repositorySha to verified clean detached HEAD before private capability use", async () => {
+  const fx = await fixture();
+  const calls = [];
+  await assert.rejects(
+    main(fx.args, {
+      async inspectRepository() {
+        calls.push("inspectRepository");
+        return { clean: true, detached: true, head: REPOSITORY_SHA };
+      },
+      async readLaunchManifest() {
+        calls.push("readLaunchManifest");
+        return {
+          payerMcpIntakeCapability: CAPABILITY,
+          repositorySha: "b".repeat(40),
+          role: "payee",
+        };
+      },
+      async readTextFile() {
+        calls.push("readTextFile");
+        return "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n";
+      },
+      async requestPayment() {
+        calls.push("requestPayment");
+        return { paymentMoved: false, status: "HANDSHAKE_REQUIRED" };
+      },
+      async runSupervisor() {
+        calls.push("runSupervisor");
+      },
+    }),
+    /Request payment startup failed safely/,
+  );
+  assert.deepEqual(calls, ["inspectRepository", "readLaunchManifest"]);
 });
 
 test("Requestor CLI rejects bad arguments, wrong role, dirty SHA, and any prior failure without supervisor start", async () => {
@@ -107,7 +186,6 @@ test("Requestor CLI rejects bad arguments, wrong role, dirty SHA, and any prior 
 
   const failures = [
     { manifest: { payerMcpIntakeCapability: CAPABILITY, repositorySha: REPOSITORY_SHA, role: "payer" } },
-    { manifest: { payerMcpIntakeCapability: CAPABILITY, repositorySha: REPOSITORY_SHA, role: "payee" }, repositoryOk: false },
     { manifest: { payerMcpIntakeCapability: CAPABILITY, repositorySha: REPOSITORY_SHA, role: "payee" }, requestFails: true },
   ];
   for (const failure of failures) {
@@ -117,11 +195,11 @@ test("Requestor CLI rejects bad arguments, wrong role, dirty SHA, and any prior 
         async readLaunchManifest() {
           return failure.manifest;
         },
+        async inspectRepository() {
+          return { clean: true, detached: true, head: REPOSITORY_SHA };
+        },
         async readTextFile() {
           return "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n";
-        },
-        async verifyRepositoryState() {
-          return failure.repositoryOk !== false;
         },
         async requestPayment() {
           if (failure.requestFails) throw new Error("boom");

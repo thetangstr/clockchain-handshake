@@ -107,6 +107,7 @@ function response(res, statusCode, body, headers = {}) {
 
 function emptyResponse(res, statusCode) {
   res.statusCode = statusCode;
+  res.setHeader("Content-Type", JSON_CONTENT_TYPE);
   res.end();
 }
 

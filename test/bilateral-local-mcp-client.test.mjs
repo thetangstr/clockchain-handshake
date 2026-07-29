@@ -24,6 +24,7 @@ const CAPABILITY_DIGEST = createHash("sha256")
   .update(Buffer.from(CAPABILITY, "hex"))
   .digest("hex");
 const INTAKE_REQUEST_ID = "00000000-0000-4000-8000-000000000000";
+const SESSION_ID = "BwcHBwcHBwcHBwcHBwcHBw";
 
 function paymentInput(overrides = {}) {
   return {
@@ -200,4 +201,113 @@ test("client rejects transport, lifecycle, schema, result, duplicate-key, and cl
   assert.deepEqual(methods, ["POST", "POST", "POST", "POST", "DELETE"]);
   assert.equal(deleted, true);
   await assert.rejects(readFile(join(stateRoot, REQUESTOR_MCP_INTAKE_FILE_NAME)), { code: "ENOENT" });
+});
+
+function validLifecycleResponses({ overrides = {}, toolResult } = {}) {
+  const result = toolResult ?? buildPaymentIntakeToolResult({
+    repositorySha: REPOSITORY_SHA,
+    toolInput: paymentInput(),
+  });
+  return [
+    {
+      body: { id: 1, jsonrpc: "2.0", result: { capabilities: { tools: {} }, protocolVersion: PROTOCOL_VERSION, serverInfo: { name: "clockchain-payer-local-mcp", version: "1.0.0" } } },
+      headers: { "content-type": "application/json", "mcp-protocol-version": PROTOCOL_VERSION, "mcp-session-id": SESSION_ID },
+      statusCode: 200,
+      text: '{"id":1,"jsonrpc":"2.0","result":{"capabilities":{"tools":{}},"protocolVersion":"2025-11-25","serverInfo":{"name":"clockchain-payer-local-mcp","version":"1.0.0"}}}',
+      ...overrides.initialize,
+    },
+    {
+      body: null,
+      headers: { "content-type": "application/json" },
+      statusCode: 202,
+      text: "",
+      ...overrides.initialized,
+    },
+    {
+      body: { id: 2, jsonrpc: "2.0", result: { tools: [PAYMENT_INTAKE_TOOL_DESCRIPTOR] } },
+      headers: { "content-type": "application/json" },
+      statusCode: 200,
+      text: JSON.stringify({ id: 2, jsonrpc: "2.0", result: { tools: [PAYMENT_INTAKE_TOOL_DESCRIPTOR] } }),
+      ...overrides.tools,
+    },
+    {
+      body: { id: 3, jsonrpc: "2.0", result },
+      headers: { "content-type": "application/json" },
+      statusCode: 200,
+      text: JSON.stringify({ id: 3, jsonrpc: "2.0", result }),
+      ...overrides.call,
+    },
+    {
+      body: { paymentMoved: false, status: "deleted" },
+      headers: { "content-type": "application/json" },
+      statusCode: 200,
+      text: "{\"paymentMoved\":false,\"status\":\"deleted\"}",
+      ...overrides.delete,
+    },
+  ];
+}
+
+async function assertMockedClientFails(t, { overrides = {}, repositorySha = REPOSITORY_SHA, toolResult } = {}) {
+  const pinned = await makeServer(t);
+  const stateRoot = await mkdtemp(join(tmpdir(), "requestor-mcp-client-mocked-fail-"));
+  await chmod(stateRoot, 0o700);
+  t.after(() => rm(stateRoot, { force: true, recursive: true }));
+  const responses = validLifecycleResponses({ overrides, toolResult });
+  const requests = [];
+  await assert.rejects(
+    requestPaymentThroughPayerMcp({
+      capability: CAPABILITY,
+      intakeRequestId: INTAKE_REQUEST_ID,
+      mcpUrl: "https://127.0.0.1:4443/mcp",
+      repositorySha,
+      stateRoot,
+      tlsCertificatePem: pinned.tlsCertificatePem,
+      tlsFingerprint: pinned.fingerprint,
+      requestJsonRpc: async ({ body, headers, method, url }) => {
+        requests.push({ body, headers, method, url: url.href });
+        assert.equal(headers.Authorization, `Bearer ${CAPABILITY}`);
+        assert.equal(url.href.includes(CAPABILITY), false);
+        assert.equal(JSON.stringify(body ?? null).includes(CAPABILITY), false);
+        return responses.shift();
+      },
+    }),
+    /Requestor MCP client failed safely/,
+  );
+  await assert.rejects(readFile(join(stateRoot, REQUESTOR_MCP_INTAKE_FILE_NAME)), { code: "ENOENT" });
+  return requests;
+}
+
+test("client requires exact JSON content-type and rejects SSE on every lifecycle response including 202", async (t) => {
+  for (const overrides of [
+    { initialize: { headers: { "content-type": "application/json; charset=utf-8", "mcp-protocol-version": PROTOCOL_VERSION, "mcp-session-id": SESSION_ID } } },
+    { initialized: { headers: {}, text: "" } },
+    { initialized: { headers: { "content-type": "text/event-stream" }, text: "event: message\n\n" } },
+    { tools: { headers: { "content-type": "text/event-stream" }, text: "event: message\n\n" } },
+    { call: { headers: { "content-type": "text/event-stream" }, text: "event: message\n\n" } },
+    { delete: { headers: { "content-type": "text/event-stream" }, text: "event: message\n\n" } },
+  ]) {
+    await assertMockedClientFails(t, { overrides });
+  }
+});
+
+test("client fails closed on tool discovery, response IDs, malformed JSON, and handshake result drift", async (t) => {
+  const baseResult = buildPaymentIntakeToolResult({
+    repositorySha: REPOSITORY_SHA,
+    toolInput: paymentInput(),
+  });
+  const cases = [
+    { overrides: { tools: { body: { id: 2, jsonrpc: "2.0", result: { tools: [] } }, text: "{\"id\":2,\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[]}}" } } },
+    { overrides: { tools: { body: { id: 2, jsonrpc: "2.0", result: { tools: [PAYMENT_INTAKE_TOOL_DESCRIPTOR, PAYMENT_INTAKE_TOOL_DESCRIPTOR] } } } } },
+    { overrides: { tools: { body: { id: 2, jsonrpc: "2.0", result: { tools: [{ ...PAYMENT_INTAKE_TOOL_DESCRIPTOR, name: "other" }] } } } } },
+    { overrides: { call: { body: { id: 4, jsonrpc: "2.0", result: baseResult } } } },
+    { overrides: { call: { text: "{\"id\":3,\"id\":3,\"jsonrpc\":\"2.0\",\"result\":{}}" } } },
+    { toolResult: structuredClone(baseResult), mutate(result) { result.structuredContent.status = "AUTHORIZED"; } },
+    { toolResult: structuredClone(baseResult), mutate(result) { result.structuredContent.repositorySha = "b".repeat(40); } },
+    { toolResult: structuredClone(baseResult), mutate(result) { result.structuredContent.authorizationSequence = ["PROPOSED", "ACKNOWLEDGED", "ACCEPTED"]; } },
+    { toolResult: structuredClone(baseResult), mutate(result) { result.structuredContent.intakeRequestId = "11111111-1111-4111-8111-111111111111"; } },
+  ];
+  for (const candidate of cases) {
+    if (candidate.mutate) candidate.mutate(candidate.toolResult);
+    await assertMockedClientFails(t, candidate);
+  }
 });
