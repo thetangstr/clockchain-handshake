@@ -11,6 +11,7 @@ import { canonicalizeReceiptEventValue } from "../../canonical.mjs";
 import { validateActiveLaunchState } from "./manifest.mjs";
 import { readLaunchManifest } from "./manifest.mjs";
 import { PAYER_MCP_INTAKE_DIRECTORY_NAME, createPayerMcpIntakeStore, scanPayerMcpIntakeDirectory } from "../local-mcp/intake-store.mjs";
+import { readRequestorMcpIntake as readDefaultRequestorMcpIntake } from "../local-mcp/client.mjs";
 import { createPayerMcpServer as createDefaultPayerMcpServer } from "../local-mcp/server.mjs";
 import { createLocalPreflightEnrollment, readAndSignTokenCommitment } from "./preflight.mjs";
 import { validateRelayArtifact, validateRelayArtifactWithFacts } from "./artifact.mjs";
@@ -604,9 +605,17 @@ export async function createProductionSupervisorDependencies({ createPayerMcpSer
       async stopPayerMcpServer() { return payerMcpServer.stop(); },
     }),
   };
+  const requestorMcpIntakeDependencies = scope.role === "payee"
+    ? {
+      async readRequestorMcpIntake() {
+        return readDefaultRequestorMcpIntake({ repositorySha: scope.repositorySha, stateRoot });
+      },
+    }
+    : {};
   return Object.freeze({
     ...store,
     ...payerMcpIntakeDependencies,
+    ...requestorMcpIntakeDependencies,
     scanCheckpointDirectories: scanSupervisorCheckpointDirectories,
     async readLaunchManifest(path) { if (!manifest || path !== launchManifestPath) fail(); return manifest; },
     async verifyRepositoryState(repositorySha) { return verifyRepositoryState({ repositorySha, probe: probe ?? (() => repositoryInspector.probe()) }); },

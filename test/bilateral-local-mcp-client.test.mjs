@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import {
   REQUESTOR_MCP_INTAKE_FILE_NAME,
+  readRequestorMcpIntake,
   requestPaymentThroughPayerMcp,
 } from "../src/bilateral/local-mcp/client.mjs";
 import { createPayerMcpIntakeStore } from "../src/bilateral/local-mcp/intake-store.mjs";
@@ -148,6 +149,33 @@ test("client accepts byte-identical persisted Requestor intake after crash-befor
   assert.deepEqual(second, first);
   assert.equal(after.equals(before), true);
   assert.equal(after.toString("utf8"), canonicalBytes(first).toString("utf8"));
+});
+
+test("strict Requestor intake reader adopts only the exact persisted handshake-required result", async (t) => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "requestor-mcp-client-reader-"));
+  await chmod(stateRoot, 0o700);
+  t.after(() => rm(stateRoot, { force: true, recursive: true }));
+  const result = buildPaymentIntakeToolResult({
+    repositorySha: REPOSITORY_SHA,
+    toolInput: paymentInput(),
+  }).structuredContent;
+  await writeFile(join(stateRoot, REQUESTOR_MCP_INTAKE_FILE_NAME), canonicalBytes(result), { mode: 0o600 });
+
+  assert.deepEqual(
+    await readRequestorMcpIntake({ repositorySha: REPOSITORY_SHA, stateRoot }),
+    result,
+  );
+
+  const driftRoot = await mkdtemp(join(tmpdir(), "requestor-mcp-client-reader-drift-"));
+  await chmod(driftRoot, 0o700);
+  t.after(() => rm(driftRoot, { force: true, recursive: true }));
+  const changed = structuredClone(result);
+  changed.paymentMoved = true;
+  await writeFile(join(driftRoot, REQUESTOR_MCP_INTAKE_FILE_NAME), canonicalBytes(changed), { mode: 0o600 });
+  await assert.rejects(
+    readRequestorMcpIntake({ repositorySha: REPOSITORY_SHA, stateRoot: driftRoot }),
+    /Requestor MCP client failed safely/,
+  );
 });
 
 test("client rejects symlink state root before chmod or persistence can mutate the target", async (t) => {

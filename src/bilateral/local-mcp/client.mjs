@@ -9,6 +9,7 @@ import { isDeepStrictEqual } from "node:util";
 import { canonicalBytes } from "../canonical.mjs";
 import {
   PAYMENT_INTAKE_TOOL_DESCRIPTOR,
+  validateHandshakeRequiredResult,
   validatePaymentIntakeToolResult,
 } from "./payment-intake.mjs";
 
@@ -465,6 +466,51 @@ async function readAndValidatePersistedIntake({ bytes, path, result, root }) {
   } finally {
     await readbackHandle.close();
   }
+}
+
+async function readPersistedRequestorIntake({ repositorySha, stateRoot }) {
+  const root = await createPrivateStateRoot(stateRoot);
+  const path = join(stateRoot, REQUESTOR_MCP_INTAKE_FILE_NAME);
+  if (resolve(path) !== path || !path.startsWith(`${stateRoot}/`)) fail();
+  let handle;
+  try {
+    await root.assertPinned();
+    const before = await lstat(path);
+    if (!hasPrivateFileMetadata(before) || before.size <= 0 || before.size > MAX_RESPONSE_BYTES) fail();
+    handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const opened = await handle.stat();
+    if (!sameIdentity(before, opened) || !hasPrivateFileMetadata(opened)) fail();
+    const buffer = Buffer.alloc(before.size + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead !== before.size) fail();
+    const bytes = buffer.subarray(0, bytesRead);
+    const parsed = parseJson(bytes.toString("utf8"));
+    if (canonicalBytes(parsed).toString("utf8") !== bytes.toString("utf8")) fail();
+    const result = validateHandshakeRequiredResult({
+      repositorySha,
+      result: parsed,
+      toolInput: paymentInput(parsed?.intakeRequestId),
+    });
+    if (!isDeepStrictEqual(parsed, result)) fail();
+    const after = await lstat(path);
+    await root.assertPinned();
+    if (!sameIdentity(before, after) || !hasPrivateFileMetadata(after) || after.size !== bytes.length) fail();
+    return result;
+  } finally {
+    if (handle) await handle.close();
+    await root.handle.close();
+  }
+}
+
+export async function readRequestorMcpIntake({ repositorySha, stateRoot } = {}) {
+  try {
+    if (typeof repositorySha !== "string" || !REPOSITORY_SHA_PATTERN.test(repositorySha)) fail();
+    if (typeof stateRoot !== "string" || resolve(stateRoot) !== stateRoot || stateRoot === "/") fail();
+    return await readPersistedRequestorIntake({ repositorySha, stateRoot });
+  } catch (error) {
+    sanitize(error);
+  }
+  fail();
 }
 
 export async function requestPaymentThroughPayerMcp(input) {

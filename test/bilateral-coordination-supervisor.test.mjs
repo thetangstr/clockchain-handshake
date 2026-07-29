@@ -13,6 +13,7 @@ import { parseCoordinationEnrollmentSet } from "../src/bilateral/coordination/en
 import { payerMandateDigest, signPayerMandate } from "../src/bilateral/payer-mandate.mjs";
 import { paymentRequestDigest, signPaymentRequest } from "../src/bilateral/payment-request.mjs";
 import { DEMO_INTENT_POLICY } from "../src/bilateral/demo-intent-policy.mjs";
+import { buildPaymentIntakeToolResult, intakeDigest } from "../src/bilateral/local-mcp/payment-intake.mjs";
 
 import {
   SUPERVISOR_COMMAND_POLICY,
@@ -191,8 +192,56 @@ function replayThroughIdentities(fixture) {
 
 const payerIntentAccount = privateKeyToAccount(`0x${"5".repeat(64)}`);
 const payeeIntentAccount = privateKeyToAccount(`0x${"6".repeat(64)}`);
-const INTAKE_DIGEST = "b".repeat(64);
 const INTAKE_REQUEST_ID = "22222222-3333-4444-8555-666666666666";
+function intakeToolInput() {
+  return {
+    amount: { currency: "USD", value: "100" },
+    intakeRequestId: INTAKE_REQUEST_ID,
+    invoiceReference: "invoice-001",
+    paymentMoved: false,
+    purpose: "Handshake demo",
+    schema: "clockchain.payer-mcp-payment-intake/v1",
+  };
+}
+const INTAKE_DIGEST = intakeDigest(intakeToolInput());
+function intakeRecordJson(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(intakeRecordJson).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${intakeRecordJson(value[key])}`).join(",")}}`;
+}
+function payerIntakeRecord(repositorySha) {
+  const request = intakeToolInput();
+  const response = buildPaymentIntakeToolResult({ repositorySha, toolInput: request });
+  const digestBody = {
+    paymentMoved: false,
+    repositorySha,
+    request,
+    response,
+  };
+  return {
+    digest: sha256(Buffer.from(intakeRecordJson(digestBody), "utf8")),
+    intakeDigest: INTAKE_DIGEST,
+    intakeRequestId: INTAKE_REQUEST_ID,
+    paymentMoved: false,
+    policy: {
+      amount: { currency: "USD", value: "100" },
+      invoiceReferencePrefix: "invoice-",
+      purpose: "Handshake demo",
+    },
+    repositorySha,
+    request,
+    requestDigest: sha256(canonicalBytes(request)),
+    response,
+    responseDigest: sha256(Buffer.from(intakeRecordJson(response), "utf8")),
+    schema: "clockchain.payer-mcp-intake-record/v1",
+  };
+}
+function requestorIntakeResult(repositorySha) {
+  return buildPaymentIntakeToolResult({
+    repositorySha,
+    toolInput: intakeToolInput(),
+  }).structuredContent;
+}
 
 test("pins the supervisor schema and closed role-run command policy", () => {
   assert.equal(SUPERVISOR_STATE_SCHEMA, "clockchain.bilateral-supervisor-state/v1");
@@ -470,6 +519,9 @@ test("payer publishes one signed mandate from identity-bound parties before desc
         });
       },
       shouldContinue() { return false; },
+      async readStoredPayerMcpIntake() {
+        return payerIntakeRecord(fixture.repo);
+      },
       async validateRelayArtifactWithFacts({ artifactType, bytes, expectedDigest }) {
         assert.equal(artifactType, "identity-package");
         assert.equal(sha256(bytes), expectedDigest);
@@ -483,10 +535,6 @@ test("payer publishes one signed mandate from identity-bound parties before desc
       async writeState(value) { writes.push(value); },
     },
     localState: {
-      intakeBinding: {
-        intakeDigest: INTAKE_DIGEST,
-        intakeRequestId: INTAKE_REQUEST_ID,
-      },
       operatorPublicKey: raw(fixture.operator),
       processedEventDigests,
       rehearsal: {
@@ -526,6 +574,7 @@ test("payer publishes one signed mandate from identity-bound parties before desc
   assert.equal(envelope.mandate.purpose, DEMO_INTENT_POLICY.purpose);
   assert.equal(writes.at(-1).intentJournal.mandateDigest, payerMandateDigest(envelope));
   assert.equal(writes.at(-1).intentJournal.mandateRawDigest, sha256(publications[0].bytes));
+  assert.deepEqual(writes.at(-1).intakeBinding, { intakeDigest: INTAKE_DIGEST, intakeRequestId: INTAKE_REQUEST_ID });
   assert.equal(writes.at(-1).intentJournal.intakeDigest, INTAKE_DIGEST);
   assert.equal(writes.at(-1).intentJournal.intakeRequestId, INTAKE_REQUEST_ID);
 });
@@ -602,6 +651,9 @@ test("payee verifies Iris mandate and submits one Billie-signed payment request"
         });
       },
       shouldContinue() { return false; },
+      async readRequestorMcpIntake() {
+        return requestorIntakeResult(fixture.repo);
+      },
       async validateRelayArtifactWithFacts({ artifactType, bytes, expectedDigest }) {
         assert.equal(artifactType, "identity-package");
         assert.equal(sha256(bytes), expectedDigest);
@@ -615,10 +667,6 @@ test("payee verifies Iris mandate and submits one Billie-signed payment request"
       async writeState(value) { writes.push(value); },
     },
     localState: {
-      intakeBinding: {
-        intakeDigest: INTAKE_DIGEST,
-        intakeRequestId: INTAKE_REQUEST_ID,
-      },
       operatorPublicKey: raw(fixture.operator),
       processedEventDigests: events.filter((event) => event.role === "operator").map((event) => event.eventDigest),
       rehearsal: {
@@ -644,6 +692,7 @@ test("payee verifies Iris mandate and submits one Billie-signed payment request"
   assert.notEqual(envelope.request.requestId, envelope.request.intakeRequestId);
   assert.equal(envelope.request.paymentMoved, false);
   assert.equal(writes.at(-1).intentJournal.mandateRawDigest, sha256(mandateBytes));
+  assert.deepEqual(writes.at(-1).intakeBinding, { intakeDigest: INTAKE_DIGEST, intakeRequestId: INTAKE_REQUEST_ID });
   assert.equal(writes.at(-1).intentJournal.intakeDigest, INTAKE_DIGEST);
   assert.equal(writes.at(-1).intentJournal.intakeRequestId, INTAKE_REQUEST_ID);
   assert.equal(writes.at(-1).intentJournal.requestDigest, paymentRequestDigest(envelope));
@@ -1768,6 +1817,40 @@ test("starts Payer MCP after active bootstrap before enrollment readiness and st
   assert.deepEqual(calls[3][1], { paymentMoved: false, role: "payer", status: "PEER_READY" });
 });
 
+test("stops Payer MCP when readiness polling fails after listener start", async () => {
+  const fixture = replayFixture();
+  const calls = [];
+  await assert.rejects(runSupervisor({
+    client: {
+      async readEnrollmentReadiness() {
+        calls.push("readiness");
+        throw new Error("readiness unavailable");
+      },
+      async readEnrollmentSet() { assert.fail("failed readiness must not read enrollment set"); },
+      async readEvents() { assert.fail("failed readiness must not read events"); },
+    },
+    dependencies: {
+      async startPayerMcpServer() {
+        calls.push("mcp-start");
+        return { host: "127.0.0.1", port: 9443, url: "https://127.0.0.1:9443/mcp" };
+      },
+      async stopPayerMcpServer() {
+        calls.push("mcp-stop");
+      },
+      verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
+    },
+    localState: {
+      activeLaunchState: { paymentMoved: false },
+      operatorPublicKey: raw(fixture.operator),
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      role: "payer",
+      sessionId: fixture.session,
+    },
+  }));
+  assert.deepEqual(calls, ["mcp-start", "readiness", "mcp-stop"]);
+});
+
 test("drives the authenticated startup through a token commitment without replacing its checkpoint", async () => {
   const fixture = replayFixture();
   const payer = generateKeyPairSync("ed25519");
@@ -1843,6 +1926,7 @@ test("resumes only through a replay-derived resumed coordination client", async 
     createResumedCoordinationClient(input) { resumed += 1; assert.equal(input.senderState.sequence, "0"); return {}; },
     async retireLaunchManifest(path) { retirements.push(path); },
     async scanCheckpointDirectories({ checkpoint: value }) { scans.push(value.phase); },
+    async readStoredPayerMcpIntake() { return payerIntakeRecord(fixture.repo); },
     verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
   } });
   const state = await supervisor.bootstrap();
@@ -1853,6 +1937,17 @@ test("resumes only through a replay-derived resumed coordination client", async 
   assert.notEqual(deterministicRequestId(state.sessionId, "rehearsal"), state.intakeBinding.intakeRequestId);
   assert.equal(Buffer.isBuffer(state.enrollmentSet), false);
   checkpoint = state;
+  await assert.rejects(createRoleSupervisor({ launchManifestPath: "/retired", stateRoot: "/state", dependencies: {
+    async readState() { return checkpoint; },
+    async validateActiveLaunchState(value) { return value; },
+    async readStoredPayerMcpIntake() {
+      const drift = payerIntakeRecord(fixture.repo);
+      return { ...drift, intakeRequestId: "33333333-3333-4333-8333-333333333333" };
+    },
+    async createTransport() { assert.fail("intake drift restart must not create transport"); },
+    async resolveOperatorPublicKey() { assert.fail("intake drift restart must not resolve authority"); },
+    createResumedCoordinationClient() { assert.fail("intake drift restart must not create client"); },
+  } }));
   for (const mutation of [
     (value) => { value.phase = "BEFORE_CHILD"; },
     (value) => { value.phase = "DESCRIPTOR_WRITING"; },
@@ -1887,6 +1982,7 @@ test("resumes only through a replay-derived resumed coordination client", async 
     createResumedCoordinationClient(input) { resumed += 1; assert.equal(input.senderState.sequence, "0"); return {}; },
     async retireLaunchManifest(path) { retirements.push(path); },
     async scanCheckpointDirectories({ checkpoint: value }) { scans.push(value.phase); },
+    async readStoredPayerMcpIntake() { return payerIntakeRecord(fixture.repo); },
     verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
   } });
   await restarted.bootstrap();

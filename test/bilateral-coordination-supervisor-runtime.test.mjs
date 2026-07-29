@@ -22,6 +22,7 @@ import { createLaunchManifest, writeLaunchManifest } from "../src/bilateral/coor
 import { createCoordinationReceipt } from "../src/bilateral/coordination/receipt.mjs";
 import { buildPaymentIntakeToolResult } from "../src/bilateral/local-mcp/payment-intake.mjs";
 import { PAYER_MCP_INTAKE_DIRECTORY_NAME } from "../src/bilateral/local-mcp/intake-store.mjs";
+import { REQUESTOR_MCP_INTAKE_FILE_NAME } from "../src/bilateral/local-mcp/client.mjs";
 import { main as supervisorMain } from "../bin/handshake-supervisor.mjs";
 import { main as createInvitationFiles } from "../scripts/create-invitations.mjs";
 
@@ -643,6 +644,20 @@ test("Requestor production dependencies do not expose Payer intake methods and r
   assert.equal(Object.hasOwn(dependencies, "writePayerMcpIntake"), false);
   assert.equal(Object.hasOwn(dependencies, "readPayerMcpIntake"), false);
   assert.equal(Object.hasOwn(dependencies, "readStoredPayerMcpIntake"), false);
+  assert.equal(typeof dependencies.readRequestorMcpIntake, "function");
+  const result = buildPaymentIntakeToolResult({
+    repositorySha,
+    toolInput: {
+      amount: { currency: "USD", value: "100" },
+      intakeRequestId: "00000000-0000-4000-8000-000000000000",
+      invoiceReference: "invoice-001",
+      paymentMoved: false,
+      purpose: "Handshake demo",
+      schema: "clockchain.payer-mcp-payment-intake/v1",
+    },
+  }).structuredContent;
+  await writeFile(join(root, REQUESTOR_MCP_INTAKE_FILE_NAME), canonicalBytes(result), { mode: 0o600 });
+  assert.deepEqual(await dependencies.readRequestorMcpIntake(), result);
 
   const rehearsal = join(root, "rehearsal"), stakeholder = join(root, "stakeholder");
   for (const directory of [join(root, "preflight"), rehearsal, stakeholder, join(rehearsal, "identity"), join(rehearsal, "result"), join(stakeholder, "identity"), join(stakeholder, "result"), join(root, PAYER_MCP_INTAKE_DIRECTORY_NAME)]) await mkdir(directory, { recursive: true, mode: 0o700 });

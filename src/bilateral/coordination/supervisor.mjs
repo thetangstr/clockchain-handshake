@@ -13,6 +13,7 @@ import { readAndSignTokenCommitment as defaultReadAndSignTokenCommitment, verify
 import { payerMandateDigest, verifyPayerMandate } from "../payer-mandate.mjs";
 import { paymentRequestDigest, verifyPaymentRequest } from "../payment-request.mjs";
 import { DEMO_INTENT_POLICY } from "../demo-intent-policy.mjs";
+import { validateHandshakeRequiredResult, validatePaymentIntakeToolResult } from "../local-mcp/payment-intake.mjs";
 
 export const SUPERVISOR_STATE_SCHEMA = "clockchain.bilateral-supervisor-state/v1";
 export const SUPERVISOR_COMMAND_POLICY = Object.freeze({
@@ -33,6 +34,7 @@ const TOKEN_BOUND_PHASES = new Set(["TOKEN_READY", "DESCRIPTOR_WRITING", "DESCRI
 const ENROLLMENT_READINESS_SCHEMA = "clockchain.bilateral-enrollment-readiness/v1";
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 const INTAKE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const PAYER_MCP_INTAKE_RECORD_KEYS = ["digest", "intakeDigest", "intakeRequestId", "paymentMoved", "policy", "repositorySha", "request", "requestDigest", "response", "responseDigest", "schema"];
 
 function invalid() { throw new Error("Coordination supervisor operation failed safely."); }
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
@@ -150,6 +152,109 @@ function validateDurableIntakeBinding(value) {
     !DIGEST_PATTERN.test(value.intakeDigest) ||
     !INTAKE_UUID_PATTERN.test(value.intakeRequestId)
   ) invalid();
+}
+function paymentIntakeInput(intakeRequestId) {
+  return Object.freeze({
+    amount: Object.freeze({ currency: DEMO_INTENT_POLICY.amount.currency, value: DEMO_INTENT_POLICY.amount.value }),
+    intakeRequestId,
+    invoiceReference: `${DEMO_INTENT_POLICY.invoiceReferencePrefix}001`,
+    paymentMoved: false,
+    purpose: DEMO_INTENT_POLICY.purpose,
+    schema: "clockchain.payer-mcp-payment-intake/v1",
+  });
+}
+function validateIntakePolicy(value) {
+  if (
+    !dataExact(value, ["amount", "invoiceReferencePrefix", "purpose"]) ||
+    !dataExact(value.amount, ["currency", "value"]) ||
+    value.amount.currency !== DEMO_INTENT_POLICY.amount.currency ||
+    value.amount.value !== DEMO_INTENT_POLICY.amount.value ||
+    value.invoiceReferencePrefix !== DEMO_INTENT_POLICY.invoiceReferencePrefix ||
+    value.purpose !== DEMO_INTENT_POLICY.purpose
+  ) invalid();
+}
+function recordJson(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(recordJson).join(",")}]`;
+  if (typeof value !== "object" || value === undefined) invalid();
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) invalid();
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${recordJson(value[key])}`).join(",")}}`;
+}
+function intakeBindingFromPayerRecord(record, localState) {
+  if (!dataExact(record, PAYER_MCP_INTAKE_RECORD_KEYS) || record.schema !== "clockchain.payer-mcp-intake-record/v1" || record.paymentMoved !== false || record.repositorySha !== localState.repositorySha) invalid();
+  validateIntakePolicy(record.policy);
+  const structuredContent = validatePaymentIntakeToolResult({
+    repositorySha: localState.repositorySha,
+    result: record.response,
+    toolInput: record.request,
+  });
+  const digest = sha256(Buffer.from(recordJson({
+    paymentMoved: false,
+    repositorySha: localState.repositorySha,
+    request: record.request,
+    response: record.response,
+  }), "utf8"));
+  const requestDigest = sha256(canonicalBytes(record.request));
+  const responseDigest = sha256(Buffer.from(recordJson(record.response), "utf8"));
+  if (
+    record.digest !== digest ||
+    record.requestDigest !== requestDigest ||
+    record.responseDigest !== responseDigest ||
+    !DIGEST_PATTERN.test(record.digest) ||
+    !DIGEST_PATTERN.test(record.requestDigest) ||
+    !DIGEST_PATTERN.test(record.responseDigest) ||
+    record.intakeDigest !== structuredContent.intakeDigest ||
+    record.intakeRequestId !== structuredContent.intakeRequestId
+  ) invalid();
+  return Object.freeze({ intakeDigest: structuredContent.intakeDigest, intakeRequestId: structuredContent.intakeRequestId });
+}
+function intakeBindingFromRequestorResult(result, localState) {
+  const structuredContent = validateHandshakeRequiredResult({
+    repositorySha: localState.repositorySha,
+    result,
+    toolInput: paymentIntakeInput(result?.intakeRequestId),
+  });
+  return Object.freeze({ intakeDigest: structuredContent.intakeDigest, intakeRequestId: structuredContent.intakeRequestId });
+}
+async function adoptIntakeBinding({ dependencies, localState }) {
+  const existing = localState.intakeBinding === undefined ? null : intakeBindingFor(localState);
+  let binding = null;
+  if (localState.role === "payer") {
+    if (typeof dependencies.readStoredPayerMcpIntake !== "function") return existing === null ? null : localState;
+    const record = await dependencies.readStoredPayerMcpIntake();
+    if (record === null || record === undefined) {
+      if (existing !== null) invalid();
+      return null;
+    }
+    binding = intakeBindingFromPayerRecord(record, localState);
+  } else if (localState.role === "payee") {
+    if (typeof dependencies.readRequestorMcpIntake !== "function") {
+      if (existing !== null) return localState;
+      invalid();
+    }
+    binding = intakeBindingFromRequestorResult(await dependencies.readRequestorMcpIntake(), localState);
+  } else invalid();
+  if (existing !== null && !sameIntakeBinding(existing, binding)) invalid();
+  if (existing !== null) return localState;
+  const state = Object.freeze({ ...localState, intakeBinding: binding, paymentMoved: false });
+  if (typeof dependencies.writeState === "function") await dependencies.writeState(state);
+  return state;
+}
+async function revalidateRestartIntakeBinding({ checkpoint, dependencies }) {
+  if (checkpoint.intakeBinding === undefined) return;
+  const binding = intakeBindingFor(checkpoint);
+  let persisted;
+  if (checkpoint.role === "payer") {
+    if (typeof dependencies.readStoredPayerMcpIntake !== "function") invalid();
+    persisted = await dependencies.readStoredPayerMcpIntake();
+    if (persisted === null || persisted === undefined) invalid();
+    persisted = intakeBindingFromPayerRecord(persisted, checkpoint);
+  } else if (checkpoint.role === "payee") {
+    if (typeof dependencies.readRequestorMcpIntake !== "function") invalid();
+    persisted = intakeBindingFromRequestorResult(await dependencies.readRequestorMcpIntake(), checkpoint);
+  } else invalid();
+  if (!sameIntakeBinding(binding, persisted)) invalid();
 }
 function eventFor(events, role, kind, subjectRun) {
   return events.find((event) => event?.role === role && event.kind === kind && event.subjectRun === subjectRun);
@@ -341,6 +446,9 @@ async function runCommercialIntentPhase({ client, dependencies, localState, repl
     if (localState.role !== "payee" || eventFor(replay.events, "payee", "PAYMENT_REQUEST_READY", journal.subjectRun)) return null;
     return retryPaymentRequestSubmission({ client, dependencies, localState, subjectRun: journal.subjectRun });
   }
+  const adoptedState = await adoptIntakeBinding({ dependencies, localState });
+  if (adoptedState === null) return null;
+  localState = adoptedState;
   for (const subjectRun of ["rehearsal", "stakeholder"]) {
     const identityReady = ["payer", "payee"].every((role) => eventFor(replay.events, role, "IDENTITY_PACKAGE_READY", subjectRun));
     if (!identityReady) continue;
@@ -651,6 +759,7 @@ export async function createRoleSupervisor({ launchManifestPath, stateRoot, depe
       if (activeLaunchState.paymentMoved !== false || activeLaunchState.role !== checkpoint.role || activeLaunchState.repositorySha !== checkpoint.repositorySha || activeLaunchState.sessionId !== checkpoint.sessionId) invalid();
       validateDurableCheckpointShape(checkpoint, activeLaunchState, stateRoot);
       validateLocalCheckpoint(checkpoint, { capabilityDigest: activeLaunchState.capabilityDigest, releaseId: activeLaunchState.releaseId, repositorySha: checkpoint.repositorySha, role: checkpoint.role, sessionId: checkpoint.sessionId });
+      await revalidateRestartIntakeBinding({ checkpoint, dependencies });
       if (typeof dependencies.scanCheckpointDirectories === "function") await dependencies.scanCheckpointDirectories({ checkpoint, stateRoot });
       if (typeof dependencies.retireLaunchManifest === "function") await dependencies.retireLaunchManifest(launchManifestPath);
       const earlyCheckpoint = checkpoint.events === undefined && checkpoint.enrollmentSet === undefined;
