@@ -28,7 +28,22 @@ function fail() {
 }
 
 function validateHost(host) {
-  if (typeof host !== "string" || net.isIP(host) === 0 || host === "0.0.0.0" || host === "::" || host === "::0") fail();
+  if (typeof host !== "string" || host !== host.toLowerCase() || host.includes("%")) fail();
+  const family = net.isIP(host);
+  if (family === 0) fail();
+  if (family === 4) {
+    if (host === "0.0.0.0") fail();
+    return host;
+  }
+  if (
+    host === "::" ||
+    host === "::0" ||
+    host === "0:0:0:0:0:0:0:0" ||
+    host === "::ffff:0.0.0.0" ||
+    host === "0:0:0:0:0:ffff:0.0.0.0"
+  ) {
+    fail();
+  }
   return host;
 }
 
@@ -173,6 +188,7 @@ function assertSessionRequest(session) {
 
 export function createPayerMcpServer({
   capabilityDigest: expectedCapabilityDigest,
+  createHttpsServer = https.createServer,
   host,
   intakeStore,
   nowMs = () => Date.now(),
@@ -189,7 +205,7 @@ export function createPayerMcpServer({
   const store = validateIntakeStore(intakeStore);
   const certificate = validatePem(tlsCertificatePem);
   const privateKey = validatePem(tlsPrivateKeyPem);
-  if (typeof nowMs !== "function" || typeof randomBytes !== "function") fail();
+  if (typeof createHttpsServer !== "function" || typeof nowMs !== "function" || typeof randomBytes !== "function") fail();
 
   const sessions = new Map();
   const failedAuth = [];
@@ -224,9 +240,9 @@ export function createPayerMcpServer({
       const id = req.headers["mcp-session-id"];
       validateProtocolHeader(req);
       const session = sessions.get(id);
-      if (!session) fail();
+      if (!session || session.state !== "initialized") fail();
       assertSessionRequest(session);
-      session.initialized = true;
+      session.state = "ready";
       emptyResponse(res, 202);
       return;
     }
@@ -237,7 +253,7 @@ export function createPayerMcpServer({
       const params = exactObject(rpc.params, ["protocolVersion"]);
       if (params.protocolVersion !== PAYER_MCP_PROTOCOL_VERSION) fail();
       const id = sessionId(randomBytes(16));
-      const session = { ids: new Set([String(rpc.id)]), initialized: false, requests: 1, retired: false };
+      const session = { ids: new Set([String(rpc.id)]), requests: 1, retired: false, state: "initialized" };
       sessions.set(id, session);
       response(res, 200, {
         id: rpc.id,
@@ -256,18 +272,22 @@ export function createPayerMcpServer({
 
     validateProtocolHeader(req);
     const session = sessions.get(req.headers["mcp-session-id"]);
-    if (!session || !session.initialized || hasDuplicateId(session, rpc.id)) fail();
+    if (!session || hasDuplicateId(session, rpc.id)) fail();
     assertSessionRequest(session);
     if (rpc.method === "tools/list") {
+      if (session.state !== "ready") fail();
       exactObject(rpc.params, []);
+      session.state = "listed";
       response(res, 200, { id: rpc.id, jsonrpc: "2.0", result: { tools: [PAYMENT_INTAKE_TOOL_DESCRIPTOR] } });
       return;
     }
     if (rpc.method === "tools/call") {
+      if (session.state !== "listed") fail();
       const params = exactObject(rpc.params, ["arguments", "name"]);
       if (params.name !== REQUEST_PAYMENT_TOOL_NAME) fail();
       const result = buildPaymentIntakeToolResult({ repositorySha: sha, toolInput: params.arguments });
       const record = await store.writeIntake({ request: params.arguments, response: result });
+      session.state = "called";
       response(res, 200, { id: rpc.id, jsonrpc: "2.0", result: record.response });
       return;
     }
@@ -298,7 +318,7 @@ export function createPayerMcpServer({
         validateProtocolHeader(req);
         const id = req.headers["mcp-session-id"];
         const session = sessions.get(id);
-        if (!session) fail();
+        if (!session || session.state !== "called") fail();
         assertSessionRequest(session);
         session.retired = true;
         sessions.delete(id);
@@ -315,7 +335,7 @@ export function createPayerMcpServer({
   return Object.freeze({
     async start() {
       if (server) fail();
-      server = https.createServer({ cert: certificate, key: privateKey }, handleRequest);
+      server = createHttpsServer({ cert: certificate, key: privateKey }, handleRequest);
       server.headersTimeout = HEADER_TIMEOUT_MS;
       server.requestTimeout = REQUEST_TIMEOUT_MS;
       await new Promise((resolve, reject) => {

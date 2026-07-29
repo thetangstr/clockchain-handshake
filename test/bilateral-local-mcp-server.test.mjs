@@ -57,6 +57,7 @@ async function makeFixture(t, options = {}) {
   const observed = [];
   const server = createPayerMcpServer({
     capabilityDigest: CAPABILITY_DIGEST,
+    createHttpsServer: options.createHttpsServer,
     host: options.host ?? "127.0.0.1",
     intakeStore,
     nowMs: options.nowMs,
@@ -80,8 +81,10 @@ async function makeFixture(t, options = {}) {
   return { ...listening, certificate: tlsCertificatePem, fingerprint: createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex"), observed, root, server };
 }
 
-async function request({ body, fixture, headers = {}, method = "POST", path = "/mcp" }) {
-  const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
+async function request({ body, fixture, headers = {}, method = "POST", path = "/mcp", rawBody }) {
+  const payload = rawBody === undefined
+    ? (body === undefined ? undefined : Buffer.from(JSON.stringify(body)))
+    : Buffer.from(rawBody);
   return new Promise((resolve, reject) => {
     const requestHeaders = Object.fromEntries(Object.entries({
       Accept: "application/json, text/event-stream",
@@ -168,8 +171,27 @@ test("serves the exact JSON-only MCP lifecycle and persists one request_payment 
 
 test("rejects unsafe transport boundary, host, path, headers, session, method, and tool shapes", async (t) => {
   const fixture = await makeFixture(t);
-  assert.throws(() => createPayerMcpServer({ ...fixture, capabilityDigest: CAPABILITY_DIGEST, host: "0.0.0.0", intakeStore: {}, repositorySha: REPOSITORY_SHA, tlsCertificatePem: fixture.certificate, tlsPrivateKeyPem: "x" }));
-  assert.throws(() => createPayerMcpServer({ ...fixture, capabilityDigest: CAPABILITY_DIGEST, host: "localhost", intakeStore: {}, repositorySha: REPOSITORY_SHA, tlsCertificatePem: fixture.certificate, tlsPrivateKeyPem: "x" }));
+  const tlsPrivateKeyPem = await readFile(join(fixture.root, "key.pem"), "utf8");
+  for (const host of ["0.0.0.0", "0:0:0:0:0:0:0:0", "::", "::0", "::ffff:0.0.0.0", "localhost"]) {
+    assert.throws(() => createPayerMcpServer({
+      capabilityDigest: CAPABILITY_DIGEST,
+      host,
+      intakeStore: { writeIntake: async () => undefined },
+      port: 0,
+      repositorySha: REPOSITORY_SHA,
+      tlsCertificatePem: fixture.certificate,
+      tlsPrivateKeyPem,
+    }), /Payer MCP server failed safely\./);
+  }
+  assert.equal(typeof createPayerMcpServer({
+    capabilityDigest: CAPABILITY_DIGEST,
+    host: "::1",
+    intakeStore: { writeIntake: async () => undefined },
+    port: 0,
+    repositorySha: REPOSITORY_SHA,
+    tlsCertificatePem: fixture.certificate,
+    tlsPrivateKeyPem,
+  }).start, "function");
 
   assert.equal((await request({ body: rpc(1, "initialize", { protocolVersion: PROTOCOL_VERSION }), fixture, method: "GET" })).statusCode, 405);
   assert.equal((await request({ body: rpc(1, "initialize", { protocolVersion: PROTOCOL_VERSION }), fixture, path: "/mcp?x=1" })).statusCode, 404);
@@ -179,6 +201,7 @@ test("rejects unsafe transport boundary, host, path, headers, session, method, a
   assert.equal((await request({ body: rpc(1, "initialize", { protocolVersion: PROTOCOL_VERSION }), fixture, headers: { "Content-Type": "text/plain" } })).statusCode, 415);
 
   const { sessionId } = await initializedSession(t, fixture);
+  assert.equal((await request({ fixture, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": sessionId }, rawBody: "{" })).statusCode, 400);
   for (const body of [
     rpc(9, "initialize", { protocolVersion: PROTOCOL_VERSION }),
     rpc(10, "tools/call", { arguments: paymentInput(), name: "other" }),
@@ -188,9 +211,63 @@ test("rejects unsafe transport boundary, host, path, headers, session, method, a
     const response = await request({ body, fixture, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": sessionId } });
     assert.equal(response.statusCode, 400);
   }
+  assert.equal((await request({ body: rpc(13, "tools/list"), fixture, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": sessionId } })).statusCode, 200);
+  assert.equal((await request({ body: rpc(13, "tools/list"), fixture, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": sessionId } })).statusCode, 400);
   assert.equal((await request({ body: rpc(13, "tools/list"), fixture, headers: { "MCP-Protocol-Version": "2024-01-01", "MCP-Session-Id": sessionId } })).statusCode, 400);
   assert.equal((await request({ body: rpc(14, "tools/list"), fixture, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": "wrong" } })).statusCode, 400);
   await fixture.server.stop();
+});
+
+test("enforces the exact monotonic MCP session state machine", async (t) => {
+  const fixture = await makeFixture(t);
+  const initialized = await request({ body: rpc(1, "initialize", { protocolVersion: PROTOCOL_VERSION }), fixture, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION } });
+  const sessionId = initialized.headers["mcp-session-id"];
+  const sessionHeaders = { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": sessionId };
+  assert.equal((await request({ body: rpc(2, "tools/list"), fixture, headers: sessionHeaders })).statusCode, 400);
+  assert.equal((await request({ body: rpc(3, "tools/call", { arguments: paymentInput(), name: "request_payment" }), fixture, headers: sessionHeaders })).statusCode, 400);
+
+  const { fixture: secondFixture, sessionId: secondSessionId } = await initializedSession(t);
+  const headers = { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": secondSessionId };
+  assert.equal((await request({ body: { jsonrpc: "2.0", method: "notifications/initialized" }, fixture: secondFixture, headers })).statusCode, 400);
+
+  const { fixture: thirdFixture, sessionId: thirdSessionId } = await initializedSession(t);
+  const thirdHeaders = { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": thirdSessionId };
+  assert.equal((await request({ body: rpc(4, "tools/call", { arguments: paymentInput(), name: "request_payment" }), fixture: thirdFixture, headers: thirdHeaders })).statusCode, 400);
+  assert.equal((await request({ body: rpc(5, "tools/list"), fixture: thirdFixture, headers: thirdHeaders })).statusCode, 200);
+  assert.equal((await request({ body: rpc(6, "tools/call", { arguments: paymentInput(), name: "request_payment" }), fixture: thirdFixture, headers: thirdHeaders })).statusCode, 200);
+  assert.equal((await request({ body: rpc(7, "tools/call", { arguments: paymentInput(), name: "request_payment" }), fixture: thirdFixture, headers: thirdHeaders })).statusCode, 400);
+});
+
+test("configures the exact MCP server header and request timeouts", async (t) => {
+  let created;
+  await makeFixture(t, {
+    createHttpsServer(options, handler) {
+      assert.equal(typeof handler, "function");
+      const listeners = new Map();
+      created = {
+        address: () => ({ address: "127.0.0.1", family: "IPv4", port: 9443 }),
+        close: (callback) => callback(),
+        headersTimeout: 0,
+        listen(port, host, callback) {
+          assert.equal(port, 0);
+          assert.equal(host, "127.0.0.1");
+          callback();
+        },
+        off(event) {
+          listeners.delete(event);
+        },
+        once(event, listener) {
+          listeners.set(event, listener);
+        },
+        requestTimeout: 0,
+      };
+      assert.equal(options.cert.includes("BEGIN CERTIFICATE"), true);
+      assert.equal(options.key.includes("BEGIN PRIVATE KEY"), true);
+      return created;
+    },
+  });
+  assert.equal(created.headersTimeout, 5_000);
+  assert.equal(created.requestTimeout, 10_000);
 });
 
 test("uses generic capability failures, rate limits failed auth, caps session requests, body and header count", async (t) => {
@@ -219,8 +296,9 @@ test("uses generic capability failures, rate limits failed auth, caps session re
   assert.equal((await request({ body: rpc(102, "initialize", { protocolVersion: PROTOCOL_VERSION, padding: "x".repeat(65_536) }), fixture })).statusCode, 413);
 
   const { sessionId } = await initializedSession(t, fixture);
-  for (let id = 2; id <= 7; id += 1) {
-    assert.equal((await request({ body: rpc(id, "tools/list"), fixture, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": sessionId } })).statusCode, 200);
+  assert.equal((await request({ body: rpc(2, "tools/list"), fixture, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": sessionId } })).statusCode, 200);
+  for (let id = 3; id <= 7; id += 1) {
+    assert.equal((await request({ body: rpc(id, "tools/list"), fixture, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": sessionId } })).statusCode, 400);
   }
   assert.equal((await request({ body: rpc(8, "tools/list"), fixture, headers: { "MCP-Protocol-Version": PROTOCOL_VERSION, "MCP-Session-Id": sessionId } })).statusCode, 400);
   await fixture.server.stop();
