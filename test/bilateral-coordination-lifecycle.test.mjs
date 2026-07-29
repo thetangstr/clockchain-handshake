@@ -294,6 +294,15 @@ test("requires payer mandate, payee request, and payer match before a run descri
   view = apply(view, "REGISTER_REHEARSAL", "operator", "rehearsal");
   view = apply(view, "IDENTITY_PACKAGE_READY", "payer", "rehearsal");
   view = apply(view, "IDENTITY_PACKAGE_READY", "payee", "rehearsal");
+  assertLifecycleError(() =>
+    apply(view, "PAYER_MANDATE_READY", "payee", "rehearsal"),
+  );
+  assertLifecycleError(() =>
+    apply(view, "PAYMENT_REQUEST_READY", "payer", "rehearsal"),
+  );
+  assertLifecycleError(() =>
+    apply(view, "PAYMENT_REQUEST_MATCHED", "payee", "rehearsal"),
+  );
   assert.throws(() => apply(view, "REHEARSAL_DESCRIPTOR_READY", "operator", "rehearsal"), CoordinationLifecycleError);
   view = apply(view, "PAYER_MANDATE_READY", "payer", "rehearsal");
   assert.throws(() => apply(view, "REHEARSAL_DESCRIPTOR_READY", "operator", "rehearsal"), CoordinationLifecycleError);

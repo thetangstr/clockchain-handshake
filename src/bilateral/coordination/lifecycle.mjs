@@ -641,6 +641,8 @@ function assertAuthority(event) {
     authority === undefined ||
     (authority === "operator" &&
       event.role !== "operator") ||
+    (authority === "payer" && event.role !== "payer") ||
+    (authority === "payee" && event.role !== "payee") ||
     (authority === "role" && !ROLES.includes(event.role))
   ) {
     invalid();

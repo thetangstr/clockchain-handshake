@@ -19,6 +19,7 @@ const execFile = promisify(execFileCallback);
 const ROOT = new URL("../", import.meta.url).pathname;
 const COORDINATOR_SCHEMA = "clockchain.bilateral-coordination-process-coordinator/v1";
 const AUTHORIZE = "AUTHORIZED";
+const CONSOLE_VERIFICATION_PASSED = "VERIFICATION_PASSED";
 const PROCESS_PHASE_DEADLINE_MS = 90_000;
 const FAKE_CLOCKCHAIN_BASE_TIME_MS = 1_784_923_200_000;
 const SHARED_TEST_CLOCK_MS = FAKE_CLOCKCHAIN_BASE_TIME_MS - 1_000;
@@ -649,7 +650,7 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   await stop(restartedConsole.child);
   for (const projection of [firstProjection, restartedProjection]) {
     assert.equal(projection.paymentMoved, false);
-    assert.equal(projection.verifier.status, AUTHORIZE);
+    assert.equal(projection.verifier.status, CONSOLE_VERIFICATION_PASSED);
     assert.equal(projection.verifier.advisory, false);
     assert.deepEqual(
       Object.fromEntries(Object.entries(projection.actors).map(([role, actor]) => [role, actor.health])),
@@ -664,10 +665,10 @@ test("real coordinator and supervisors gate one isolated three-transition proces
     assert.equal(projection.session.repositorySha, coordinatorReport.release.repositorySha);
     assert.equal(projection.session.sessionId, coordinatorReport.release.sessionId);
   }
-  assert.equal(firstConsole.output().stdout.includes(AUTHORIZE), false);
-  assert.equal(firstConsole.output().stderr.includes(AUTHORIZE), false);
-  assert.equal(restartedConsole.output().stdout.includes(AUTHORIZE), false);
-  assert.equal(restartedConsole.output().stderr.includes(AUTHORIZE), false);
+  assert.equal(firstConsole.output().stdout.includes("AUTHORIZED"), false);
+  assert.equal(firstConsole.output().stderr.includes("AUTHORIZED"), false);
+  assert.equal(restartedConsole.output().stdout.includes("AUTHORIZED"), false);
+  assert.equal(restartedConsole.output().stderr.includes("AUTHORIZED"), false);
   await assertPrivateFile(coordinatorReport.consoleStatePath);
   const namedLogs = Object.fromEntries(await Promise.all(["payer", "payee", "verifier"].map(async (name) => [name, {
     stderr: await readFile(session.logs[name].stderr, "utf8"),

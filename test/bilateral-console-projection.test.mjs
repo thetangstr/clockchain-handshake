@@ -26,7 +26,8 @@ test("projection is closed, redacted, ordered, and labels pre-protocol evidence"
   assert.equal(value.mandate.kind, "pre-protocol");
   assert.equal(value.request.kind, "pre-protocol");
   assert.deepEqual(value.anchors.map((anchor) => anchor.kind), ["PROPOSED", "ACCEPTED", "ACKNOWLEDGED"]);
-  assert.equal(value.verifier.status, "AUTH" + "ORIZED");
+  assert.equal(value.verifier.status, "VERIFICATION_PASSED");
+  assert.equal(JSON.stringify(value).includes("AUTHORIZED"), false);
 });
 
 test("projection reads rehearsal facts for rehearsal publications", () => {
@@ -42,7 +43,7 @@ test("projection reads rehearsal facts for rehearsal publications", () => {
   assert.equal(value.request.received, true);
   assert.equal(value.mandate.received, true);
   assert.equal(value.mandate.matched, true);
-  assert.equal(value.verifier.status, "AUTH" + "ORIZED");
+  assert.equal(value.verifier.status, "VERIFICATION_PASSED");
 });
 
 test("projection reads stakeholder facts for stakeholder publications", () => {
@@ -56,7 +57,7 @@ test("projection reads stakeholder facts for stakeholder publications", () => {
   assert.equal(value.request.received, true);
   assert.equal(value.mandate.received, true);
   assert.equal(value.mandate.matched, true);
-  assert.equal(value.verifier.status, "AUTH" + "ORIZED");
+  assert.equal(value.verifier.status, "VERIFICATION_PASSED");
 });
 
 test("projection fails closed when active lifecycle run and verifier publication disagree", () => {
@@ -160,7 +161,7 @@ test("projection conveys structured console status without widening top-level ke
     watcher: { advisory: true, health: "READY", label: "watcher advisory" },
   });
   assert.equal(value.verifier.advisory, false);
-  assert.equal(value.verifier.status, "AUTH" + "ORIZED");
+  assert.equal(value.verifier.status, "VERIFICATION_PASSED");
   assert.equal(JSON.stringify(value).includes("console-canary"), false);
 });
 
@@ -211,7 +212,7 @@ test("projection accepts only exact fresh closed health input", () => {
   }
 });
 
-test("projection fails closed and never emits authorization from advisory or mismatched evidence", () => {
+test("projection fails closed and never emits the authorizing literal from advisory or mismatched evidence", () => {
   for (const mutate of [
     (input) => { input.lifecycleView.releaseId = null; },
     (input) => { input.lifecycleView.repositorySha = null; },
@@ -236,7 +237,8 @@ test("projection fails closed and never emits authorization from advisory or mis
   ]) {
     const input = base(); mutate(input);
     const value = buildConsoleProjection(input);
-    assert.notEqual(value.verifier.status, "AUTH" + "ORIZED");
+    assert.equal(value.verifier.status, "PENDING");
+    assert.equal(JSON.stringify(value).includes("AUTHORIZED"), false);
   }
 });
 

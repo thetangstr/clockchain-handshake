@@ -144,6 +144,6 @@ export function buildConsoleProjection(input) {
     request: Object.freeze({ amount: object(request.amount).currency === "USD" && typeof request.amount?.value === "string" ? Object.freeze({ currency: "USD", value: request.amount.value }) : null, digest: requestDigest, invoiceReference: typeof request.invoiceReference === "string" ? request.invoiceReference : null, kind: "pre-protocol", received: requestReceived }),
     schema: "clockchain.bilateral-console-projection/v1",
     session,
-    verifier: Object.freeze({ advisory: !fresh, publicationDigest: fresh ? value.verifierPublication.publicationDigest : null, status: fresh ? "AUTH" + "ORIZED" : "PENDING" }),
+    verifier: Object.freeze({ advisory: !fresh, publicationDigest: fresh ? value.verifierPublication.publicationDigest : null, status: fresh ? "VERIFICATION_PASSED" : "PENDING" }),
   });
 }
