@@ -20,9 +20,10 @@ Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and
 
 ## Before everyone starts
 
-- Use immutable repository SHA `54d3476de9309d386fe3e903a843b473b3851c15`.
+- Use immutable repository SHA `034cdbe4bff8999819d3834f94da5286470b8a99` as the executable release.
+- Operators read the later handoff/helper at bf1315ae4f3f62759219d2605997b76cc8faf869, but checkout exact executable SHA 034cdbe4bff8999819d3834f94da5286470b8a99; subsequent test/docs/site commits do not alter executable runtime bytes.
 - Confirm Node.js 22 is installed on all three computers.
-- Confirm a clean checkout of exact SHA `54d3476de9309d386fe3e903a843b473b3851c15` on all three computers.
+- Confirm a clean checkout of exact SHA `034cdbe4bff8999819d3834f94da5286470b8a99` on all three computers.
 - Confirm the operator Mac can reach both role computers over the advertised relay IP.
 - Publish no secrets, live evidence, or manifest contents.
 - Do not claim physical rehearsal passed; report only fresh verifier output and public status words.

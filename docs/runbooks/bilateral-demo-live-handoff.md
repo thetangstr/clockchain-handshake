@@ -22,10 +22,12 @@ Billie followed Iris's signed mandate, Iris anchored `PROPOSED` and
 ## Release and computers
 
 Pinned executable Handshake release SHA:
-`54d3476de9309d386fe3e903a843b473b3851c15`.
+`034cdbe4bff8999819d3834f94da5286470b8a99`.
+
+Operators read the later handoff/helper at bf1315ae4f3f62759219d2605997b76cc8faf869, but checkout exact executable SHA 034cdbe4bff8999819d3834f94da5286470b8a99; subsequent test/docs/site commits do not alter executable runtime bytes.
 
 A clean detached checkout of immutable repository SHA
-`54d3476de9309d386fe3e903a843b473b3851c15`, Node.js 22, and
+`034cdbe4bff8999819d3834f94da5286470b8a99`, Node.js 22, and
 `npm ci --ignore-scripts` is required on all three computers. Stop on a dirty
 worktree, wrong SHA, branch checkout, wrong Node.js major version, dependency
 install drift, or any extra command.
@@ -118,7 +120,7 @@ Set path placeholders locally. Do not paste private values.
 ```sh
 export OPERATOR_KEY_ID="bilateral-demo-2026-07-28"
 export OPERATOR_PRIVATE_KEY_FILE=".context/operator-keys/$OPERATOR_KEY_ID.ed25519.pem"
-export BILATERAL_REPOSITORY_SHA="54d3476de9309d386fe3e903a843b473b3851c15"
+export BILATERAL_REPOSITORY_SHA="034cdbe4bff8999819d3834f94da5286470b8a99"
 export REPOSITORY_ROOT="$(pwd)"
 export BILATERAL_OPERATOR_ROOT="$HOME/.clockchain/bilateral/$BILATERAL_REPOSITORY_SHA"
 export BILATERAL_RELEASE_ROOT="$BILATERAL_OPERATOR_ROOT/release"

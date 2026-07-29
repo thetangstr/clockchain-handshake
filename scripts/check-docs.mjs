@@ -93,7 +93,9 @@ const OFFICIAL_REGISTRY =
 const OFFICIAL_REPOSITORY =
   "https://github.com/thetangstr/clockchain-handshake.git";
 const LIVE_HANDOFF_RELEASE_SHA =
-  "54d3476de9309d386fe3e903a843b473b3851c15";
+  "034cdbe4bff8999819d3834f94da5286470b8a99";
+const LIVE_HANDOFF_POST_RUNTIME_SHA =
+  "bf1315ae4f3f62759219d2605997b76cc8faf869";
 const LIVE_HANDOFF_HELPER_URL =
   "https://clockchain-research.vercel.app/handshake/run";
 const LIVE_HANDOFF_TREASURY_ADDRESS =
@@ -811,6 +813,13 @@ function bilateralContractFailures(relativePath, contents) {
         new RegExp(`\\b${LIVE_HANDOFF_RELEASE_SHA}\\b`),
       ],
       [
+        "release relationship",
+        new RegExp(
+          `operators read the later handoff/helper at ${LIVE_HANDOFF_POST_RUNTIME_SHA}[\\s\\S]*checkout exact executable SHA ${LIVE_HANDOFF_RELEASE_SHA}[\\s\\S]*subsequent test/docs/site commits do not alter executable runtime bytes`,
+          "i",
+        ),
+      ],
+      [
         "Node.js 22 on all computers",
         /\bNode\.js 22\b[^.\n]*\ball three computers\b/i,
       ],
@@ -1002,6 +1011,13 @@ function bilateralContractFailures(relativePath, contents) {
         /`AUTHORIZED` only from fresh\s+aggregate verifier/i,
       ],
       ["paymentMoved:false", /\bpaymentMoved:false\b/],
+      [
+        "release relationship",
+        new RegExp(
+          `operators read the later handoff/helper at ${LIVE_HANDOFF_POST_RUNTIME_SHA}[\\s\\S]*checkout exact executable SHA ${LIVE_HANDOFF_RELEASE_SHA}[\\s\\S]*subsequent test/docs/site commits do not alter executable runtime bytes`,
+          "i",
+        ),
+      ],
       [
         "advisory console/relay",
         /\bRelay\/watcher\/console fields are advisory\b/,

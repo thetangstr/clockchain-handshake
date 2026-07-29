@@ -61,7 +61,9 @@ const PUBLISHED_TRANSACTIONS = Object.freeze([
   "0xbb9435c8f9d46f0f57e0aab6208610f2b4c37177b33d27319f1b0311db16b160",
 ]);
 const LIVE_HANDOFF_RELEASE_SHA =
-  "54d3476de9309d386fe3e903a843b473b3851c15";
+  "034cdbe4bff8999819d3834f94da5286470b8a99";
+const LIVE_HANDOFF_POST_RUNTIME_SHA =
+  "bf1315ae4f3f62759219d2605997b76cc8faf869";
 const LIVE_HANDOFF_HELPER_URL =
   "https://clockchain-research.vercel.app/handshake/run";
 const LIVE_HANDOFF_TREASURY_ADDRESS =
@@ -481,6 +483,8 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
     quickStart,
     new RegExp(LIVE_HANDOFF_RELEASE_SHA),
   );
+  assert.match(quickStart, new RegExp(`operators read the later handoff/helper at ${LIVE_HANDOFF_POST_RUNTIME_SHA}[\\s\\S]*checkout exact executable SHA ${LIVE_HANDOFF_RELEASE_SHA}`, "i"));
+  assert.match(quickStart, /subsequent test\/docs\/site commits do not alter executable runtime bytes/i);
   assert.match(
     quickStart,
     /Node\.js 22[^.\n]*all three computers/i,
@@ -555,6 +559,8 @@ test("live bilateral handoff pins the public operator checklist without secrets"
     "relay -> coordinator -> console -> funding -> Iris payer supervisor -> Billie payee supervisor";
 
   assert.match(handoff, new RegExp(LIVE_HANDOFF_RELEASE_SHA));
+  assert.match(handoff, new RegExp(`operators read the later handoff/helper at ${LIVE_HANDOFF_POST_RUNTIME_SHA}[\\s\\S]*checkout exact executable SHA ${LIVE_HANDOFF_RELEASE_SHA}`, "i"));
+  assert.match(handoff, /subsequent test\/docs\/site commits do not alter executable runtime bytes/i);
   assert.match(handoff, new RegExp(LIVE_HANDOFF_HELPER_URL.replaceAll(".", "\\.")));
   assert.match(handoff, new RegExp(LIVE_HANDOFF_TREASURY_ADDRESS, "i"));
   assert.match(handoff, /clean detached checkout[\s\S]*Node\.js 22[\s\S]*npm ci --ignore-scripts[\s\S]*all three computers/i);
