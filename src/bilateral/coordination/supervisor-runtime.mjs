@@ -131,7 +131,7 @@ async function readPrivateBytes(root, path, maximum = MAX_STATE_BYTES) {
     return bytes;
   } finally { await handle.close(); }
 }
-async function readPinnedPrivateText(path, maximum = MAX_STATE_BYTES) {
+async function readPinnedPrivateText(path, maximum = MAX_STATE_BYTES, afterFirstRead) {
   if (typeof path !== "string" || path.includes("\0") || resolve(path) !== path) fail();
   let handle;
   try {
@@ -143,9 +143,21 @@ async function readPinnedPrivateText(path, maximum = MAX_STATE_BYTES) {
     const buffer = Buffer.allocUnsafe(before.size + 1);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
     if (bytesRead !== before.size) fail();
+    if (afterFirstRead !== undefined) {
+      if (typeof afterFirstRead !== "function") fail();
+      await afterFirstRead(Object.freeze({ path }));
+    }
     const after = await lstat(path);
-    if (!hasExactPrivateMetadata(after) || !sameIdentity(before, after)) fail();
-    return buffer.subarray(0, bytesRead).toString("utf8");
+    if (!hasExactPrivateMetadata(after) || !sameIdentity(before, after) || after.size !== before.size) fail();
+    const reopened = await handle.stat();
+    if (!hasExactPrivateMetadata(reopened) || !sameIdentity(before, reopened) || reopened.size !== before.size) fail();
+    const second = Buffer.allocUnsafe(before.size + 1);
+    const secondRead = await handle.read(second, 0, second.length, 0);
+    if (secondRead.bytesRead !== before.size) fail();
+    const bytes = buffer.subarray(0, bytesRead);
+    const secondBytes = second.subarray(0, secondRead.bytesRead);
+    if (!bytes.equals(secondBytes) || createHash("sha256").update(bytes).digest("hex") !== createHash("sha256").update(secondBytes).digest("hex")) fail();
+    return bytes.toString("utf8");
   } finally {
     if (handle) await handle.close();
   }
@@ -585,8 +597,8 @@ export async function createProductionSupervisorDependencies({ createPayerMcpSer
   const normalizedPayerMcpServerOptions = payerMcpServerOptions === undefined ? null : Object.freeze({
     host: payerMcpServerOptions.host,
     port: payerMcpServerOptions.port,
-    tlsCertificatePem: payerMcpServerOptions.tlsCertificatePem ?? await readPinnedPrivateText(payerMcpServerOptions.tlsCertificatePath),
-    tlsPrivateKeyPem: payerMcpServerOptions.tlsPrivateKeyPem ?? await readPinnedPrivateText(payerMcpServerOptions.tlsPrivateKeyPath),
+    tlsCertificatePem: payerMcpServerOptions.tlsCertificatePem ?? await readPinnedPrivateText(payerMcpServerOptions.tlsCertificatePath, MAX_STATE_BYTES, payerMcpServerOptions.afterPinnedTextFirstRead),
+    tlsPrivateKeyPem: payerMcpServerOptions.tlsPrivateKeyPem ?? await readPinnedPrivateText(payerMcpServerOptions.tlsPrivateKeyPath, MAX_STATE_BYTES, payerMcpServerOptions.afterPinnedTextFirstRead),
   });
   const payerMcpServer = normalizedPayerMcpServerOptions === null ? null : createPayerMcpServer(Object.freeze({
     ...normalizedPayerMcpServerOptions,

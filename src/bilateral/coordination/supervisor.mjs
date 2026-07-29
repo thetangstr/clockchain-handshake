@@ -123,8 +123,8 @@ function requestIdForRun(localState, dependencies, subjectRun, intakeBinding) {
   return requestId;
 }
 function intakeBindingFor(localState) {
-  const binding = localState.intakeBinding ?? localState.intentJournal;
-  if (localState.intakeBinding !== undefined && !dataExact(binding, ["intakeDigest", "intakeRequestId"])) invalid();
+  const binding = localState.intakeBinding;
+  if (!dataExact(binding, ["intakeDigest", "intakeRequestId"])) invalid();
   const digest = Object.getOwnPropertyDescriptor(binding ?? {}, "intakeDigest");
   const requestId = Object.getOwnPropertyDescriptor(binding ?? {}, "intakeRequestId");
   if (
@@ -141,6 +141,21 @@ function intakeBindingFor(localState) {
     intakeDigest: digest.value,
     intakeRequestId: requestId.value,
   });
+}
+function intakeBindingFromSignedArtifact(value) {
+  const digest = Object.getOwnPropertyDescriptor(value ?? {}, "intakeDigest");
+  const requestId = Object.getOwnPropertyDescriptor(value ?? {}, "intakeRequestId");
+  if (
+    !value ||
+    typeof value !== "object" ||
+    digest?.enumerable !== true ||
+    requestId?.enumerable !== true ||
+    !Object.hasOwn(digest, "value") ||
+    !Object.hasOwn(requestId, "value") ||
+    !DIGEST_PATTERN.test(digest.value) ||
+    !INTAKE_UUID_PATTERN.test(requestId.value)
+  ) invalid();
+  return Object.freeze({ intakeDigest: digest.value, intakeRequestId: requestId.value });
 }
 function sameIntakeBinding(left, right) {
   return left?.intakeDigest === right?.intakeDigest &&
@@ -221,7 +236,7 @@ async function adoptIntakeBinding({ dependencies, localState }) {
   const existing = localState.intakeBinding === undefined ? null : intakeBindingFor(localState);
   let binding = null;
   if (localState.role === "payer") {
-    if (typeof dependencies.readStoredPayerMcpIntake !== "function") return existing === null ? null : localState;
+    if (typeof dependencies.readStoredPayerMcpIntake !== "function") invalid();
     const record = await dependencies.readStoredPayerMcpIntake();
     if (record === null || record === undefined) {
       if (existing !== null) invalid();
@@ -229,10 +244,7 @@ async function adoptIntakeBinding({ dependencies, localState }) {
     }
     binding = intakeBindingFromPayerRecord(record, localState);
   } else if (localState.role === "payee") {
-    if (typeof dependencies.readRequestorMcpIntake !== "function") {
-      if (existing !== null) return localState;
-      invalid();
-    }
+    if (typeof dependencies.readRequestorMcpIntake !== "function") invalid();
     binding = intakeBindingFromRequestorResult(await dependencies.readRequestorMcpIntake(), localState);
   } else invalid();
   if (existing !== null && !sameIntakeBinding(existing, binding)) invalid();
@@ -242,7 +254,10 @@ async function adoptIntakeBinding({ dependencies, localState }) {
   return state;
 }
 async function revalidateRestartIntakeBinding({ checkpoint, dependencies }) {
-  if (checkpoint.intakeBinding === undefined) return;
+  if (checkpoint.intakeBinding === undefined) {
+    if (checkpoint.intentJournal !== undefined) invalid();
+    return;
+  }
   const binding = intakeBindingFor(checkpoint);
   let persisted;
   if (checkpoint.role === "payer") {
@@ -330,7 +345,7 @@ function requestFor({ intakeBinding, localState, mandateEnvelope, parties, polic
   });
 }
 function exactIntentJournal({ mandateBytes, mandateEnvelope, requestBytes = undefined, requestEnvelope = undefined, requestId = undefined, stage, subjectRun }) {
-  const binding = intakeBindingFor({ intentJournal: mandateEnvelope.mandate });
+  const binding = intakeBindingFromSignedArtifact(mandateEnvelope.mandate);
   const value = { intakeDigest: binding.intakeDigest, intakeRequestId: binding.intakeRequestId, mandateDigest: payerMandateDigest(mandateEnvelope), mandateRawDigest: sha256(mandateBytes), stage, subjectRun };
   if (requestBytes !== undefined && requestEnvelope !== undefined) {
     if (!sameIntakeBinding(requestEnvelope.request, binding)) invalid();
@@ -438,6 +453,11 @@ async function matchPaymentRequestPhase({ client, dependencies, localState, repl
 }
 async function runCommercialIntentPhase({ client, dependencies, localState, replay }) {
   const journal = localState.intentJournal;
+  if (journal !== undefined) {
+    const adoptedState = await adoptIntakeBinding({ dependencies, localState });
+    if (localState.intakeBinding === undefined || adoptedState === null) invalid();
+    localState = adoptedState;
+  }
   if (journal?.stage === "PAYER_MANDATE_READY_TO_PUBLISH") {
     if (localState.role !== "payer" || eventFor(replay.events, "payer", "PAYER_MANDATE_READY", journal.subjectRun)) return null;
     return retryPayerMandatePublication({ client, dependencies, localState, subjectRun: journal.subjectRun });
@@ -446,18 +466,27 @@ async function runCommercialIntentPhase({ client, dependencies, localState, repl
     if (localState.role !== "payee" || eventFor(replay.events, "payee", "PAYMENT_REQUEST_READY", journal.subjectRun)) return null;
     return retryPaymentRequestSubmission({ client, dependencies, localState, subjectRun: journal.subjectRun });
   }
-  const adoptedState = await adoptIntakeBinding({ dependencies, localState });
-  if (adoptedState === null) return null;
-  localState = adoptedState;
   for (const subjectRun of ["rehearsal", "stakeholder"]) {
     const identityReady = ["payer", "payee"].every((role) => eventFor(replay.events, role, "IDENTITY_PACKAGE_READY", subjectRun));
     if (!identityReady) continue;
     const mandateReady = eventFor(replay.events, "payer", "PAYER_MANDATE_READY", subjectRun);
     const requestReady = eventFor(replay.events, "payee", "PAYMENT_REQUEST_READY", subjectRun);
     const requestMatched = eventFor(replay.events, "payer", "PAYMENT_REQUEST_MATCHED", subjectRun);
-    if (localState.role === "payer" && !mandateReady) return publishPayerMandatePhase({ client, dependencies, localState, replay, subjectRun });
-    if (localState.role === "payee" && mandateReady && !requestReady) return submitPaymentRequestPhase({ client, dependencies, localState, replay, subjectRun });
-    if (localState.role === "payer" && mandateReady && requestReady && !requestMatched) return matchPaymentRequestPhase({ client, dependencies, localState, replay, subjectRun });
+    if (localState.role === "payer" && !mandateReady) {
+      const adoptedState = await adoptIntakeBinding({ dependencies, localState });
+      if (adoptedState === null) return null;
+      return publishPayerMandatePhase({ client, dependencies, localState: adoptedState, replay, subjectRun });
+    }
+    if (localState.role === "payee" && mandateReady && !requestReady) {
+      const adoptedState = await adoptIntakeBinding({ dependencies, localState });
+      if (adoptedState === null) return null;
+      return submitPaymentRequestPhase({ client, dependencies, localState: adoptedState, replay, subjectRun });
+    }
+    if (localState.role === "payer" && mandateReady && requestReady && !requestMatched) {
+      const adoptedState = await adoptIntakeBinding({ dependencies, localState });
+      if (adoptedState === null) return null;
+      return matchPaymentRequestPhase({ client, dependencies, localState: adoptedState, replay, subjectRun });
+    }
   }
   return null;
 }
@@ -533,6 +562,7 @@ function validateDurableCheckpointShape(checkpoint, activeLaunchState, stateRoot
   if (checkpoint.intakeBinding !== undefined) validateDurableIntakeBinding(checkpoint.intakeBinding);
   const intent = checkpoint.intentJournal;
   if (intent !== undefined) {
+    if (checkpoint.intakeBinding === undefined) invalid();
     const keys = intent.requestDigest === undefined
       ? ["intakeDigest", "intakeRequestId", "mandateDigest", "mandateRawDigest", "stage", "subjectRun"]
       : ["intakeDigest", "intakeRequestId", "mandateDigest", "mandateRawDigest", "requestDigest", "requestId", "requestRawDigest", "stage", "subjectRun"];

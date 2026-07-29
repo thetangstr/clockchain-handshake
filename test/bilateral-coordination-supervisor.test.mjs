@@ -899,6 +899,7 @@ test("payer verifies the exact Billie request before appending PAYMENT_REQUEST_M
     },
     dependencies: {
       nowMs() { return 1785294300000; },
+      async readStoredPayerMcpIntake() { return payerIntakeRecord(fixture.repo); },
       shouldContinue() { return false; },
       async validateRelayArtifactWithFacts({ artifactType, bytes, expectedDigest }) {
         assert.equal(artifactType, "identity-package");
@@ -1017,6 +1018,7 @@ test("payer discovers Billie's unpredictable requestId from the authenticated pa
     },
     dependencies: {
       nowMs() { return 1785294300000; },
+      async readStoredPayerMcpIntake() { return payerIntakeRecord(fixture.repo); },
       shouldContinue() { return false; },
       async validateRelayArtifactWithFacts({ artifactType, bytes, expectedDigest }) {
         assert.equal(sha256(bytes), expectedDigest);
@@ -1212,11 +1214,16 @@ test("retries payer mandate publication from durable bytes without re-signing", 
       },
       async signPayerMandate() { assert.fail("restart retry must not re-sign mandate bytes"); },
       shouldContinue() { return false; },
+      async readStoredPayerMcpIntake() { return payerIntakeRecord(fixture.repo); },
       async validateRelayArtifactWithFacts({ bytes }) { return { facts: { identity: JSON.parse(bytes.toString("utf8")) } }; },
       verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
       async writeState() {},
     },
     localState: {
+      intakeBinding: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
+      },
       intentJournal: {
         intakeDigest: INTAKE_DIGEST,
         intakeRequestId: INTAKE_REQUEST_ID,
@@ -1261,10 +1268,15 @@ test("fails closed when durable mandate retry bytes differ from the journal", as
       async readArtifactFile() { return Buffer.from("{\"changed\":true}"); },
       async signPayerMandate() { assert.fail("changed retry bytes must not re-sign"); },
       shouldContinue() { return false; },
+      async readStoredPayerMcpIntake() { return payerIntakeRecord(fixture.repo); },
       verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
       async writeState() {},
     },
     localState: {
+      intakeBinding: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
+      },
       intentJournal: {
         intakeDigest: INTAKE_DIGEST,
         intakeRequestId: INTAKE_REQUEST_ID,
@@ -1282,6 +1294,75 @@ test("fails closed when durable mandate retry bytes differ from the journal", as
       sessionId: fixture.session,
     },
   }));
+  assert.equal(published, 0);
+});
+
+test("payer mandate retry rejects intentJournal without checkpoint binding before publishing", async () => {
+  const fixture = replayFixture({
+    payerInvitationAddress: payerIntentAccount.address.toLowerCase(),
+    payeeInvitationAddress: payeeIntentAccount.address.toLowerCase(),
+  });
+  const { events, payerIdentity, payeeIdentity } = replayThroughIdentities(fixture);
+  const payer = JSON.parse(payerIdentity.toString("utf8"));
+  const payee = JSON.parse(payeeIdentity.toString("utf8"));
+  const mandateEnvelope = await signPayerMandate({
+    mandate: {
+      amount: { currency: "USD", value: "100" },
+      expiresAtMs: "1785297900000",
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
+      invoiceReferencePrefix: "invoice-",
+      issuedAtMs: "1785294299999",
+      payee: { address: payee.address, agentId: payee.agentId },
+      payer: { address: payer.address, agentId: payer.agentId },
+      paymentMoved: false,
+      protocol: "clockchain.bilateral-authorization/v1",
+      purpose: "Handshake demo",
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      requestEndpoint: `/v1/sessions/${fixture.session}/payment-requests`,
+      schema: "clockchain.bilateral-payer-mandate/v1",
+      sessionId: fixture.session,
+      subjectRun: "rehearsal",
+    },
+    signMessage: (bytes) => payerIntentAccount.signMessage({ message: { raw: bytes } }),
+  });
+  const mandateBytes = canonicalBytes(mandateEnvelope);
+  let persistedReads = 0;
+  let published = 0;
+  await assert.rejects(runSupervisor({
+    client: {
+      async publishPayerMandate() { published += 1; return {}; },
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
+      async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
+      async readEvents() { return structuredClone(events); },
+    },
+    dependencies: {
+      async readArtifactFile() { return mandateBytes; },
+      async readStoredPayerMcpIntake() { persistedReads += 1; return payerIntakeRecord(fixture.repo); },
+      shouldContinue() { return false; },
+      verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
+      async writeState() {},
+    },
+    localState: {
+      intentJournal: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
+        mandateDigest: payerMandateDigest(mandateEnvelope),
+        mandateRawDigest: sha256(mandateBytes),
+        stage: "PAYER_MANDATE_READY_TO_PUBLISH",
+        subjectRun: "rehearsal",
+      },
+      operatorPublicKey: raw(fixture.operator),
+      processedEventDigests: events.filter((event) => event.role === "operator").map((event) => event.eventDigest),
+      rehearsal: { descriptorPath: "/state/rehearsal/descriptor.json", mandatePath: "/state/rehearsal/payer-mandate.json" },
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      role: "payer",
+      sessionId: fixture.session,
+    },
+  }));
+  assert.equal(persistedReads, 1);
   assert.equal(published, 0);
 });
 
@@ -1359,10 +1440,15 @@ test("retries payment-request submission from durable bytes without re-signing o
       },
       async signPaymentRequest() { assert.fail("restart retry must not re-sign request bytes"); },
       shouldContinue() { return false; },
+      async readRequestorMcpIntake() { return requestorIntakeResult(fixture.repo); },
       verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
       async writeState() {},
     },
     localState: {
+      intakeBinding: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
+      },
       intentJournal: {
         intakeDigest: INTAKE_DIGEST,
         intakeRequestId: INTAKE_REQUEST_ID,
@@ -1404,10 +1490,15 @@ test("fails closed when durable payment-request retry bytes differ from the jour
       async readArtifactFile() { return Buffer.from("{\"changed\":true}"); },
       async signPaymentRequest() { assert.fail("changed retry bytes must not re-sign"); },
       shouldContinue() { return false; },
+      async readRequestorMcpIntake() { return requestorIntakeResult(fixture.repo); },
       verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
       async writeState() {},
     },
     localState: {
+      intakeBinding: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
+      },
       intentJournal: {
         intakeDigest: INTAKE_DIGEST,
         intakeRequestId: INTAKE_REQUEST_ID,
@@ -1428,6 +1519,110 @@ test("fails closed when durable payment-request retry bytes differ from the jour
       sessionId: fixture.session,
     },
   }));
+  assert.equal(submitted, 0);
+});
+
+test("request retry rejects drifted persisted Requestor intake before submitting", async () => {
+  const fixture = replayFixture({
+    payerInvitationAddress: payerIntentAccount.address.toLowerCase(),
+    payeeInvitationAddress: payeeIntentAccount.address.toLowerCase(),
+  });
+  const { append, events, payerIdentity, payeeIdentity } = replayThroughIdentities(fixture);
+  const payer = JSON.parse(payerIdentity.toString("utf8"));
+  const payee = JSON.parse(payeeIdentity.toString("utf8"));
+  const mandateEnvelope = await signPayerMandate({
+    mandate: {
+      amount: { currency: "USD", value: "100" },
+      expiresAtMs: "1785297900000",
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
+      invoiceReferencePrefix: "invoice-",
+      issuedAtMs: "1785294299999",
+      payee: { address: payee.address, agentId: payee.agentId },
+      payer: { address: payer.address, agentId: payer.agentId },
+      paymentMoved: false,
+      protocol: "clockchain.bilateral-authorization/v1",
+      purpose: "Handshake demo",
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      requestEndpoint: `/v1/sessions/${fixture.session}/payment-requests`,
+      schema: "clockchain.bilateral-payer-mandate/v1",
+      sessionId: fixture.session,
+      subjectRun: "rehearsal",
+    },
+    signMessage: (bytes) => payerIntentAccount.signMessage({ message: { raw: bytes } }),
+  });
+  const mandateBytes = canonicalBytes(mandateEnvelope);
+  const requestEnvelope = await signPaymentRequest({
+    request: {
+      amount: { currency: "USD", value: "100" },
+      createdAtMs: "1785294300000",
+      expiresAtMs: "1785297600000",
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
+      invoiceReference: "invoice-001",
+      mandateDigest: payerMandateDigest(mandateEnvelope),
+      payee: { address: payee.address, agentId: payee.agentId },
+      payer: { address: payer.address, agentId: payer.agentId },
+      paymentMoved: false,
+      protocol: "clockchain.bilateral-authorization/v1",
+      purpose: "Handshake demo",
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      requestId: "9f953393-86d0-4f99-9d6a-102f525fbecd",
+      schema: "clockchain.bilateral-payment-request/v1",
+      sessionId: fixture.session,
+      subjectRun: "rehearsal",
+    },
+    signMessage: (bytes) => payeeIntentAccount.signMessage({ message: { raw: bytes } }),
+  });
+  const requestBytes = canonicalBytes(requestEnvelope);
+  append("payer", fixture.payer, "PAYER_MANDATE_READY", sha256(mandateBytes), "rehearsal");
+  let persistedReads = 0;
+  let submitted = 0;
+  await assert.rejects(runSupervisor({
+    client: {
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
+      async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
+      async readEvents() { return structuredClone(events); },
+      async submitPaymentRequest() { submitted += 1; return {}; },
+    },
+    dependencies: {
+      async readArtifactFile() { return requestBytes; },
+      async readRequestorMcpIntake() {
+        persistedReads += 1;
+        return { ...requestorIntakeResult(fixture.repo), intakeRequestId: "33333333-3333-4333-8333-333333333333" };
+      },
+      shouldContinue() { return false; },
+      verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
+      async writeState() {},
+    },
+    localState: {
+      intakeBinding: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
+      },
+      intentJournal: {
+        intakeDigest: INTAKE_DIGEST,
+        intakeRequestId: INTAKE_REQUEST_ID,
+        mandateDigest: payerMandateDigest(mandateEnvelope),
+        mandateRawDigest: sha256(mandateBytes),
+        requestDigest: paymentRequestDigest(requestEnvelope),
+        requestId: "9f953393-86d0-4f99-9d6a-102f525fbecd",
+        requestRawDigest: sha256(requestBytes),
+        stage: "PAYMENT_REQUEST_READY_TO_SUBMIT",
+        subjectRun: "rehearsal",
+      },
+      operatorPublicKey: raw(fixture.operator),
+      processedEventDigests: events.filter((event) => event.role === "operator").map((event) => event.eventDigest),
+      rehearsal: { descriptorPath: "/state/rehearsal/descriptor.json", requestPath: "/state/rehearsal/payment-request.json" },
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      role: "payee",
+      sessionId: fixture.session,
+    },
+  }));
+  assert.equal(persistedReads, 1);
   assert.equal(submitted, 0);
 });
 
@@ -1948,6 +2143,30 @@ test("resumes only through a replay-derived resumed coordination client", async 
     async resolveOperatorPublicKey() { assert.fail("intake drift restart must not resolve authority"); },
     createResumedCoordinationClient() { assert.fail("intake drift restart must not create client"); },
   } }));
+  {
+    const hostile = structuredClone(checkpoint);
+    hostile.intentJournal = {
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
+      mandateDigest: "b".repeat(64),
+      mandateRawDigest: "c".repeat(64),
+      stage: "PAYER_MANDATE_PUBLISHED",
+      subjectRun: "rehearsal",
+    };
+    delete hostile.intakeBinding;
+    let transportCreated = 0;
+    let resumedCreated = 0;
+    await assert.rejects(createRoleSupervisor({ launchManifestPath: "/retired", stateRoot: "/state", dependencies: {
+      async readState() { return hostile; },
+      async validateActiveLaunchState(value) { return value; },
+      async readStoredPayerMcpIntake() { return payerIntakeRecord(fixture.repo); },
+      async createTransport() { transportCreated += 1; return {}; },
+      async resolveOperatorPublicKey() { return raw(fixture.operator); },
+      createResumedCoordinationClient() { resumedCreated += 1; return {}; },
+    } }));
+    assert.equal(transportCreated, 0);
+    assert.equal(resumedCreated, 0);
+  }
   for (const mutation of [
     (value) => { value.phase = "BEFORE_CHILD"; },
     (value) => { value.phase = "DESCRIPTOR_WRITING"; },

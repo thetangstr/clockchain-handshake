@@ -864,6 +864,21 @@ test("supervisor CLI accepts exactly four Payer MCP path options and production 
   assert.equal(seen[0].payerMcpServerOptions.port, 9443);
   assert.equal(seen[0].payerMcpServerOptions.tlsCertificatePath, certificatePath);
   assert.equal(seen[0].payerMcpServerOptions.tlsPrivateKeyPath, privateKeyPath);
+  let portZeroFactoryCalled = false;
+  await assert.rejects(supervisorMain([
+    "--launch-manifest", payerManifestPath,
+    "--state", root,
+    "--payer-mcp-host", "127.0.0.1",
+    "--payer-mcp-port", "0",
+    "--payer-mcp-tls-certificate", certificatePath,
+    "--payer-mcp-tls-private-key", privateKeyPath,
+  ], {
+    async createProductionSupervisorDependencies() {
+      portZeroFactoryCalled = true;
+      return {};
+    },
+  }));
+  assert.equal(portZeroFactoryCalled, false);
 
   const payeeManifestPath = join(manifestRoot, "payee-launch-manifest.json");
   const { manifest: payeeManifest } = createLaunchManifest({
@@ -907,6 +922,85 @@ test("supervisor CLI accepts exactly four Payer MCP path options and production 
     probe: async () => ({ clean: true, head: repositorySha }),
     stateRoot: join(root, "bad-key-mode"),
   }));
+});
+
+test("production TLS option reader rejects growth and same-size drift before constructing MCP server", async (t) => {
+  for (const candidate of ["growth", "same-size"]) {
+    const root = await mkdtemp(join(tmpdir(), `supervisor-runtime-mcp-${candidate}-state-`));
+    const manifestRoot = await mkdtemp(join(tmpdir(), `supervisor-runtime-mcp-${candidate}-manifest-`));
+    t.after(() => Promise.all([
+      rm(root, { force: true, recursive: true }),
+      rm(manifestRoot, { force: true, recursive: true }),
+    ]));
+    await chmod(manifestRoot, 0o700);
+    const certificatePath = join(manifestRoot, "tls-cert.pem");
+    const privateKeyPath = join(manifestRoot, "tls-key.pem");
+    execFileSync("openssl", [
+      "req",
+      "-x509",
+      "-newkey",
+      "ed25519",
+      "-keyout",
+      privateKeyPath,
+      "-out",
+      certificatePath,
+      "-nodes",
+      "-days",
+      "1",
+      "-subj",
+      "/CN=127.0.0.1",
+      "-addext",
+      "subjectAltName=IP:127.0.0.1",
+    ], { stdio: "ignore" });
+    await chmod(certificatePath, 0o600);
+    await chmod(privateKeyPath, 0o600);
+    const tlsCertificatePem = await readFile(certificatePath, "utf8");
+    const repositorySha = "a".repeat(40);
+    const manifestPath = join(manifestRoot, "payer-launch-manifest.json");
+    const { manifest } = createLaunchManifest({
+      expectedTlsFingerprint: sha256(new X509Certificate(tlsCertificatePem).raw),
+      nowMs: 0,
+      operatorKeyId: "operator",
+      randomBytes: () => Buffer.alloc(32, 11),
+      relayUrl: "https://127.0.0.1:8443",
+      releaseId: `release-mcp-${candidate}`,
+      repositorySha,
+      role: "payer",
+      sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd",
+      tlsCertificatePem,
+      payerMcpIntakeCapabilityDigest: "7".repeat(64),
+    });
+    await writeLaunchManifest(manifestPath, manifest);
+    let hookCalled = false;
+    await assert.rejects(createProductionSupervisorDependencies({
+      createPayerMcpServer() {
+        assert.fail("drifted TLS file must fail before MCP server construction");
+      },
+      launchManifestPath: manifestPath,
+      payerMcpServerOptions: {
+        host: "127.0.0.1",
+        port: 9443,
+        tlsCertificatePath: certificatePath,
+        tlsPrivateKeyPath: privateKeyPath,
+        async afterPinnedTextFirstRead({ path }) {
+          if (path !== certificatePath || hookCalled) return;
+          hookCalled = true;
+          const current = await readFile(path);
+          if (candidate === "growth") {
+            await writeFile(path, Buffer.concat([current, Buffer.from("x")]));
+          } else {
+            const drifted = Buffer.from(current);
+            drifted[0] = drifted[0] === 0x2d ? 0x20 : 0x2d;
+            await writeFile(path, drifted);
+          }
+          await chmod(path, 0o600);
+        },
+      },
+      probe: async () => ({ clean: true, head: repositorySha }),
+      stateRoot: root,
+    }));
+    assert.equal(hookCalled, true);
+  }
 });
 
 test("securely unlinks a launch manifest without retaining bootstrap capability in active state", async () => {

@@ -12,7 +12,7 @@ function fail() {
 function parsePort(value) {
   if (typeof value !== "string" || !/^(?:0|[1-9][0-9]{0,4})$/.test(value)) fail();
   const port = Number(value);
-  if (!Number.isInteger(port) || port < 0 || port > 65_535) fail();
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) fail();
   return port;
 }
 
