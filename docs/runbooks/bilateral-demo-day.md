@@ -140,8 +140,10 @@ RELAY_TLS_FINGERPRINT="$(openssl x509 -in "$RELAY_TLS_CERTIFICATE" -outform DER 
 ```
 
 Payer, not the operator, generates the Payer MCP TLS private key on the Payer
-machine under Payer's private state. The operator never creates, receives,
-reads, prints, or stores that private key.
+machine in a Payer-owned sibling TLS root. The operator never creates, receives,
+reads, prints, or stores that private key. Keeping TLS material outside
+`PAYER_SUPERVISOR_STATE` preserves supervisor restart scanning while operator
+never handles the key.
 
 Start the relay and coordinator from the operator Mac in separate terminals.
 Keep both processes attached and stop on any nonzero exit.
@@ -218,10 +220,11 @@ Start Payer first and do not start Requestor until Payer prints exact
 ```sh
 export PAYER_MCP_HOST="${PAYER_MCP_HOST:?set exact numeric Payer IP reachable from Requestor; same computer 127.0.0.1, two computers Payer LAN IP}"
 export PAYER_MCP_PORT="9443"
-mkdir -p "$PAYER_SUPERVISOR_STATE/tls"
-chmod 0700 "$PAYER_SUPERVISOR_STATE" "$PAYER_SUPERVISOR_STATE/tls"
-export PAYER_MCP_TLS_CERTIFICATE="$PAYER_SUPERVISOR_STATE/tls/payer-mcp.crt"
-export PAYER_MCP_TLS_PRIVATE_KEY="$PAYER_SUPERVISOR_STATE/tls/payer-mcp.key"
+export PAYER_MCP_TLS_ROOT="${PAYER_SUPERVISOR_STATE%/}.payer-mcp-tls"
+mkdir -p "$PAYER_MCP_TLS_ROOT"
+chmod 0700 "$PAYER_MCP_TLS_ROOT"
+export PAYER_MCP_TLS_CERTIFICATE="$PAYER_MCP_TLS_ROOT/payer-mcp.crt"
+export PAYER_MCP_TLS_PRIVATE_KEY="$PAYER_MCP_TLS_ROOT/payer-mcp.key"
 printf '%s\n' "$PAYER_MCP_HOST" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
 test "$PAYER_MCP_HOST" != "0.0.0.0"
 openssl req -x509 -newkey rsa:3072 -nodes \
@@ -248,6 +251,8 @@ npm run bilateral:supervisor -- \
 same computer uses `127.0.0.1`; two computers use the Payer LAN IP. Never bind
 Payer MCP to `0.0.0.0`. The Payer MCP certificate SAN must match the exact
 `PAYER_MCP_HOST`. The private key stays on Payer and is never read or printed.
+The sibling TLS root preserves supervisor restart scanning because it is outside
+`PAYER_SUPERVISOR_STATE`, while operator never handles the key.
 
 After exact `PAYER_MCP_READY`, transfer only the public MCP URL, public TLS
 certificate, and lowercase 64-hex certificate fingerprint to Requestor. Never

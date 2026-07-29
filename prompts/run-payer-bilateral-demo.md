@@ -56,18 +56,21 @@ operator and Requestor roots.
 
 The operator privately provides one role-specific launch-manifest path and one
 fresh private state directory. Generate the local TLS MCP certificate and
-private key under Payer's private state, with the certificate SAN matching the
-exact numeric Payer IP reachable from Requestor. Same computer uses
-`127.0.0.1`; two computers use the Payer LAN IP. Never bind Payer MCP to
-`0.0.0.0`, and never read or print the private key.
+private key in a Payer-owned sibling TLS root outside `PAYER_SUPERVISOR_STATE`,
+with the certificate SAN matching the exact numeric Payer IP reachable from
+Requestor. Same computer uses `127.0.0.1`; two computers use the Payer LAN IP.
+Never bind Payer MCP to `0.0.0.0`, and never read or print the private key. The
+sibling TLS root preserves supervisor restart scanning while operator never
+handles the key.
 
 ```sh
 export PAYER_MCP_HOST="${PAYER_MCP_HOST:?set exact numeric Payer IP reachable from Requestor; same computer 127.0.0.1, two computers Payer LAN IP}"
 export PAYER_MCP_PORT="9443"
-mkdir -p "$PAYER_SUPERVISOR_STATE/tls"
-chmod 0700 "$PAYER_SUPERVISOR_STATE" "$PAYER_SUPERVISOR_STATE/tls"
-export PAYER_MCP_TLS_CERTIFICATE="$PAYER_SUPERVISOR_STATE/tls/payer-mcp.crt"
-export PAYER_MCP_TLS_PRIVATE_KEY="$PAYER_SUPERVISOR_STATE/tls/payer-mcp.key"
+export PAYER_MCP_TLS_ROOT="${PAYER_SUPERVISOR_STATE%/}.payer-mcp-tls"
+mkdir -p "$PAYER_MCP_TLS_ROOT"
+chmod 0700 "$PAYER_MCP_TLS_ROOT"
+export PAYER_MCP_TLS_CERTIFICATE="$PAYER_MCP_TLS_ROOT/payer-mcp.crt"
+export PAYER_MCP_TLS_PRIVATE_KEY="$PAYER_MCP_TLS_ROOT/payer-mcp.key"
 printf '%s\n' "$PAYER_MCP_HOST" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
 test "$PAYER_MCP_HOST" != "0.0.0.0"
 openssl req -x509 -newkey rsa:3072 -nodes \
@@ -116,7 +119,7 @@ do not create extra sessions, do not fund addresses, do not run the watcher or v
 
 ## Fixed Private Inputs
 
-The operator privately sets:
+Payer receives or derives these private inputs and paths:
 
 - `BILATERAL_REPOSITORY_SHA`: reviewed immutable repository SHA, exactly 40
   lowercase hexadecimal characters.
@@ -126,10 +129,12 @@ The operator privately sets:
   `127.0.0.1` only when both roles run on the same computer; use the Payer LAN
   IP for two computers. Never use `0.0.0.0`.
 - `PAYER_MCP_PORT`: Payer-owned local MCP bind port.
+- `PAYER_MCP_TLS_ROOT`: Payer-owned sibling TLS root, exactly
+  `${PAYER_SUPERVISOR_STATE%/}.payer-mcp-tls`, mode `0700`.
 - `PAYER_MCP_TLS_CERTIFICATE`: Payer-generated local MCP public TLS certificate
-  path under Payer's private state.
+  path under `PAYER_MCP_TLS_ROOT`.
 - `PAYER_MCP_TLS_PRIVATE_KEY`: Payer-generated local MCP private TLS key path
-  under Payer's private state.
+  under `PAYER_MCP_TLS_ROOT`.
 - `PAYER_INVITATION_FILE`: Payer's reserved mode-`0600` invitation, used only by
   approved repository commands.
 - `PAYER_CLOCKCHAIN_TOKEN_FILE`: token path under Payer's private state root.

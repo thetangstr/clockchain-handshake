@@ -428,7 +428,10 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /test "\$PAYER_MCP_HOST" != "0\.0\.0\.0"/);
   assert.doesNotMatch(primaryRunbook, /export PAYER_MCP_HOST="0\.0\.0\.0"/);
   assert.doesNotMatch(primaryRunbook, /PAYER_MCP_TLS_PRIVATE_KEY="\$BILATERAL_RELEASE_ROOT/);
-  assert.match(primaryRunbook, /Payer machine:[\s\S]*export PAYER_MCP_TLS_PRIVATE_KEY="\$PAYER_SUPERVISOR_STATE\/tls\/payer-mcp\.key"/);
+  assert.doesNotMatch(primaryRunbook, /\$PAYER_SUPERVISOR_STATE\/tls/);
+  assert.match(primaryRunbook, /Payer machine:[\s\S]*export PAYER_MCP_TLS_ROOT="\$\{PAYER_SUPERVISOR_STATE%\/\}\.payer-mcp-tls"/);
+  assert.match(primaryRunbook, /export PAYER_MCP_TLS_PRIVATE_KEY="\$PAYER_MCP_TLS_ROOT\/payer-mcp\.key"/);
+  assert.match(primaryRunbook, /preserves supervisor restart scanning/i);
   assert.match(primaryRunbook, /subjectAltName=IP:\$PAYER_MCP_HOST/);
   assert.match(primaryRunbook, /chmod 0600 "\$PAYER_MCP_TLS_CERTIFICATE"/);
   assert.doesNotMatch(primaryRunbook, /chmod 0644 "\$PAYER_MCP_TLS_CERTIFICATE"/);
@@ -493,10 +496,23 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(requestor, /You are Stakeholder 2, Requestor, the payment requestor\./);
   assert.match(requestor, /\bDo not start `npm run bilateral:supervisor` directly\b/i);
   assert.match(requestor, /\bHANDSHAKE_REQUIRED\b/);
+  assert.match(requestor, /Requestor receives or derives these private inputs and paths:/);
+  assert.doesNotMatch(
+    requestor,
+    /The operator privately sets:[\s\S]*(REQUESTOR_INTAKE_REQUEST_ID|PAYER_MCP_URL|PAYER_MCP_TLS_CERTIFICATE|PAYER_MCP_TLS_FINGERPRINT)/,
+  );
   assert.match(payer, /You are Stakeholder 1, Payer, the mandate-owning payer\./);
   assert.match(payer, /\bPAYER_MCP_READY\b/);
-  assert.match(payer, /mkdir -p "\$PAYER_SUPERVISOR_STATE\/tls"/);
-  assert.match(payer, /export PAYER_MCP_TLS_PRIVATE_KEY="\$PAYER_SUPERVISOR_STATE\/tls\/payer-mcp\.key"/);
+  assert.match(payer, /Payer receives or derives these private inputs and paths:/);
+  assert.doesNotMatch(
+    payer,
+    /The operator privately sets:[\s\S]*(PAYER_MCP_TLS_ROOT|PAYER_MCP_TLS_CERTIFICATE|PAYER_MCP_TLS_PRIVATE_KEY)/,
+  );
+  assert.doesNotMatch(payer, /\$PAYER_SUPERVISOR_STATE\/tls/);
+  assert.match(payer, /export PAYER_MCP_TLS_ROOT="\$\{PAYER_SUPERVISOR_STATE%\/\}\.payer-mcp-tls"/);
+  assert.match(payer, /mkdir -p "\$PAYER_MCP_TLS_ROOT"/);
+  assert.match(payer, /export PAYER_MCP_TLS_PRIVATE_KEY="\$PAYER_MCP_TLS_ROOT\/payer-mcp\.key"/);
+  assert.match(payer, /preserves supervisor restart scanning/i);
   assert.match(payer, /subjectAltName=IP:\$PAYER_MCP_HOST/);
   assert.match(payer, /chmod 0600 "\$PAYER_MCP_TLS_CERTIFICATE"/);
   assert.doesNotMatch(payer, /chmod 0644 "\$PAYER_MCP_TLS_CERTIFICATE"/);
@@ -640,7 +656,10 @@ test("live bilateral handoff pins the public operator checklist without secrets"
   assert.match(handoff, /test "\$PAYER_MCP_HOST" != "0\.0\.0\.0"/);
   assert.doesNotMatch(handoff, /export PAYER_MCP_HOST="0\.0\.0\.0"/);
   assert.doesNotMatch(handoff, /PAYER_MCP_TLS_PRIVATE_KEY="\$BILATERAL_RELEASE_ROOT/);
-  assert.match(handoff, /Payer supervisor:[\s\S]*export PAYER_MCP_TLS_PRIVATE_KEY="\$PAYER_SUPERVISOR_STATE\/tls\/payer-mcp\.key"/);
+  assert.doesNotMatch(handoff, /\$PAYER_SUPERVISOR_STATE\/tls/);
+  assert.match(handoff, /Payer supervisor:[\s\S]*export PAYER_MCP_TLS_ROOT="\$\{PAYER_SUPERVISOR_STATE%\/\}\.payer-mcp-tls"/);
+  assert.match(handoff, /export PAYER_MCP_TLS_PRIVATE_KEY="\$PAYER_MCP_TLS_ROOT\/payer-mcp\.key"/);
+  assert.match(handoff, /preserves supervisor restart scanning/i);
   assert.match(handoff, /subjectAltName=IP:\$PAYER_MCP_HOST/);
   assert.match(handoff, /chmod 0600 "\$PAYER_MCP_TLS_CERTIFICATE"/);
   assert.doesNotMatch(handoff, /chmod 0644 "\$PAYER_MCP_TLS_CERTIFICATE"/);

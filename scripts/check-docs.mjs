@@ -447,6 +447,26 @@ function bilateralContractFailures(relativePath, contents) {
       `${relativePath}: must not describe hosted Clockchain MCP as the payment-intake entry point; use the Payer-owned local TLS MCP /mcp flow.`,
     );
   }
+  if (
+    relativePath === "prompts/run-payer-bilateral-demo.md" &&
+    /The operator privately sets:[\s\S]*(PAYER_MCP_TLS_ROOT|PAYER_MCP_TLS_CERTIFICATE|PAYER_MCP_TLS_PRIVATE_KEY)/.test(
+      contents,
+    )
+  ) {
+    failures.push(
+      `${relativePath}: must not claim the operator privately sets Payer-derived MCP TLS paths.`,
+    );
+  }
+  if (
+    relativePath === "prompts/run-requestor-bilateral-demo.md" &&
+    /The operator privately sets:[\s\S]*(REQUESTOR_INTAKE_REQUEST_ID|PAYER_MCP_URL|PAYER_MCP_TLS_CERTIFICATE|PAYER_MCP_TLS_FINGERPRINT)/.test(
+      contents,
+    )
+  ) {
+    failures.push(
+      `${relativePath}: must not claim the operator privately sets Requestor-derived or received MCP request inputs.`,
+    );
+  }
   for (const { label, pattern } of BILATERAL_COMMON_REQUIREMENTS) {
     if (!pattern.test(contents)) {
       failures.push(
@@ -502,6 +522,10 @@ function bilateralContractFailures(relativePath, contents) {
       [
         "TLS certificate fingerprint pin",
         /\bTLS certificate fingerprint\b[\s\S]{0,160}\bpins that fingerprint\b/i,
+      ],
+      [
+        "neutral private input ownership",
+        /\bRequestor receives or derives these private inputs and paths:/,
       ],
       ["secret-byte prohibition", /\bdo not inspect secret bytes\b/i],
       ["role-switch prohibition", /\bdo not switch roles\b/i],
@@ -561,6 +585,10 @@ function bilateralContractFailures(relativePath, contents) {
       [
         "TLS certificate fingerprint pin",
         /\bTLS certificate fingerprint\b[\s\S]{0,160}\bpins that fingerprint\b/i,
+      ],
+      [
+        "neutral private input ownership",
+        /\bPayer receives or derives these private inputs and paths:/,
       ],
       ["secret-byte prohibition", /\bdo not inspect secret bytes\b/i],
       ["role-switch prohibition", /\bdo not switch roles\b/i],
@@ -1004,7 +1032,7 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "Payer MCP certificate generation",
-        /\bsubjectAltName=IP:\$PAYER_MCP_HOST\b[\s\S]*chmod 0600 "\$PAYER_MCP_TLS_CERTIFICATE"[\s\S]*PAYER_MCP_TLS_FINGERPRINT="\$\(openssl x509 -in "\$PAYER_MCP_TLS_CERTIFICATE" -outform DER \| openssl dgst -sha256 -binary \| xxd -p -c 256\)"[\s\S]*\bgrep -Eq '\^\[0-9a-f\]\{64\}\$'/,
+        /\bPAYER_MCP_TLS_ROOT="\$\{PAYER_SUPERVISOR_STATE%\/\}\.payer-mcp-tls"[\s\S]*\bmkdir -p "\$PAYER_MCP_TLS_ROOT"[\s\S]*\bsubjectAltName=IP:\$PAYER_MCP_HOST\b[\s\S]*chmod 0600 "\$PAYER_MCP_TLS_CERTIFICATE"[\s\S]*PAYER_MCP_TLS_FINGERPRINT="\$\(openssl x509 -in "\$PAYER_MCP_TLS_CERTIFICATE" -outform DER \| openssl dgst -sha256 -binary \| xxd -p -c 256\)"[\s\S]*\bgrep -Eq '\^\[0-9a-f\]\{64\}\$'[\s\S]*\bpreserves supervisor restart scanning\b/i,
       ],
       [
         "exact startup order",

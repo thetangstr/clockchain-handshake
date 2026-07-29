@@ -96,7 +96,7 @@ do not create extra sessions, do not fund addresses, do not run the watcher or v
 
 ## Fixed Private Inputs
 
-The operator privately sets:
+Requestor receives or derives these private inputs and paths:
 
 - `BILATERAL_REPOSITORY_SHA`: reviewed immutable repository SHA, exactly 40
   lowercase hexadecimal characters.
