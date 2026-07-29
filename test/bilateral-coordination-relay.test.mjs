@@ -1703,6 +1703,7 @@ test("creates the exact transport-independent service and requires every authori
     "putArtifact",
     "readPayerMandate",
     "readPaymentRequest",
+    "readEnrollmentReadiness",
     "registerCapabilities",
     "readEnrollmentSet",
     "readEvents",
@@ -2052,6 +2053,298 @@ test("revalidates both persisted enrollment receipts and exact storage records b
       exactPayer,
     );
   }
+});
+
+test("reports exact frozen enrollment readiness without exposing enrollment authority data", async (t) => {
+  const { store } = await storeFixture(t);
+  await registerRole(store, {
+    capability: PAYER_CAPABILITY,
+    role: "payer",
+  });
+  await registerRole(store, {
+    capability: PAYEE_CAPABILITY,
+    role: "payee",
+  });
+  const { relay } = relayFixture(store);
+  await bootstrapRole(relay, {
+    capability: PAYER_CAPABILITY,
+    coordination: payerCoordination,
+    invitationPrivateKeys: invitationKeys.payer,
+    preflight: payerPreflight,
+    role: "payer",
+  });
+
+  const notReady = await relay.readEnrollmentReadiness({
+    sessionId: SESSION_ID,
+    waitMs: 0,
+  });
+  assert.deepEqual(notReady, {
+    paymentMoved: false,
+    ready: false,
+    repositorySha: REPOSITORY_SHA,
+    schema:
+      "clockchain.bilateral-enrollment-readiness/v1",
+    sessionId: SESSION_ID,
+  });
+  assert.equal(Object.isFrozen(notReady), true);
+
+  await bootstrapRole(relay, {
+    capability: PAYEE_CAPABILITY,
+    coordination: payeeCoordination,
+    invitationPrivateKeys: invitationKeys.payee,
+    preflight: payeePreflight,
+    role: "payee",
+  });
+  const ready = await relay.readEnrollmentReadiness({
+    sessionId: SESSION_ID,
+    waitMs: 0,
+  });
+  assert.deepEqual(ready, {
+    ...notReady,
+    ready: true,
+  });
+  const encoded = JSON.stringify(ready);
+  for (const secret of [
+    "digest",
+    "receipt",
+    "capability",
+    "address",
+    "key",
+    PAYER_CAPABILITY.toString("hex"),
+    PAYEE_CAPABILITY.toString("hex"),
+  ]) {
+    assert.equal(encoded.includes(secret), false, secret);
+  }
+});
+
+test("long-poll enrollment readiness waits for durable payee bootstrap and times out boundedly", async (t) => {
+  const { store } = await storeFixture(t);
+  await registerRole(store, {
+    capability: PAYER_CAPABILITY,
+    role: "payer",
+  });
+  await registerRole(store, {
+    capability: PAYEE_CAPABILITY,
+    role: "payee",
+  });
+  const { relay } = relayFixture(store);
+  await bootstrapRole(relay, {
+    capability: PAYER_CAPABILITY,
+    coordination: payerCoordination,
+    invitationPrivateKeys: invitationKeys.payer,
+    preflight: payerPreflight,
+    role: "payer",
+  });
+  const pending = relay.readEnrollmentReadiness({
+    sessionId: SESSION_ID,
+    waitMs: 30_000,
+  });
+  assert.equal(
+    await Promise.race([
+      pending.then(() => "settled"),
+      new Promise((resolve) =>
+        setTimeout(() => resolve("pending"), 25),
+      ),
+    ]),
+    "pending",
+  );
+  await bootstrapRole(relay, {
+    capability: PAYEE_CAPABILITY,
+    coordination: payeeCoordination,
+    invitationPrivateKeys: invitationKeys.payee,
+    preflight: payeePreflight,
+    role: "payee",
+  });
+  assert.deepEqual(await pending, {
+    paymentMoved: false,
+    ready: true,
+    repositorySha: REPOSITORY_SHA,
+    schema:
+      "clockchain.bilateral-enrollment-readiness/v1",
+    sessionId: SESSION_ID,
+  });
+
+  const { store: timeoutStore } = await storeFixture(t);
+  await registerRole(timeoutStore, {
+    capability: PAYER_CAPABILITY,
+    role: "payer",
+  });
+  const { relay: timeoutRelay } =
+    relayFixture(timeoutStore);
+  await bootstrapRole(timeoutRelay, {
+    capability: PAYER_CAPABILITY,
+    coordination: payerCoordination,
+    invitationPrivateKeys: invitationKeys.payer,
+    preflight: payerPreflight,
+    role: "payer",
+  });
+  const started = Date.now();
+  assert.deepEqual(
+    await timeoutRelay.readEnrollmentReadiness({
+      sessionId: SESSION_ID,
+      waitMs: 15,
+    }),
+    {
+      paymentMoved: false,
+      ready: false,
+      repositorySha: REPOSITORY_SHA,
+      schema:
+        "clockchain.bilateral-enrollment-readiness/v1",
+      sessionId: SESSION_ID,
+    },
+  );
+  assert.ok(Date.now() - started >= 8);
+});
+
+test("notifies enrollment readiness only after successful capability consumption and receipt verification", async (t) => {
+  const { store } = await storeFixture(t);
+  await registerRole(store, {
+    capability: PAYER_CAPABILITY,
+    role: "payer",
+  });
+  await registerRole(store, {
+    capability: PAYEE_CAPABILITY,
+    role: "payee",
+  });
+  let verifyReceipts = true;
+  const pair = generateKeyPairSync("ed25519");
+  const receipt = {
+    signer: Object.freeze({
+      certificateSha256: "c".repeat(64),
+      signatureAlgorithm: "ed25519",
+      sign(preimage) {
+        return sign(null, preimage, pair.privateKey);
+      },
+      verify(preimage, signature) {
+        return (
+          verifyReceipts &&
+          verify(null, preimage, pair.publicKey, signature)
+        );
+      },
+    }),
+  };
+  const { relay } = relayFixture(store, { receipt });
+  await bootstrapRole(relay, {
+    capability: PAYER_CAPABILITY,
+    coordination: payerCoordination,
+    invitationPrivateKeys: invitationKeys.payer,
+    preflight: payerPreflight,
+    role: "payer",
+  });
+  const pending = relay.readEnrollmentReadiness({
+    sessionId: SESSION_ID,
+    waitMs: 30_000,
+  });
+  verifyReceipts = false;
+  await assert.rejects(
+    bootstrapRole(relay, {
+      capability: PAYEE_CAPABILITY,
+      coordination: payeeCoordination,
+      invitationPrivateKeys: invitationKeys.payee,
+      preflight: payeePreflight,
+      role: "payee",
+    }),
+    { code: "COORDINATION_RELAY_INVALID" },
+  );
+  assert.equal(
+    await Promise.race([
+      pending.then(() => "settled"),
+      new Promise((resolve) =>
+        setTimeout(() => resolve("pending"), 25),
+      ),
+    ]),
+    "pending",
+  );
+  verifyReceipts = true;
+  await bootstrapRole(relay, {
+    capability: PAYEE_CAPABILITY,
+    coordination: payeeCoordination,
+    invitationPrivateKeys: invitationKeys.payee,
+    preflight: payeePreflight,
+    role: "payee",
+  });
+  assert.equal((await pending).ready, true);
+});
+
+test("enrollment readiness fails closed for malformed input and non-pending store errors", async (t) => {
+  const { store } = await storeFixture(t);
+  await registerRole(store, {
+    capability: PAYER_CAPABILITY,
+    role: "payer",
+  });
+  const { relay } = relayFixture(store);
+  const aborted = new AbortController();
+  aborted.abort();
+  for (const input of [
+    { sessionId: SESSION_ID, waitMs: -1 },
+    { sessionId: SESSION_ID, waitMs: 30_001 },
+    { sessionId: SESSION_ID, waitMs: 1.5 },
+    { sessionId: SESSION_ID, waitMs: "0" },
+    { extra: true, sessionId: SESSION_ID, waitMs: 0 },
+    Object.defineProperty({ waitMs: 0 }, "sessionId", {
+      enumerable: true,
+      get() {
+        return SESSION_ID;
+      },
+    }),
+    { sessionId: SESSION_ID, signal: {}, waitMs: 0 },
+    { sessionId: SESSION_ID, signal: aborted.signal, waitMs: 0 },
+    Object.defineProperty(
+      { sessionId: SESSION_ID, waitMs: 0 },
+      "signal",
+      {
+        enumerable: true,
+        get() {
+          return new AbortController().signal;
+        },
+      },
+    ),
+  ]) {
+    await assert.rejects(
+      () => relay.readEnrollmentReadiness(input),
+      { code: "COORDINATION_RELAY_INVALID" },
+    );
+  }
+
+  const pendingRelay = relayFixture(storeFacade(store, {
+    async readEnrollment(input) {
+      if (input.role === "payer") {
+        return {
+          bytes: Buffer.from("payer-secret"),
+          digest: "a".repeat(64),
+          receiptBytes: Buffer.from("payer-receipt"),
+        };
+      }
+      const error = new Error("pending");
+      error.code = "COORDINATION_ENROLLMENT_NOT_FOUND";
+      throw error;
+    },
+  })).relay;
+  assert.equal(
+    (
+      await pendingRelay.readEnrollmentReadiness({
+        sessionId: SESSION_ID,
+        waitMs: 0,
+      })
+    ).ready,
+    false,
+  );
+
+  const closedRelay = relayFixture(storeFacade(store, {
+    async readEnrollment() {
+      const error = new Error("storage unavailable");
+      error.code = "COORDINATION_IO";
+      throw error;
+    },
+  })).relay;
+  await assert.rejects(
+    () =>
+      closedRelay.readEnrollmentReadiness({
+        sessionId: SESSION_ID,
+        waitMs: 0,
+      }),
+    { code: "COORDINATION_RELAY_INVALID" },
+  );
 });
 
 test("bootstraps exact enrollment once and returns the persisted verified receipt on retry", async (t) => {

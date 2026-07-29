@@ -66,6 +66,8 @@ export const VERIFIER_PUBLICATION_SCHEMA = "clockchain.bilateral-verifier-public
 export const VERIFIED_EVENT_SCHEMA = "clockchain.bilateral-verified-event/v1";
 export const CAPABILITY_REGISTRATION_RECEIPT_SCHEMA =
   "clockchain.bilateral-capability-registration-receipt/v1";
+export const ENROLLMENT_READINESS_SCHEMA =
+  "clockchain.bilateral-enrollment-readiness/v1";
 
 const SERVICE_KEYS = Object.freeze([
   "appendEvent",
@@ -75,6 +77,7 @@ const SERVICE_KEYS = Object.freeze([
   "putArtifact",
   "readPayerMandate",
   "readPaymentRequest",
+  "readEnrollmentReadiness",
   "registerCapabilities",
   "readEnrollmentSet",
   "readEvents",
@@ -130,6 +133,15 @@ const PUT_ARTIFACT_KEYS = Object.freeze([
 const READ_PAYER_MANDATE_KEYS = Object.freeze(["sessionId", "subjectRun"]);
 const READ_PAYMENT_REQUEST_KEYS = Object.freeze(["requestId", "sessionId"]);
 const SUBMIT_PAYMENT_REQUEST_KEYS = Object.freeze(["body", "sessionId"]);
+const READ_ENROLLMENT_READINESS_KEYS = Object.freeze([
+  "sessionId",
+  "waitMs",
+]);
+const READ_ENROLLMENT_READINESS_KEYS_WITH_SIGNAL = Object.freeze([
+  "sessionId",
+  "signal",
+  "waitMs",
+]);
 
 function verifierPublicationMatchesEvent(publication, event) {
   const claim = readExactData(publication, PUBLICATION_KEYS);
@@ -1157,6 +1169,43 @@ export function createRelayService(input) {
       });
     }
 
+    function enrollmentReadinessResult(sessionId, ready) {
+      return Object.freeze({
+        paymentMoved: false,
+        ready,
+        repositorySha: frozenRepositorySha,
+        schema: ENROLLMENT_READINESS_SCHEMA,
+        sessionId,
+      });
+    }
+
+    async function enrollmentRoleExists(sessionId, role) {
+      try {
+        await store.readEnrollment({ role, sessionId });
+        return true;
+      } catch (error) {
+        if (
+          error?.code ===
+          "COORDINATION_ENROLLMENT_NOT_FOUND"
+        ) {
+          return false;
+        }
+        invalid();
+      }
+    }
+
+    async function enrollmentsReady(sessionId) {
+      const payerReady = await enrollmentRoleExists(
+        sessionId,
+        "payer",
+      );
+      const payeeReady = await enrollmentRoleExists(
+        sessionId,
+        "payee",
+      );
+      return payerReady && payeeReady;
+    }
+
     async function resolvedOperatorPublicKey(keyId) {
       let repositoryPath;
       let repositoryValue;
@@ -1594,7 +1643,7 @@ export function createRelayService(input) {
         ) {
           invalid();
         }
-        return verifyCoordinationReceipt({
+        const receipt = await verifyCoordinationReceipt({
           bytes: consumption.receiptBytes,
           expected: {
             capabilityDigest:
@@ -1607,6 +1656,8 @@ export function createRelayService(input) {
           },
           verifier: receiptSigner,
         });
+        notifySession(enrollment.sessionId);
+        return receipt;
       });
     }
 
@@ -1902,6 +1953,89 @@ export function createRelayService(input) {
       });
     }
 
+    async function readEnrollmentReadiness(value) {
+      return guardedAsync(async () => {
+        let inputKeys;
+        try {
+          inputKeys = Reflect.ownKeys(value);
+        } catch {
+          invalid();
+        }
+        const data = readExactData(
+          value,
+          inputKeys.includes("signal")
+            ? READ_ENROLLMENT_READINESS_KEYS_WITH_SIGNAL
+            : READ_ENROLLMENT_READINESS_KEYS,
+        );
+        const sessionId = assertSessionId(data.sessionId);
+        const signal = data.signal ?? null;
+        if (
+          signal !== null &&
+          (
+            !(signal instanceof AbortSignal) ||
+            Object.getPrototypeOf(signal) !==
+              AbortSignal.prototype
+          )
+        ) {
+          invalid();
+        }
+        if (
+          !Number.isInteger(data.waitMs) ||
+          data.waitMs < 0 ||
+          data.waitMs > MAX_RELAY_WAIT_MS
+        ) {
+          invalid();
+        }
+        if (signal?.aborted === true) {
+          invalid();
+        }
+        if (data.waitMs === 0) {
+          const ready = await enrollmentsReady(sessionId);
+          if (signal?.aborted === true) {
+            invalid();
+          }
+          return enrollmentReadinessResult(
+            sessionId,
+            ready,
+          );
+        }
+        const waiter = waitForSession(
+          sessionId,
+          data.waitMs,
+          signal,
+        );
+        try {
+          let ready = await enrollmentsReady(sessionId);
+          if (signal?.aborted === true) {
+            invalid();
+          }
+          if (ready) {
+            return enrollmentReadinessResult(
+              sessionId,
+              true,
+            );
+          }
+          const aborted = await waiter.promise;
+          if (
+            aborted ||
+            signal?.aborted === true
+          ) {
+            invalid();
+          }
+          ready = await enrollmentsReady(sessionId);
+          if (signal?.aborted === true) {
+            invalid();
+          }
+          return enrollmentReadinessResult(
+            sessionId,
+            ready,
+          );
+        } finally {
+          waiter.cancel();
+        }
+      });
+    }
+
     async function readEnrollmentSet(value) {
       return guardedAsync(async () => {
         const data = readExactData(
@@ -2052,6 +2186,7 @@ export function createRelayService(input) {
       putArtifact,
       readPayerMandate,
       readPaymentRequest,
+      readEnrollmentReadiness,
       registerCapabilities,
       readEnrollmentSet,
       readEvents,
