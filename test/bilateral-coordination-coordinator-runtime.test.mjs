@@ -35,6 +35,7 @@ import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import { payerMandateDigest, signPayerMandate } from "../src/bilateral/payer-mandate.mjs";
 import { signPaymentRequest } from "../src/bilateral/payment-request.mjs";
 import { runCoordinator as runCoordinatorCore } from "../src/bilateral/coordination/coordinator.mjs";
+import { validateFundingRecord } from "../src/bilateral/funding/record.mjs";
 
 const execFile = promisify(execFileCallback);
 
@@ -57,6 +58,41 @@ const INTENT_PAYER = privateKeyToAccount(`0x${"1".repeat(64)}`);
 const INTENT_PAYEE = privateKeyToAccount(`0x${"2".repeat(64)}`);
 const INTENT_SESSION_ID = "11111111-2222-4333-8444-555555555555";
 const INTENT_NOW_MS = 1785294300000;
+const FUNDING_ADDRESSES = Object.freeze([
+  "0x1111111111111111111111111111111111111111",
+  "0x2222222222222222222222222222222222222222",
+  "0x3333333333333333333333333333333333333333",
+  "0x4444444444444444444444444444444444444444",
+]);
+
+function fundingAdmissionClient({ balances = FUNDING_ADDRESSES.map(() => 0n), nonces = FUNDING_ADDRESSES.map(() => 0n), calls = [] } = {}) {
+  return {
+    calls,
+    client: {
+      async getBalance({ address }) {
+        calls.push(["getBalance", address]);
+        return balances[FUNDING_ADDRESSES.indexOf(address)];
+      },
+      async getTransactionCount({ address, blockTag }) {
+        calls.push(["getTransactionCount", address, blockTag]);
+        return nonces[FUNDING_ADDRESSES.indexOf(address)];
+      },
+    },
+  };
+}
+
+function expectedFundingRecord(addresses = FUNDING_ADDRESSES) {
+  return {
+    addresses: [...addresses],
+    paymentMoved: false,
+    participants: addresses.map((address) => ({
+      address,
+      balanceWei: "0",
+      nonce: "0",
+    })),
+    schema: "clockchain.bilateral-funding-addresses/v1",
+  };
+}
 
 function intentParties() {
   return {
@@ -193,29 +229,67 @@ test("runtime publishes one canonical private funding address file and validates
     tlsCertificatePem: "certificate",
     tlsFingerprint: "b".repeat(64),
   });
-  const addresses = [
-    "0x1111111111111111111111111111111111111111",
-    "0x2222222222222222222222222222222222222222",
-    "0x3333333333333333333333333333333333333333",
-    "0x4444444444444444444444444444444444444444",
-  ];
   const output = [];
-  const runtime = createCoordinatorRuntimeDependencies(config, { createClient: () => ({}), createTransport: () => ({}), output: (line) => output.push(line) });
-  await runtime.runDependencies({ releaseId: "release-a", repositorySha: config.repositorySha, sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }).displayAddresses(addresses);
+  const admission = fundingAdmissionClient();
+  const runtime = createCoordinatorRuntimeDependencies(config, { createClient: () => ({}), createFundingAdmissionClient: () => admission.client, createTransport: () => ({}), output: (line) => output.push(line) });
+  await runtime.runDependencies({ releaseId: "release-a", repositorySha: config.repositorySha, sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }).displayAddresses(FUNDING_ADDRESSES);
   const path = join(rootPath, "funding-addresses.json");
   const bytes = await readFile(path);
+  const record = JSON.parse(bytes.toString("utf8"));
   assert.equal((await lstat(path)).mode & 0o777, 0o600);
-  assert.equal(bytes.toString("utf8"), `${JSON.stringify({ addresses, paymentMoved: false, schema: "clockchain.bilateral-funding-addresses/v1" })}\n`);
+  assert.deepEqual(record, expectedFundingRecord());
+  assert.deepEqual(validateFundingRecord(record), expectedFundingRecord());
+  assert.equal(bytes.toString("utf8"), `${JSON.stringify(expectedFundingRecord())}\n`);
   assert.deepEqual(output, [bytes.toString("utf8")]);
+  assert.deepEqual(admission.calls, FUNDING_ADDRESSES.flatMap((address) => [
+    ["getBalance", address],
+    ["getTransactionCount", address, "latest"],
+  ]));
 
   const restartOutput = [];
-  const restarted = createCoordinatorRuntimeDependencies(config, { createClient: () => ({}), createTransport: () => ({}), output: (line) => restartOutput.push(line) });
-  await restarted.runDependencies({ releaseId: "release-a", repositorySha: config.repositorySha, sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }).displayAddresses(addresses);
+  const restarted = createCoordinatorRuntimeDependencies(config, { createClient: () => ({}), createFundingAdmissionClient: () => assert.fail("restart must not inspect live admission facts"), createTransport: () => ({}), output: (line) => restartOutput.push(line) });
+  await restarted.runDependencies({ releaseId: "release-a", repositorySha: config.repositorySha, sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }).displayAddresses(FUNDING_ADDRESSES);
   assert.equal((await readFile(path)).equals(bytes), true);
   assert.deepEqual(restartOutput, [bytes.toString("utf8")]);
 
-  const hostile = createCoordinatorRuntimeDependencies(config, { createClient: () => ({}), createTransport: () => ({}) });
-  await assert.rejects(hostile.runDependencies({ releaseId: "release-a", repositorySha: config.repositorySha, sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }).displayAddresses([...addresses].reverse()));
+  const hostile = createCoordinatorRuntimeDependencies(config, { createClient: () => ({}), createFundingAdmissionClient: () => fundingAdmissionClient().client, createTransport: () => ({}) });
+  await assert.rejects(hostile.runDependencies({ releaseId: "release-a", repositorySha: config.repositorySha, sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }).displayAddresses([...FUNDING_ADDRESSES].reverse()));
+});
+
+test("runtime rejects nonzero funding admission facts before publication", async (t) => {
+  for (const [name, overrides] of [
+    ["balance", { balances: [1n, 0n, 0n, 0n] }],
+    ["nonce", { nonces: [1n, 0n, 0n, 0n] }],
+  ]) {
+    const rootPath = await mkdtemp(join(tmpdir(), `coordinator-runtime-funding-${name}-`));
+    await chmod(rootPath, 0o700);
+    const before = await lstat(rootPath);
+    const handle = await open(rootPath, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0));
+    t.after(() => handle.close());
+    t.after(() => rm(rootPath, { recursive: true, force: true }));
+    const config = Object.freeze({
+      clockchainToken: "token",
+      operatorIdentity: Object.freeze({ keyId: "clockchain-demo-2026", privateKeyPem: "private", publicKey: "public" }),
+      operatorPublicKey: "public",
+      releaseRoot: Object.freeze({ before, handle, path: rootPath }),
+      repositorySha: "a".repeat(40),
+      relayUrl: "https://127.0.0.1:8443",
+      rpcUrl: "https://127.0.0.1/",
+      tlsCertificatePem: "certificate",
+      tlsFingerprint: "b".repeat(64),
+    });
+    const admission = fundingAdmissionClient(overrides);
+    const runtime = createCoordinatorRuntimeDependencies(config, {
+      createClient: () => ({}),
+      createFundingAdmissionClient: () => admission.client,
+      createTransport: () => ({}),
+    });
+
+    await assert.rejects(
+      runtime.runDependencies({ releaseId: "release-a", repositorySha: config.repositorySha, sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }).displayAddresses(FUNDING_ADDRESSES),
+    );
+    await assert.rejects(readFile(join(rootPath, "funding-addresses.json")), { code: "ENOENT" });
+  }
 });
 
 test("runtime rejects stale funding address temporaries before publishing", async (t) => {
@@ -273,6 +347,7 @@ test("runtime rejects funding address publication when the destination appears a
   let raced = false;
   const runtime = createCoordinatorRuntimeDependencies(config, {
     createClient: () => ({}),
+    createFundingAdmissionClient: () => fundingAdmissionClient().client,
     createTransport: () => ({}),
     fundingFileSystem: {
       link: async (temporary, path) => {

@@ -32,6 +32,7 @@ import { watchBilateralSession } from "../../../scripts/watch-bilateral-session.
 import { validatePublishedBilateralVerdict as validateVerdictPublication } from "../verdict.mjs";
 import { createMcpClient } from "../../mcp.mjs";
 import { assertSecretFree } from "../../redact.mjs";
+import { validateFundingRecord } from "../funding/record.mjs";
 
 export const COORDINATOR_CLI_FLAGS = Object.freeze([
   "--clockchain-token-file", "--operator-key-id", "--operator-private-key",
@@ -62,9 +63,48 @@ const privateFile = (s) => s.isFile() && !s.isSymbolicLink() && s.uid === proces
 const publicFile = (s) => s.isFile() && !s.isSymbolicLink() && s.nlink === 1;
 const privateRoot = (s) => s.isDirectory() && !s.isSymbolicLink() && s.uid === process.getuid() && (s.mode & 0o777) === 0o700;
 const relayPackageBytes = (value) => Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(value)), "utf8");
-function fundingAddressBytes(addresses) {
+function assertFundingAddresses(addresses) {
   if (!Array.isArray(addresses) || addresses.length !== 4 || new Set(addresses).size !== 4 || addresses.some((address) => !ADDRESS.test(address))) fail();
-  return Buffer.from(`${JSON.stringify({ addresses, paymentMoved: false, schema: FUNDING_ADDRESSES_SCHEMA })}\n`, "utf8");
+}
+function fundingAddressBytes(record) {
+  return Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+}
+function validateExistingFundingRecord(bytes, addresses) {
+  let parsed;
+  try { parsed = JSON.parse(bytes.toString("utf8")); } catch { fail(); }
+  let record;
+  try { record = validateFundingRecord(parsed); } catch { fail(); }
+  if (JSON.stringify(record) !== JSON.stringify(parsed) || JSON.stringify(record.addresses) !== JSON.stringify(addresses) || !bytes.equals(fundingAddressBytes(record))) fail();
+  return record;
+}
+function admissionQuantity(value) {
+  if (typeof value === "bigint" && value >= 0n) return value;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+  if (typeof value === "string" && /^(?:0|[1-9][0-9]*)$/.test(value)) return BigInt(value);
+  fail();
+}
+function createFundingAdmissionInspector({ createClient = createPublicClient, rpcUrl }) {
+  if (typeof createClient !== "function" || typeof rpcUrl !== "string") fail();
+  const client = createClient({ chain: sepolia, transport: http(rpcUrl, { retryCount: 0, timeout: 15_000 }) });
+  if (!client || typeof client.getBalance !== "function" || typeof client.getTransactionCount !== "function") fail();
+  return async (addresses) => {
+    assertFundingAddresses(addresses);
+    const participants = [];
+    for (const address of addresses) {
+      const [balanceWei, nonce] = await Promise.all([
+        client.getBalance({ address }),
+        client.getTransactionCount({ address, blockTag: "latest" }),
+      ]);
+      if (admissionQuantity(balanceWei) !== 0n || admissionQuantity(nonce) !== 0n) fail();
+      participants.push({ address, balanceWei: "0", nonce: "0" });
+    }
+    return Object.freeze({
+      addresses: Object.freeze([...addresses]),
+      paymentMoved: false,
+      participants: Object.freeze(participants.map(Object.freeze)),
+      schema: FUNDING_ADDRESSES_SCHEMA,
+    });
+  };
 }
 function tokenText(bytes) { const text = bytes.toString("utf8"); const value = text.endsWith("\n") ? text.slice(0, -1) : text; if (!/^[!-~]{1,4096}$/.test(value) || value.includes("\r") || value.includes("\n")) fail(); return value; }
 function abortableSleep(delay, signal) {
@@ -94,19 +134,21 @@ async function writePrivateWithFileSystem(path, bytes, fs) {
   const handle = await fs.open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
   try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
 }
-async function publishFundingAddresses(root, addresses, fs = fundingFileSystem()) {
-  const bytes = fundingAddressBytes(addresses);
+async function publishFundingAddresses(root, addresses, { fs = fundingFileSystem(), inspectAdmission } = {}) {
+  assertFundingAddresses(addresses);
   const path = join(root.path, FUNDING_ADDRESSES_FILE_NAME);
   await assertRoot(root, fs);
   const names = await fs.readdir(root.path);
   if (!Array.isArray(names) || names.some((name) => typeof name !== "string" || name.startsWith(".funding-addresses") && name.endsWith(".tmp"))) fail();
   let existing = null;
-  try { existing = await readStable(path, bytes.length + 1, privateFile, fs); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  try { existing = await readStable(path, 4096, privateFile, fs); } catch (error) { if (error?.code !== "ENOENT") throw error; }
   if (existing !== null) {
-    if (!existing.equals(bytes)) fail();
+    validateExistingFundingRecord(existing, addresses);
     await assertRoot(root, fs);
-    return bytes;
+    return existing;
   }
+  if (typeof inspectAdmission !== "function") fail();
+  const bytes = fundingAddressBytes(validateFundingRecord(await inspectAdmission(addresses)));
   const temporary = join(root.path, `.${FUNDING_ADDRESSES_FILE_NAME}.${randomUUID()}.tmp`);
   try {
     await writePrivateWithFileSystem(temporary, bytes, fs);
@@ -457,7 +499,7 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
       };
       const runtimeDependencies = Object.freeze({
         appendOperatorEvent: client.appendOperatorEvent, appendVerifiedEvent: client.appendVerifiedEvent, createVerifiedEvent: client.createVerifiedEvent, getArtifact: client.getArtifact, putArtifact: client.putArtifact, readEnrollmentSet: client.readEnrollmentSet, readEvents: client.readEvents, readSessionView: client.readSessionView, readVerifierPublication: client.readVerifierPublication,
-        readState: state.readState, writeState: state.writeState, resolveOperatorPublicKey: async () => config.operatorPublicKey, waitForFunding: dependencies.waitForFunding ?? createProductionFundingWaiter({ now, rpcUrl: config.rpcUrl, sleeper }), now, sleeper, displayAddresses: async (addresses) => { if (displayedFunding) fail(); displayedFunding = true; const bytes = await publishFundingAddresses(config.releaseRoot, addresses, fundingFileSystem(dependencies.fundingFileSystem)); (dependencies.output ?? ((line) => process.stdout.write(line)))(bytes.toString("utf8")); }, createTransport: () => transport,
+        readState: state.readState, writeState: state.writeState, resolveOperatorPublicKey: async () => config.operatorPublicKey, waitForFunding: dependencies.waitForFunding ?? createProductionFundingWaiter({ now, rpcUrl: config.rpcUrl, sleeper }), now, sleeper, displayAddresses: async (addresses) => { if (displayedFunding) fail(); displayedFunding = true; const bytes = await publishFundingAddresses(config.releaseRoot, addresses, { fs: fundingFileSystem(dependencies.fundingFileSystem), inspectAdmission: (publishedAddresses) => createFundingAdmissionInspector({ createClient: dependencies.createFundingAdmissionClient, rpcUrl: config.rpcUrl })(publishedAddresses) }); (dependencies.output ?? ((line) => process.stdout.write(line)))(bytes.toString("utf8")); }, createTransport: () => transport,
         launcher: async () => fail(), verifyMarkerCompleteVerdict: async () => fail(),
         // The coordinator owns lifecycle ordering; this runtime only validates a
         // bounded artifact snapshot and observes authenticated relay effects.
