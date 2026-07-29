@@ -325,6 +325,8 @@ function supervisorLauncher(value, role, owners, inspector) {
         const barrierRoot = dirname(value.stateRoot);
         const readyPath = join(barrierRoot, `.preflight-${role}-ready.json`);
         const peerPath = join(barrierRoot, `.preflight-${role === "payer" ? "payee" : "payer"}-ready.json`);
+        const payerWrite = preflightWriteMarker(barrierRoot, "payer");
+        const payeeWrite = preflightWriteMarker(barrierRoot, "payee");
         await writeOrReuseExact(readyPath, { role, schema: ROLE_SCHEMA, stage: "preflight-client-ready" });
         const peerDeadline = Date.now() + BARRIER_DEADLINE_MS;
         let peerReady = false;
@@ -341,8 +343,27 @@ function supervisorLauncher(value, role, owners, inspector) {
         }
         if (!peerReady) fail();
         let now = value.clockMs;
+        let firstPeerRead = true;
+        const rawPreflightClient = createFakeBilateralClockchainHttpClient(value.preflightFake);
+        const preflightClient = Object.freeze({
+          ...rawPreflightClient,
+          logAction: async (input) => {
+            if (role === "payee") await waitForExactPrivateMarker(payerWrite.path, payerWrite.value);
+            const result = await rawPreflightClient.logAction(input);
+            const marker = role === "payer" ? payerWrite : payeeWrite;
+            await writeOrReuseExact(marker.path, marker.value);
+            return result;
+          },
+          searchActions: async (input) => {
+            if (role === "payer" && firstPeerRead) {
+              firstPeerRead = false;
+              await waitForExactPrivateMarker(payeeWrite.path, payeeWrite.value);
+            }
+            return rawPreflightClient.searchActions(input);
+          },
+        });
         await preflightMain(args, {
-          createClient: () => createFakeBilateralClockchainHttpClient(value.preflightFake),
+          createClient: () => preflightClient,
           now: () => ++now,
           repositoryPublicKeyResolver: async ({ repositoryPath, repositorySha }) => {
             const key = /^docs\/operator-keys\/([a-z0-9][a-z0-9-]{0,63})\.pub$/.exec(repositoryPath);
@@ -354,8 +375,8 @@ function supervisorLauncher(value, role, owners, inspector) {
             if (state.head !== repositorySha || state.clean !== true) fail();
             return { commitSha: repositorySha, headSha: repositorySha, worktreeStatus: "" };
           },
-          sleeper: async () => {
-            now += 20_000;
+          sleeper: async (delay) => {
+            now += delay;
             await sleep(20);
           },
           windowMs: 120_000,
@@ -738,6 +759,30 @@ async function waitForRelease(path) {
     await sleep(20);
   }
   fail();
+}
+
+async function waitForExactPrivateMarker(path, expected) {
+  const bytes = canonicalJson(expected);
+  const deadline = Date.now() + BARRIER_DEADLINE_MS;
+  while (Date.now() < deadline) {
+    try {
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || (info.mode & 0o777) !== 0o600) fail();
+      if (await readFile(path, "utf8") !== bytes) fail();
+      return;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await sleep(20);
+  }
+  fail();
+}
+
+function preflightWriteMarker(root, role) {
+  return Object.freeze({
+    path: join(root, `.preflight-${role}-write-complete.json`),
+    value: Object.freeze({ role, schema: ROLE_SCHEMA, stage: "preflight-write-complete" }),
+  });
 }
 
 function validLogs(value) {

@@ -227,6 +227,22 @@ function pinnedGet({ ca, fingerprint, path, port }) { return new Promise((resolv
 function sha256(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
 function triple(transition) { return { anchoredHash: transition.onChain.anchoredHash, blockHeight: transition.onChain.blockHeight, kind: transition.message.kind, ledgerId: transition.onChain.ledgerId }; }
 function assertPaymentNeverMoved(value) { if (Array.isArray(value)) return value.forEach(assertPaymentNeverMoved); if (value !== null && typeof value === "object") { for (const [key, child] of Object.entries(value)) { if (key === "paymentMoved") assert.equal(child, false); assertPaymentNeverMoved(child); } } }
+async function assertOrderedPreflightWrites(session, preflightSnapshot) {
+  const [payerReport, payeeReport] = await Promise.all([
+    readFile(join(session.roleRoots.payer, "preflight", "participant-report.json"), "utf8"),
+    readFile(join(session.roleRoots.payee, "preflight", "participant-report.json"), "utf8"),
+  ]).then((reports) => reports.map((report) => JSON.parse(report)));
+  const writes = preflightSnapshot.callSequence.filter(({ name }) => name === "logAction").map(({ args }) => args);
+  assert.deepEqual(
+    writes.map(({ asset_reference_id }) => asset_reference_id),
+    [payerReport.report.write.key, payeeReport.report.write.key],
+  );
+  assert.deepEqual(
+    writes.map(({ asset_hash }) => asset_hash),
+    [payerReport.report.write.digest, payeeReport.report.write.digest],
+  );
+  assert.equal(writes.length, 2);
+}
 async function assertPrivateFile(path, { canonical = false, pretty = false } = {}) { const info = await lstat(path); assert.equal(info.isFile(), true); assert.equal(info.isSymbolicLink(), false); assert.equal(info.nlink, 1); assert.equal(info.mode & 0o777, 0o600); const bytes = await readFile(path); const text = bytes.toString("utf8"); if (canonical) assert.equal(text, canonicalJson(JSON.parse(text))); if (pretty) assert.equal(text, `${JSON.stringify(JSON.parse(text), null, 2)}\n`); return bytes; }
 async function assertRoot(path) { const info = await lstat(path); assert.equal(info.isDirectory(), true); assert.equal(info.isSymbolicLink(), false); assert.equal(info.mode & 0o777, 0o700); }
 async function assertCompletion(directory, marker, json, markdown) { const bytes = await assertPrivateFile(join(directory, marker)); const text = bytes.toString("utf8"); assert.equal(text, `${canonicalJson(JSON.parse(text))}\n`); const value = JSON.parse(text); assert.equal(value.jsonSha256, sha256(await readFile(join(directory, json)))); assert.equal(value.markdownSha256, sha256(await readFile(join(directory, markdown)))); }
@@ -585,6 +601,7 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   const preflightSnapshot = JSON.parse(await readFile(session.preflightFakeState, "utf8"));
   assert.equal(preflightSnapshot.writeCount, 2);
   assert.equal(preflightSnapshot.paymentMoved, false);
+  await assertOrderedPreflightWrites(session, preflightSnapshot);
   assert.equal(payerResult.transitions.length, 3);
   assert.ok(payeeResult.transitions.length >= 2);
   assert.deepEqual(payeeResult.transitions.slice(0, 2), payerResult.transitions.slice(0, 2));
@@ -1001,10 +1018,22 @@ test("relay crash before verifier fails closed without spawning a verifier", { c
   const coordinator = session.startCoordinator();
   t.after(() => stopGroup(coordinator.child));
 
-  await waitForPrivateMarker(session.barrier.ready, {
-    schema: COORDINATOR_SCHEMA,
-    stage: "roles-complete",
-  }, coordinator);
+  try {
+    await waitForPrivateMarker(session.barrier.ready, {
+      schema: COORDINATOR_SCHEMA,
+      stage: "roles-complete",
+    }, coordinator);
+  } catch (error) {
+    const phase = await readFile(`${session.report}.phase`, "utf8").catch(() => "");
+    const roleLogs = await Promise.all(["payer", "payee"].flatMap((role) => [
+      readFile(session.logs[role].stdout, "utf8").catch(() => ""),
+      readFile(session.logs[role].stderr, "utf8").catch(() => ""),
+    ]));
+    throw new Error(
+      `relay-crash-before-verifier: ${error.message}\nphase=${JSON.stringify(phase.trim())}`
+      + `\ncoordinator=${JSON.stringify(coordinator.output())}\nroles=${roleLogs.join("\\n")}`,
+    );
+  }
   const beforeCrash = JSON.parse(await readFile(session.fakeState, "utf8"));
   const payerResult = JSON.parse(await readFile(join(session.outputs.payer, "party-result.json"), "utf8"));
   const protocolAnchors = beforeCrash.calls.logAction.filter(({ asset_reference_id }) => ["proposal", "acceptance", "acknowledgment"].map((slot) => sessionKey(payerResult.sessionDigest, slot)).includes(asset_reference_id));
