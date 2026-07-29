@@ -1352,6 +1352,63 @@ test("refreshes only complete authenticated event snapshots", async () => {
   assert.equal(result.view.state, "BOOTSTRAPPING");
 });
 
+test("waits for peer enrollment readiness before the authoritative enrollment set", async () => {
+  const fixture = replayFixture();
+  const parsedEnrollmentSet = parseCoordinationEnrollmentSet(fixture.set);
+  const calls = [];
+  const status = [];
+  let enrollments = 0;
+  const result = await runSupervisor({
+    client: {
+      async readEnrollmentReadiness(value) {
+        calls.push(["readiness", value]);
+        return {
+          paymentMoved: false,
+          ready: calls.length > 1,
+          releaseId: fixture.release,
+          repositorySha: fixture.repo,
+          schema: "clockchain.bilateral-enrollment-readiness/v1",
+          sessionId: fixture.session,
+        };
+      },
+      async readEnrollmentSet() {
+        calls.push(["enrollment-set"]);
+        enrollments += 1;
+        return parsedEnrollmentSet;
+      },
+      async readEvents(value) {
+        calls.push(["events", value]);
+        return [];
+      },
+    },
+    dependencies: {
+      shouldContinue() { return false; },
+      writeStatus(value) { status.push(value); },
+      verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
+    },
+    localState: {
+      operatorPublicKey: raw(fixture.operator),
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      role: "payer",
+      sessionId: fixture.session,
+    },
+  });
+  assert.equal(enrollments, 1);
+  assert.deepEqual(calls.map(([kind]) => kind), [
+    "readiness",
+    "readiness",
+    "enrollment-set",
+    "events",
+  ]);
+  assert.deepEqual(calls[0][1], { waitMs: 30000 });
+  assert.deepEqual(status, [
+    { paymentMoved: false, role: "payer", status: "WAITING_FOR_PEER" },
+    { paymentMoved: false, role: "payer", status: "PEER_READY" },
+  ]);
+  assert.equal(result.view.state, "BOOTSTRAPPING");
+});
+
 test("drives the authenticated startup through a token commitment without replacing its checkpoint", async () => {
   const fixture = replayFixture();
   const payer = generateKeyPairSync("ed25519");

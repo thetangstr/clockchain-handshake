@@ -39,6 +39,7 @@ import {
   ARTIFACT_POLICIES,
 } from "../src/bilateral/coordination/artifact.mjs";
 import {
+  ENROLLMENT_READINESS_SCHEMA,
   createRelayService,
 } from "../src/bilateral/coordination/relay.mjs";
 import {
@@ -101,6 +102,14 @@ const MAIN_DEPENDENCY_KEYS = Object.freeze([
 const CHECKOUT_RESULT_KEYS = Object.freeze([
   "clean",
   "repositorySha",
+]);
+const ENROLLMENT_READINESS_KEYS = Object.freeze([
+  "paymentMoved",
+  "ready",
+  "releaseId",
+  "repositorySha",
+  "schema",
+  "sessionId",
 ]);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const REPOSITORY_SHA_PATTERN = /^[0-9a-f]{40}$/;
@@ -211,6 +220,34 @@ function stableBytes(value) {
   } catch {
     invalid();
   }
+}
+
+function enrollmentReadinessResponse(value, sessionId, expectedRepositorySha) {
+  const data = readExactData(value, ENROLLMENT_READINESS_KEYS);
+  if (
+    data.schema !== ENROLLMENT_READINESS_SCHEMA ||
+    data.paymentMoved !== false ||
+    typeof data.ready !== "boolean" ||
+    typeof data.releaseId !== "string" ||
+    !REPOSITORY_SHA_PATTERN.test(data.repositorySha) ||
+    (
+      expectedRepositorySha !== null &&
+      data.repositorySha !== expectedRepositorySha
+    ) ||
+    data.sessionId !== sessionId
+  ) {
+    invalid();
+  }
+  const response = {
+    paymentMoved: false,
+    ready: data.ready,
+    releaseId: data.releaseId,
+    repositorySha: data.repositorySha,
+    schema: data.schema,
+    sessionId: data.sessionId,
+  };
+  assertSecretFree(response);
+  return Object.freeze(response);
 }
 
 export function relayReadinessLine(running) {
@@ -755,7 +792,7 @@ function parseRawQuery(query, allowed) {
   return result;
 }
 
-export function createRelayRequestHandler(service, host, port) {
+export function createRelayRequestHandler(service, host, port, expectedRepositorySha = null) {
   const expectedHost =
     isIP(host) === 6
       ? `[${host}]:${port}`
@@ -900,9 +937,39 @@ export function createRelayRequestHandler(service, host, port) {
       const eventsMatch = path.match(
         /^\/v1\/sessions\/([0-9a-f-]{36})\/events$/,
       );
+      const enrollmentReadinessMatch = path.match(
+        /^\/v1\/sessions\/([0-9a-f-]{36})\/enrollment-readiness$/,
+      );
       const enrollmentsMatch = path.match(
         /^\/v1\/sessions\/([0-9a-f-]{36})\/enrollments$/,
       );
+      if (
+        request.method === "GET" &&
+        enrollmentReadinessMatch !== null
+      ) {
+        const queryValues = parseRawQuery(query, ["waitMs"]);
+        const waitText = queryValues.get("waitMs");
+        if (
+          !/^(?:0|[1-9][0-9]*)$/.test(waitText) ||
+          !UUID_PATTERN.test(enrollmentReadinessMatch[1])
+        ) {
+          throw new Error();
+        }
+        sendJson(
+          response,
+          200,
+          enrollmentReadinessResponse(
+            await service.readEnrollmentReadiness({
+              sessionId: enrollmentReadinessMatch[1],
+              signal: requestController.signal,
+              waitMs: Number(waitText),
+            }),
+            enrollmentReadinessMatch[1],
+            expectedRepositorySha,
+          ),
+        );
+        return;
+      }
       if (
         request.method === "GET" &&
         enrollmentsMatch !== null
@@ -1129,7 +1196,7 @@ export async function main(arguments_, dependencies = {}) {
     const port = bound.port;
     server.on(
       "request",
-      createRelayRequestHandler(service, options.host, port),
+      createRelayRequestHandler(service, options.host, port, options.repositorySha),
     );
     let closePromise;
     const running = Object.freeze({

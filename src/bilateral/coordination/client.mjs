@@ -159,6 +159,21 @@ const READ_EVENTS_KEYS_WITH_SIGNAL = Object.freeze([
   ...READ_EVENTS_KEYS,
   "signal",
 ]);
+const READ_ENROLLMENT_READINESS_KEYS = Object.freeze([
+  "waitMs",
+]);
+const READ_ENROLLMENT_READINESS_KEYS_WITH_SIGNAL = Object.freeze([
+  "signal",
+  "waitMs",
+]);
+const ENROLLMENT_READINESS_KEYS = Object.freeze([
+  "paymentMoved",
+  "ready",
+  "releaseId",
+  "repositorySha",
+  "schema",
+  "sessionId",
+]);
 const RECEIPT_EXPECTED_KEYS = Object.freeze([
   "capabilityDigest",
   "enrollmentDigest",
@@ -216,6 +231,8 @@ const VERIFIER_PUBLICATION_KEYS = Object.freeze([
 ]);
 const VERIFIER_PUBLICATION_SCHEMA =
   "clockchain.bilateral-verifier-publication/v1";
+const ENROLLMENT_READINESS_SCHEMA =
+  "clockchain.bilateral-enrollment-readiness/v1";
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -577,6 +594,9 @@ function validateRequestInput(value) {
     const enrollments = new RegExp(
       `^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/enrollments$`,
     ).test(data.path);
+    const enrollmentReadiness = new RegExp(
+      `^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/enrollment-readiness\\?waitMs=(?:0|[1-9][0-9]*)$`,
+    ).test(data.path);
     const verifierPublication = new RegExp(
       `^/v1/sessions/${UUID_PATTERN.source.slice(1, -1)}/verifier-publications/(?:rehearsal|stakeholder)$`,
     ).test(data.path);
@@ -590,12 +610,13 @@ function validateRequestInput(value) {
         !view &&
         !events &&
         !enrollments &&
+        !enrollmentReadiness &&
         !verifierPublication && !mandate && !paymentRequest) ||
       data.body !== null
     ) {
       invalid();
     }
-    if (events) {
+    if (events || enrollmentReadiness) {
       const waitMs = Number(
         /[?&]waitMs=([0-9]+)$/.exec(
           data.path,
@@ -1984,6 +2005,75 @@ function createCoordinationClientCore({
       }
     }
 
+    async function readEnrollmentReadiness(value) {
+      try {
+        const keys = keysWithOptionalSignal(
+          value,
+          READ_ENROLLMENT_READINESS_KEYS,
+          READ_ENROLLMENT_READINESS_KEYS_WITH_SIGNAL,
+        );
+        const inputData = readExactData(value, keys);
+        const signal =
+          inputData.signal === undefined
+            ? undefined
+            : assertSignal(inputData.signal);
+        if (
+          !Number.isSafeInteger(inputData.waitMs) ||
+          inputData.waitMs < 0 ||
+          inputData.waitMs > 30_000 ||
+          !bootstrapComplete ||
+          capability !== null ||
+          authenticatedLaunchState === null
+        ) {
+          invalid();
+        }
+        const response = await exactRequest(
+          transport,
+          {
+            body: null,
+            method: "GET",
+            path:
+              `/v1/sessions/${context.sessionId}` +
+              `/enrollment-readiness?waitMs=${inputData.waitMs}`,
+            signal,
+          },
+        );
+        const responseBytes =
+          validateInjectedResponse(
+            response,
+            "application/json",
+          );
+        const parsed = parseCanonicalJson(responseBytes);
+        const readiness = readExactData(
+          parsed,
+          ENROLLMENT_READINESS_KEYS,
+        );
+        if (
+          readiness.schema !== ENROLLMENT_READINESS_SCHEMA ||
+          readiness.paymentMoved !== false ||
+          typeof readiness.ready !== "boolean" ||
+          readiness.releaseId !== context.releaseId ||
+          readiness.repositorySha !== context.repositorySha ||
+          readiness.sessionId !== context.sessionId
+        ) {
+          invalid();
+        }
+        return deepFreeze({
+          paymentMoved: false,
+          ready: readiness.ready,
+          releaseId: readiness.releaseId,
+          repositorySha: readiness.repositorySha,
+          schema: readiness.schema,
+          sessionId: readiness.sessionId,
+        });
+      } catch (error) {
+        if (error instanceof CoordinationClientError) {
+          throw error;
+        }
+        invalid();
+      }
+    }
+
     async function readSessionView(value) {
       try {
         const inputData =
@@ -2133,6 +2223,7 @@ function createCoordinationClientCore({
       getArtifact,
       publishPayerMandate,
       putArtifact,
+      readEnrollmentReadiness,
       readEnrollmentSet,
       readPayerMandate,
       readPaymentRequest,

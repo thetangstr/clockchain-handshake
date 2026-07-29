@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createGitInspector, createPrivateRoot, createPrivateSupervisorStateStore, createProductionSupervisorDependencies, createSupervisorLauncher, createVerifierPublicationVerifier, scanSupervisorCheckpointDirectories } from "../src/bilateral/coordination/supervisor-runtime.mjs";
+import { createGitInspector, createPrivateRoot, createPrivateSupervisorStateStore, createProductionSupervisorDependencies, createSupervisorLauncher, createSupervisorStatusLine, createVerifierPublicationVerifier, scanSupervisorCheckpointDirectories } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { verifyRepositoryState } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { ensureToken } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { ensureInvitations } from "../src/bilateral/coordination/supervisor-runtime.mjs";
@@ -170,6 +170,33 @@ test("reads verifier publication through the context-bound client route", async 
     return { paymentMoved: false, publicationDigest: context.event.artifactDigest, releaseId: context.releaseId, repositorySha: context.repositorySha, schema: "clockchain.bilateral-verifier-publication/v1", sessionId: context.sessionId, status: "VERIFICATION_PASSED", subjectRun: "rehearsal" };
   } }));
   assert.deepEqual(request, { subjectRun: "rehearsal" });
+});
+
+test("projects supervisor status lines through an exact secret-free allowlist", () => {
+  assert.equal(
+    createSupervisorStatusLine({ paymentMoved: false, privateKeyPem: "secret", role: "payer", status: "WAITING_FOR_PEER" }),
+    '{"paymentMoved":false,"role":"payer","status":"WAITING_FOR_PEER"}\n',
+  );
+  assert.equal(
+    createSupervisorStatusLine({ code: "COORDINATION_SUPERVISOR_FAILED", message: "/private/path", paymentMoved: false, stack: "secret" }),
+    '{"code":"COORDINATION_SUPERVISOR_FAILED","paymentMoved":false}\n',
+  );
+  assert.throws(() => createSupervisorStatusLine({ paymentMoved: true, role: "payer", status: "WAITING_FOR_PEER" }));
+});
+
+test("supervisor CLI emits only the generic coordination failure line", () => {
+  assert.throws(
+    () => execFileSync(process.execPath, ["bin/handshake-supervisor.mjs"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    }),
+    (error) => {
+      assert.equal(error.status, 1);
+      assert.equal(error.stdout, '{"code":"COORDINATION_SUPERVISOR_FAILED","paymentMoved":false}\n');
+      assert.equal(error.stderr, "");
+      return true;
+    },
+  );
 });
 
 test("production supervisor verifies valid enrollment receipts and binds each descriptor to its derived run session", async (t) => {

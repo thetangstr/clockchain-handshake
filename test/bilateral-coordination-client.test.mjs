@@ -2475,6 +2475,7 @@ test("gates enrollment-set authority until bootstrap and returns one exact verif
       "getArtifact",
       "publishPayerMandate",
       "putArtifact",
+      "readEnrollmentReadiness",
       "readEnrollmentSet",
       "readEvents",
       "readPayerMandate",
@@ -2537,6 +2538,52 @@ test("resumed clients are immediately ready to read the exact authenticated enro
         },
       ],
       role,
+    );
+  }
+});
+
+test("role clients read a secret-free advisory enrollment readiness snapshot", async (t) => {
+  const requests = [];
+  const readiness = {
+    paymentMoved: false,
+    ready: true,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.bilateral-enrollment-readiness/v1",
+    sessionId: SESSION_ID,
+  };
+  const fixture = await resumedClientFixture(t, async (input) => {
+    requests.push(input);
+    return injectedResponse({ body: stableBytes(readiness) });
+  });
+  const controller = new AbortController();
+  const snapshot = await fixture.client.readEnrollmentReadiness({
+    signal: controller.signal,
+    waitMs: 250,
+  });
+  assert.deepEqual(snapshot, readiness);
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.deepEqual(requests.map((request) => ({ ...request })), [
+    {
+      body: null,
+      method: "GET",
+      path: `/v1/sessions/${SESSION_ID}/enrollment-readiness?waitMs=250`,
+      signal: controller.signal,
+    },
+  ]);
+  for (const [label, body] of [
+    ["ready missing", { ...readiness, ready: undefined }],
+    ["payment moved", { ...readiness, paymentMoved: true }],
+    ["wrong schema", { ...readiness, schema: "clockchain.bilateral-enrollment-readiness/v2" }],
+    ["extra key", { ...readiness, note: "secret" }],
+  ]) {
+    const hostile = await resumedClientFixture(t, async () =>
+      injectedResponse({ body: stableBytes(body) }),
+    );
+    await assert.rejects(
+      hostile.client.readEnrollmentReadiness({ waitMs: 0 }),
+      { code: "COORDINATION_CLIENT_INVALID" },
+      label,
     );
   }
 });
@@ -2838,6 +2885,7 @@ test("bootstraps with one raw capability, retries only identical bytes, verifies
       "getArtifact",
       "publishPayerMandate",
       "putArtifact",
+      "readEnrollmentReadiness",
       "readEnrollmentSet",
       "readEvents",
       "readPayerMandate",

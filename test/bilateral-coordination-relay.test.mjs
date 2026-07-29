@@ -148,6 +148,48 @@ test("routes only exact verified-event posts to the verified service seam", asyn
   assert.equal(rejected.status, 400);
 });
 
+test("routes only exact enrollment-readiness reads to the advisory service seam", async () => {
+  const calls = [];
+  const ready = {
+    paymentMoved: false,
+    ready: false,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.bilateral-enrollment-readiness/v1",
+    sessionId: SESSION_ID,
+  };
+  const handler = createRelayRequestHandler({
+    appendEvent: async () => ({}),
+    appendVerifiedEvent: async () => ({}),
+    bootstrap: async () => ({}),
+    getArtifact: async () => Buffer.alloc(0),
+    putArtifact: async () => ({}),
+    readEnrollmentReadiness: async (input) => {
+      calls.push(input);
+      assert.equal(input.signal?.aborted, false);
+      return ready;
+    },
+    readEnrollmentSet: async () => Buffer.alloc(0),
+    readEvents: async () => [],
+    readSessionView: async () => ({}),
+  }, "127.0.0.1", 8443);
+  const url = `/v1/sessions/${SESSION_ID}/enrollment-readiness?waitMs=250`;
+  const result = await invokeRelayHandler(handler, { method: "GET", url });
+  assert.equal(result.status, 200);
+  assert.deepEqual(JSON.parse(result.body), ready);
+  assert.deepEqual(calls.map(({ sessionId, waitMs }) => ({ sessionId, waitMs })), [
+    { sessionId: SESSION_ID, waitMs: 250 },
+  ]);
+  for (const rejected of [
+    `/v1/sessions/${SESSION_ID}/enrollment-readiness`,
+    `/v1/sessions/${SESSION_ID}/enrollment-readiness?waitMs=-1`,
+    `/v1/sessions/${SESSION_ID}/enrollment-readiness?waitMs=1&after=${"a".repeat(64)}`,
+    `/v1/sessions/${SESSION_ID}/enrollment-readiness/`,
+  ]) {
+    assert.equal((await invokeRelayHandler(handler, { method: "GET", url: rejected })).status, 400);
+  }
+});
+
 test("routes the exact payer-owned inbox endpoints with canonical bytes", async () => {
   const calls = [];
   const mandate = Buffer.from('{"mandate":true}', "utf8");

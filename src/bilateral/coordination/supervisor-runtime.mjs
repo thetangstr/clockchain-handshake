@@ -338,6 +338,15 @@ function fundingVerifier(sepoliaRpc) {
   };
 }
 
+export function createSupervisorStatusLine(value) {
+  if (value?.code === "COORDINATION_SUPERVISOR_FAILED") {
+    if (!Object.hasOwn(value, "paymentMoved") || value.paymentMoved !== false) fail();
+    return `${canonicalJson({ code: "COORDINATION_SUPERVISOR_FAILED", paymentMoved: false })}\n`;
+  }
+  if (!value || value.paymentMoved !== false || !["payer", "payee"].includes(value.role) || !["WAITING_FOR_PEER", "PEER_READY"].includes(value.status)) fail();
+  return `${canonicalJson({ paymentMoved: false, role: value.role, status: value.status })}\n`;
+}
+
 export function createVerifierPublicationVerifier() {
   return async ({ event, releaseId, repositorySha, sessionId }, client) => {
     if (typeof client?.readVerifierPublication !== "function" || !event || event.kind !== "VERIFICATION_PASSED" || event.role !== "operator" || typeof event.artifactDigest !== "string") fail();
@@ -547,6 +556,7 @@ export async function createProductionSupervisorDependencies({ launchManifestPat
     verifyEnrollmentSet: enrollmentVerifier({ tlsCertificatePem }),
     verifyFundingInputs: fundingVerifier(sepoliaRpc ?? createProductionSepoliaRpc({ createClient: createSepoliaClient })),
     verifyVerifierPublication: createVerifierPublicationVerifier(),
+    writeStatus(value) { process.stdout.write(createSupervisorStatusLine(value)); },
     launcher: createSupervisorLauncher(),
     async writeArtifactFile({ bytes, path }) {
       fixedArtifactPath(stateRoot, path);

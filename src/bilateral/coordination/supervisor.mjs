@@ -29,12 +29,17 @@ const FULL_CHECKPOINT_PHASES = new Set(["BOOTSTRAPPED_ACTIVE", "ENROLLMENT_CONFI
 const DURABLE_CHECKPOINT_KEYS = new Set(["activeLaunchState", "authenticatedEvents", "childJournal", "coordinationIdentity", "descriptorJournal", "enrollmentBase64", "enrollmentSet", "events", "eventDigest", "failureSummaryDigest", "intentJournal", "invitations", "operatorPublicKey", "paymentMoved", "phase", "preflight", "processedEventDigests", "receipt", "recovery", "rehearsal", "releaseId", "repositorySha", "role", "schema", "senderState", "sessionId", "stateRoot", "stakeholder", "tokenCommitment", "tokenPath", "view"]);
 const CHILD_JOURNAL_PHASES = new Set(["BEFORE_CHILD", "CHILD_COMPLETE", "ARTIFACT_STORED", "EVENT_APPENDED", "TRANSITION_COMPLETE"]);
 const TOKEN_BOUND_PHASES = new Set(["TOKEN_READY", "DESCRIPTOR_WRITING", "DESCRIPTOR_ACCEPTED", "BEFORE_CHILD", "CHILD_COMPLETE", "ARTIFACT_STORED", "EVENT_APPENDED", "RECOVERY_REQUIRED", "TRANSITION_COMPLETE"]);
+const ENROLLMENT_READINESS_SCHEMA = "clockchain.bilateral-enrollment-readiness/v1";
 
 function invalid() { throw new Error("Coordination supervisor operation failed safely."); }
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const same = (left, right) => isDeepStrictEqual(left, right);
 function exact(value, keys) { return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key)); }
 function dataExact(value, keys) { return exact(value, keys) && keys.every((key) => { const descriptor = Object.getOwnPropertyDescriptor(value, key); return descriptor?.enumerable === true && Object.hasOwn(descriptor, "value"); }); }
+function assertEnrollmentReadiness(value, localState) {
+  if (!dataExact(value, ["paymentMoved", "ready", "releaseId", "repositorySha", "schema", "sessionId"]) || value.schema !== ENROLLMENT_READINESS_SCHEMA || value.paymentMoved !== false || typeof value.ready !== "boolean" || value.releaseId !== localState.releaseId || value.repositorySha !== localState.repositorySha || value.sessionId !== localState.sessionId) invalid();
+  return value.ready;
+}
 function publicState({ activeLaunchState, coordinationIdentity, enrollmentBase64, invitations, phase, preflight, receipt, rehearsal, stateRoot, stakeholder, ...base }) { return Object.freeze({ ...base, activeLaunchState, phase, receipt }); }
 function safePrivateRoot(stateRoot) {
   if (typeof stateRoot !== "string" || !/^\/(?:[^/]+\/)*[^/]+$/.test(stateRoot) || stateRoot.includes("/../") || stateRoot.endsWith("/..")) invalid();
@@ -647,6 +652,24 @@ export async function runSupervisor(input) {
     const { client, dependencies = {} } = input;
     let localState = input.localState;
     if (!localState || typeof client.readEnrollmentSet !== "function" || typeof client.readEvents !== "function" || typeof localState.operatorPublicKey !== "string" || typeof localState.releaseId !== "string" || typeof localState.repositorySha !== "string" || typeof localState.sessionId !== "string" || !["payer", "payee"].includes(localState.role)) invalid();
+    if (typeof client.readEnrollmentReadiness === "function") {
+      let waitingReported = false;
+      let readyReported = false;
+      for (;;) {
+        const ready = assertEnrollmentReadiness(await client.readEnrollmentReadiness({ waitMs: 30000 }), localState);
+        if (ready) {
+          if (!readyReported && typeof dependencies.writeStatus === "function") {
+            dependencies.writeStatus(Object.freeze({ paymentMoved: false, role: localState.role, status: "PEER_READY" }));
+            readyReported = true;
+          }
+          break;
+        }
+        if (!waitingReported && typeof dependencies.writeStatus === "function") {
+          dependencies.writeStatus(Object.freeze({ paymentMoved: false, role: localState.role, status: "WAITING_FOR_PEER" }));
+          waitingReported = true;
+        }
+      }
+    }
     let enrollmentSet = await client.readEnrollmentSet();
     const processed = new Set(localState.processedEventDigests ?? []);
     let previous = null, replay;
