@@ -27,6 +27,7 @@ import {
   waitForVerifiedCoordinatorIntentReadiness,
 } from "../src/bilateral/coordination/coordinator.mjs";
 import { createCoordinationEnvelope } from "../src/bilateral/coordination/envelope.mjs";
+import { createLaunchManifest } from "../src/bilateral/coordination/manifest.mjs";
 
 const REPOSITORY_SHA = "a".repeat(40);
 const SESSION_ID = "8f953393-86d0-4f99-9d6a-102f525fbecd";
@@ -173,6 +174,32 @@ function fundingReplay() {
 
 function stableBytes(value) {
   return Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(value)), "utf8");
+}
+
+function canonicalPrivateBytes(value) {
+  return Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(value)), "utf8");
+}
+
+async function pendingRestartInput(t, root) {
+  const tls = await tlsFixture(t);
+  const base = stateWriterInput(root, {
+    createLaunchManifest: (value) =>
+      createLaunchManifest({
+        ...value,
+        randomBytes: () =>
+          Buffer.alloc(32, value.role === "payee" ? 0x31 : 0x32),
+      }),
+    writeLaunchManifest: async () => {
+      throw new Error("interrupt");
+    },
+  });
+  const input = {
+    ...base,
+    tlsCertificatePem: tls.certificate,
+    tlsFingerprint: tls.fingerprint,
+  };
+  await assert.rejects(createCoordinatorRelease(input), /interrupt/);
+  return input;
 }
 
 async function privateRoot(t) {
@@ -772,29 +799,19 @@ test("does not write either launch manifest when the atomic capability set is re
 
 test("reuses one durable private capability registration after a lost post response", async (t) => {
   const root = await privateRoot(t);
+  const tls = await tlsFixture(t);
   const registrations = [];
   let generated = 0;
   const generatedInputs = [];
-  const input = stateWriterInput(root, {
+  const base = stateWriterInput(root, {
     createLaunchManifest: (value) => {
       generated += 1;
       generatedInputs.push(value);
-      return {
-        capabilityDigest: value.role === "payee" ? "a".repeat(64) : "b".repeat(64),
-        manifest: {
-          bootstrapCapability: value.role === "payee" ? "1".repeat(64) : "2".repeat(64),
-          expectedTlsFingerprint: value.expectedTlsFingerprint,
-          expiresAtMs: "20", issuedAtMs: "10", operatorKeyId: value.operatorKeyId,
-          ...(value.role === "payee"
-            ? { payerMcpIntakeCapability: value.payerMcpIntakeCapability }
-            : { payerMcpIntakeCapabilityDigest: value.payerMcpIntakeCapabilityDigest }),
-          protocol: "clockchain.bilateral-authorization/v1",
-          relayUrl: value.relayUrl,
-          releaseId: value.releaseId, repositorySha: value.repositorySha,
-          role: value.role, schema: "clockchain.bilateral-launch-manifest/v1", sessionId: value.sessionId,
-          tlsCertificatePem: value.tlsCertificatePem,
-        },
-      };
+      return createLaunchManifest({
+        ...value,
+        randomBytes: () =>
+          Buffer.alloc(32, value.role === "payee" ? 0x41 : 0x42),
+      });
     },
     registerCapabilitySet: async (value) => {
       registrations.push(value.registration);
@@ -802,6 +819,11 @@ test("reuses one durable private capability registration after a lost post respo
     },
     writeLaunchManifest: async () => { throw new Error("lost response after durable relay post"); },
   });
+  const input = {
+    ...base,
+    tlsCertificatePem: tls.certificate,
+    tlsFingerprint: tls.fingerprint,
+  };
   await assert.rejects(createCoordinatorRelease(input), /lost response after durable relay post/);
   assert.equal(registrations.length, 1);
   assert.match(generatedInputs[0].payerMcpIntakeCapability, /^[0-9a-f]{64}$/);
@@ -829,6 +851,54 @@ test("rejects a stale or tampered private capability registration journal", asyn
   const pending = join(root, "capability-registration.pending.json");
   await writeFile(pending, "{}", { mode: 0o600 });
   await assert.rejects(createCoordinatorRelease(input), { code: "COORDINATION_COORDINATOR_INVALID" });
+});
+
+test("rejects restart pending manifests with extra raw MCP mirror fields", async (t) => {
+  const root = await privateRoot(t);
+  const input = await pendingRestartInput(t, root);
+  const pending = join(root, "capability-registration.pending.json");
+  const journal = JSON.parse((await readFile(pending)).toString("utf8"));
+  const rawIntake = journal.entries[0].manifest.payerMcpIntakeCapability;
+  journal.entries[1].manifest.extraSecretMirror = rawIntake;
+  const payerLaunch = join(root, "payer.launch.json");
+  await writeFile(payerLaunch, canonicalPrivateBytes(journal.entries[1].manifest), { mode: 0o600 });
+  await writeFile(pending, canonicalPrivateBytes(journal), { mode: 0o600 });
+
+  await assert.rejects(
+    createCoordinatorRelease({
+      ...input,
+      dependencies: {
+        ...input.dependencies,
+        writeLaunchManifest: async () => {},
+        writeState: async () => {},
+      },
+    }),
+    { code: "COORDINATION_COORDINATOR_INVALID" },
+  );
+});
+
+test("rejects restart pending entries whose digest does not bind the bootstrap capability", async (t) => {
+  const root = await privateRoot(t);
+  const input = await pendingRestartInput(t, root);
+  const pending = join(root, "capability-registration.pending.json");
+  const journal = JSON.parse((await readFile(pending)).toString("utf8"));
+  const mismatchedDigest = sha256(Buffer.alloc(32, 0x77));
+  journal.entries[1].capabilityDigest = mismatchedDigest;
+  journal.registration.capabilities.payer.capabilityDigest = mismatchedDigest;
+  journal.receipt.capabilities.payer.capabilityDigest = mismatchedDigest;
+  await writeFile(pending, canonicalPrivateBytes(journal), { mode: 0o600 });
+
+  await assert.rejects(
+    createCoordinatorRelease({
+      ...input,
+      dependencies: {
+        ...input.dependencies,
+        writeLaunchManifest: async () => {},
+        writeState: async () => {},
+      },
+    }),
+    { code: "COORDINATION_COORDINATOR_INVALID" },
+  );
 });
 
 test("writes canonical secret-free coordinator state in a preexisting private root", async (t) => {

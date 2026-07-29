@@ -18,6 +18,7 @@ import { canonicalBytes } from "../canonical.mjs";
 
 import {
   createLaunchManifest,
+  validateLaunchManifest,
   writeLaunchManifest as writePrivateLaunchManifest,
 } from "./manifest.mjs";
 import {
@@ -712,14 +713,22 @@ function pendingContext(value) {
   return data;
 }
 
-function pendingJournal(value, expectedContext) {
+function pendingJournal(value, expectedContext, { parsedManifests = false } = {}) {
   const data = exact(value, CAPABILITY_PENDING_KEYS);
   if (data.schema !== CAPABILITY_PENDING_SCHEMA || !sameCanonical(pendingContext(data.context), expectedContext) || !Array.isArray(data.entries) || data.entries.length !== 2) invalid();
   const entries = data.entries.map((entry, index) => {
     const parsed = exact(entry, CAPABILITY_PENDING_ENTRY_KEYS);
     const role = index === 0 ? "payee" : "payer";
     if (parsed.role !== role || !SHA256_PATTERN.test(parsed.capabilityDigest) || !isPlainObject(parsed.manifest)) invalid();
-    return parsed;
+    if (!parsedManifests) return parsed;
+    let manifest;
+    try { manifest = validateLaunchManifest(parsed.manifest); } catch { invalid(); }
+    if (
+      manifest.role !== role ||
+      parsed.capabilityDigest !==
+        digest(Buffer.from(manifest.bootstrapCapability, "hex"))
+    ) invalid();
+    return deepFreeze({ ...parsed, manifest });
   });
   if (entries[0].capabilityDigest === entries[1].capabilityDigest || entries[0].manifest.bootstrapCapability === entries[1].manifest.bootstrapCapability) invalid();
   validateMcpIntakePair(entries);
@@ -1637,7 +1646,7 @@ export async function createCoordinatorRelease(input) {
     let parsed;
     try { parsed = JSON.parse(pendingBytes.toString("utf8")); } catch { invalid(); }
     if (!pendingBytes.equals(canonicalPrivateBytes(parsed, MAX_PENDING_BYTES))) invalid();
-    journal = pendingJournal(parsed, context);
+    journal = pendingJournal(parsed, context, { parsedManifests: true });
   } else {
     const sessionId = dependencies.randomUUID();
     const releaseId = `release-${digest(Buffer.from(sessionId, "utf8")).slice(0, 16)}`;
