@@ -97,6 +97,7 @@ test("rejects malformed and hostile payment requests", async () => {
     request(mandateEnvelope, { intakeDigest: "B".repeat(64) }),
     request(mandateEnvelope, { intakeDigest: "b".repeat(63) }),
     request(mandateEnvelope, { intakeRequestId: "not-a-uuid" }),
+    request(mandateEnvelope, { intakeRequestId: "22222222-3333-1444-8555-666666666666" }),
     request(mandateEnvelope, { createdAtMs: 1785294300000 }),
     request(mandateEnvelope, { requestId: "not-a-uuid" }),
     request(mandateEnvelope, { mandateDigest: "B".repeat(64) }),

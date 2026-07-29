@@ -1441,6 +1441,8 @@ export function createRelayService(input) {
         envelope: metadata.facts,
         expected: {
           amount: mandate.amount,
+          intakeDigest: mandate.intakeDigest,
+          intakeRequestId: mandate.intakeRequestId,
           invoiceReferencePrefix: mandate.invoiceReferencePrefix,
           payer: { address: identityContext.payer.address.toLowerCase(), agentId: identityContext.payer.agentId },
           payee: { address: identityContext.payee.address.toLowerCase(), agentId: identityContext.payee.agentId },
@@ -1504,6 +1506,8 @@ export function createRelayService(input) {
         mandateEnvelope: context.mandate.envelope,
         expected: {
           amount: context.mandate.envelope.mandate.amount,
+          intakeDigest: context.mandate.envelope.mandate.intakeDigest,
+          intakeRequestId: context.mandate.envelope.mandate.intakeRequestId,
           invoiceReferencePrefix: context.mandate.envelope.mandate.invoiceReferencePrefix,
           payer: { address: context.identityContext.payer.address.toLowerCase(), agentId: context.identityContext.payer.agentId },
           payee: { address: context.identityContext.payee.address.toLowerCase(), agentId: context.identityContext.payee.agentId },
@@ -1894,6 +1898,8 @@ export function createRelayService(input) {
           mandateEnvelope: context.mandate.envelope,
           expected: {
             amount: context.mandate.envelope.mandate.amount,
+            intakeDigest: context.mandate.envelope.mandate.intakeDigest,
+            intakeRequestId: context.mandate.envelope.mandate.intakeRequestId,
             invoiceReferencePrefix: context.mandate.envelope.mandate.invoiceReferencePrefix,
             payer: { address: context.identityContext.payer.address.toLowerCase(), agentId: context.identityContext.payer.agentId },
             payee: { address: context.identityContext.payee.address.toLowerCase(), agentId: context.identityContext.payee.agentId },

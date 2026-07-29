@@ -27,12 +27,12 @@ export const SUPERVISOR_COMMAND_POLICY = Object.freeze({
   TERMINAL_ABORT: "abort",
 });
 const FULL_CHECKPOINT_PHASES = new Set(["BOOTSTRAPPED_ACTIVE", "ENROLLMENT_CONFIRMING", "VERIFYING_FUNDING_INPUTS", "TOKEN_COMMITMENT_PREPARING", "TOKEN_READY", "DESCRIPTOR_WRITING", "DESCRIPTOR_ACCEPTED", "BEFORE_CHILD", "CHILD_COMPLETE", "ARTIFACT_STORED", "EVENT_APPENDED", "RECOVERY_REQUIRED", "TERMINAL_FAILURE", "EVENT_PROCESSED", "TRANSITION_COMPLETE", "ABORTED"]);
-const DURABLE_CHECKPOINT_KEYS = new Set(["activeLaunchState", "authenticatedEvents", "childJournal", "coordinationIdentity", "descriptorJournal", "enrollmentBase64", "enrollmentSet", "events", "eventDigest", "failureSummaryDigest", "intentJournal", "invitations", "operatorPublicKey", "paymentMoved", "phase", "preflight", "processedEventDigests", "receipt", "recovery", "rehearsal", "releaseId", "repositorySha", "role", "schema", "senderState", "sessionId", "stateRoot", "stakeholder", "tokenCommitment", "tokenPath", "view"]);
+const DURABLE_CHECKPOINT_KEYS = new Set(["activeLaunchState", "authenticatedEvents", "childJournal", "coordinationIdentity", "descriptorJournal", "enrollmentBase64", "enrollmentSet", "events", "eventDigest", "failureSummaryDigest", "intakeBinding", "intentJournal", "invitations", "operatorPublicKey", "paymentMoved", "phase", "preflight", "processedEventDigests", "receipt", "recovery", "rehearsal", "releaseId", "repositorySha", "role", "schema", "senderState", "sessionId", "stateRoot", "stakeholder", "tokenCommitment", "tokenPath", "view"]);
 const CHILD_JOURNAL_PHASES = new Set(["BEFORE_CHILD", "CHILD_COMPLETE", "ARTIFACT_STORED", "EVENT_APPENDED", "TRANSITION_COMPLETE"]);
 const TOKEN_BOUND_PHASES = new Set(["TOKEN_READY", "DESCRIPTOR_WRITING", "DESCRIPTOR_ACCEPTED", "BEFORE_CHILD", "CHILD_COMPLETE", "ARTIFACT_STORED", "EVENT_APPENDED", "RECOVERY_REQUIRED", "TRANSITION_COMPLETE"]);
 const ENROLLMENT_READINESS_SCHEMA = "clockchain.bilateral-enrollment-readiness/v1";
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const INTAKE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function invalid() { throw new Error("Coordination supervisor operation failed safely."); }
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
@@ -118,7 +118,7 @@ function intakeBindingFor(localState) {
     !Object.hasOwn(digest, "value") ||
     !Object.hasOwn(requestId, "value") ||
     !DIGEST_PATTERN.test(digest.value) ||
-    !UUID_PATTERN.test(requestId.value)
+    !INTAKE_UUID_PATTERN.test(requestId.value)
   ) invalid();
   return Object.freeze({
     intakeDigest: digest.value,
@@ -128,6 +128,13 @@ function intakeBindingFor(localState) {
 function sameIntakeBinding(left, right) {
   return left?.intakeDigest === right?.intakeDigest &&
     left?.intakeRequestId === right?.intakeRequestId;
+}
+function validateDurableIntakeBinding(value) {
+  if (
+    !dataExact(value, ["intakeDigest", "intakeRequestId"]) ||
+    !DIGEST_PATTERN.test(value.intakeDigest) ||
+    !INTAKE_UUID_PATTERN.test(value.intakeRequestId)
+  ) invalid();
 }
 function eventFor(events, role, kind, subjectRun) {
   return events.find((event) => event?.role === role && event.kind === kind && event.subjectRun === subjectRun);
@@ -400,12 +407,14 @@ function validateDurableCheckpointShape(checkpoint, activeLaunchState, stateRoot
     const event = checkpoint.events?.find((entry) => entry?.eventDigest === descriptor.eventDigest && entry.role === "operator");
     if (!event || !sameDescriptorJournal(descriptor, event, descriptor.stage)) invalid();
   } else if (["DESCRIPTOR_WRITING", "DESCRIPTOR_ACCEPTED"].includes(checkpoint.phase)) invalid();
+  if (checkpoint.intakeBinding !== undefined) validateDurableIntakeBinding(checkpoint.intakeBinding);
   const intent = checkpoint.intentJournal;
   if (intent !== undefined) {
     const keys = intent.requestDigest === undefined
       ? ["intakeDigest", "intakeRequestId", "mandateDigest", "mandateRawDigest", "stage", "subjectRun"]
       : ["intakeDigest", "intakeRequestId", "mandateDigest", "mandateRawDigest", "requestDigest", "requestId", "requestRawDigest", "stage", "subjectRun"];
-    if (!dataExact(intent, keys) || !DIGEST_PATTERN.test(intent.intakeDigest) || !UUID_PATTERN.test(intent.intakeRequestId) || !/^[0-9a-f]{64}$/.test(intent.mandateDigest) || !/^[0-9a-f]{64}$/.test(intent.mandateRawDigest) || !["PAYER_MANDATE_READY_TO_PUBLISH", "PAYER_MANDATE_PUBLISHED", "PAYMENT_REQUEST_READY_TO_SUBMIT", "PAYMENT_REQUEST_SUBMITTED", "PAYMENT_REQUEST_MATCHED"].includes(intent.stage) || !["rehearsal", "stakeholder"].includes(intent.subjectRun)) invalid();
+    if (!dataExact(intent, keys) || !DIGEST_PATTERN.test(intent.intakeDigest) || !INTAKE_UUID_PATTERN.test(intent.intakeRequestId) || !/^[0-9a-f]{64}$/.test(intent.mandateDigest) || !/^[0-9a-f]{64}$/.test(intent.mandateRawDigest) || !["PAYER_MANDATE_READY_TO_PUBLISH", "PAYER_MANDATE_PUBLISHED", "PAYMENT_REQUEST_READY_TO_SUBMIT", "PAYMENT_REQUEST_SUBMITTED", "PAYMENT_REQUEST_MATCHED"].includes(intent.stage) || !["rehearsal", "stakeholder"].includes(intent.subjectRun)) invalid();
+    if (checkpoint.intakeBinding !== undefined && !sameIntakeBinding(checkpoint.intakeBinding, intent)) invalid();
     if (intent.requestDigest !== undefined && (!/^[0-9a-f]{64}$/.test(intent.requestDigest) || !/^[0-9a-f]{64}$/.test(intent.requestRawDigest) || typeof intent.requestId !== "string")) invalid();
   }
   if (checkpoint.recovery !== undefined) {

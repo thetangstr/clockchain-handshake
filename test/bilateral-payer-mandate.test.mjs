@@ -103,6 +103,7 @@ test("rejects malformed, noncanonical, and hostile mandate payloads", () => {
     mandate({ intakeDigest: "B".repeat(64) }),
     mandate({ intakeDigest: "b".repeat(63) }),
     mandate({ intakeRequestId: "not-a-uuid" }),
+    mandate({ intakeRequestId: "22222222-3333-1444-8555-666666666666" }),
     mandate({ amount: { currency: "USD", value: "0100" } }),
     mandate({ expiresAtMs: 1785297600000 }),
     mandate({ payer: { address: PAYER_ADDRESS.toUpperCase(), agentId: "101" } }),

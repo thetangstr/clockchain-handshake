@@ -57,6 +57,8 @@ const INTENT_DIGESTS = Object.freeze({
 const INTENT_PAYER = privateKeyToAccount(`0x${"1".repeat(64)}`);
 const INTENT_PAYEE = privateKeyToAccount(`0x${"2".repeat(64)}`);
 const INTENT_SESSION_ID = "11111111-2222-4333-8444-555555555555";
+const INTAKE_DIGEST = "b".repeat(64);
+const INTAKE_REQUEST_ID = "22222222-3333-4444-8555-666666666666";
 const INTENT_NOW_MS = 1785294300000;
 const FUNDING_ADDRESSES = Object.freeze([
   "0x1111111111111111111111111111111111111111",
@@ -101,11 +103,12 @@ function intentParties() {
   };
 }
 
-async function signedIntents({ amount = "100", repositorySha = "b".repeat(40) } = {}) {
+async function signedIntents({ amount = "100", repositorySha = "b".repeat(40), requestOverrides = {} } = {}) {
   const parties = intentParties();
   const mandateEnvelope = await signPayerMandate({
     mandate: {
       amount: { currency: "USD", value: amount }, expiresAtMs: "1785297600000", invoiceReferencePrefix: "TREL-", issuedAtMs: "1785294000000",
+      intakeDigest: INTAKE_DIGEST, intakeRequestId: INTAKE_REQUEST_ID,
       payee: { address: parties.payee.address, agentId: parties.payee.agentId }, payer: { address: parties.payer.address, agentId: parties.payer.agentId }, paymentMoved: false,
       protocol: "clockchain.bilateral-authorization/v1", purpose: "freight-services", releaseId: "2026-07-28-live-demo", repositorySha,
       requestEndpoint: `/v1/sessions/${INTENT_SESSION_ID}/payment-requests`, schema: "clockchain.bilateral-payer-mandate/v1", sessionId: INTENT_SESSION_ID, subjectRun: "stakeholder",
@@ -115,9 +118,10 @@ async function signedIntents({ amount = "100", repositorySha = "b".repeat(40) } 
   const requestEnvelope = await signPaymentRequest({
     request: {
       amount: { currency: "USD", value: amount }, createdAtMs: "1785294300000", expiresAtMs: "1785297000000", invoiceReference: "TREL-2026-0001", mandateDigest: payerMandateDigest(mandateEnvelope),
+      intakeDigest: INTAKE_DIGEST, intakeRequestId: INTAKE_REQUEST_ID,
       payee: { address: parties.payee.address, agentId: parties.payee.agentId }, payer: { address: parties.payer.address, agentId: parties.payer.agentId }, paymentMoved: false,
       protocol: "clockchain.bilateral-authorization/v1", purpose: "freight-services", releaseId: "2026-07-28-live-demo", repositorySha, requestId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-      schema: "clockchain.bilateral-payment-request/v1", sessionId: INTENT_SESSION_ID, subjectRun: "stakeholder",
+      schema: "clockchain.bilateral-payment-request/v1", sessionId: INTENT_SESSION_ID, subjectRun: "stakeholder", ...requestOverrides,
     },
     signMessage: (bytes) => INTENT_PAYEE.signMessage({ message: { raw: bytes } }),
   });
@@ -825,6 +829,7 @@ test("pinned descriptor envelope requires the exact Git operator and derived run
 
 test("coordinator descriptor derives amount and intent digests only from verified envelopes", async () => {
   const input = { ...(await signedIntents({ amount: "250" })), nowMs: INTENT_NOW_MS, promptSha256: "a".repeat(64), repositorySha: "b".repeat(40), sessionId: "c".repeat(32) };
+  const mismatchedIntake = await signedIntents({ amount: "250", requestOverrides: { intakeDigest: "c".repeat(64) } });
   const descriptor = await createCoordinatorDescriptor(input);
   assert.deepEqual(descriptor.amountOptions.map((amount) => Object.fromEntries(Object.entries(amount))), [{ currency: "USD", value: "250" }]);
   assert.equal(descriptor.mandateDigest, payerMandateDigest(input.mandateEnvelope));
@@ -832,6 +837,7 @@ test("coordinator descriptor derives amount and intent digests only from verifie
   for (const hostile of [
     { ...input, mandateEnvelope: undefined },
     { ...input, requestEnvelope: undefined },
+    { ...input, requestEnvelope: mismatchedIntake.requestEnvelope },
     { ...input, requestEnvelope: { ...input.requestEnvelope, request: { ...input.requestEnvelope.request, amount: { currency: "USD", value: "251" } } } },
     { ...input, repositorySha: "c".repeat(40) },
     { ...input, parties: { ...input.parties, payer: { ...input.parties.payer, agentId: "999" } } },

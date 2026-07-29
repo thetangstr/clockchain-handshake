@@ -29,6 +29,7 @@ const EXPECTED_KEYS = Object.freeze([
   "subjectRun",
 ]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const INTAKE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 const DECIMAL_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
@@ -110,7 +111,7 @@ function requestSnapshot(value) {
   if (
     BigInt(result.createdAtMs) >= BigInt(result.expiresAtMs) ||
     !DIGEST_PATTERN.test(result.intakeDigest) ||
-    !UUID_PATTERN.test(result.intakeRequestId) ||
+    !INTAKE_UUID_PATTERN.test(result.intakeRequestId) ||
     !printable(result.invoiceReference) || !DIGEST_PATTERN.test(result.mandateDigest) ||
     !printable(result.purpose) || !printable(result.releaseId) ||
     !SHA_PATTERN.test(result.repositorySha) || !UUID_PATTERN.test(result.requestId) ||
@@ -141,7 +142,7 @@ function expectedSnapshot(value) {
   if (
     !printable(result.invoiceReferencePrefix) || !printable(result.purpose) ||
     !DIGEST_PATTERN.test(result.intakeDigest) ||
-    !UUID_PATTERN.test(result.intakeRequestId) ||
+    !INTAKE_UUID_PATTERN.test(result.intakeRequestId) ||
     !printable(result.releaseId) || !SHA_PATTERN.test(result.repositorySha) ||
     !UUID_PATTERN.test(result.sessionId) || !["rehearsal", "stakeholder"].includes(result.subjectRun)
   ) invalid();

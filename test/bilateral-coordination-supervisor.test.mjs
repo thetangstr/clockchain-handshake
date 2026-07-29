@@ -26,6 +26,10 @@ import {
 import { createSupervisorLauncher } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+function deterministicRequestId(sessionId, subjectRun) {
+  const digest = sha256(Buffer.from(`${sessionId}:${subjectRun}`, "utf8"));
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
 const raw = (pair) => pair.publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64");
 const pem = (pair) => pair.privateKey.export({ format: "pem", type: "pkcs8" });
 const independentlyVerifiedEnrollmentSet = async ({ enrollmentSet }) => enrollmentSet;
@@ -1650,7 +1654,7 @@ test("resumes only through a replay-derived resumed coordination client", async 
   let resumed = 0;
   const payerEnrollment = parseCoordinationEnrollmentSet(fixture.set).enrollments.payer;
   const payer = verifyCoordinationEnrollment(JSON.parse(Buffer.from(payerEnrollment.enrollmentBase64, "base64").toString("utf8")));
-  let checkpoint = { activeLaunchState: { capabilityDigest: payer.capabilityDigest, paymentMoved: false, releaseId: fixture.release, repositorySha: fixture.repo, role: "payer", sessionId: fixture.session }, coordinationIdentity: { keyId: "payer-coordination", privateKeyPem: pem(fixture.payer), publicKey: raw(fixture.payer) }, enrollmentBase64: payerEnrollment.enrollmentBase64, invitations: [{ address: payer.invitations.rehearsal.address, algorithm: "eip191", secretPath: "/secret/rehearsal", signature: payer.invitations.rehearsal.signature, subjectRun: "rehearsal" }, { address: payer.invitations.stakeholder.address, algorithm: "eip191", secretPath: "/secret/stakeholder", signature: payer.invitations.stakeholder.signature, subjectRun: "stakeholder" }], paymentMoved: false, phase: "BOOTSTRAPPED_ACTIVE", preflight: { outputPath: "/state/preflight/report.json", planPath: "/state/preflight/plan.json", privateKeyPath: "/state/preflight/preflight.ed25519.pem", publicArtifact: { paymentMoved: false, publicKey: payer.preflightKey.publicKey, repositorySha: fixture.repo, role: "payer" }, publicArtifactPath: "/state/preflight/preflight-key-enrollment.json" }, receipt: {}, rehearsal: { descriptorPath: "/state/rehearsal/descriptor.json", identityDirectory: "/state/rehearsal/identity", invitationPath: "/secret/rehearsal", resultDirectory: "/state/rehearsal/result" }, repositorySha: fixture.repo, role: "payer", schema: SUPERVISOR_STATE_SCHEMA, sessionId: fixture.session, stateRoot: "/state", stakeholder: { descriptorPath: "/state/stakeholder/descriptor.json", identityDirectory: "/state/stakeholder/identity", invitationPath: "/secret/stakeholder", resultDirectory: "/state/stakeholder/result" } };
+  let checkpoint = { activeLaunchState: { capabilityDigest: payer.capabilityDigest, paymentMoved: false, releaseId: fixture.release, repositorySha: fixture.repo, role: "payer", sessionId: fixture.session }, coordinationIdentity: { keyId: "payer-coordination", privateKeyPem: pem(fixture.payer), publicKey: raw(fixture.payer) }, enrollmentBase64: payerEnrollment.enrollmentBase64, intakeBinding: { intakeDigest: INTAKE_DIGEST, intakeRequestId: INTAKE_REQUEST_ID }, invitations: [{ address: payer.invitations.rehearsal.address, algorithm: "eip191", secretPath: "/secret/rehearsal", signature: payer.invitations.rehearsal.signature, subjectRun: "rehearsal" }, { address: payer.invitations.stakeholder.address, algorithm: "eip191", secretPath: "/secret/stakeholder", signature: payer.invitations.stakeholder.signature, subjectRun: "stakeholder" }], paymentMoved: false, phase: "BOOTSTRAPPED_ACTIVE", preflight: { outputPath: "/state/preflight/report.json", planPath: "/state/preflight/plan.json", privateKeyPath: "/state/preflight/preflight.ed25519.pem", publicArtifact: { paymentMoved: false, publicKey: payer.preflightKey.publicKey, repositorySha: fixture.repo, role: "payer" }, publicArtifactPath: "/state/preflight/preflight-key-enrollment.json" }, receipt: {}, rehearsal: { descriptorPath: "/state/rehearsal/descriptor.json", identityDirectory: "/state/rehearsal/identity", invitationPath: "/secret/rehearsal", resultDirectory: "/state/rehearsal/result" }, repositorySha: fixture.repo, role: "payer", schema: SUPERVISOR_STATE_SCHEMA, sessionId: fixture.session, stateRoot: "/state", stakeholder: { descriptorPath: "/state/stakeholder/descriptor.json", identityDirectory: "/state/stakeholder/identity", invitationPath: "/secret/stakeholder", resultDirectory: "/state/stakeholder/result" } };
   const retirements = [], scans = [];
   const supervisor = await createRoleSupervisor({ launchManifestPath: "/retired", stateRoot: "/state", dependencies: {
     async readState() { return checkpoint; },
@@ -1666,6 +1670,9 @@ test("resumes only through a replay-derived resumed coordination client", async 
   const state = await supervisor.bootstrap();
   assert.equal(resumed, 1);
   assert.equal(state.phase, "BOOTSTRAPPED_ACTIVE");
+  assert.deepEqual(state.intakeBinding, { intakeDigest: INTAKE_DIGEST, intakeRequestId: INTAKE_REQUEST_ID });
+  assert.notEqual(deterministicRequestId(state.sessionId, "rehearsal"), deterministicRequestId(state.sessionId, "stakeholder"));
+  assert.notEqual(deterministicRequestId(state.sessionId, "rehearsal"), state.intakeBinding.intakeRequestId);
   assert.equal(Buffer.isBuffer(state.enrollmentSet), false);
   checkpoint = state;
   for (const mutation of [
@@ -1674,6 +1681,7 @@ test("resumes only through a replay-derived resumed coordination client", async 
     (value) => { value.phase = "TOKEN_READY"; },
     (value) => { value.phase = "RECOVERY_REQUIRED"; },
     (value) => { value.processedEventDigests = ["f".repeat(64)]; },
+    (value) => { value.intakeBinding.intakeRequestId = "22222222-3333-1444-8555-666666666666"; },
     (value) => { value.childJournal = { command: "bin/handshake-propose.mjs", commandDigest: "f".repeat(64), eventDigest: "f".repeat(64), status: "CHILD_COMPLETE", subjectRun: "rehearsal" }; },
   ]) {
     const hostile = structuredClone(checkpoint);

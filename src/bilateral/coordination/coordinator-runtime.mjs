@@ -234,6 +234,8 @@ export async function createCoordinatorDescriptor({ mandateEnvelope, nowMs = Dat
   if (!mandate || mandate.repositorySha !== repositorySha || mandate.payer?.address !== parties.payer.address || mandate.payer?.agentId !== parties.payer.agentId || mandate.payee?.address !== parties.payee.address || mandate.payee?.agentId !== parties.payee.agentId || parties.payer.role !== "payer" || parties.payee.role !== "payee") fail();
   const expected = {
     amount: mandate.amount,
+    intakeDigest: mandate.intakeDigest,
+    intakeRequestId: mandate.intakeRequestId,
     invoiceReferencePrefix: mandate.invoiceReferencePrefix,
     payee: mandate.payee,
     payer: mandate.payer,

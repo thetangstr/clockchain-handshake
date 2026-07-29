@@ -100,6 +100,8 @@ const REPOSITORY_SHA = "e".repeat(40);
 const SESSION_ID = "8f953393-86d0-4f99-9d6a-102f525fbecd";
 const RELEASE_ID = "release-a";
 const NOW_MS = 1_785_120_000_000;
+const INTAKE_DIGEST = "b".repeat(64);
+const INTAKE_REQUEST_ID = "22222222-3333-4444-8555-666666666666";
 const RECEIPT_SCHEMA =
   "clockchain.bilateral-coordination-receipt/v1";
 const OPERATOR_KEY_ID = "relay-test-operator";
@@ -1699,12 +1701,12 @@ async function rehearsalReadyForVerification(t) {
   const payerAccount = privateKeyToAccount(invitationKeys.payer.rehearsal);
   const payeeAccount = privateKeyToAccount(invitationKeys.payee.rehearsal);
   const mandate = await signPayerMandate({
-    mandate: { amount: { currency: "USD", value: "100" }, expiresAtMs: String(NOW_MS + 60_000), invoiceReferencePrefix: "invoice-", issuedAtMs: String(NOW_MS - 1), payer: { address: payerAccount.address.toLowerCase(), agentId: identities.payer.agentId }, payee: { address: payeeAccount.address.toLowerCase(), agentId: identities.payee.agentId }, paymentMoved: false, protocol: "clockchain.bilateral-authorization/v1", purpose: "Handshake demo", releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, requestEndpoint: `/v1/sessions/${SESSION_ID}/payment-requests`, schema: "clockchain.bilateral-payer-mandate/v1", sessionId: SESSION_ID, subjectRun: "rehearsal" },
+    mandate: { amount: { currency: "USD", value: "100" }, expiresAtMs: String(NOW_MS + 60_000), intakeDigest: INTAKE_DIGEST, intakeRequestId: INTAKE_REQUEST_ID, invoiceReferencePrefix: "invoice-", issuedAtMs: String(NOW_MS - 1), payer: { address: payerAccount.address.toLowerCase(), agentId: identities.payer.agentId }, payee: { address: payeeAccount.address.toLowerCase(), agentId: identities.payee.agentId }, paymentMoved: false, protocol: "clockchain.bilateral-authorization/v1", purpose: "Handshake demo", releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, requestEndpoint: `/v1/sessions/${SESSION_ID}/payment-requests`, schema: "clockchain.bilateral-payer-mandate/v1", sessionId: SESSION_ID, subjectRun: "rehearsal" },
     signMessage: (bytes) => payerAccount.signMessage({ message: { raw: toHex(bytes) } }),
   });
   const mandateBytes = canonicalBytes(mandate);
   const request = await signPaymentRequest({
-    request: { amount: { currency: "USD", value: "100" }, createdAtMs: String(NOW_MS), expiresAtMs: String(NOW_MS + 30_000), invoiceReference: "invoice-001", mandateDigest: sha256(canonicalBytes(mandate.mandate)), payer: { address: payerAccount.address.toLowerCase(), agentId: identities.payer.agentId }, payee: { address: payeeAccount.address.toLowerCase(), agentId: identities.payee.agentId }, paymentMoved: false, protocol: "clockchain.bilateral-authorization/v1", purpose: "Handshake demo", releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, requestId: "9f953393-86d0-4f99-9d6a-102f525fbecd", schema: "clockchain.bilateral-payment-request/v1", sessionId: SESSION_ID, subjectRun: "rehearsal" },
+    request: { amount: { currency: "USD", value: "100" }, createdAtMs: String(NOW_MS), expiresAtMs: String(NOW_MS + 30_000), intakeDigest: INTAKE_DIGEST, intakeRequestId: INTAKE_REQUEST_ID, invoiceReference: "invoice-001", mandateDigest: sha256(canonicalBytes(mandate.mandate)), payer: { address: payerAccount.address.toLowerCase(), agentId: identities.payer.agentId }, payee: { address: payeeAccount.address.toLowerCase(), agentId: identities.payee.agentId }, paymentMoved: false, protocol: "clockchain.bilateral-authorization/v1", purpose: "Handshake demo", releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, requestId: "9f953393-86d0-4f99-9d6a-102f525fbecd", schema: "clockchain.bilateral-payment-request/v1", sessionId: SESSION_ID, subjectRun: "rehearsal" },
     signMessage: (bytes) => payeeAccount.signMessage({ message: { raw: toHex(bytes) } }),
   });
   const requestBytes = canonicalBytes(request);
@@ -1751,6 +1753,8 @@ test("persists fully verified signed inbox artifacts and returns exact bytes", a
   await assert.rejects(relay.submitPaymentRequest({ body: canonicalBytes(expired), sessionId: SESSION_ID }), { code: "COORDINATION_RELAY_INVALID" });
   const wrongMandate = await signPaymentRequest({ request: { ...request.request, mandateDigest: "f".repeat(64) }, signMessage: (bytes) => payeeAccount.signMessage({ message: { raw: toHex(bytes) } }) });
   await assert.rejects(relay.submitPaymentRequest({ body: canonicalBytes(wrongMandate), sessionId: SESSION_ID }), { code: "COORDINATION_RELAY_INVALID" });
+  const wrongIntake = await signPaymentRequest({ request: { ...request.request, intakeDigest: "c".repeat(64) }, signMessage: (bytes) => payeeAccount.signMessage({ message: { raw: toHex(bytes) } }) });
+  await assert.rejects(relay.submitPaymentRequest({ body: canonicalBytes(wrongIntake), sessionId: SESSION_ID }), { code: "COORDINATION_RELAY_INVALID" });
   const wrongRun = await signPaymentRequest({ request: { ...request.request, subjectRun: "stakeholder" }, signMessage: (bytes) => payeeAccount.signMessage({ message: { raw: toHex(bytes) } }) });
   await assert.rejects(relay.submitPaymentRequest({ body: canonicalBytes(wrongRun), sessionId: SESSION_ID }), { code: "COORDINATION_RELAY_INVALID" });
   await assert.rejects(relay.submitPaymentRequest({ body: requestBytes, sessionId: "9f953393-86d0-4f99-9d6a-102f525fbecd" }), { code: "COORDINATION_SESSION_NOT_FOUND" });
