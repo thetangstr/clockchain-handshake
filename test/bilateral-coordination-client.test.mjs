@@ -601,6 +601,15 @@ test("launch manifest creation rejects every non-exact or noncanonical field wit
       ...exact,
       payerMcpIntakeCapabilityDigest: "a".repeat(63),
     },
+    {
+      ...exact,
+      payerMcpIntakeCapabilityDigest: sha256(FIXED_CAPABILITY),
+    },
+    new Proxy(exact, {}),
+    {
+      ...exact,
+      randomBytes: new Proxy(() => Buffer.from(FIXED_CAPABILITY), {}),
+    },
     (() => {
       const { payerMcpIntakeCapabilityDigest: _digest, ...missing } = exact;
       return missing;
@@ -661,10 +670,18 @@ test("manifest validation rejects opposite-role MCP intake material without invo
   const payee = manifestFixture(tls, { role: "payee" }).manifest;
   const payer = manifestFixture(tls, { role: "payer" }).manifest;
   for (const candidate of [
+    new Proxy(payee, {}),
+    new Proxy(payer, {}),
     { ...payee, payerMcpIntakeCapabilityDigest: "a".repeat(64) },
     { ...payer, payerMcpIntakeCapability: "b".repeat(64) },
     { ...payee, payerMcpIntakeCapability: payee.payerMcpIntakeCapability.toUpperCase() },
     { ...payer, payerMcpIntakeCapabilityDigest: payer.payerMcpIntakeCapabilityDigest.toUpperCase() },
+    {
+      ...payer,
+      payerMcpIntakeCapabilityDigest: sha256(
+        Buffer.from(payer.bootstrapCapability, "hex"),
+      ),
+    },
     (() => {
       const { payerMcpIntakeCapability: _capability, ...missing } = payee;
       return missing;
@@ -3315,6 +3332,7 @@ test("creates and independently validates an exact capability-free active launch
       }).toString("base64"),
     },
   ];
+  cases.push(new Proxy(exact, {}));
   const alternateTls = await tlsFixture(t);
   const authenticatedMutations = {
     capabilityDigest: "0".repeat(64),
@@ -3443,6 +3461,21 @@ test("creates and independently validates an exact capability-free active launch
         role: "payee",
       },
       manifest: fixture.manifest,
+      receiptBytes: fixture.receiptBytes,
+    }),
+    { code: "LAUNCH_MANIFEST_INVALID" },
+  );
+  await assert.rejects(
+    createActiveLaunchState({
+      coordinationIdentity: {
+        keyId: "payer-coordination",
+        privateKeyPem:
+          privateKeyPem(fixture.coordination),
+        publicKey:
+          rawPublicKey(fixture.coordination),
+      },
+      enrollment: fixture.enrollment,
+      manifest: new Proxy(fixture.manifest, {}),
       receiptBytes: fixture.receiptBytes,
     }),
     { code: "LAUNCH_MANIFEST_INVALID" },

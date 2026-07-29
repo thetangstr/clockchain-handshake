@@ -22,6 +22,9 @@ import {
   dirname,
   resolve,
 } from "node:path";
+import {
+  types as utilTypes,
+} from "node:util";
 
 import {
   canonicalizeReceiptEventValue,
@@ -151,7 +154,11 @@ function invalid() {
 }
 
 function isPlainObject(value) {
-  if (value === null || typeof value !== "object") {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    utilTypes.isProxy(value)
+  ) {
     return false;
   }
   try {
@@ -203,6 +210,14 @@ function readExactData(value, keys) {
     });
   }
   return Object.freeze(result);
+}
+
+function isProxy(value) {
+  try {
+    return utilTypes.isProxy(value);
+  } catch {
+    return true;
+  }
 }
 
 function readDataRole(value) {
@@ -433,7 +448,14 @@ export function validateLaunchManifest(value) {
         "string" ||
         !SHA256_PATTERN.test(
           data.payerMcpIntakeCapabilityDigest,
-        ))
+        ) ||
+        data.payerMcpIntakeCapabilityDigest ===
+          sha256(
+            Buffer.from(
+              data.bootstrapCapability,
+              "hex",
+            ),
+          ))
     ) {
       invalid();
     }
@@ -508,7 +530,10 @@ export function createLaunchManifest(input) {
     }
     const randomBytes =
       data.randomBytes ?? secureRandomBytes;
-    if (typeof randomBytes !== "function") {
+    if (
+      typeof randomBytes !== "function" ||
+      isProxy(randomBytes)
+    ) {
       invalid();
     }
     let capability;
@@ -541,7 +566,9 @@ export function createLaunchManifest(input) {
         "string" ||
         !SHA256_PATTERN.test(
           data.payerMcpIntakeCapabilityDigest,
-        ))
+        ) ||
+        data.payerMcpIntakeCapabilityDigest ===
+          sha256(capability))
     ) {
       invalid();
     }
