@@ -652,6 +652,110 @@ test("Requestor production dependencies do not expose Payer intake methods and r
   await assert.rejects(scanSupervisorCheckpointDirectories({ checkpoint, stateRoot: root }));
 });
 
+test("production dependencies construct the local MCP server only for the Payer role", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "supervisor-runtime-mcp-server-"));
+  const manifestRoot = await mkdtemp(join(tmpdir(), "supervisor-runtime-mcp-server-manifest-"));
+  t.after(() => Promise.all([
+    rm(root, { force: true, recursive: true }),
+    rm(manifestRoot, { force: true, recursive: true }),
+  ]));
+  await chmod(manifestRoot, 0o700);
+  const certificatePath = join(manifestRoot, "tls-cert.pem");
+  const privateKeyPath = join(manifestRoot, "tls-key.pem");
+  execFileSync("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "ed25519",
+    "-keyout",
+    privateKeyPath,
+    "-out",
+    certificatePath,
+    "-nodes",
+    "-days",
+    "1",
+    "-subj",
+    "/CN=127.0.0.1",
+    "-addext",
+    "subjectAltName=IP:127.0.0.1",
+  ], { stdio: "ignore" });
+  const tlsCertificatePem = await readFile(certificatePath, "utf8");
+  const tlsPrivateKeyPem = await readFile(privateKeyPath, "utf8");
+  const repositorySha = "a".repeat(40);
+  const payerMcpIntakeCapabilityDigest = "3".repeat(64);
+  const manifestPath = join(manifestRoot, "launch-manifest.json");
+  const { manifest } = createLaunchManifest({
+    expectedTlsFingerprint: sha256(new X509Certificate(tlsCertificatePem).raw),
+    nowMs: 0,
+    operatorKeyId: "operator",
+    randomBytes: () => Buffer.alloc(32, 7),
+    relayUrl: "https://127.0.0.1:8443",
+    releaseId: "release-mcp-server",
+    repositorySha,
+    role: "payer",
+    sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd",
+    tlsCertificatePem,
+    payerMcpIntakeCapabilityDigest,
+  });
+  await writeLaunchManifest(manifestPath, manifest);
+  const calls = [];
+  const dependencies = await createProductionSupervisorDependencies({
+    createPayerMcpServer: (input) => {
+      calls.push(input);
+      return {
+        start: async () => ({ host: input.host, port: input.port, url: `https://${input.host}:${input.port}/mcp` }),
+        stop: async () => undefined,
+      };
+    },
+    launchManifestPath: manifestPath,
+    payerMcpServerOptions: {
+      host: "127.0.0.1",
+      port: 9443,
+      tlsCertificatePem,
+      tlsPrivateKeyPem,
+    },
+    probe: async () => ({ clean: true, head: repositorySha }),
+    stateRoot: root,
+  });
+  assert.equal(typeof dependencies.startPayerMcpServer, "function");
+  assert.equal(typeof dependencies.stopPayerMcpServer, "function");
+  assert.deepEqual(await dependencies.startPayerMcpServer(), { host: "127.0.0.1", port: 9443, url: "https://127.0.0.1:9443/mcp" });
+  await dependencies.stopPayerMcpServer();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].capabilityDigest, payerMcpIntakeCapabilityDigest);
+  assert.equal(calls[0].repositorySha, repositorySha);
+  assert.equal(typeof calls[0].intakeStore.writeIntake, "function");
+  assert.equal(Object.hasOwn(calls[0], "bootstrapCapability"), false);
+  assert.equal(Object.hasOwn(calls[0], "payerMcpIntakeCapability"), false);
+
+  const payeeManifestPath = join(manifestRoot, "payee-launch-manifest.json");
+  const { manifest: payeeManifest } = createLaunchManifest({
+    expectedTlsFingerprint: sha256(new X509Certificate(tlsCertificatePem).raw),
+    nowMs: 0,
+    operatorKeyId: "operator",
+    randomBytes: () => Buffer.alloc(32, 8),
+    relayUrl: "https://127.0.0.1:8443",
+    releaseId: "release-mcp-server",
+    repositorySha,
+    role: "payee",
+    sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd",
+    tlsCertificatePem,
+    payerMcpIntakeCapability: "4".repeat(64),
+  });
+  await writeLaunchManifest(payeeManifestPath, payeeManifest);
+  await assert.rejects(createProductionSupervisorDependencies({
+    launchManifestPath: payeeManifestPath,
+    payerMcpServerOptions: {
+      host: "127.0.0.1",
+      port: 9443,
+      tlsCertificatePem,
+      tlsPrivateKeyPem,
+    },
+    probe: async () => ({ clean: true, head: repositorySha }),
+    stateRoot: join(root, "payee"),
+  }));
+});
+
 test("securely unlinks a launch manifest without retaining bootstrap capability in active state", async () => {
   const stateRoot = await mkdtemp(join(tmpdir(), "supervisor-state-"));
   const manifestRoot = await mkdtemp(join(tmpdir(), "supervisor-manifest-"));

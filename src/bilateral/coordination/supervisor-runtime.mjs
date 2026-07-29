@@ -11,6 +11,7 @@ import { canonicalizeReceiptEventValue } from "../../canonical.mjs";
 import { validateActiveLaunchState } from "./manifest.mjs";
 import { readLaunchManifest } from "./manifest.mjs";
 import { PAYER_MCP_INTAKE_DIRECTORY_NAME, createPayerMcpIntakeStore, scanPayerMcpIntakeDirectory } from "../local-mcp/intake-store.mjs";
+import { createPayerMcpServer as createDefaultPayerMcpServer } from "../local-mcp/server.mjs";
 import { createLocalPreflightEnrollment, readAndSignTokenCommitment } from "./preflight.mjs";
 import { validateRelayArtifact, validateRelayArtifactWithFacts } from "./artifact.mjs";
 import { verifyDescriptorEnvelope } from "../descriptor.mjs";
@@ -538,7 +539,7 @@ export async function ensureInvitations({ capabilityDigest, releaseId, repositor
   if (proofs[0].address === proofs[1].address || proofs[0].secretPath === proofs[1].secretPath || proofs[0].signature === proofs[1].signature) fail();
   return Object.freeze(proofs);
 }
-export async function createProductionSupervisorDependencies({ launchManifestPath, stateRoot, probe, repositoryRoot = SUPERVISOR_REPOSITORY_ROOT, sepoliaRpc, createSepoliaClient } = {}) {
+export async function createProductionSupervisorDependencies({ createPayerMcpServer = createDefaultPayerMcpServer, launchManifestPath, payerMcpServerOptions, stateRoot, probe, repositoryRoot = SUPERVISOR_REPOSITORY_ROOT, sepoliaRpc, createSepoliaClient } = {}) {
   const store = await createPrivateSupervisorStateStore({ stateRoot });
   await createFixedRunDirectories(stateRoot);
   const repositoryInspector = createGitInspector(repositoryRoot);
@@ -547,16 +548,29 @@ export async function createProductionSupervisorDependencies({ launchManifestPat
   const manifest = resumed ? null : await readLaunchManifest(launchManifestPath);
   const active = resumed ? await validateActiveLaunchState(checkpoint.activeLaunchState) : null;
   const scope = Object.freeze(resumed
-    ? { capabilityDigest: active.capabilityDigest, releaseId: active.releaseId, repositorySha: active.repositorySha, role: active.role, sessionId: active.sessionId }
-    : { capabilityDigest: createHash('sha256').update(Buffer.from(manifest.bootstrapCapability, 'hex')).digest('hex'), releaseId: manifest.releaseId, repositorySha: manifest.repositorySha, role: manifest.role, sessionId: manifest.sessionId });
+    ? { capabilityDigest: active.capabilityDigest, ...(active.role === "payer" ? { payerMcpIntakeCapabilityDigest: active.payerMcpIntakeCapabilityDigest } : {}), releaseId: active.releaseId, repositorySha: active.repositorySha, role: active.role, sessionId: active.sessionId }
+    : { capabilityDigest: createHash('sha256').update(Buffer.from(manifest.bootstrapCapability, 'hex')).digest('hex'), ...(manifest.role === "payer" ? { payerMcpIntakeCapabilityDigest: manifest.payerMcpIntakeCapabilityDigest } : {}), releaseId: manifest.releaseId, repositorySha: manifest.repositorySha, role: manifest.role, sessionId: manifest.sessionId });
   const payerMcpIntakeStore = scope.role === "payer"
     ? await createPayerMcpIntakeStore({ repositorySha: scope.repositorySha, stateRoot })
     : null;
+  if (payerMcpServerOptions !== undefined && scope.role !== "payer") fail();
+  if (payerMcpServerOptions !== undefined && typeof createPayerMcpServer !== "function") fail();
+  const payerMcpServer = payerMcpServerOptions === undefined ? null : createPayerMcpServer(Object.freeze({
+    ...payerMcpServerOptions,
+    capabilityDigest: scope.payerMcpIntakeCapabilityDigest,
+    intakeStore: payerMcpIntakeStore,
+    repositorySha: scope.repositorySha,
+  }));
+  if (payerMcpServer !== null && (typeof payerMcpServer.start !== "function" || typeof payerMcpServer.stop !== "function")) fail();
   const tlsCertificatePem = resumed ? active.tlsCertificatePem : manifest.tlsCertificatePem;
   const payerMcpIntakeDependencies = payerMcpIntakeStore === null ? {} : {
     async writePayerMcpIntake(input) { return payerMcpIntakeStore.writeIntake(input); },
     async readPayerMcpIntake(input) { return payerMcpIntakeStore.readIntake(input); },
     async readStoredPayerMcpIntake() { return payerMcpIntakeStore.readStoredIntake(); },
+    ...(payerMcpServer === null ? {} : {
+      async startPayerMcpServer() { return payerMcpServer.start(); },
+      async stopPayerMcpServer() { return payerMcpServer.stop(); },
+    }),
   };
   return Object.freeze({
     ...store,
