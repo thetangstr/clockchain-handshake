@@ -10,6 +10,7 @@ import { canonicalBytes } from "../canonical.mjs";
 import { canonicalizeReceiptEventValue } from "../../canonical.mjs";
 import { validateActiveLaunchState } from "./manifest.mjs";
 import { readLaunchManifest } from "./manifest.mjs";
+import { PAYER_MCP_INTAKE_DIRECTORY_NAME, createPayerMcpIntakeStore, scanPayerMcpIntakeDirectory } from "../local-mcp/intake-store.mjs";
 import { createLocalPreflightEnrollment, readAndSignTokenCommitment } from "./preflight.mjs";
 import { validateRelayArtifact, validateRelayArtifactWithFacts } from "./artifact.mjs";
 import { verifyDescriptorEnvelope } from "../descriptor.mjs";
@@ -101,7 +102,13 @@ export async function scanSupervisorCheckpointDirectories({ checkpoint, stateRoo
     dirname(checkpoint.rehearsal.descriptorPath), checkpoint.rehearsal.identityDirectory, checkpoint.rehearsal.resultDirectory,
     dirname(checkpoint.stakeholder.descriptorPath), checkpoint.stakeholder.identityDirectory, checkpoint.stakeholder.resultDirectory,
   ]);
-  await scanExistingPrivateDirectory(stateRoot, new Set(["preflight", "rehearsal", "stakeholder", "invitation-public", "invitation-secret"]));
+  await scanExistingPrivateDirectory(stateRoot, new Set(["preflight", "rehearsal", "stakeholder", "invitation-public", "invitation-secret", PAYER_MCP_INTAKE_DIRECTORY_NAME]));
+  try {
+    await lstat(join(stateRoot, PAYER_MCP_INTAKE_DIRECTORY_NAME));
+    await scanPayerMcpIntakeDirectory({ repositorySha: checkpoint.repositorySha, stateRoot });
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
   await scanExistingPrivateDirectory(dirname(checkpoint.preflight.planPath));
   for (const run of [checkpoint.rehearsal, checkpoint.stakeholder]) {
     await scanExistingPrivateDirectory(dirname(run.descriptorPath), new Set(["identity", "result"]));
@@ -541,6 +548,7 @@ export async function createProductionSupervisorDependencies({ launchManifestPat
   const scope = Object.freeze(resumed
     ? { capabilityDigest: active.capabilityDigest, releaseId: active.releaseId, repositorySha: active.repositorySha, sessionId: active.sessionId }
     : { capabilityDigest: createHash('sha256').update(Buffer.from(manifest.bootstrapCapability, 'hex')).digest('hex'), releaseId: manifest.releaseId, repositorySha: manifest.repositorySha, sessionId: manifest.sessionId });
+  const payerMcpIntakeStore = await createPayerMcpIntakeStore({ repositorySha: scope.repositorySha, stateRoot });
   const tlsCertificatePem = resumed ? active.tlsCertificatePem : manifest.tlsCertificatePem;
   return Object.freeze({
     ...store,
@@ -551,6 +559,9 @@ export async function createProductionSupervisorDependencies({ launchManifestPat
     async createLocalPreflightEnrollment({ role }) { return createPreflight({ role, repositorySha: scope.repositorySha, stateRoot }); },
     async createInvitations({ role }) { return ensureInvitations({ ...scope, role, stateRoot }); },
     async ensureToken({ role }) { return ensureToken({ role, repositorySha: scope.repositorySha, stateRoot }); },
+    async writePayerMcpIntake(input) { return payerMcpIntakeStore.writeIntake(input); },
+    async readPayerMcpIntake(input) { return payerMcpIntakeStore.readIntake(input); },
+    async readStoredPayerMcpIntake() { return payerMcpIntakeStore.readStoredIntake(); },
     requestId() { return randomUUID(); },
     async readAndSignTokenCommitment(input) { return readAndSignTokenCommitment(input); },
     verifyEnrollmentSet: enrollmentVerifier({ tlsCertificatePem }),
