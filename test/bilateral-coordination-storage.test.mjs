@@ -90,13 +90,15 @@ const TOKEN_COMMITMENT_SIGNATURE_DOMAIN =
   "clockchain.bilateral-token-commitment-signature/v1\n";
 const INBOX_PAYER = privateKeyToAccount(`0x${"1".repeat(64)}`);
 const INBOX_PAYEE = privateKeyToAccount(`0x${"2".repeat(64)}`);
+const INBOX_INTAKE_DIGEST = "b".repeat(64);
+const INBOX_INTAKE_REQUEST_ID = "22222222-3333-4444-8555-666666666666";
 const INBOX_REQUEST_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 
 async function inboxArtifacts() {
   const payer = { address: INBOX_PAYER.address.toLowerCase(), agentId: "101" };
   const payee = { address: INBOX_PAYEE.address.toLowerCase(), agentId: "202" };
-  const mandate = await signPayerMandate({ mandate: { amount: { currency: "USD", value: "100" }, expiresAtMs: "1785297600000", invoiceReferencePrefix: "TREL-", issuedAtMs: "1785294000000", payee, payer, paymentMoved: false, protocol: "clockchain.bilateral-authorization/v1", purpose: "freight-services", releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, requestEndpoint: `/v1/sessions/${SESSION_ID}/payment-requests`, schema: PAYER_MANDATE_SCHEMA, sessionId: SESSION_ID, subjectRun: "stakeholder" }, signMessage: (bytes) => INBOX_PAYER.signMessage({ message: { raw: bytes } }) });
-  const request = await signPaymentRequest({ request: { amount: { currency: "USD", value: "100" }, createdAtMs: "1785294300000", expiresAtMs: "1785297000000", invoiceReference: "TREL-2026-0001", mandateDigest: payerMandateDigest(mandate), payee, payer, paymentMoved: false, protocol: "clockchain.bilateral-authorization/v1", purpose: "freight-services", releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, requestId: INBOX_REQUEST_ID, schema: PAYMENT_REQUEST_SCHEMA, sessionId: SESSION_ID, subjectRun: "stakeholder" }, signMessage: (bytes) => INBOX_PAYEE.signMessage({ message: { raw: bytes } }) });
+  const mandate = await signPayerMandate({ mandate: { amount: { currency: "USD", value: "100" }, expiresAtMs: "1785297600000", intakeDigest: INBOX_INTAKE_DIGEST, intakeRequestId: INBOX_INTAKE_REQUEST_ID, invoiceReferencePrefix: "TREL-", issuedAtMs: "1785294000000", payee, payer, paymentMoved: false, protocol: "clockchain.bilateral-authorization/v1", purpose: "freight-services", releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, requestEndpoint: `/v1/sessions/${SESSION_ID}/payment-requests`, schema: PAYER_MANDATE_SCHEMA, sessionId: SESSION_ID, subjectRun: "stakeholder" }, signMessage: (bytes) => INBOX_PAYER.signMessage({ message: { raw: bytes } }) });
+  const request = await signPaymentRequest({ request: { amount: { currency: "USD", value: "100" }, createdAtMs: "1785294300000", expiresAtMs: "1785297000000", intakeDigest: INBOX_INTAKE_DIGEST, intakeRequestId: INBOX_INTAKE_REQUEST_ID, invoiceReference: "TREL-2026-0001", mandateDigest: payerMandateDigest(mandate), payee, payer, paymentMoved: false, protocol: "clockchain.bilateral-authorization/v1", purpose: "freight-services", releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, requestId: INBOX_REQUEST_ID, schema: PAYMENT_REQUEST_SCHEMA, sessionId: SESSION_ID, subjectRun: "stakeholder" }, signMessage: (bytes) => INBOX_PAYEE.signMessage({ message: { raw: bytes } }) });
   const mandateBytes = canonicalBytes(mandate); const requestBytes = canonicalBytes(request);
   return { mandate: mandateBytes, mandateDigest: sha256(mandateBytes), request: requestBytes, requestDigest: sha256(requestBytes) };
 }

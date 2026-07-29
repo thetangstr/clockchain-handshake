@@ -115,6 +115,9 @@ const PEER_INVITATION_KEYS = Object.freeze({
   stakeholder: `0x${"4".repeat(64)}`,
 });
 const INTENT_SESSION_ID = SESSION_ID;
+const INTENT_INTAKE_DIGEST = "b".repeat(64);
+const INTENT_INTAKE_REQUEST_ID =
+  "22222222-3333-4444-8555-666666666666";
 const INTENT_REQUEST_ID =
   "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const INTENT_PAYER_ACCOUNT = privateKeyToAccount(
@@ -139,6 +142,8 @@ function intentMandate(overrides = {}) {
   return {
     amount: { currency: "USD", value: "100" },
     expiresAtMs: "1785297600000",
+    intakeDigest: INTENT_INTAKE_DIGEST,
+    intakeRequestId: INTENT_INTAKE_REQUEST_ID,
     invoiceReferencePrefix: "TREL-",
     issuedAtMs: "1785294000000",
     payee: INTENT_PAYEE,
@@ -172,6 +177,8 @@ function intentRequest(mandateEnvelope, overrides = {}) {
     amount: { currency: "USD", value: "100" },
     createdAtMs: "1785294300000",
     expiresAtMs: "1785297000000",
+    intakeDigest: INTENT_INTAKE_DIGEST,
+    intakeRequestId: INTENT_INTAKE_REQUEST_ID,
     invoiceReference: "TREL-2026-0001",
     mandateDigest: sha256(canonicalBytes(mandateEnvelope.mandate)),
     payee: INTENT_PAYEE,

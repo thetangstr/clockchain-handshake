@@ -92,6 +92,8 @@ const ROOT_DIRECTORY = dirname(
 );
 const PAYER = privateKeyToAccount(generatePrivateKey());
 const PAYEE = privateKeyToAccount(generatePrivateKey());
+const INTAKE_DIGEST = "b".repeat(64);
+const INTAKE_REQUEST_ID = "22222222-3333-4444-8555-666666666666";
 const ROLE_CANARY = "operational-role-secret-canary";
 const SLOTS = Object.freeze([
   "proposal",
@@ -142,6 +144,8 @@ async function intentEnvelopes() {
   const mandate = {
     amount: { currency: "USD", value: "100" },
     expiresAtMs: "1784923800000",
+    intakeDigest: INTAKE_DIGEST,
+    intakeRequestId: INTAKE_REQUEST_ID,
     invoiceReferencePrefix: "INV-",
     issuedAtMs: "1784923100000",
     payee: { address: PAYEE.address.toLowerCase(), agentId: "8678" },
@@ -165,6 +169,8 @@ async function intentEnvelopes() {
       amount: mandate.amount,
       createdAtMs: "1784923150000",
       expiresAtMs: "1784923700000",
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
       invoiceReference: "INV-0001",
       mandateDigest: payerMandateDigest(mandateEnvelope),
       payee: mandate.payee,
