@@ -96,7 +96,12 @@ function runArtifactPath(runState, fileName) {
   if (!runState || typeof runState.descriptorPath !== "string") invalid();
   return `${dirname(runState.descriptorPath)}/${fileName}`;
 }
-function requestIdForRun(localState, dependencies, subjectRun) {
+function otherSubjectRun(subjectRun) {
+  if (subjectRun === "rehearsal") return "stakeholder";
+  if (subjectRun === "stakeholder") return "rehearsal";
+  invalid();
+}
+function rawRequestIdForRun(localState, dependencies, subjectRun) {
   const journal = localState.intentJournal;
   if (journal?.subjectRun === subjectRun && typeof journal.requestId === "string") return journal.requestId;
   const configured = localState[subjectRun]?.requestId;
@@ -104,6 +109,16 @@ function requestIdForRun(localState, dependencies, subjectRun) {
   if (typeof dependencies.requestId === "function") return dependencies.requestId({ localState, subjectRun });
   const digest = sha256(Buffer.from(`${localState.sessionId}:${subjectRun}`, "utf8"));
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+function validateFormalRequestId(requestId, intakeBinding) {
+  if (typeof requestId !== "string" || !INTAKE_UUID_PATTERN.test(requestId) || requestId === intakeBinding.intakeRequestId) invalid();
+  return requestId;
+}
+function requestIdForRun(localState, dependencies, subjectRun, intakeBinding) {
+  const requestId = validateFormalRequestId(rawRequestIdForRun(localState, dependencies, subjectRun), intakeBinding);
+  const peerRequestId = validateFormalRequestId(rawRequestIdForRun(localState, dependencies, otherSubjectRun(subjectRun)), intakeBinding);
+  if (requestId === peerRequestId) invalid();
+  return requestId;
 }
 function intakeBindingFor(localState) {
   const binding = localState.intakeBinding ?? localState.intentJournal;
@@ -279,7 +294,7 @@ async function submitPaymentRequestPhase({ client, dependencies, localState, rep
   if (!Buffer.isBuffer(mandateBytes)) invalid();
   const mandateEvent = eventFor(replay.events, "payer", "PAYER_MANDATE_READY", subjectRun);
   const mandateEnvelope = await verifyPayerMandate({ envelope: parseCanonicalEnvelope(mandateBytes, mandateEvent.artifactDigest), expected: { ...policy, ...intakeBinding, payer: parties.payer, payee: parties.payee, releaseId: localState.releaseId, repositorySha: localState.repositorySha, requestEndpoint: `/v1/sessions/${localState.sessionId}/payment-requests`, sessionId: localState.sessionId, subjectRun }, nowMs: timeMs });
-  const requestId = requestIdForRun(localState, dependencies, subjectRun);
+  const requestId = requestIdForRun(localState, dependencies, subjectRun, intakeBinding);
   const request = requestFor({ intakeBinding, localState, mandateEnvelope, parties, policy, requestId, subjectRun, timeMs });
   const envelope = await dependencies.signPaymentRequest({ invitationPath: localState[subjectRun]?.invitationPath, localState, request, subjectRun });
   const bytes = canonicalBytes(envelope);
@@ -415,7 +430,7 @@ function validateDurableCheckpointShape(checkpoint, activeLaunchState, stateRoot
       : ["intakeDigest", "intakeRequestId", "mandateDigest", "mandateRawDigest", "requestDigest", "requestId", "requestRawDigest", "stage", "subjectRun"];
     if (!dataExact(intent, keys) || !DIGEST_PATTERN.test(intent.intakeDigest) || !INTAKE_UUID_PATTERN.test(intent.intakeRequestId) || !/^[0-9a-f]{64}$/.test(intent.mandateDigest) || !/^[0-9a-f]{64}$/.test(intent.mandateRawDigest) || !["PAYER_MANDATE_READY_TO_PUBLISH", "PAYER_MANDATE_PUBLISHED", "PAYMENT_REQUEST_READY_TO_SUBMIT", "PAYMENT_REQUEST_SUBMITTED", "PAYMENT_REQUEST_MATCHED"].includes(intent.stage) || !["rehearsal", "stakeholder"].includes(intent.subjectRun)) invalid();
     if (checkpoint.intakeBinding !== undefined && !sameIntakeBinding(checkpoint.intakeBinding, intent)) invalid();
-    if (intent.requestDigest !== undefined && (!/^[0-9a-f]{64}$/.test(intent.requestDigest) || !/^[0-9a-f]{64}$/.test(intent.requestRawDigest) || typeof intent.requestId !== "string")) invalid();
+    if (intent.requestDigest !== undefined && (!/^[0-9a-f]{64}$/.test(intent.requestDigest) || !/^[0-9a-f]{64}$/.test(intent.requestRawDigest) || !INTAKE_UUID_PATTERN.test(intent.requestId) || intent.requestId === intent.intakeRequestId)) invalid();
   }
   if (checkpoint.recovery !== undefined) {
     const recovery = checkpoint.recovery;

@@ -590,7 +590,11 @@ test("payee verifies Iris mandate and submits one Billie-signed payment request"
     },
     dependencies: {
       nowMs() { return 1785294300000; },
-      requestId() { return "9f953393-86d0-4f99-9d6a-102f525fbecd"; },
+      requestId({ subjectRun }) {
+        return subjectRun === "rehearsal"
+          ? "9f953393-86d0-4f99-9d6a-102f525fbecd"
+          : "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      },
       async signPaymentRequest({ request }) {
         return signPaymentRequest({
           request,
@@ -644,6 +648,125 @@ test("payee verifies Iris mandate and submits one Billie-signed payment request"
   assert.equal(writes.at(-1).intentJournal.intakeRequestId, INTAKE_REQUEST_ID);
   assert.equal(writes.at(-1).intentJournal.requestDigest, paymentRequestDigest(envelope));
   assert.equal(writes.at(-1).intentJournal.requestRawDigest, sha256(submitted[0].bytes));
+});
+
+async function assertPayeeRequestIdFailure({ localRunState = {}, requestId, stakeholderRunState = {} }) {
+  const fixture = replayFixture({
+    payerInvitationAddress: payerIntentAccount.address.toLowerCase(),
+    payeeInvitationAddress: payeeIntentAccount.address.toLowerCase(),
+  });
+  const { append, artifacts, events, payerIdentity, payeeIdentity } = replayThroughIdentities(fixture);
+  const payer = JSON.parse(payerIdentity.toString("utf8"));
+  const payee = JSON.parse(payeeIdentity.toString("utf8"));
+  const mandateEnvelope = await signPayerMandate({
+    mandate: {
+      amount: { currency: "USD", value: "100" },
+      expiresAtMs: "1785297900000",
+      intakeDigest: INTAKE_DIGEST,
+      intakeRequestId: INTAKE_REQUEST_ID,
+      invoiceReferencePrefix: "invoice-",
+      issuedAtMs: "1785294299999",
+      payee: { address: payee.address, agentId: payee.agentId },
+      payer: { address: payer.address, agentId: payer.agentId },
+      paymentMoved: false,
+      protocol: "clockchain.bilateral-authorization/v1",
+      purpose: "Handshake demo",
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      requestEndpoint: `/v1/sessions/${fixture.session}/payment-requests`,
+      schema: "clockchain.bilateral-payer-mandate/v1",
+      sessionId: fixture.session,
+      subjectRun: "rehearsal",
+    },
+    signMessage: (bytes) => payerIntentAccount.signMessage({ message: { raw: bytes } }),
+  });
+  const mandateBytes = canonicalBytes(mandateEnvelope);
+  append("payer", fixture.payer, "PAYER_MANDATE_READY", sha256(mandateBytes), "rehearsal");
+  await assert.rejects(
+    runSupervisor({
+      client: {
+        async getArtifact({ digest, artifactType }) {
+          assert.equal(artifactType, "identity-package");
+          return artifacts.get(digest);
+        },
+        readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
+        async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
+        async readEvents() { return structuredClone(events); },
+        async readPayerMandate() { return mandateBytes; },
+        async submitPaymentRequest() { assert.fail("invalid requestId must not submit"); },
+      },
+      dependencies: {
+        nowMs() { return 1785294300000; },
+        requestId,
+        async signPaymentRequest() { assert.fail("invalid requestId must not sign"); },
+        shouldContinue() { return false; },
+        async validateRelayArtifactWithFacts({ artifactType, bytes, expectedDigest }) {
+          assert.equal(artifactType, "identity-package");
+          assert.equal(sha256(bytes), expectedDigest);
+          return { facts: { identity: JSON.parse(bytes.toString("utf8")) } };
+        },
+        verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
+        async writeArtifactFile() { assert.fail("invalid requestId must not write artifact"); },
+        async writeState() { assert.fail("invalid requestId must not write state"); },
+      },
+      localState: {
+        intakeBinding: {
+          intakeDigest: INTAKE_DIGEST,
+          intakeRequestId: INTAKE_REQUEST_ID,
+        },
+        operatorPublicKey: raw(fixture.operator),
+        processedEventDigests: events.filter((event) => event.role === "operator").map((event) => event.eventDigest),
+        rehearsal: {
+          descriptorPath: "/state/rehearsal/descriptor.json",
+          identityDirectory: "/state/rehearsal/identity",
+          invitationPath: "/secret/rehearsal",
+          requestPath: "/state/rehearsal/payment-request.json",
+          resultDirectory: "/state/rehearsal/result",
+          ...localRunState,
+        },
+        releaseId: fixture.release,
+        repositorySha: fixture.repo,
+        role: "payee",
+        sessionId: fixture.session,
+        stakeholder: {
+          descriptorPath: "/state/stakeholder/descriptor.json",
+          identityDirectory: "/state/stakeholder/identity",
+          invitationPath: "/secret/stakeholder",
+          requestPath: "/state/stakeholder/payment-request.json",
+          resultDirectory: "/state/stakeholder/result",
+          ...stakeholderRunState,
+        },
+      },
+    }),
+    { message: "Coordination supervisor operation failed safely." },
+  );
+}
+
+test("rejects a dependency-generated formal requestId that collides with the intake request", async () => {
+  await assertPayeeRequestIdFailure({
+    requestId() { return INTAKE_REQUEST_ID; },
+  });
+});
+
+test("rejects a configured formal requestId that collides with the intake request", async () => {
+  await assertPayeeRequestIdFailure({
+    localRunState: { requestId: INTAKE_REQUEST_ID },
+  });
+});
+
+test("rejects equal configured rehearsal and stakeholder formal requestIds", async () => {
+  const duplicate = "9f953393-86d0-4f99-9d6a-102f525fbecd";
+  await assertPayeeRequestIdFailure({
+    localRunState: { requestId: duplicate },
+    stakeholderRunState: { requestId: duplicate },
+  });
+});
+
+test("rejects equal dependency-generated rehearsal and stakeholder formal requestIds", async () => {
+  const duplicate = "9f953393-86d0-4f99-9d6a-102f525fbecd";
+  await assertPayeeRequestIdFailure({
+    requestId() { return duplicate; },
+  });
 });
 
 test("payer verifies the exact Billie request before appending PAYMENT_REQUEST_MATCHED", async () => {
@@ -1682,6 +1805,11 @@ test("resumes only through a replay-derived resumed coordination client", async 
     (value) => { value.phase = "RECOVERY_REQUIRED"; },
     (value) => { value.processedEventDigests = ["f".repeat(64)]; },
     (value) => { value.intakeBinding.intakeRequestId = "22222222-3333-1444-8555-666666666666"; },
+    (value) => { value.intentJournal = { intakeDigest: INTAKE_DIGEST, intakeRequestId: INTAKE_REQUEST_ID, mandateDigest: "b".repeat(64), mandateRawDigest: "c".repeat(64), requestDigest: "d".repeat(64), requestId: INTAKE_REQUEST_ID, requestRawDigest: "e".repeat(64), stage: "PAYMENT_REQUEST_SUBMITTED", subjectRun: "rehearsal" }; },
+    (value) => {
+      value.rehearsal.requestId = "9f953393-86d0-4f99-9d6a-102f525fbecd";
+      value.stakeholder.requestId = "9f953393-86d0-4f99-9d6a-102f525fbecd";
+    },
     (value) => { value.childJournal = { command: "bin/handshake-propose.mjs", commandDigest: "f".repeat(64), eventDigest: "f".repeat(64), status: "CHILD_COMPLETE", subjectRun: "rehearsal" }; },
   ]) {
     const hostile = structuredClone(checkpoint);
