@@ -556,6 +556,7 @@ test("checkpoint scanning accepts one valid Payer intake directory and rejects t
   await writeLaunchManifest(manifestPath, manifest);
   const checkpoint = {
     repositorySha: "a".repeat(40),
+    role: "payer",
     stateRoot: root,
     preflight: { planPath: join(root, "preflight", "plan.json"), outputPath: join(root, "preflight", "report.json"), privateKeyPath: join(root, "preflight", "key.pem"), publicArtifactPath: join(root, "preflight", "public.json") },
     rehearsal: { descriptorPath: join(rehearsal, "descriptor.json"), identityDirectory: join(rehearsal, "identity"), resultDirectory: join(rehearsal, "result") },
@@ -582,6 +583,72 @@ test("checkpoint scanning accepts one valid Payer intake directory and rejects t
   await scanSupervisorCheckpointDirectories({ checkpoint, stateRoot: root });
 
   await writeFile(join(root, PAYER_MCP_INTAKE_DIRECTORY_NAME, "unexpected.json"), "{}", { mode: 0o600 });
+  await assert.rejects(scanSupervisorCheckpointDirectories({ checkpoint, stateRoot: root }));
+});
+
+test("Requestor production dependencies do not expose Payer intake methods and reject intake checkpoint state", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "supervisor-runtime-payee-intake-"));
+  const manifestRoot = await mkdtemp(join(tmpdir(), "supervisor-runtime-payee-intake-manifest-"));
+  t.after(() => Promise.all([
+    rm(root, { force: true, recursive: true }),
+    rm(manifestRoot, { force: true, recursive: true }),
+  ]));
+  await chmod(manifestRoot, 0o700);
+  const certificatePath = join(manifestRoot, "tls-cert.pem");
+  const privateKeyPath = join(manifestRoot, "tls-key.pem");
+  execFileSync("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "ed25519",
+    "-keyout",
+    privateKeyPath,
+    "-out",
+    certificatePath,
+    "-nodes",
+    "-days",
+    "1",
+    "-subj",
+    "/CN=127.0.0.1",
+    "-addext",
+    "subjectAltName=IP:127.0.0.1",
+  ], { stdio: "ignore" });
+  const tlsCertificatePem = await readFile(certificatePath, "utf8");
+  const manifestPath = join(manifestRoot, "launch-manifest.json");
+  const repositorySha = "a".repeat(40);
+  const { manifest } = createLaunchManifest({
+    expectedTlsFingerprint: sha256(new X509Certificate(tlsCertificatePem).raw),
+    nowMs: 0,
+    operatorKeyId: "operator",
+    randomBytes: () => Buffer.alloc(32, 7),
+    relayUrl: "https://127.0.0.1:8443",
+    releaseId: "release-payee-intake",
+    repositorySha,
+    role: "payee",
+    sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd",
+    tlsCertificatePem,
+    payerMcpIntakeCapability: "1".repeat(64),
+  });
+  await writeLaunchManifest(manifestPath, manifest);
+  const dependencies = await createProductionSupervisorDependencies({
+    launchManifestPath: manifestPath,
+    probe: async () => ({ clean: true, head: repositorySha }),
+    stateRoot: root,
+  });
+  assert.equal(Object.hasOwn(dependencies, "writePayerMcpIntake"), false);
+  assert.equal(Object.hasOwn(dependencies, "readPayerMcpIntake"), false);
+  assert.equal(Object.hasOwn(dependencies, "readStoredPayerMcpIntake"), false);
+
+  const rehearsal = join(root, "rehearsal"), stakeholder = join(root, "stakeholder");
+  for (const directory of [join(root, "preflight"), rehearsal, stakeholder, join(rehearsal, "identity"), join(rehearsal, "result"), join(stakeholder, "identity"), join(stakeholder, "result"), join(root, PAYER_MCP_INTAKE_DIRECTORY_NAME)]) await mkdir(directory, { recursive: true, mode: 0o700 });
+  const checkpoint = {
+    repositorySha,
+    role: "payee",
+    stateRoot: root,
+    preflight: { planPath: join(root, "preflight", "plan.json"), outputPath: join(root, "preflight", "report.json"), privateKeyPath: join(root, "preflight", "key.pem"), publicArtifactPath: join(root, "preflight", "public.json") },
+    rehearsal: { descriptorPath: join(rehearsal, "descriptor.json"), identityDirectory: join(rehearsal, "identity"), resultDirectory: join(rehearsal, "result") },
+    stakeholder: { descriptorPath: join(stakeholder, "descriptor.json"), identityDirectory: join(stakeholder, "identity"), resultDirectory: join(stakeholder, "result") },
+  };
   await assert.rejects(scanSupervisorCheckpointDirectories({ checkpoint, stateRoot: root }));
 });
 
