@@ -106,6 +106,27 @@ test("rejects malformed intake ids, hostile objects, and noncanonical fields", (
   assertInvalid(() => validatePaymentIntakeInput(proxied));
 });
 
+test("normalizes throwing proxy traps into the generic intake failure", () => {
+  const trapFailure = new Error("trap exception must not leak");
+  for (const trap of ["getPrototypeOf", "ownKeys", "getOwnPropertyDescriptor"]) {
+    const input = new Proxy(validInput(), {
+      [trap]() {
+        throw trapFailure;
+      },
+    });
+    assertInvalid(() => validatePaymentIntakeInput(input));
+  }
+
+  const inputWithProxyAmount = validInput({
+    amount: new Proxy(validInput().amount, {
+      getOwnPropertyDescriptor() {
+        throw trapFailure;
+      },
+    }),
+  });
+  assertInvalid(() => validatePaymentIntakeInput(inputWithProxyAmount));
+});
+
 test("computes intakeDigest as lowercase SHA-256 over only canonical validated input bytes", () => {
   const input = validInput();
   const validated = validatePaymentIntakeInput(input);

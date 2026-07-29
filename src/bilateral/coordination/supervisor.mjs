@@ -125,11 +125,8 @@ async function resolveRunParties({ client, dependencies, enrollmentSet, events, 
   }
   return Object.freeze({ payer: parties.payer, payee: parties.payee });
 }
-function intentPolicy(localState, subjectRun) {
-  const override = localState[subjectRun]?.intentPolicy;
-  if (override === undefined) return DEMO_INTENT_POLICY;
-  if (!dataExact(override, ["amount", "invoiceReferencePrefix", "purpose"])) invalid();
-  return Object.freeze({ amount: Object.freeze({ ...override.amount }), invoiceReferencePrefix: override.invoiceReferencePrefix, purpose: override.purpose });
+function intentPolicy() {
+  return DEMO_INTENT_POLICY;
 }
 function nowMs(dependencies) {
   const value = typeof dependencies.nowMs === "function" ? dependencies.nowMs() : Date.now();

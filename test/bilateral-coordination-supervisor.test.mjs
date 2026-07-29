@@ -479,6 +479,11 @@ test("payer publishes one signed mandate from identity-bound parties before desc
         descriptorPath: "/state/rehearsal/descriptor.json",
         identityDirectory: "/state/rehearsal/identity",
         invitationPath: "/secret/rehearsal",
+        intentPolicy: {
+          amount: { currency: "EUR", value: "999" },
+          invoiceReferencePrefix: "drift-",
+          purpose: "Local override must not win",
+        },
         mandatePath: "/state/rehearsal/payer-mandate.json",
         resultDirectory: "/state/rehearsal/result",
       },
@@ -499,7 +504,10 @@ test("payer publishes one signed mandate from identity-bound parties before desc
   assert.equal(envelope.mandate.payer.agentId, payer.agentId);
   assert.equal(envelope.mandate.payee.address, payee.address);
   assert.equal(envelope.mandate.payee.agentId, payee.agentId);
+  assert.deepEqual(envelope.mandate.amount, DEMO_INTENT_POLICY.amount);
+  assert.equal(envelope.mandate.invoiceReferencePrefix, DEMO_INTENT_POLICY.invoiceReferencePrefix);
   assert.equal(envelope.mandate.paymentMoved, false);
+  assert.equal(envelope.mandate.purpose, DEMO_INTENT_POLICY.purpose);
   assert.equal(writes.at(-1).intentJournal.mandateDigest, payerMandateDigest(envelope));
   assert.equal(writes.at(-1).intentJournal.mandateRawDigest, sha256(publications[0].bytes));
 });

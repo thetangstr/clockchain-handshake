@@ -43,23 +43,27 @@ function deepFreeze(value) {
 }
 
 function exactDataObject(value, keys) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) invalid();
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) invalid();
-  const ownKeys = Reflect.ownKeys(value);
-  if (
-    ownKeys.length !== keys.length ||
-    keys.some((key, index) => ownKeys[index] !== key)
-  ) {
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) invalid();
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) invalid();
+    const ownKeys = Reflect.ownKeys(value);
+    if (
+      ownKeys.length !== keys.length ||
+      keys.some((key, index) => ownKeys[index] !== key)
+    ) {
+      invalid();
+    }
+    const entries = Object.create(null);
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) invalid();
+      entries[key] = descriptor.value;
+    }
+    return entries;
+  } catch {
     invalid();
   }
-  const entries = Object.create(null);
-  for (const key of keys) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) invalid();
-    entries[key] = descriptor.value;
-  }
-  return entries;
 }
 
 function assertCloneablePlain(value) {
