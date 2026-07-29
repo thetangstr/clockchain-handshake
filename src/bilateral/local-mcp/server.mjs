@@ -32,19 +32,36 @@ function validateHost(host) {
   const family = net.isIP(host);
   if (family === 0) fail();
   if (family === 4) {
-    if (host === "0.0.0.0") fail();
+    const octets = host.split(".");
+    if (
+      octets.length !== 4 ||
+      octets.some((octet) => !/^(?:0|[1-9][0-9]{0,2})$/.test(octet) || String(Number(octet)) !== octet || Number(octet) > 255) ||
+      octets.every((octet) => octet === "0")
+    ) {
+      fail();
+    }
     return host;
   }
+  let canonical;
+  try {
+    const parsed = new URL(`https://[${host}]/`);
+    if (!parsed.hostname.startsWith("[") || !parsed.hostname.endsWith("]")) fail();
+    canonical = parsed.hostname.slice(1, -1);
+  } catch {
+    fail();
+  }
   if (
-    host === "::" ||
-    host === "::0" ||
-    host === "0:0:0:0:0:0:0:0" ||
-    host === "::ffff:0.0.0.0" ||
-    host === "0:0:0:0:0:ffff:0.0.0.0"
+    host !== canonical ||
+    canonical === "::" ||
+    canonical === "::ffff:0:0"
   ) {
     fail();
   }
   return host;
+}
+
+function hostAuthority(host, port) {
+  return net.isIP(host) === 6 ? `[${host}]:${port}` : `${host}:${port}`;
 }
 
 function validatePort(port) {
@@ -217,7 +234,7 @@ export function createPayerMcpServer({
   }
 
   function expectedHost() {
-    return `${bindHost}:${currentPort()}`;
+    return hostAuthority(bindHost, currentPort());
   }
 
   function authBlocked() {
@@ -345,7 +362,7 @@ export function createPayerMcpServer({
           resolve();
         });
       });
-      return Object.freeze({ host: bindHost, port: currentPort(), url: `https://${bindHost}:${currentPort()}/mcp` });
+      return Object.freeze({ host: bindHost, port: currentPort(), url: `https://${hostAuthority(bindHost, currentPort())}/mcp` });
     },
     async stop() {
       if (!server) return;

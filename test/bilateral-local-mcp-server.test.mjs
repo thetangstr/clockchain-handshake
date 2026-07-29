@@ -172,7 +172,19 @@ test("serves the exact JSON-only MCP lifecycle and persists one request_payment 
 test("rejects unsafe transport boundary, host, path, headers, session, method, and tool shapes", async (t) => {
   const fixture = await makeFixture(t);
   const tlsPrivateKeyPem = await readFile(join(fixture.root, "key.pem"), "utf8");
-  for (const host of ["0.0.0.0", "0:0:0:0:0:0:0:0", "::", "::0", "::ffff:0.0.0.0", "localhost"]) {
+  for (const host of [
+    "0.0.0.0",
+    "0:0:0:0:0:0:0:0",
+    "0000:0000:0000:0000:0000:0000:0000:0000",
+    "0:0:0:0:0:0:0:0000",
+    "0000:0:0:0:0:0:0:0",
+    "::",
+    "::0",
+    "::ffff:0.0.0.0",
+    "::ffff:0:0",
+    "0:0:0:0:0:ffff:0:0",
+    "localhost",
+  ]) {
     assert.throws(() => createPayerMcpServer({
       capabilityDigest: CAPABILITY_DIGEST,
       host,
@@ -192,6 +204,17 @@ test("rejects unsafe transport boundary, host, path, headers, session, method, a
     tlsCertificatePem: fixture.certificate,
     tlsPrivateKeyPem,
   }).start, "function");
+  for (const host of ["2001:0db8::1", "2001:db8:0:0:0:0:0:1", "::0001"]) {
+    assert.throws(() => createPayerMcpServer({
+      capabilityDigest: CAPABILITY_DIGEST,
+      host,
+      intakeStore: { writeIntake: async () => undefined },
+      port: 0,
+      repositorySha: REPOSITORY_SHA,
+      tlsCertificatePem: fixture.certificate,
+      tlsPrivateKeyPem,
+    }), /Payer MCP server failed safely\./);
+  }
 
   assert.equal((await request({ body: rpc(1, "initialize", { protocolVersion: PROTOCOL_VERSION }), fixture, method: "GET" })).statusCode, 405);
   assert.equal((await request({ body: rpc(1, "initialize", { protocolVersion: PROTOCOL_VERSION }), fixture, path: "/mcp?x=1" })).statusCode, 404);
