@@ -1106,6 +1106,7 @@ export function createRelayService(input) {
     const store = validateStore(data.store);
     let mutationQueue = Promise.resolve();
     const sessionWaiters = new Map();
+    const enrollmentWaiters = new Map();
 
     function serializeMutation(action) {
       const execute = () => guardedAsync(action);
@@ -1162,6 +1163,64 @@ export function createRelayService(input) {
           { once: true },
         );
         timer = setTimeout(notified, waitMs);
+      });
+      return Object.freeze({
+        cancel,
+        promise,
+      });
+    }
+
+    function notifyEnrollmentReadiness(sessionId) {
+      const waiters = enrollmentWaiters.get(sessionId);
+      if (waiters === undefined) {
+        return;
+      }
+      enrollmentWaiters.delete(sessionId);
+      for (const resolve of waiters) {
+        resolve("notified");
+      }
+    }
+
+    function waitForEnrollmentReadiness(
+      sessionId,
+      waitMs,
+      signal,
+    ) {
+      let cancel;
+      const promise = new Promise((resolve) => {
+        const waiters =
+          enrollmentWaiters.get(sessionId) ?? new Set();
+        let timer;
+        const complete = (result) => {
+          clearTimeout(timer);
+          signal?.removeEventListener(
+            "abort",
+            aborted,
+          );
+          waiters.delete(notified);
+          if (waiters.size === 0) {
+            enrollmentWaiters.delete(sessionId);
+          }
+          resolve(result);
+        };
+        const aborted = () => {
+          complete("aborted");
+        };
+        const notified = (result = "notified") => {
+          complete(result);
+        };
+        cancel = () => complete("cancelled");
+        waiters.add(notified);
+        enrollmentWaiters.set(sessionId, waiters);
+        signal?.addEventListener(
+          "abort",
+          aborted,
+          { once: true },
+        );
+        timer = setTimeout(
+          () => notified("timeout"),
+          waitMs,
+        );
       });
       return Object.freeze({
         cancel,
@@ -1656,7 +1715,7 @@ export function createRelayService(input) {
           },
           verifier: receiptSigner,
         });
-        notifySession(enrollment.sessionId);
+        notifyEnrollmentReadiness(enrollment.sessionId);
         return receipt;
       });
     }
@@ -1999,7 +2058,7 @@ export function createRelayService(input) {
             ready,
           );
         }
-        const waiter = waitForSession(
+        const waiter = waitForEnrollmentReadiness(
           sessionId,
           data.waitMs,
           signal,
@@ -2015,12 +2074,18 @@ export function createRelayService(input) {
               true,
             );
           }
-          const aborted = await waiter.promise;
+          const result = await waiter.promise;
           if (
-            aborted ||
+            result === "aborted" ||
             signal?.aborted === true
           ) {
             invalid();
+          }
+          if (result === "timeout") {
+            return enrollmentReadinessResult(
+              sessionId,
+              false,
+            );
           }
           ready = await enrollmentsReady(sessionId);
           if (signal?.aborted === true) {

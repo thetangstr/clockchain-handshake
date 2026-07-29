@@ -2196,6 +2196,102 @@ test("long-poll enrollment readiness waits for durable payee bootstrap and times
   assert.ok(Date.now() - started >= 8);
 });
 
+test("enrollment readiness ignores unrelated session event notifications until peer bootstrap", async (t) => {
+  const { store } = await storeFixture(t);
+  await registerRole(store, {
+    capability: PAYER_CAPABILITY,
+    role: "payer",
+  });
+  await registerRole(store, {
+    capability: PAYEE_CAPABILITY,
+    role: "payee",
+  });
+  const { relay } = relayFixture(store);
+  await bootstrapRole(relay, {
+    capability: PAYER_CAPABILITY,
+    coordination: payerCoordination,
+    invitationPrivateKeys: invitationKeys.payer,
+    preflight: payerPreflight,
+    role: "payer",
+  });
+  const pending = relay.readEnrollmentReadiness({
+    sessionId: SESSION_ID,
+    waitMs: 30_000,
+  });
+  const failure = eventFixture({
+    coordination: payerCoordination,
+    keyId: "payer-coordination",
+    kind: "TERMINAL_FAILURE",
+    role: "payer",
+  });
+  await relay.appendEvent({
+    body: canonicalBytes(failure),
+  });
+  assert.equal(
+    await Promise.race([
+      pending.then(() => "settled"),
+      new Promise((resolve) =>
+        setTimeout(() => resolve("pending"), 25),
+      ),
+    ]),
+    "pending",
+  );
+  await bootstrapRole(relay, {
+    capability: PAYEE_CAPABILITY,
+    coordination: payeeCoordination,
+    invitationPrivateKeys: invitationKeys.payee,
+    preflight: payeePreflight,
+    role: "payee",
+  });
+  assert.deepEqual(await pending, {
+    paymentMoved: false,
+    ready: true,
+    repositorySha: REPOSITORY_SHA,
+    schema:
+      "clockchain.bilateral-enrollment-readiness/v1",
+    sessionId: SESSION_ID,
+  });
+});
+
+test("enrollment readiness timeout returns false without treating timeout as notification", async (t) => {
+  const { store } = await storeFixture(t);
+  let payeeReads = 0;
+  const timeoutStore = storeFacade(store, {
+    async readEnrollment(input) {
+      if (input.role === "payer") {
+        return {
+          bytes: Buffer.from("payer-placeholder"),
+          digest: "a".repeat(64),
+          receiptBytes: Buffer.from("receipt-placeholder"),
+        };
+      }
+      payeeReads += 1;
+      const error = new Error("payee pending");
+      error.code =
+        payeeReads === 1
+          ? "COORDINATION_ENROLLMENT_NOT_FOUND"
+          : "COORDINATION_IO";
+      throw error;
+    },
+  });
+  const { relay } = relayFixture(timeoutStore);
+  assert.deepEqual(
+    await relay.readEnrollmentReadiness({
+      sessionId: SESSION_ID,
+      waitMs: 15,
+    }),
+    {
+      paymentMoved: false,
+      ready: false,
+      repositorySha: REPOSITORY_SHA,
+      schema:
+        "clockchain.bilateral-enrollment-readiness/v1",
+      sessionId: SESSION_ID,
+    },
+  );
+  assert.equal(payeeReads, 1);
+});
+
 test("notifies enrollment readiness only after successful capability consumption and receipt verification", async (t) => {
   const { store } = await storeFixture(t);
   await registerRole(store, {
