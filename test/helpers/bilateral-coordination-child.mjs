@@ -891,7 +891,27 @@ async function runProductionCoordinatorChild(input) {
       "expired-mandate",
       "expired-request",
     ]).has(value.scenario);
+    const admittedFundingAddresses = new Map();
+    const createFundingAdmissionClient = () => Object.freeze({
+      async getBalance({ address }) {
+        recordFundingAdmission(address, "balance");
+        return 0n;
+      },
+      async getTransactionCount({ address, blockTag }) {
+        if (blockTag !== "latest") fail();
+        recordFundingAdmission(address, "nonce");
+        return 0n;
+      },
+    });
+    const recordFundingAdmission = (address, fact) => {
+      if (typeof address !== "string" || !/^0x[0-9a-f]{40}$/.test(address)) fail();
+      const facts = admittedFundingAddresses.get(address) ?? new Set();
+      if (facts.has(fact)) fail();
+      facts.add(fact);
+      admittedFundingAddresses.set(address, facts);
+    };
     runtime = createCoordinatorRuntimeDependencies(config, {
+      createFundingAdmissionClient,
       repositoryRoot: value.repositoryRoot,
       now: () => value.clockMs + (
         intentFailureScenario
@@ -1005,6 +1025,7 @@ async function runProductionCoordinatorChild(input) {
       ...(["success", "coordinator-restart-before-descriptor"].includes(value.scenario)
         ? { createWatcherClient: () => createFakeBilateralClockchainHttpClient(value.fake) }
         : { watchBilateralSession: boundedWatcher }),
+      createFundingAdmissionClient,
       repositoryRoot: value.repositoryRoot,
       now: base.now,
       sleeper: base.sleeper,
