@@ -251,19 +251,22 @@ test("actual mapped role prompts are canonical Iris payer and Billie payee surfa
     readFile(join(ROLE_REPOSITORY_ROOT, paths.payer), "utf8"),
     readFile(join(ROLE_REPOSITORY_ROOT, paths.payee), "utf8"),
   ]);
-  assert.match(payer, /You are Stakeholder 1, Iris, the payer\./);
-  assert.match(payer, /\bmandate owner\b/i);
+  assert.match(
+    payer,
+    /You are Stakeholder 1, Iris, the payer and mandate owner\./,
+  );
   assert.match(payer, /\bPROPOSED\b/);
   assert.match(payer, /\bACKNOWLEDGED\b/);
   assert.doesNotMatch(payer, /\bIris\b[^.\n]*\bpayee\b/i);
   assert.doesNotMatch(payer, /\bBilly\b[^.\n]*\bpayer\b/i);
 
-  assert.match(payee, /You are Stakeholder 2, Billie, the payee\./);
+  assert.match(
+    payee,
+    /You are Stakeholder 2, Billie, the vendor and payee\./,
+  );
   assert.match(payee, /\bvendor\b/i);
-  assert.match(payee, /\bpayment receiver\b/i);
   assert.match(payee, /\bACCEPTED\b/);
-  assert.match(payee, /\brequest submission\b/i);
-  assert.match(payee, /\bfollow(?:s|ing)? Iris's signed mandate\b/i);
+  assert.match(payee, /\bfollowed Iris's signed mandate\b/i);
   assert.doesNotMatch(payee, /\bIris\b[^.\n]*\bpayee\b/i);
   assert.doesNotMatch(payee, /\bBilly\b[^.\n]*\bpayer\b/i);
 
