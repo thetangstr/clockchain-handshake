@@ -706,6 +706,15 @@ export async function runSupervisor(input) {
     if (!localState || typeof client.readEnrollmentReadiness !== "function" || typeof client.readEnrollmentSet !== "function" || typeof client.readEvents !== "function" || typeof localState.operatorPublicKey !== "string" || typeof localState.releaseId !== "string" || typeof localState.repositorySha !== "string" || typeof localState.sessionId !== "string" || !["payer", "payee"].includes(localState.role)) invalid();
     let waitingReported = false;
     let readyReported = false;
+    let stopPayerMcpServer = null;
+    try {
+    if (localState.role === "payer" && typeof dependencies.startPayerMcpServer === "function") {
+      if (typeof dependencies.stopPayerMcpServer !== "function") invalid();
+      const listen = await dependencies.startPayerMcpServer();
+      if (!listen || typeof listen.url !== "string" || typeof listen.host !== "string" || !Number.isInteger(listen.port)) invalid();
+      stopPayerMcpServer = dependencies.stopPayerMcpServer;
+      if (typeof dependencies.writeStatus === "function") dependencies.writeStatus(Object.freeze({ paymentMoved: false, role: "payer", status: "PAYER_MCP_READY", url: listen.url }));
+    }
     for (;;) {
       const ready = assertEnrollmentReadiness(await client.readEnrollmentReadiness({ waitMs: 30000 }), localState);
       if (ready) {
@@ -845,6 +854,9 @@ export async function runSupervisor(input) {
       }
     } while (dependencies.shouldContinue?.() !== false);
     return Object.freeze({ ...replay, processedEventDigests: Object.freeze([...processed]) });
+    } finally {
+      if (stopPayerMcpServer !== null) await stopPayerMcpServer();
+    }
   }
   const supervisor = await createRoleSupervisor(input);
   return supervisor.run();

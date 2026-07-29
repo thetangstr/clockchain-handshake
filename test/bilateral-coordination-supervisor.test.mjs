@@ -1713,6 +1713,61 @@ test("waits for peer enrollment readiness before the authoritative enrollment se
   assert.equal(result.view.state, "BOOTSTRAPPING");
 });
 
+test("starts Payer MCP after active bootstrap before enrollment readiness and stops it on return", async () => {
+  const fixture = replayFixture();
+  const parsedEnrollmentSet = parseCoordinationEnrollmentSet(fixture.set);
+  const calls = [];
+  const result = await runSupervisor({
+    client: {
+      async readEnrollmentReadiness(value) {
+        calls.push(["readiness", value]);
+        return {
+          paymentMoved: false,
+          ready: true,
+          releaseId: fixture.release,
+          repositorySha: fixture.repo,
+          schema: "clockchain.bilateral-enrollment-readiness/v1",
+          sessionId: fixture.session,
+        };
+      },
+      async readEnrollmentSet() {
+        calls.push(["enrollment-set"]);
+        return parsedEnrollmentSet;
+      },
+      async readEvents() {
+        calls.push(["events"]);
+        return [];
+      },
+    },
+    dependencies: {
+      async startPayerMcpServer() {
+        calls.push(["mcp-start"]);
+        return { host: "127.0.0.1", port: 9443, url: "https://127.0.0.1:9443/mcp" };
+      },
+      async stopPayerMcpServer() {
+        calls.push(["mcp-stop"]);
+      },
+      writeStatus(value) {
+        calls.push(["status", value]);
+      },
+      shouldContinue() { return false; },
+      verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
+    },
+    localState: {
+      activeLaunchState: { paymentMoved: false },
+      operatorPublicKey: raw(fixture.operator),
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      role: "payer",
+      sessionId: fixture.session,
+    },
+  });
+  assert.equal(result.view.state, "BOOTSTRAPPING");
+  assert.deepEqual(calls.map(([kind]) => kind), ["mcp-start", "status", "readiness", "status", "enrollment-set", "events", "mcp-stop"]);
+  assert.deepEqual(calls[1][1], { paymentMoved: false, role: "payer", status: "PAYER_MCP_READY", url: "https://127.0.0.1:9443/mcp" });
+  assert.deepEqual(calls[3][1], { paymentMoved: false, role: "payer", status: "PEER_READY" });
+});
+
 test("drives the authenticated startup through a token commitment without replacing its checkpoint", async () => {
   const fixture = replayFixture();
   const payer = generateKeyPairSync("ed25519");

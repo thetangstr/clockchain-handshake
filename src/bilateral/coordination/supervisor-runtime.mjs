@@ -130,6 +130,25 @@ async function readPrivateBytes(root, path, maximum = MAX_STATE_BYTES) {
     return bytes;
   } finally { await handle.close(); }
 }
+async function readPinnedPrivateText(path, maximum = MAX_STATE_BYTES) {
+  if (typeof path !== "string" || path.includes("\0") || resolve(path) !== path) fail();
+  let handle;
+  try {
+    const before = await lstat(path);
+    if (!hasExactPrivateMetadata(before) || before.size <= 0 || before.size > maximum) fail();
+    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const opened = await handle.stat();
+    if (!hasExactPrivateMetadata(opened) || !sameIdentity(before, opened)) fail();
+    const buffer = Buffer.allocUnsafe(before.size + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead !== before.size) fail();
+    const after = await lstat(path);
+    if (!hasExactPrivateMetadata(after) || !sameIdentity(before, after)) fail();
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    if (handle) await handle.close();
+  }
+}
 async function readPrivateJson(root, path) {
   const bytes = await readPrivateBytes(root, path); const text = bytes.toString("utf8");
   if (!text.endsWith("\n")) fail(); let value; try { value = JSON.parse(text); } catch { fail(); }
@@ -352,7 +371,14 @@ export function createSupervisorStatusLine(value) {
     if (!Object.hasOwn(value, "paymentMoved") || value.paymentMoved !== false) fail();
     return `${canonicalJson({ code: "COORDINATION_SUPERVISOR_FAILED", paymentMoved: false })}\n`;
   }
-  if (!value || value.paymentMoved !== false || !["payer", "payee"].includes(value.role) || !["WAITING_FOR_PEER", "PEER_READY"].includes(value.status)) fail();
+  if (!value || value.paymentMoved !== false || !["payer", "payee"].includes(value.role) || !["WAITING_FOR_PEER", "PEER_READY", "PAYER_MCP_READY"].includes(value.status)) fail();
+  if (value.status === "PAYER_MCP_READY") {
+    if (value.role !== "payer" || typeof value.url !== "string") fail();
+    let url;
+    try { url = new URL(value.url); } catch { fail(); }
+    if (url.protocol !== "https:" || url.username || url.password || url.hash || url.search || url.pathname !== "/mcp") fail();
+    return `${canonicalJson({ paymentMoved: false, role: value.role, status: value.status, url: value.url })}\n`;
+  }
   return `${canonicalJson({ paymentMoved: false, role: value.role, status: value.status })}\n`;
 }
 
@@ -555,8 +581,14 @@ export async function createProductionSupervisorDependencies({ createPayerMcpSer
     : null;
   if (payerMcpServerOptions !== undefined && scope.role !== "payer") fail();
   if (payerMcpServerOptions !== undefined && typeof createPayerMcpServer !== "function") fail();
-  const payerMcpServer = payerMcpServerOptions === undefined ? null : createPayerMcpServer(Object.freeze({
-    ...payerMcpServerOptions,
+  const normalizedPayerMcpServerOptions = payerMcpServerOptions === undefined ? null : Object.freeze({
+    host: payerMcpServerOptions.host,
+    port: payerMcpServerOptions.port,
+    tlsCertificatePem: payerMcpServerOptions.tlsCertificatePem ?? await readPinnedPrivateText(payerMcpServerOptions.tlsCertificatePath),
+    tlsPrivateKeyPem: payerMcpServerOptions.tlsPrivateKeyPem ?? await readPinnedPrivateText(payerMcpServerOptions.tlsPrivateKeyPath),
+  });
+  const payerMcpServer = normalizedPayerMcpServerOptions === null ? null : createPayerMcpServer(Object.freeze({
+    ...normalizedPayerMcpServerOptions,
     capabilityDigest: scope.payerMcpIntakeCapabilityDigest,
     intakeStore: payerMcpIntakeStore,
     repositorySha: scope.repositorySha,

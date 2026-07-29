@@ -22,6 +22,7 @@ import { createLaunchManifest, writeLaunchManifest } from "../src/bilateral/coor
 import { createCoordinationReceipt } from "../src/bilateral/coordination/receipt.mjs";
 import { buildPaymentIntakeToolResult } from "../src/bilateral/local-mcp/payment-intake.mjs";
 import { PAYER_MCP_INTAKE_DIRECTORY_NAME } from "../src/bilateral/local-mcp/intake-store.mjs";
+import { main as supervisorMain } from "../bin/handshake-supervisor.mjs";
 import { main as createInvitationFiles } from "../scripts/create-invitations.mjs";
 
 const DESCRIPTOR_SESSION_DOMAIN =
@@ -182,6 +183,10 @@ test("projects supervisor status lines through an exact secret-free allowlist", 
   assert.equal(
     createSupervisorStatusLine({ code: "COORDINATION_SUPERVISOR_FAILED", message: "/private/path", paymentMoved: false, stack: "secret" }),
     '{"code":"COORDINATION_SUPERVISOR_FAILED","paymentMoved":false}\n',
+  );
+  assert.equal(
+    createSupervisorStatusLine({ paymentMoved: false, privateKeyPem: "secret", role: "payer", status: "PAYER_MCP_READY", url: "https://127.0.0.1:9443/mcp" }),
+    '{"paymentMoved":false,"role":"payer","status":"PAYER_MCP_READY","url":"https://127.0.0.1:9443/mcp"}\n',
   );
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: true, role: "payer", status: "WAITING_FOR_PEER" }));
 });
@@ -753,6 +758,139 @@ test("production dependencies construct the local MCP server only for the Payer 
     },
     probe: async () => ({ clean: true, head: repositorySha }),
     stateRoot: join(root, "payee"),
+  }));
+
+});
+
+test("supervisor CLI accepts exactly four Payer MCP path options and production pins TLS files", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "supervisor-runtime-mcp-cli-"));
+  const manifestRoot = await mkdtemp(join(tmpdir(), "supervisor-runtime-mcp-cli-manifest-"));
+  t.after(() => Promise.all([
+    rm(root, { force: true, recursive: true }),
+    rm(manifestRoot, { force: true, recursive: true }),
+  ]));
+  await chmod(manifestRoot, 0o700);
+  const certificatePath = join(manifestRoot, "tls-cert.pem");
+  const privateKeyPath = join(manifestRoot, "tls-key.pem");
+  execFileSync("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "ed25519",
+    "-keyout",
+    privateKeyPath,
+    "-out",
+    certificatePath,
+    "-nodes",
+    "-days",
+    "1",
+    "-subj",
+    "/CN=127.0.0.1",
+    "-addext",
+    "subjectAltName=IP:127.0.0.1",
+  ], { stdio: "ignore" });
+  await chmod(certificatePath, 0o600);
+  await chmod(privateKeyPath, 0o600);
+  const tlsCertificatePem = await readFile(certificatePath, "utf8");
+  const tlsPrivateKeyPem = await readFile(privateKeyPath, "utf8");
+  const repositorySha = "a".repeat(40);
+  const payerManifestPath = join(manifestRoot, "payer-launch-manifest.json");
+  const { manifest: payerManifest } = createLaunchManifest({
+    expectedTlsFingerprint: sha256(new X509Certificate(tlsCertificatePem).raw),
+    nowMs: 0,
+    operatorKeyId: "operator",
+    randomBytes: () => Buffer.alloc(32, 9),
+    relayUrl: "https://127.0.0.1:8443",
+    releaseId: "release-mcp-cli",
+    repositorySha,
+    role: "payer",
+    sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd",
+    tlsCertificatePem,
+    payerMcpIntakeCapabilityDigest: "5".repeat(64),
+  });
+  await writeLaunchManifest(payerManifestPath, payerManifest);
+  const constructed = [];
+  const dependencies = await createProductionSupervisorDependencies({
+    createPayerMcpServer(input) {
+      constructed.push(input);
+      return { start: async () => ({ host: input.host, port: input.port, url: `https://${input.host}:${input.port}/mcp` }), stop: async () => undefined };
+    },
+    launchManifestPath: payerManifestPath,
+    payerMcpServerOptions: {
+      host: "127.0.0.1",
+      port: 9443,
+      tlsCertificatePath: certificatePath,
+      tlsPrivateKeyPath: privateKeyPath,
+    },
+    probe: async () => ({ clean: true, head: repositorySha }),
+    stateRoot: root,
+  });
+  assert.equal(typeof dependencies.startPayerMcpServer, "function");
+  assert.equal(constructed[0].tlsCertificatePem, tlsCertificatePem);
+  assert.equal(constructed[0].tlsPrivateKeyPem, tlsPrivateKeyPem);
+
+  const seen = [];
+  await supervisorMain([
+    "--launch-manifest", payerManifestPath,
+    "--state", root,
+    "--payer-mcp-host", "127.0.0.1",
+    "--payer-mcp-port", "9443",
+    "--payer-mcp-tls-certificate", certificatePath,
+    "--payer-mcp-tls-private-key", privateKeyPath,
+  ], {
+    async createProductionSupervisorDependencies(input) {
+      seen.push(input);
+      return {
+        runSupervisor: async () => ({ paymentMoved: false }),
+      };
+    },
+  });
+  assert.equal(seen[0].payerMcpServerOptions.host, "127.0.0.1");
+  assert.equal(seen[0].payerMcpServerOptions.port, 9443);
+  assert.equal(seen[0].payerMcpServerOptions.tlsCertificatePath, certificatePath);
+  assert.equal(seen[0].payerMcpServerOptions.tlsPrivateKeyPath, privateKeyPath);
+
+  const payeeManifestPath = join(manifestRoot, "payee-launch-manifest.json");
+  const { manifest: payeeManifest } = createLaunchManifest({
+    expectedTlsFingerprint: sha256(new X509Certificate(tlsCertificatePem).raw),
+    nowMs: 0,
+    operatorKeyId: "operator",
+    randomBytes: () => Buffer.alloc(32, 10),
+    relayUrl: "https://127.0.0.1:8443",
+    releaseId: "release-mcp-cli",
+    repositorySha,
+    role: "payee",
+    sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd",
+    tlsCertificatePem,
+    payerMcpIntakeCapability: "6".repeat(64),
+  });
+  await writeLaunchManifest(payeeManifestPath, payeeManifest);
+  await assert.rejects(createProductionSupervisorDependencies({
+    launchManifestPath: payeeManifestPath,
+    payerMcpServerOptions: {
+      host: "127.0.0.1",
+      port: 9443,
+      tlsCertificatePath: certificatePath,
+      tlsPrivateKeyPath: privateKeyPath,
+    },
+    probe: async () => ({ clean: true, head: repositorySha }),
+    stateRoot: join(root, "payee"),
+  }));
+
+  await chmod(privateKeyPath, 0o644);
+  await assert.rejects(createProductionSupervisorDependencies({
+    createPayerMcpServer() {
+      throw new Error("must reject before constructing MCP server");
+    },
+    launchManifestPath: payerManifestPath,
+    payerMcpServerOptions: {
+      host: "127.0.0.1",
+      port: 9443,
+      tlsCertificatePath: certificatePath,
+      tlsPrivateKeyPath: privateKeyPath,
+    },
+    probe: async () => ({ clean: true, head: repositorySha }),
+    stateRoot: join(root, "bad-key-mode"),
   }));
 });
 
