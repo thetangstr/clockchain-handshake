@@ -66,6 +66,32 @@ function exactDataObject(value, keys) {
   }
 }
 
+function exactDenseArray(value, length) {
+  try {
+    if (!Array.isArray(value)) invalid();
+    const ownKeys = Reflect.ownKeys(value);
+    const expectedKeys = [
+      ...Array.from({ length }, (_, index) => String(index)),
+      "length",
+    ];
+    if (
+      ownKeys.length !== expectedKeys.length ||
+      expectedKeys.some((key, index) => ownKeys[index] !== key)
+    ) {
+      invalid();
+    }
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    if (!lengthDescriptor || !Object.hasOwn(lengthDescriptor, "value") || lengthDescriptor.value !== length) invalid();
+    return Array.from({ length }, (_, index) => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) invalid();
+      return descriptor.value;
+    });
+  } catch {
+    invalid();
+  }
+}
+
 function assertCloneablePlain(value) {
   try {
     structuredClone(value);
@@ -101,7 +127,6 @@ function clonePolicy() {
 function validatePolicyPreview(value) {
   const preview = exactDataObject(value, ["amount", "invoiceReferencePrefix", "purpose"]);
   const amount = exactDataObject(preview.amount, AMOUNT_KEYS);
-  assertCloneablePlain(value);
   if (
     amount.currency !== DEMO_INTENT_POLICY.amount.currency ||
     amount.value !== DEMO_INTENT_POLICY.amount.value ||
@@ -207,13 +232,11 @@ export function buildPaymentIntakeToolResult({ repositorySha, toolInput }) {
 
 export function validateHandshakeRequiredResult({ result, repositorySha, toolInput }) {
   const value = exactDataObject(result, RESULT_KEYS);
-  assertCloneablePlain(result);
   const input = validatePaymentIntakeInput(toolInput);
   const preview = validatePolicyPreview(value.mandatePreview);
+  const sequence = exactDenseArray(value.authorizationSequence, AUTHORIZATION_SEQUENCE.length);
   if (
-    !Array.isArray(value.authorizationSequence) ||
-    value.authorizationSequence.length !== AUTHORIZATION_SEQUENCE.length ||
-    !value.authorizationSequence.every((entry, index) => entry === AUTHORIZATION_SEQUENCE[index]) ||
+    !sequence.every((entry, index) => entry === AUTHORIZATION_SEQUENCE[index]) ||
     typeof value.intakeDigest !== "string" ||
     !LOWERCASE_DIGEST_PATTERN.test(value.intakeDigest) ||
     value.intakeDigest !== intakeDigest(input) ||
@@ -245,14 +268,13 @@ export function validateHandshakeRequiredResult({ result, repositorySha, toolInp
 
 export function validatePaymentIntakeToolResult({ result, repositorySha, toolInput }) {
   const value = exactDataObject(result, TOOL_RESULT_KEYS);
-  assertCloneablePlain(result);
   const structuredContent = validateHandshakeRequiredResult({
     result: value.structuredContent,
     repositorySha,
     toolInput,
   });
-  if (!Array.isArray(value.content) || value.content.length !== 1) invalid();
-  const block = exactDataObject(value.content[0], TEXT_BLOCK_KEYS);
+  const content = exactDenseArray(value.content, 1);
+  const block = exactDataObject(content[0], TEXT_BLOCK_KEYS);
   if (block.type !== "text" || block.text !== canonicalText(structuredContent)) invalid();
   let parsed;
   try {

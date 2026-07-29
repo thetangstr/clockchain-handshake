@@ -207,6 +207,62 @@ test("rejects changed handshake-required result shape and values", () => {
   }));
 });
 
+test("rejects result accessors without touching nested getter values", () => {
+  const input = validInput();
+  const result = buildPaymentIntakeToolResult({ repositorySha: REPOSITORY_SHA, toolInput: input });
+
+  let previewPurposeGets = 0;
+  const previewWithPurposeAccessor = {
+    amount: { currency: "USD", value: "100" },
+    invoiceReferencePrefix: "invoice-",
+  };
+  Object.defineProperty(previewWithPurposeAccessor, "purpose", {
+    enumerable: true,
+    get() {
+      previewPurposeGets += 1;
+      return "Handshake demo";
+    },
+  });
+  assertInvalid(() => validateHandshakeRequiredResult({
+    result: { ...result.structuredContent, mandatePreview: previewWithPurposeAccessor },
+    toolInput: input,
+    repositorySha: REPOSITORY_SHA,
+  }));
+  assert.equal(previewPurposeGets, 0);
+
+  let sequenceGets = 0;
+  const sequenceWithAccessor = ["PROPOSED", "ACCEPTED", "ACKNOWLEDGED"];
+  Object.defineProperty(sequenceWithAccessor, "0", {
+    enumerable: true,
+    get() {
+      sequenceGets += 1;
+      return "PROPOSED";
+    },
+  });
+  assertInvalid(() => validateHandshakeRequiredResult({
+    result: { ...result.structuredContent, authorizationSequence: sequenceWithAccessor },
+    toolInput: input,
+    repositorySha: REPOSITORY_SHA,
+  }));
+  assert.equal(sequenceGets, 0);
+
+  let textGets = 0;
+  const textBlockWithAccessor = { type: "text" };
+  Object.defineProperty(textBlockWithAccessor, "text", {
+    enumerable: true,
+    get() {
+      textGets += 1;
+      return result.content[0].text;
+    },
+  });
+  assertInvalid(() => validatePaymentIntakeToolResult({
+    result: { structuredContent: result.structuredContent, content: [textBlockWithAccessor] },
+    toolInput: input,
+    repositorySha: REPOSITORY_SHA,
+  }));
+  assert.equal(textGets, 0);
+});
+
 test("exports the canonical request_payment MCP tool descriptor", () => {
   assert.deepEqual(PAYMENT_INTAKE_TOOL_DESCRIPTOR, {
     name: "request_payment",
