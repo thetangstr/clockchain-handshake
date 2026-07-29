@@ -651,23 +651,21 @@ export async function runSupervisor(input) {
   if (input?.client) {
     const { client, dependencies = {} } = input;
     let localState = input.localState;
-    if (!localState || typeof client.readEnrollmentSet !== "function" || typeof client.readEvents !== "function" || typeof localState.operatorPublicKey !== "string" || typeof localState.releaseId !== "string" || typeof localState.repositorySha !== "string" || typeof localState.sessionId !== "string" || !["payer", "payee"].includes(localState.role)) invalid();
-    if (typeof client.readEnrollmentReadiness === "function") {
-      let waitingReported = false;
-      let readyReported = false;
-      for (;;) {
-        const ready = assertEnrollmentReadiness(await client.readEnrollmentReadiness({ waitMs: 30000 }), localState);
-        if (ready) {
-          if (!readyReported && typeof dependencies.writeStatus === "function") {
-            dependencies.writeStatus(Object.freeze({ paymentMoved: false, role: localState.role, status: "PEER_READY" }));
-            readyReported = true;
-          }
-          break;
+    if (!localState || typeof client.readEnrollmentReadiness !== "function" || typeof client.readEnrollmentSet !== "function" || typeof client.readEvents !== "function" || typeof localState.operatorPublicKey !== "string" || typeof localState.releaseId !== "string" || typeof localState.repositorySha !== "string" || typeof localState.sessionId !== "string" || !["payer", "payee"].includes(localState.role)) invalid();
+    let waitingReported = false;
+    let readyReported = false;
+    for (;;) {
+      const ready = assertEnrollmentReadiness(await client.readEnrollmentReadiness({ sessionId: localState.sessionId, waitMs: 30000 }), localState);
+      if (ready) {
+        if (!readyReported && typeof dependencies.writeStatus === "function") {
+          dependencies.writeStatus(Object.freeze({ paymentMoved: false, role: localState.role, status: "PEER_READY" }));
+          readyReported = true;
         }
-        if (!waitingReported && typeof dependencies.writeStatus === "function") {
-          dependencies.writeStatus(Object.freeze({ paymentMoved: false, role: localState.role, status: "WAITING_FOR_PEER" }));
-          waitingReported = true;
-        }
+        break;
+      }
+      if (!waitingReported && typeof dependencies.writeStatus === "function") {
+        dependencies.writeStatus(Object.freeze({ paymentMoved: false, role: localState.role, status: "WAITING_FOR_PEER" }));
+        waitingReported = true;
       }
     }
     let enrollmentSet = await client.readEnrollmentSet();

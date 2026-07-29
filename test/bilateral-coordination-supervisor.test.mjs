@@ -39,6 +39,23 @@ function replayFixture({ payerInvitationAddress = `0x${"1".repeat(40)}`, payeeIn
   return { events: [event("payer", "ENROLLMENT_CONFIRMED", payer), event("payee", "ENROLLMENT_CONFIRMED", payee), event("operator", "ENROLLMENT_RECEIPT", operator)], operator, payee, payer, release, repo, session, set };
 }
 
+function immediateEnrollmentReadiness(fixture) {
+  return async function readEnrollmentReadiness(value) {
+    assert.deepEqual(value, {
+      sessionId: fixture.session,
+      waitMs: 30000,
+    });
+    return {
+      paymentMoved: false,
+      ready: true,
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      schema: "clockchain.bilateral-enrollment-readiness/v1",
+      sessionId: fixture.session,
+    };
+  };
+}
+
 function replayThroughDescriptor(fixture) {
   const events = [...fixture.events];
   const append = (role, pair, kind, artifactDigest = null, subjectRun = "release") => {
@@ -305,6 +322,7 @@ test("the long-lived supervisor accepts a descriptor without treating it as a ch
         assert.deepEqual(value, { artifactType: "signed-descriptor", digest: descriptor.artifactDigest });
         return descriptorBytes;
       },
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
       async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
       async readEvents() { return structuredClone(events); },
     },
@@ -346,6 +364,7 @@ test("the payer supervisor waits for authenticated payee readiness instead of fa
     .map((event) => event.eventDigest);
   const result = await runSupervisor({
     client: {
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
       async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
       async readEvents() { return structuredClone(events); },
     },
@@ -402,6 +421,7 @@ test("payer publishes one signed mandate from identity-bound parties before desc
         publications.push(value);
         return { artifactType: "payer-mandate", byteLength: String(value.bytes.length), digest: sha256(value.bytes) };
       },
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
       async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
       async readEvents() { return structuredClone(events); },
     },
@@ -498,6 +518,7 @@ test("payee verifies Iris mandate and submits one Billie-signed payment request"
         assert.equal(artifactType, "identity-package");
         return artifacts.get(digest);
       },
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
       async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
       async readEvents() { return structuredClone(events); },
       async readPayerMandate(value) {
@@ -629,6 +650,7 @@ test("payer verifies the exact Billie request before appending PAYMENT_REQUEST_M
         assert.equal(artifactType, "identity-package");
         return artifacts.get(digest);
       },
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
       async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
       async readEvents() { return structuredClone(events); },
       async readPayerMandate() { return mandateBytes; },
@@ -735,6 +757,7 @@ test("payer discovers Billie's unpredictable requestId from the authenticated pa
         assert.equal(digest, sha256(requestBytes));
         return requestBytes;
       },
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
       async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
       async readEvents() { return structuredClone(events); },
       async readPayerMandate() { return mandateBytes; },
@@ -842,6 +865,7 @@ test("payer rejects payment-request route bytes that differ from the authenticat
         assert.equal(digest, sha256(requestBytes));
         return requestBytes;
       },
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
       async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
       async readEvents() { return structuredClone(events); },
       async readPayerMandate() { return mandateBytes; },
@@ -915,6 +939,7 @@ test("retries payer mandate publication from durable bytes without re-signing", 
         published.push(value);
         return { artifactType: "payer-mandate", byteLength: String(value.bytes.length), digest: sha256(value.bytes) };
       },
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
       async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
       async readEvents() { return structuredClone(events); },
     },
@@ -964,6 +989,7 @@ test("fails closed when durable mandate retry bytes differ from the journal", as
   await assert.rejects(runSupervisor({
     client: {
       async publishPayerMandate() { published += 1; },
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
       async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
       async readEvents() { return structuredClone(events); },
     },
@@ -1048,6 +1074,7 @@ test("retries payment-request submission from durable bytes without re-signing o
   const submitted = [];
   await runSupervisor({
     client: {
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
       async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
       async readEvents() { return structuredClone(events); },
       async submitPaymentRequest(value) {
@@ -1096,6 +1123,7 @@ test("fails closed when durable payment-request retry bytes differ from the jour
   let submitted = 0;
   await assert.rejects(runSupervisor({
     client: {
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
       async readEnrollmentSet() { return parseCoordinationEnrollmentSet(fixture.set); },
       async readEvents() { return structuredClone(events); },
       async submitPaymentRequest() { submitted += 1; },
@@ -1346,10 +1374,34 @@ test("refreshes only complete authenticated event snapshots", async () => {
   const fixture = replayFixture();
   let enrollments = 0, events = 0;
   const parsedEnrollmentSet = parseCoordinationEnrollmentSet(fixture.set);
-  const result = await runSupervisor({ client: { async readEnrollmentSet() { enrollments += 1; return parsedEnrollmentSet; }, async readEvents(value) { events += 1; assert.deepEqual(value, { after: null, waitMs: 30000 }); return []; } }, localState: { operatorPublicKey: raw(fixture.operator), releaseId: fixture.release, repositorySha: fixture.repo, sessionId: fixture.session, role: "payer" }, dependencies: { shouldContinue() { return false; }, verifyEnrollmentSet: independentlyVerifiedEnrollmentSet } });
+  const result = await runSupervisor({ client: { readEnrollmentReadiness: immediateEnrollmentReadiness(fixture), async readEnrollmentSet() { enrollments += 1; return parsedEnrollmentSet; }, async readEvents(value) { events += 1; assert.deepEqual(value, { after: null, waitMs: 30000 }); return []; } }, localState: { operatorPublicKey: raw(fixture.operator), releaseId: fixture.release, repositorySha: fixture.repo, sessionId: fixture.session, role: "payer" }, dependencies: { shouldContinue() { return false; }, verifyEnrollmentSet: independentlyVerifiedEnrollmentSet } });
   assert.equal(enrollments, 1);
   assert.equal(events, 1);
   assert.equal(result.view.state, "BOOTSTRAPPING");
+});
+
+test("fails closed when the supervisor client lacks enrollment readiness", async () => {
+  const fixture = replayFixture();
+  const parsedEnrollmentSet = parseCoordinationEnrollmentSet(fixture.set);
+  await assert.rejects(
+    runSupervisor({
+      client: {
+        async readEnrollmentSet() { return parsedEnrollmentSet; },
+        async readEvents() { return []; },
+      },
+      dependencies: {
+        shouldContinue() { return false; },
+        verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
+      },
+      localState: {
+        operatorPublicKey: raw(fixture.operator),
+        releaseId: fixture.release,
+        repositorySha: fixture.repo,
+        role: "payer",
+        sessionId: fixture.session,
+      },
+    }),
+  );
 });
 
 test("waits for peer enrollment readiness before the authoritative enrollment set", async () => {
@@ -1401,7 +1453,10 @@ test("waits for peer enrollment readiness before the authoritative enrollment se
     "enrollment-set",
     "events",
   ]);
-  assert.deepEqual(calls[0][1], { waitMs: 30000 });
+  assert.deepEqual(calls[0][1], {
+    sessionId: fixture.session,
+    waitMs: 30000,
+  });
   assert.deepEqual(status, [
     { paymentMoved: false, role: "payer", status: "WAITING_FOR_PEER" },
     { paymentMoved: false, role: "payer", status: "PEER_READY" },
@@ -1436,6 +1491,7 @@ test("drives the authenticated startup through a token commitment without replac
   let loops = 0;
   const result = await runSupervisor({
     client: {
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
       async readEnrollmentSet() { return parseCoordinationEnrollmentSet(enrollmentSet); },
       async readEvents() { return structuredClone(events); },
       async putArtifact({ artifactType, bytes }) { assert.equal(artifactType, "token-commitment"); return { artifactType, byteLength: String(bytes.length), digest: sha256(bytes) }; },

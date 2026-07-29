@@ -190,6 +190,47 @@ test("routes only exact enrollment-readiness reads to the advisory service seam"
   }
 });
 
+test("routes real service enrollment readiness through the handler validator", async (t) => {
+  const { store } = await storeFixture(t);
+  await registerRole(store, {
+    capability: PAYER_CAPABILITY,
+    role: "payer",
+  });
+  await registerRole(store, {
+    capability: PAYEE_CAPABILITY,
+    role: "payee",
+  });
+  const { relay } = relayFixture(store);
+  await bootstrapRole(relay, {
+    capability: PAYER_CAPABILITY,
+    coordination: payerCoordination,
+    enrollment: await enrollmentFixture({
+      capability: PAYER_CAPABILITY,
+      coordination: payerCoordination,
+      invitationPrivateKeys: invitationKeys.payer,
+      preflight: payerPreflight,
+      role: "payer",
+    }),
+    invitationPrivateKeys: invitationKeys.payer,
+    preflight: payerPreflight,
+    role: "payer",
+  });
+  const handler = createRelayRequestHandler(relay, "127.0.0.1", 8443, REPOSITORY_SHA);
+  const result = await invokeRelayHandler(handler, {
+    method: "GET",
+    url: `/v1/sessions/${SESSION_ID}/enrollment-readiness?waitMs=0`,
+  });
+  assert.equal(result.status, 200);
+  assert.deepEqual(JSON.parse(result.body), {
+    paymentMoved: false,
+    ready: false,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.bilateral-enrollment-readiness/v1",
+    sessionId: SESSION_ID,
+  });
+});
+
 test("routes the exact payer-owned inbox endpoints with canonical bytes", async () => {
   const calls = [];
   const mandate = Buffer.from('{"mandate":true}', "utf8");
@@ -2123,6 +2164,7 @@ test("reports exact frozen enrollment readiness without exposing enrollment auth
   assert.deepEqual(notReady, {
     paymentMoved: false,
     ready: false,
+    releaseId: RELEASE_ID,
     repositorySha: REPOSITORY_SHA,
     schema:
       "clockchain.bilateral-enrollment-readiness/v1",
@@ -2200,6 +2242,7 @@ test("long-poll enrollment readiness waits for durable payee bootstrap and times
   assert.deepEqual(await pending, {
     paymentMoved: false,
     ready: true,
+    releaseId: RELEASE_ID,
     repositorySha: REPOSITORY_SHA,
     schema:
       "clockchain.bilateral-enrollment-readiness/v1",
@@ -2229,6 +2272,7 @@ test("long-poll enrollment readiness waits for durable payee bootstrap and times
     {
       paymentMoved: false,
       ready: false,
+      releaseId: RELEASE_ID,
       repositorySha: REPOSITORY_SHA,
       schema:
         "clockchain.bilateral-enrollment-readiness/v1",
@@ -2288,6 +2332,7 @@ test("enrollment readiness ignores unrelated session event notifications until p
   assert.deepEqual(await pending, {
     paymentMoved: false,
     ready: true,
+    releaseId: RELEASE_ID,
     repositorySha: REPOSITORY_SHA,
     schema:
       "clockchain.bilateral-enrollment-readiness/v1",
@@ -2297,6 +2342,14 @@ test("enrollment readiness ignores unrelated session event notifications until p
 
 test("enrollment readiness timeout returns false without treating timeout as notification", async (t) => {
   const { store } = await storeFixture(t);
+  await registerRole(store, {
+    capability: PAYER_CAPABILITY,
+    role: "payer",
+  });
+  await registerRole(store, {
+    capability: PAYEE_CAPABILITY,
+    role: "payee",
+  });
   let payeeReads = 0;
   const timeoutStore = storeFacade(store, {
     async readEnrollment(input) {
@@ -2325,6 +2378,7 @@ test("enrollment readiness timeout returns false without treating timeout as not
     {
       paymentMoved: false,
       ready: false,
+      releaseId: RELEASE_ID,
       repositorySha: REPOSITORY_SHA,
       schema:
         "clockchain.bilateral-enrollment-readiness/v1",

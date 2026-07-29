@@ -1228,10 +1228,24 @@ export function createRelayService(input) {
       });
     }
 
-    function enrollmentReadinessResult(sessionId, ready) {
+    async function enrollmentReadinessResult(sessionId, ready) {
+      let storedView;
+      try {
+        storedView = await store.readReleaseView({
+          sessionId,
+        });
+      } catch {
+        invalid();
+      }
+      const stored = assertReleaseView(
+        storedView,
+        sessionId,
+        frozenRepositorySha,
+      );
       return Object.freeze({
         paymentMoved: false,
         ready,
+        releaseId: stored.releaseId,
         repositorySha: frozenRepositorySha,
         schema: ENROLLMENT_READINESS_SCHEMA,
         sessionId,
