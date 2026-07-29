@@ -39,6 +39,9 @@ Every artifact and public status preserves `paymentMoved:false`.
   and the existing Payer/Requestor supervisors.
 - An exact intake digest and intake request identifier carried into both the
   Payer-signed session mandate and the Requestor-signed formal payment request.
+- A coordinator-generated 256-bit MCP intake capability whose raw value is
+  delivered only to the Requestor and whose SHA-256 digest is delivered to the
+  Payer.
 - Replay-safe persistence of the non-authoritative intake request on the
   Payer computer.
 - Updated Payer and Requestor prompts, runbooks, documentation checks, and the
@@ -79,6 +82,11 @@ implements only:
 The server uses JSON responses rather than SSE. It advertises only the
 `tools` capability and assigns a cryptographically random `MCP-Session-Id`.
 The client sends `MCP-Protocol-Version: 2025-11-25` after initialization.
+Every client POST sends
+`Accept: application/json, text/event-stream`, as required by Streamable HTTP.
+The pinned local server always returns `application/json`. An SSE response is a
+contract mismatch and the Requestor client fails closed rather than falling
+back to a different server behavior.
 
 The canonical intake digest and identifier are later repeated in the
 Payer-signed session mandate and Requestor-signed formal payment request. The
@@ -153,11 +161,19 @@ The server:
 - binds only to the explicit numeric Payer LAN address;
 - never defaults to `0.0.0.0`;
 - validates the exact repository SHA before listening;
+- requires `Authorization: Bearer <capability>` and compares only
+  `sha256(capability)` to the exact digest in the Payer launch manifest using
+  constant-time comparison;
 - rejects every request carrying an `Origin` header because the demo has no
   browser MCP client;
 - permits only `POST`, `GET`, and `DELETE` on `/mcp`;
-- limits headers and bodies;
-- uses fixed request deadlines;
+- accepts at most 32 request headers and a 64-KiB request body;
+- uses a five-second header deadline and a ten-second whole-request deadline;
+- permits at most 16 failed authentication attempts across the process in any
+  rolling 60-second window, then returns one generic `429` response without
+  parsing the body; and
+- permits each authenticated MCP session at most eight HTTP requests total,
+  including initialization and deletion, before retiring that session;
 - rejects unsupported MCP versions, methods, tools, fields, content types,
   and response modes;
 - returns `405` to GET because no SSE stream is implemented; and
@@ -195,28 +211,53 @@ It performs these steps:
 
 1. Verify the clean immutable checkout and validate all path inputs without
    printing their contents.
-2. Open a TLS-pinned connection to the Payer MCP endpoint.
-3. Send MCP `initialize` and require protocol version `2025-11-25`, the
+2. Read the Requestor-only MCP intake capability through the approved
+   launch-manifest parser, retain it only for the MCP exchange, and never
+   print or persist it separately.
+3. Open a TLS-pinned connection to the Payer MCP endpoint.
+4. Send MCP `initialize` and require protocol version `2025-11-25`, the
    `tools` capability, exact server identity, and one secure session ID.
-4. Send `notifications/initialized`.
-5. Call `tools/list` and require exactly one tool named `request_payment`
+5. Send `notifications/initialized`.
+6. Call `tools/list` and require exactly one tool named `request_payment`
    with the repository-owned exact input and output schemas.
-6. Call `request_payment` once with the fixed demo request.
-7. Validate the exact structured result and its duplicate text
+7. Call `request_payment` once with the fixed demo request.
+8. Validate the exact structured result and its duplicate text
    representation.
-8. Require `status:"HANDSHAKE_REQUIRED"`, the same intake request ID and
+9. Require `status:"HANDSHAKE_REQUIRED"`, the same intake request ID and
    commercial terms, the exact three-transition sequence, the reviewed
    repository SHA, the correct canonical intake digest, and
    `paymentMoved:false`.
-9. Persist the exact validated intake result at a fixed private path owned by
+10. Persist the exact validated intake result at a fixed private path owned by
    the Requestor supervisor state.
-10. Close the MCP session.
-11. Start the existing Requestor supervisor once using the supplied launch
+11. Close the MCP session.
+12. Start the existing Requestor supervisor once using the supplied launch
     manifest and private state path.
 
-Any failure before step 11 prevents the supervisor from starting.
+Any failure before step 12 prevents the supervisor from starting.
 
-### 4.4 Binding into the signed session artifacts
+### 4.4 Intake capability
+
+The coordinator creates one cryptographically random 32-byte intake
+capability when it creates the two launch manifests.
+
+- The Requestor launch manifest contains the lowercase hexadecimal raw
+  capability under a role-conditional exact field.
+- The Payer launch manifest contains only the lowercase hexadecimal SHA-256
+  digest under the corresponding role-conditional exact field.
+- The operator never sends the raw capability to the Payer.
+- The Requestor client sends the raw value only in the TLS-protected
+  `Authorization` header.
+- The Payer server hashes the header value, performs a constant-time digest
+  comparison, and discards the raw value.
+- The capability and digest are bound to one repository SHA, release ID, and
+  coordination session by their respective launch manifests.
+- Neither value appears in MCP results, intake records, supervisor status
+  lines, console projections, logs, committed files, or public documentation.
+
+Byte-identical retries may reuse the capability while the launch manifest is
+valid. Changed duplicate intake bytes still fail closed.
+
+### 4.5 Binding into the signed session artifacts
 
 The exact Payer mandate schema gains:
 
@@ -289,6 +330,24 @@ Rules:
 - `paymentMoved` must be exactly `false`.
 - Unknown, duplicate, accessor-backed, proxied, oversized, malformed, or
   noncanonical input fails closed.
+
+The exact digest is:
+
+```text
+intakeDigest =
+  lowercase_hex(
+    SHA-256(
+      bilateral_canonical_bytes(validated request_payment input)
+    )
+  )
+```
+
+The digest preimage is only the exact validated tool input object shown above.
+It excludes the JSON-RPC envelope, HTTP headers, MCP session ID, tool result,
+and text content block. `bilateral_canonical_bytes` is the repository's
+existing UTF-8 JSON profile: lexicographically ordered keys, no trailing
+newline, printable bounded strings, no numbers, and exact nested data
+properties.
 
 ### 5.3 Structured result
 
@@ -435,6 +494,11 @@ The Requestor supervisor must not start on:
 - changed duplicate request bytes; or
 - MCP timeout or premature disconnect.
 
+The server returns the same generic unauthorized response and consumes no
+intake state for missing, malformed, or incorrect capabilities. It applies
+the exact process-wide and per-session limits from section 4.2 before
+expensive parsing and never distinguishes unknown capability values.
+
 The Payer supervisor also fails closed if it reaches commercial-intent
 construction without exactly one validated intake or if its persisted intake
 differs from the Requestor's repeated intake commitment.
@@ -455,6 +519,9 @@ differs from the Requestor's repeated intake commitment.
 
 - Initialization must be first.
 - Exact protocol-version negotiation and session header behavior.
+- Every POST sends
+  `Accept: application/json, text/event-stream`; the pinned server returns
+  JSON, and an unexpected SSE response fails closed.
 - `notifications/initialized` returns `202`.
 - `tools/list` exposes exactly one tool with exact schemas.
 - `tools/call` accepts only `request_payment`.
@@ -463,6 +530,12 @@ differs from the Requestor's repeated intake commitment.
   content types, origins, and body limits fail closed.
 - TLS certificate and fingerprint pinning rejects hostname changes, alternate
   certificates, redirects, and proxy escape hatches.
+- Missing, malformed, and wrong intake capabilities fail before tool
+  execution without revealing which value was wrong.
+- The seventeenth failed authentication attempt inside one rolling 60-second
+  window receives the generic rate-limit response, and a valid capability
+  works again after the window expires.
+- An authenticated MCP session is retired after its eighth HTTP request.
 
 ### 10.3 Integration tests
 
