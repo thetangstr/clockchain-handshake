@@ -30,6 +30,15 @@ function block(value) {
   return value;
 }
 
+function timestamp(value) {
+  if (
+    typeof value !== "string" ||
+    value.length > 32 ||
+    !Number.isFinite(Date.parse(value))
+  ) fail();
+  return value;
+}
+
 function status({ anchors, markers, verifier }) {
   if (verifier === "VERIFICATION_PASSED") return "VERIFIED";
   if (anchors.every((item) => item.verified)) return "ANCHORED";
@@ -37,6 +46,41 @@ function status({ anchors, markers, verifier }) {
   if (markers.paymentRequestReady) return "REQUEST_RECEIVED";
   if (markers.payerMandateReady) return "MANDATE_READY";
   return "WAITING_FOR_PARTICIPANTS";
+}
+
+export function buildUnavailablePublicMonitorSnapshot({
+  observedAt,
+  payerMcpReady,
+}) {
+  if (typeof payerMcpReady !== "boolean") fail();
+  return Object.freeze({
+    schema: "clockchain.public-handshake-monitor/v1",
+    observedAt: timestamp(observedAt),
+    staleAfterMs: 10_000,
+    status: "WAITING_FOR_PARTICIPANTS",
+    paymentMoved: false,
+    actors: Object.freeze({
+      operator: "UNAVAILABLE",
+      payer: "UNAVAILABLE",
+      requestor: "UNAVAILABLE",
+    }),
+    services: Object.freeze({
+      payerMcp: payerMcpReady ? "READY" : "UNAVAILABLE",
+      watcher: "UNAVAILABLE",
+    }),
+    markers: Object.freeze({
+      payerMandateReady: false,
+      paymentRequestReady: false,
+      paymentRequestMatched: false,
+    }),
+    anchors: Object.freeze(ANCHORS.map((anchor) => Object.freeze({
+      actor: anchor.actor,
+      state: anchor.state,
+      verified: false,
+      block: null,
+    }))),
+    verifier: Object.freeze({ status: "PENDING" }),
+  });
 }
 
 export function buildPublicMonitorSnapshot(
@@ -47,9 +91,6 @@ export function buildPublicMonitorSnapshot(
   if (
     value.schema !== "clockchain.bilateral-console-projection/v1" ||
     value.paymentMoved !== false ||
-    typeof observedAt !== "string" ||
-    observedAt.length > 32 ||
-    !Number.isFinite(Date.parse(observedAt)) ||
     typeof payerMcpReady !== "boolean"
   ) fail();
 
@@ -88,7 +129,7 @@ export function buildPublicMonitorSnapshot(
 
   return Object.freeze({
     schema: "clockchain.public-handshake-monitor/v1",
-    observedAt,
+    observedAt: timestamp(observedAt),
     staleAfterMs: 10_000,
     status: status({ anchors, markers, verifier: verifierStatus }),
     paymentMoved: false,

@@ -2,7 +2,10 @@
 import { spawn } from "node:child_process";
 import { createConnection } from "node:net";
 import { pathToFileURL } from "node:url";
-import { buildPublicMonitorSnapshot } from "../src/bilateral/coordination/public-monitor.mjs";
+import {
+  buildPublicMonitorSnapshot,
+  buildUnavailablePublicMonitorSnapshot,
+} from "../src/bilateral/coordination/public-monitor.mjs";
 
 const DEFAULT_BUCKET = "clockchain-handshake-monitor-570035913370-us-west-2";
 
@@ -120,20 +123,28 @@ function uploadSnapshot(snapshot, options) {
 }
 
 async function publishOnce(options) {
-  const response = await fetch(options.consoleUrl, {
-    cache: "no-store",
-    signal: AbortSignal.timeout(1_500),
-  });
-  if (!response.ok) throw new Error(`Console returned ${response.status}.`);
-  const projection = await response.json();
   const payerMcpReady = await probeTcp({
     host: options.payerMcpHost,
     port: options.payerMcpPort,
   });
-  const snapshot = buildPublicMonitorSnapshot(projection, {
-    observedAt: new Date().toISOString(),
-    payerMcpReady,
-  });
+  const observedAt = new Date().toISOString();
+  let snapshot;
+  try {
+    const response = await fetch(options.consoleUrl, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(1_500),
+    });
+    if (!response.ok) throw new Error(`Console returned ${response.status}.`);
+    snapshot = buildPublicMonitorSnapshot(await response.json(), {
+      observedAt,
+      payerMcpReady,
+    });
+  } catch {
+    snapshot = buildUnavailablePublicMonitorSnapshot({
+      observedAt,
+      payerMcpReady,
+    });
+  }
   await uploadSnapshot(snapshot, options);
   process.stdout.write(`PUBLIC_MONITOR_UPDATED ${snapshot.observedAt} ${snapshot.status}\n`);
 }

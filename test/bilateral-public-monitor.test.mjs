@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildPublicMonitorSnapshot } from "../src/bilateral/coordination/public-monitor.mjs";
+import {
+  buildPublicMonitorSnapshot,
+  buildUnavailablePublicMonitorSnapshot,
+} from "../src/bilateral/coordination/public-monitor.mjs";
 import { parsePublicMonitorArguments } from "../scripts/publish-public-monitor.mjs";
 
 function projection() {
@@ -128,5 +131,41 @@ test("publisher defaults to the reviewed public bucket and loopback services", (
   assert.throws(
     () => parsePublicMonitorArguments(["--console-url", "https://example.com"]),
     /Public monitor arguments failed safely/,
+  );
+});
+
+test("publishes a fresh safe waiting snapshot before the private console starts", () => {
+  assert.deepEqual(
+    buildUnavailablePublicMonitorSnapshot({
+      observedAt: "2026-07-30T20:00:00.000Z",
+      payerMcpReady: false,
+    }),
+    {
+      schema: "clockchain.public-handshake-monitor/v1",
+      observedAt: "2026-07-30T20:00:00.000Z",
+      staleAfterMs: 10_000,
+      status: "WAITING_FOR_PARTICIPANTS",
+      paymentMoved: false,
+      actors: {
+        operator: "UNAVAILABLE",
+        payer: "UNAVAILABLE",
+        requestor: "UNAVAILABLE",
+      },
+      services: {
+        payerMcp: "UNAVAILABLE",
+        watcher: "UNAVAILABLE",
+      },
+      markers: {
+        payerMandateReady: false,
+        paymentRequestReady: false,
+        paymentRequestMatched: false,
+      },
+      anchors: [
+        { actor: "Payer", state: "PROPOSED", verified: false, block: null },
+        { actor: "Requestor", state: "ACCEPTED", verified: false, block: null },
+        { actor: "Payer", state: "ACKNOWLEDGED", verified: false, block: null },
+      ],
+      verifier: { status: "PENDING" },
+    },
   );
 });
