@@ -64,6 +64,35 @@ At expiry, the role fails closed without publishing `FUNDING_INPUTS_READY`.
 The role emits `FUNDING_INPUTS_READY` only after both of its addresses are
 independently re-read as ready.
 
+## Externally reachable Payer MCP
+
+Keep the payment-intake MCP process and its private intake store on the Payer
+machine. Do not move `request_payment` into the shared hosted Clockchain MCP.
+
+For stakeholders on different networks, expose the Payer MCP through a stable
+AWS raw-TCP reverse relay:
+
+- The Payer MCP continues to bind only to `127.0.0.1`.
+- A dedicated AWS relay with a stable Elastic IP forwards raw TCP bytes to the
+  Payer machine through an outbound reverse SSH tunnel.
+- The AWS relay never terminates TLS and therefore cannot read the MCP
+  capability, request, response, or private intake state.
+- The MCP server accepts an explicit public URL distinct from its bind address.
+  It validates requests against the public URL's exact `Host` authority and
+  reports that public URL in `PAYER_MCP_READY`.
+- The Payer-generated leaf certificate contains the relay's exact public IP as
+  its SAN. Requestor performs normal IP-hostname validation, trusts only the
+  transferred leaf certificate, and separately verifies its lowercase SHA-256
+  fingerprint.
+- The public URL remains an IP-literal `https:` URL with an explicit port and
+  exact `/mcp` path. DNS, redirects, proxies, and TLS termination at the relay
+  remain unavailable.
+
+The stable relay is reusable infrastructure, but every demo still creates a
+fresh Payer MCP certificate, capability, session, intake ID, and private state
+root. Loss of the reverse tunnel fails closed; it does not authorize a local or
+hosted fallback.
+
 ## Agent and operator instructions
 
 The Payer and Requestor prompts and runbooks will state:
@@ -98,6 +127,13 @@ Focused tests will prove:
 8. Production dependency wiring supplies the bounded clock and sleeper.
 9. Prompt and documentation gates prohibit state deletion and describe
    background execution for timeout-limited agent shells.
+10. A loopback-bound Payer MCP may advertise a distinct public IP-literal URL,
+    validates the matching public `Host` authority, and still rejects malformed
+    or unpinned endpoints.
+11. A raw-TCP relay integration test proves the Requestor completes the pinned
+    MCP lifecycle through an advertised endpoint distinct from the MCP bind
+    port without exposing the MCP payload at the relay. The live AWS gate proves
+    the same lifecycle through a non-loopback Elastic IP.
 
 After focused tests pass, run the repository verification suite once as the
 final local gate. A new live Hermes rehearsal requires a newly funded set of
@@ -114,6 +150,10 @@ failed-session addresses are not reusable.
   invariant changes.
 - Public and repository instructions explicitly preserve role state and support
   long-lived execution in timeout-limited agent environments.
+- The Payer MCP remains loopback-bound while `PAYER_MCP_READY` publishes the
+  exact externally reachable, certificate-pinned AWS relay URL.
+- An external-network Requestor can receive exact `HANDSHAKE_REQUIRED` through
+  the relay, while the relay performs no TLS termination.
 - Focused checks and one fresh `npm run verify` pass.
 - The public manual page pins the new reviewed release SHA.
 
@@ -124,3 +164,5 @@ failed-session addresses are not reusable.
 - Automatically recreating or recovering deleted private role state.
 - Reusing the four funded addresses from the failed rehearsal.
 - Claiming live-demo validation without a new funded physical rehearsal.
+- Moving payment-intake authority or private Payer state into AWS.
+- Adding a public reverse proxy that terminates Payer MCP TLS.
