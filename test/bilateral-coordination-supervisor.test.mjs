@@ -2228,30 +2228,59 @@ test("resumes only through a replay-derived resumed coordination client", async 
     assert.equal(transportCreated, 0);
     assert.equal(resumedCreated, 0);
   }
-  for (const mutation of [
-    (value) => { value.phase = "BEFORE_CHILD"; },
-    (value) => { value.phase = "DESCRIPTOR_WRITING"; },
-    (value) => { value.phase = "TOKEN_READY"; },
-    (value) => { value.phase = "RECOVERY_REQUIRED"; },
-    (value) => { value.processedEventDigests = ["f".repeat(64)]; },
-    (value) => { value.intakeBinding.intakeRequestId = "22222222-3333-1444-8555-666666666666"; },
-    (value) => { value.intentJournal = { intakeDigest: INTAKE_DIGEST, intakeRequestId: INTAKE_REQUEST_ID, mandateDigest: "b".repeat(64), mandateRawDigest: "c".repeat(64), requestDigest: "d".repeat(64), requestId: INTAKE_REQUEST_ID, requestRawDigest: "e".repeat(64), stage: "PAYMENT_REQUEST_SUBMITTED", subjectRun: "rehearsal" }; },
-    (value) => {
+  const preflightArtifact = (pair, fields = {}) => {
+    const unsigned = { algorithm: "ed25519", paymentMoved: false, publicKey: raw(pair), repositorySha: fixture.repo, role: "payer", schema: PREFLIGHT_KEY_ENROLLMENT_SCHEMA, ...fields };
+    return { ...unsigned, signature: sign(null, preflightKeyEnrollmentSignaturePreimage(unsigned), pair.privateKey).toString("base64") };
+  };
+  const unsignedPreflight = preflightArtifact(fixture.payerPreflight);
+  delete unsignedPreflight.signature;
+  const forgedPreflight = {
+    algorithm: "ed25519",
+    paymentMoved: false,
+    publicKey: raw(fixture.payerPreflight),
+    repositorySha: fixture.repo,
+    role: "payer",
+    schema: PREFLIGHT_KEY_ENROLLMENT_SCHEMA,
+  };
+  forgedPreflight.signature = sign(null, preflightKeyEnrollmentSignaturePreimage(forgedPreflight), fixture.operator.privateKey).toString("base64");
+  for (const [name, mutation] of [
+    ["phase before child", (value) => { value.phase = "BEFORE_CHILD"; }],
+    ["descriptor writing phase", (value) => { value.phase = "DESCRIPTOR_WRITING"; }],
+    ["token phase without token commitment", (value) => { value.phase = "TOKEN_READY"; }],
+    ["recovery phase without recovery journal", (value) => { value.phase = "RECOVERY_REQUIRED"; }],
+    ["processed digest without replay snapshot", (value) => { value.processedEventDigests = ["f".repeat(64)]; }],
+    ["drifted intake binding", (value) => { value.intakeBinding.intakeRequestId = "22222222-3333-1444-8555-666666666666"; }],
+    ["colliding intent request id", (value) => { value.intentJournal = { intakeDigest: INTAKE_DIGEST, intakeRequestId: INTAKE_REQUEST_ID, mandateDigest: "b".repeat(64), mandateRawDigest: "c".repeat(64), requestDigest: "d".repeat(64), requestId: INTAKE_REQUEST_ID, requestRawDigest: "e".repeat(64), stage: "PAYMENT_REQUEST_SUBMITTED", subjectRun: "rehearsal" }; }],
+    ["colliding run request ids", (value) => {
       value.rehearsal.requestId = "9f953393-86d0-4f99-9d6a-102f525fbecd";
       value.stakeholder.requestId = "9f953393-86d0-4f99-9d6a-102f525fbecd";
-    },
-    (value) => { value.childJournal = { command: "bin/handshake-propose.mjs", commandDigest: "f".repeat(64), eventDigest: "f".repeat(64), status: "CHILD_COMPLETE", subjectRun: "rehearsal" }; },
+    }],
+    ["child journal without authenticated event", (value) => { value.childJournal = { command: "bin/handshake-propose.mjs", commandDigest: "f".repeat(64), eventDigest: "f".repeat(64), status: "CHILD_COMPLETE", subjectRun: "rehearsal" }; }],
+    ["unsigned preflight artifact", (value) => { value.preflight.publicArtifact = unsignedPreflight; }],
+    ["forged preflight signature", (value) => { value.preflight.publicArtifact = forgedPreflight; }],
+    ["extra preflight artifact field", (value) => { value.preflight.publicArtifact = { ...preflightArtifact(fixture.payerPreflight), extra: true }; }],
+    ["preflight schema mismatch", (value) => { value.preflight.publicArtifact = preflightArtifact(fixture.payerPreflight, { schema: "clockchain.bad-preflight/v1" }); }],
+    ["preflight role mismatch", (value) => { value.preflight.publicArtifact = preflightArtifact(fixture.payerPreflight, { role: "payee" }); }],
+    ["preflight repository mismatch", (value) => { value.preflight.publicArtifact = preflightArtifact(fixture.payerPreflight, { repositorySha: "b".repeat(40) }); }],
+    ["preflight payment moved", (value) => { value.preflight.publicArtifact = preflightArtifact(fixture.payerPreflight, { paymentMoved: true }); }],
+    ["preflight key mismatch against enrollment", (value) => { value.preflight.publicArtifact = preflightArtifact(generateKeyPairSync("ed25519")); }],
   ]) {
     const hostile = structuredClone(checkpoint);
     mutation(hostile);
+    let transportCreated = 0;
+    let resumedCreated = 0;
     await assert.rejects(createRoleSupervisor({ launchManifestPath: "/retired", stateRoot: "/state", dependencies: {
       async readState() { return hostile; },
       async validateActiveLaunchState(value) { return value; },
-      async createTransport() { assert.fail("hostile restart must not create transport"); },
-      async resolveOperatorPublicKey() { assert.fail("hostile restart must not resolve authority"); },
-      createResumedCoordinationClient() { assert.fail("hostile restart must not create client"); },
+      async createTransport() { transportCreated += 1; return {}; },
+      async resolveOperatorPublicKey() { return raw(fixture.operator); },
+      createResumedCoordinationClient() { resumedCreated += 1; return {}; },
       async retireLaunchManifest() { assert.fail("hostile restart must not retire manifest"); },
+      async readStoredPayerMcpIntake() { return payerIntakeRecord(fixture.repo); },
+      verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
     } }));
+    assert.equal(transportCreated, 0, `${name} must fail before transport`);
+    assert.equal(resumedCreated, 0, `${name} must fail before resumed client`);
   }
   const restarted = await createRoleSupervisor({ launchManifestPath: "/retired", stateRoot: "/state", dependencies: {
     async readState() { return checkpoint; },
