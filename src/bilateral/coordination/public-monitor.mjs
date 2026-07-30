@@ -1,8 +1,9 @@
 const HEALTH = new Set(["READY", "WAITING", "FAILED", "UNAVAILABLE"]);
+const SHA64 = /^[0-9a-f]{64}$/;
 const ANCHORS = Object.freeze([
-  Object.freeze({ actor: "Payer", state: "PROPOSED" }),
-  Object.freeze({ actor: "Requestor", state: "ACCEPTED" }),
-  Object.freeze({ actor: "Payer", state: "ACKNOWLEDGED" }),
+  Object.freeze({ actor: "Payer", sequence: 1, stage: "proposal", state: "PROPOSED" }),
+  Object.freeze({ actor: "Requestor", sequence: 2, stage: "acceptance", state: "ACCEPTED" }),
+  Object.freeze({ actor: "Payer", sequence: 3, stage: "acknowledgment", state: "ACKNOWLEDGED" }),
 ]);
 const VERIFIER = new Set(["PENDING", "VERIFICATION_PASSED"]);
 
@@ -14,6 +15,16 @@ function object(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value
     : fail();
+}
+
+function closed(value, keys) {
+  const result = object(value);
+  const names = Object.keys(result);
+  if (
+    names.length !== keys.length ||
+    !keys.every((key) => Object.hasOwn(result, key))
+  ) fail();
+  return result;
 }
 
 function health(value) {
@@ -87,19 +98,84 @@ export function buildPublicMonitorSnapshot(
   projection,
   { observedAt, payerMcpReady },
 ) {
-  const value = object(projection);
+  const value = closed(projection, [
+    "actors",
+    "anchors",
+    "deadline",
+    "failure",
+    "mandate",
+    "paymentMoved",
+    "phase",
+    "request",
+    "schema",
+    "session",
+    "verifier",
+  ]);
   if (
     value.schema !== "clockchain.bilateral-console-projection/v1" ||
     value.paymentMoved !== false ||
     typeof payerMcpReady !== "boolean"
   ) fail();
 
-  const actorsValue = object(value.actors);
-  const session = object(value.session);
-  const observations = object(session.observations);
-  const mandate = object(value.mandate);
-  const request = object(value.request);
-  const verifierValue = object(value.verifier);
+  const actorsValue = closed(value.actors, ["operator", "payer", "payee"]);
+  const operator = closed(actorsValue.operator, ["health", "label", "role"]);
+  const payer = closed(actorsValue.payer, ["health", "label", "role"]);
+  const payee = closed(actorsValue.payee, ["health", "label", "role"]);
+  if (
+    operator.label !== "Operator" ||
+    operator.role !== "operator" ||
+    payer.label !== "Payer" ||
+    payer.role !== "payer" ||
+    payee.label !== "Requestor" ||
+    payee.role !== "payee"
+  ) fail();
+  const session = closed(value.session, [
+    "advisory",
+    "observations",
+    "releaseId",
+    "repositorySha",
+    "sessionId",
+  ]);
+  const observations = closed(session.observations, ["relay", "watcher"]);
+  const relay = closed(observations.relay, ["advisory", "health", "label"]);
+  const watcher = closed(observations.watcher, ["advisory", "health", "label"]);
+  if (
+    session.advisory !== true ||
+    relay.advisory !== true ||
+    relay.label !== "relay advisory" ||
+    watcher.advisory !== true ||
+    watcher.label !== "watcher advisory"
+  ) fail();
+  closed(value.deadline, ["expiresAtMs", "freshness", "nowMs"]);
+  if (value.failure !== null) {
+    const failure = closed(value.failure, ["active", "code", "recovery", "run"]);
+    closed(failure.recovery, ["label", "visible"]);
+  }
+  const phase = closed(value.phase, ["advisory", "value"]);
+  if (phase.advisory !== true) fail();
+  const mandate = closed(value.mandate, [
+    "amount",
+    "digest",
+    "kind",
+    "matched",
+    "purpose",
+    "received",
+  ]);
+  const request = closed(value.request, [
+    "amount",
+    "digest",
+    "invoiceReference",
+    "kind",
+    "received",
+  ]);
+  if (mandate.amount !== null) closed(mandate.amount, ["currency", "value"]);
+  if (request.amount !== null) closed(request.amount, ["currency", "value"]);
+  if (mandate.kind !== "pre-protocol" || request.kind !== "pre-protocol") fail();
+  const verifierValue = closed(value.verifier, [
+    "advisory",
+    "publicationDigest",
+    "status",
+  ]);
   if (!Array.isArray(value.anchors) || value.anchors.length !== ANCHORS.length) fail();
 
   const markers = Object.freeze({
@@ -108,11 +184,23 @@ export function buildPublicMonitorSnapshot(
     paymentRequestMatched: boolean(mandate.matched),
   });
   const anchors = Object.freeze(value.anchors.map((raw, index) => {
-    const item = object(raw);
+    const item = closed(raw, [
+      "actor",
+      "block",
+      "digest",
+      "kind",
+      "sequence",
+      "stage",
+      "verified",
+    ]);
     const expected = ANCHORS[index];
     if (
       item.actor !== expected.actor ||
       item.kind !== expected.state ||
+      item.sequence !== expected.sequence ||
+      item.stage !== expected.stage ||
+      typeof item.digest !== "string" ||
+      !SHA64.test(item.digest) ||
       typeof item.verified !== "boolean"
     ) fail();
     const height = block(item.block);
@@ -134,13 +222,13 @@ export function buildPublicMonitorSnapshot(
     status: status({ anchors, markers, verifier: verifierStatus }),
     paymentMoved: false,
     actors: Object.freeze({
-      operator: health(object(actorsValue.operator).health),
-      payer: health(object(actorsValue.payer).health),
-      requestor: health(object(actorsValue.payee).health),
+      operator: health(operator.health),
+      payer: health(payer.health),
+      requestor: health(payee.health),
     }),
     services: Object.freeze({
       payerMcp: payerMcpReady ? "READY" : "UNAVAILABLE",
-      watcher: health(object(observations.watcher).health),
+      watcher: health(watcher.health),
     }),
     markers,
     anchors,

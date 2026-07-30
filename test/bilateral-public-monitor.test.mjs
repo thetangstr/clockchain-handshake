@@ -16,6 +16,7 @@ function projection() {
       payee: { health: "WAITING", label: "Requestor", role: "payee" },
     },
     session: {
+      advisory: true,
       observations: {
         relay: { advisory: true, health: "READY", label: "relay advisory" },
         watcher: { advisory: true, health: "READY", label: "watcher advisory" },
@@ -27,21 +28,30 @@ function projection() {
     mandate: {
       received: true,
       matched: true,
+      kind: "pre-protocol",
       amount: { currency: "USD", value: "100" },
       purpose: "private-purpose",
       digest: "b".repeat(64),
     },
     request: {
       received: true,
+      kind: "pre-protocol",
       amount: { currency: "USD", value: "100" },
       invoiceReference: "private-invoice",
       digest: "c".repeat(64),
     },
     anchors: [
-      { actor: "Payer", kind: "PROPOSED", verified: true, block: "101", digest: "d".repeat(64) },
-      { actor: "Requestor", kind: "ACCEPTED", verified: true, block: "102", digest: "e".repeat(64) },
-      { actor: "Payer", kind: "ACKNOWLEDGED", verified: true, block: "103", digest: "f".repeat(64) },
+      { actor: "Payer", kind: "PROPOSED", sequence: 1, stage: "proposal", verified: true, block: "101", digest: "d".repeat(64) },
+      { actor: "Requestor", kind: "ACCEPTED", sequence: 2, stage: "acceptance", verified: true, block: "102", digest: "e".repeat(64) },
+      { actor: "Payer", kind: "ACKNOWLEDGED", sequence: 3, stage: "acknowledgment", verified: true, block: "103", digest: "f".repeat(64) },
     ],
+    deadline: {
+      expiresAtMs: "1785297600000",
+      freshness: "FRESH",
+      nowMs: 1785294300000,
+    },
+    failure: null,
+    phase: { advisory: true, value: "STAKEHOLDER_RUNNING" },
     verifier: {
       advisory: false,
       publicationDigest: "9".repeat(64),
@@ -106,6 +116,21 @@ test("rejects malformed, moved-payment, and mismatched anchor input", () => {
     { ...projection(), anchors: projection().anchors.map((item, index) => index === 1 ? { ...item, kind: "ACKNOWLEDGED" } : item) },
     { ...projection(), actors: { ...projection().actors, payer: { health: "UNKNOWN" } } },
     { ...projection(), verifier: { status: "AUTHORIZED" } },
+    { ...projection(), unexpectedTopLevel: "secret" },
+    { ...projection(), mandate: { ...projection().mandate, secret: "secret" } },
+    {
+      ...projection(),
+      session: {
+        ...projection().session,
+        observations: {
+          ...projection().session.observations,
+          watcher: {
+            ...projection().session.observations.watcher,
+            extra: "secret",
+          },
+        },
+      },
+    },
   ];
 
   for (const value of cases) {
