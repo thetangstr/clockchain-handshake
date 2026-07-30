@@ -1,4 +1,4 @@
-import { createHash, randomBytes as nodeRandomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes as nodeRandomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
 import https from "node:https";
 import net from "node:net";
 
@@ -91,6 +91,47 @@ function validateRepositorySha(value) {
 function validatePem(value) {
   if (typeof value !== "string" || !value.includes("-----BEGIN") || !value.includes("-----END")) fail();
   return value;
+}
+
+function validatePublicEndpoint(value, certificatePem) {
+  if (value === undefined) return null;
+  if (typeof value !== "string") fail();
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    fail();
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.pathname !== "/mcp" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.port === "" ||
+    net.isIP(url.hostname) === 0 ||
+    url.hostname === "0.0.0.0"
+  ) {
+    fail();
+  }
+  const port = Number(url.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535 || String(port) !== url.port) fail();
+  if (net.isIP(url.hostname) === 4) {
+    const octets = url.hostname.split(".");
+    if (octets.length !== 4 || octets.some((octet) => String(Number(octet)) !== octet || Number(octet) > 255)) fail();
+  }
+  let certificate;
+  try {
+    certificate = new X509Certificate(certificatePem);
+  } catch {
+    fail();
+  }
+  if (certificate.checkIP(url.hostname) !== url.hostname) fail();
+  return Object.freeze({
+    authority: hostAuthority(url.hostname, port),
+    url: url.href,
+  });
 }
 
 function validateIntakeStore(value) {
@@ -361,6 +402,7 @@ export function createPayerMcpServer({
   intakeStore,
   nowMs = () => Date.now(),
   port,
+  publicUrl,
   randomBytes = nodeRandomBytes,
   repositorySha,
   tlsCertificatePem,
@@ -373,6 +415,7 @@ export function createPayerMcpServer({
   const store = validateIntakeStore(intakeStore);
   const certificate = validatePem(tlsCertificatePem);
   const privateKey = validatePem(tlsPrivateKeyPem);
+  const publicEndpoint = validatePublicEndpoint(publicUrl, certificate);
   if (typeof createHttpsServer !== "function" || typeof nowMs !== "function" || typeof randomBytes !== "function") fail();
 
   const sessions = new Map();
@@ -384,8 +427,12 @@ export function createPayerMcpServer({
     return typeof address === "object" && address !== null ? address.port : bindPort;
   }
 
-  function expectedHost() {
-    return hostAuthority(bindHost, currentPort());
+  function advertisedAuthority() {
+    return publicEndpoint?.authority ?? hostAuthority(bindHost, currentPort());
+  }
+
+  function advertisedUrl() {
+    return publicEndpoint?.url ?? `https://${hostAuthority(bindHost, currentPort())}/mcp`;
   }
 
   function authBlocked() {
@@ -465,7 +512,7 @@ export function createPayerMcpServer({
   async function handleRequest(req, res) {
     try {
       req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy());
-      const headerStatus = validateCommonHeaders(req, expectedHost());
+      const headerStatus = validateCommonHeaders(req, advertisedAuthority());
       if (headerStatus) {
         if (headerStatus === 405 && req.method === "GET" && req.url === "/mcp") {
           res.setHeader("Allow", "POST, DELETE");
@@ -519,7 +566,7 @@ export function createPayerMcpServer({
           resolve();
         });
       });
-      return Object.freeze({ host: bindHost, port: currentPort(), url: `https://${hostAuthority(bindHost, currentPort())}/mcp` });
+      return Object.freeze({ host: bindHost, port: currentPort(), url: advertisedUrl() });
     },
     async stop() {
       if (!server) return;

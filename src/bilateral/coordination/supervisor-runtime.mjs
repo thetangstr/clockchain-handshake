@@ -623,6 +623,7 @@ export async function createProductionSupervisorDependencies({ createPayerMcpSer
   const normalizedPayerMcpServerOptions = payerMcpServerOptions === undefined ? null : Object.freeze({
     host: payerMcpServerOptions.host,
     port: payerMcpServerOptions.port,
+    ...(payerMcpServerOptions.publicUrl === undefined ? {} : { publicUrl: payerMcpServerOptions.publicUrl }),
     tlsCertificatePem: payerMcpServerOptions.tlsCertificatePem ?? await readPinnedPrivateText(payerMcpServerOptions.tlsCertificatePath, MAX_STATE_BYTES, payerMcpServerOptions.afterPinnedTextFirstRead),
     tlsPrivateKeyPem: payerMcpServerOptions.tlsPrivateKeyPem ?? await readPinnedPrivateText(payerMcpServerOptions.tlsPrivateKeyPath, MAX_STATE_BYTES, payerMcpServerOptions.afterPinnedTextFirstRead),
   });

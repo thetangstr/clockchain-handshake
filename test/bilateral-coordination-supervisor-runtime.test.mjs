@@ -739,6 +739,7 @@ test("production dependencies construct the local MCP server only for the Payer 
     payerMcpServerOptions: {
       host: "127.0.0.1",
       port: 9443,
+      publicUrl: "https://203.0.113.10:19443/mcp",
       tlsCertificatePem,
       tlsPrivateKeyPem,
     },
@@ -764,6 +765,7 @@ test("production dependencies construct the local MCP server only for the Payer 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].capabilityDigest, payerMcpIntakeCapabilityDigest);
   assert.equal(calls[0].repositorySha, repositorySha);
+  assert.equal(calls[0].publicUrl, "https://203.0.113.10:19443/mcp");
   assert.equal(typeof calls[0].intakeStore.writeIntake, "function");
   assert.equal(Object.hasOwn(calls[0], "bootstrapCapability"), false);
   assert.equal(Object.hasOwn(calls[0], "payerMcpIntakeCapability"), false);
@@ -823,7 +825,7 @@ test("production dependencies construct the local MCP server only for the Payer 
 
 });
 
-test("supervisor CLI accepts exactly four Payer MCP path options and production pins TLS files", async (t) => {
+test("supervisor CLI accepts four Payer MCP path options plus an optional public URL and production pins TLS files", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "supervisor-runtime-mcp-cli-"));
   const manifestRoot = await mkdtemp(join(tmpdir(), "supervisor-runtime-mcp-cli-manifest-"));
   t.after(() => Promise.all([
@@ -910,6 +912,36 @@ test("supervisor CLI accepts exactly four Payer MCP path options and production 
   assert.equal(seen[0].payerMcpServerOptions.port, 9443);
   assert.equal(seen[0].payerMcpServerOptions.tlsCertificatePath, certificatePath);
   assert.equal(seen[0].payerMcpServerOptions.tlsPrivateKeyPath, privateKeyPath);
+  const externalSeen = [];
+  await supervisorMain([
+    "--launch-manifest", payerManifestPath,
+    "--state", root,
+    "--payer-mcp-host", "127.0.0.1",
+    "--payer-mcp-port", "9443",
+    "--payer-mcp-public-url", "https://203.0.113.10:19443/mcp",
+    "--payer-mcp-tls-certificate", certificatePath,
+    "--payer-mcp-tls-private-key", privateKeyPath,
+  ], {
+    async createProductionSupervisorDependencies(input) {
+      externalSeen.push(input);
+      return {
+        runSupervisor: async () => ({ paymentMoved: false }),
+      };
+    },
+  });
+  assert.equal(externalSeen[0].payerMcpServerOptions.publicUrl, "https://203.0.113.10:19443/mcp");
+  let publicOnlyFactoryCalled = false;
+  await assert.rejects(supervisorMain([
+    "--launch-manifest", payerManifestPath,
+    "--state", root,
+    "--payer-mcp-public-url", "https://203.0.113.10:19443/mcp",
+  ], {
+    async createProductionSupervisorDependencies() {
+      publicOnlyFactoryCalled = true;
+      return {};
+    },
+  }));
+  assert.equal(publicOnlyFactoryCalled, false);
   let portZeroFactoryCalled = false;
   await assert.rejects(supervisorMain([
     "--launch-manifest", payerManifestPath,

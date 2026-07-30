@@ -12,6 +12,7 @@ import { test } from "node:test";
 import { createPayerMcpServer } from "../src/bilateral/local-mcp/server.mjs";
 import { buildPaymentIntakeToolResult, PAYMENT_INTAKE_TOOL_DESCRIPTOR } from "../src/bilateral/local-mcp/payment-intake.mjs";
 import { createPayerMcpIntakeStore } from "../src/bilateral/local-mcp/intake-store.mjs";
+import { requestPaymentThroughPayerMcp } from "../src/bilateral/local-mcp/client.mjs";
 
 const PROTOCOL_VERSION = "2025-11-25";
 const REPOSITORY_SHA = "a".repeat(40);
@@ -64,6 +65,7 @@ async function makeFixture(t, options = {}) {
     intakeStore,
     nowMs: options.nowMs,
     port: 0,
+    publicUrl: options.publicUrl,
     randomBytes: options.randomBytes ?? (() => Buffer.alloc(16, 1)),
     repositorySha: REPOSITORY_SHA,
     sideEffects: {
@@ -214,6 +216,67 @@ test("serves the exact JSON-only MCP lifecycle and persists one request_payment 
   await fixture.server.stop();
 });
 
+test("completes pinned request_payment through a raw TCP relay while the MCP remains loopback-bound", async (t) => {
+  let targetPort;
+  let forwardedBytes = 0;
+  const relaySockets = new Set();
+  const relay = net.createServer((downstream) => {
+    const upstream = net.connect({
+      host: "127.0.0.1",
+      port: targetPort,
+    });
+    relaySockets.add(downstream);
+    relaySockets.add(upstream);
+    downstream.once("close", () => relaySockets.delete(downstream));
+    upstream.once("close", () => relaySockets.delete(upstream));
+    downstream.once("error", () => upstream.destroy());
+    upstream.once("error", () => downstream.destroy());
+    downstream.on("data", (chunk) => {
+      forwardedBytes += chunk.length;
+    });
+    upstream.on("data", (chunk) => {
+      forwardedBytes += chunk.length;
+    });
+    downstream.pipe(upstream);
+    upstream.pipe(downstream);
+  });
+  await new Promise((resolve, reject) => {
+    relay.once("error", reject);
+    relay.listen(0, "127.0.0.1", () => {
+      relay.off("error", reject);
+      resolve();
+    });
+  });
+  const relayAddress = relay.address();
+  assert.equal(typeof relayAddress, "object");
+  const publicUrl = `https://127.0.0.1:${relayAddress.port}/mcp`;
+  t.after(() => {
+    for (const socket of relaySockets) socket.destroy();
+    return new Promise((resolve, reject) => relay.close((error) => error ? reject(error) : resolve()));
+  });
+
+  const fixture = await makeFixture(t, { publicUrl });
+  targetPort = fixture.port;
+  const requestorState = await mkdtemp(join(tmpdir(), "payer-mcp-relay-requestor-"));
+  t.after(() => rm(requestorState, { force: true, recursive: true }));
+
+  assert.equal(fixture.host, "127.0.0.1");
+  assert.notEqual(fixture.port, relayAddress.port);
+  assert.equal(fixture.url, publicUrl);
+  const result = await requestPaymentThroughPayerMcp({
+    capability: CAPABILITY,
+    intakeRequestId: INTAKE_REQUEST_ID,
+    mcpUrl: publicUrl,
+    repositorySha: REPOSITORY_SHA,
+    stateRoot: requestorState,
+    tlsCertificatePem: fixture.certificate,
+    tlsFingerprint: fixture.fingerprint,
+  });
+  assert.equal(result.status, "HANDSHAKE_REQUIRED");
+  assert.equal(result.paymentMoved, false);
+  assert.equal(forwardedBytes > 0, true);
+});
+
 test("rejects unsafe transport boundary, host, path, headers, session, method, and tool shapes", async (t) => {
   const fixture = await makeFixture(t);
   const tlsPrivateKeyPem = await readFile(join(fixture.root, "key.pem"), "utf8");
@@ -248,6 +311,56 @@ test("rejects unsafe transport boundary, host, path, headers, session, method, a
     repositorySha: REPOSITORY_SHA,
     tlsCertificatePem: fixture.certificate,
     tlsPrivateKeyPem,
+  }).start, "function");
+  for (const publicUrl of [
+    "http://127.0.0.1:19443/mcp",
+    "https://127.0.0.1/mcp",
+    "https://127.0.0.1:19443/other",
+    "https://127.0.0.1:19443/mcp?proxy=true",
+    "https://user@127.0.0.1:19443/mcp",
+    "https://0.0.0.0:19443/mcp",
+    "https://localhost:19443/mcp",
+    "https://203.0.113.10:19443/mcp",
+  ]) {
+    assert.throws(() => createPayerMcpServer({
+      capabilityDigest: CAPABILITY_DIGEST,
+      host: "127.0.0.1",
+      intakeStore: { writeIntake: async () => undefined },
+      port: 0,
+      publicUrl,
+      repositorySha: REPOSITORY_SHA,
+      tlsCertificatePem: fixture.certificate,
+      tlsPrivateKeyPem,
+    }), /Payer MCP server failed safely\./);
+  }
+  const publicCertificatePath = join(fixture.root, "public-cert.pem");
+  const publicPrivateKeyPath = join(fixture.root, "public-key.pem");
+  execFileSync("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "ed25519",
+    "-keyout",
+    publicPrivateKeyPath,
+    "-out",
+    publicCertificatePath,
+    "-nodes",
+    "-days",
+    "1",
+    "-subj",
+    "/CN=203.0.113.10",
+    "-addext",
+    "subjectAltName=IP:203.0.113.10",
+  ], { stdio: "ignore" });
+  assert.equal(typeof createPayerMcpServer({
+    capabilityDigest: CAPABILITY_DIGEST,
+    host: "127.0.0.1",
+    intakeStore: { writeIntake: async () => undefined },
+    port: 0,
+    publicUrl: "https://203.0.113.10:19443/mcp",
+    repositorySha: REPOSITORY_SHA,
+    tlsCertificatePem: await readFile(publicCertificatePath, "utf8"),
+    tlsPrivateKeyPem: await readFile(publicPrivateKeyPath, "utf8"),
   }).start, "function");
   for (const host of ["2001:0db8::1", "2001:db8:0:0:0:0:0:1", "::0001"]) {
     assert.throws(() => createPayerMcpServer({
