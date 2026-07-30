@@ -9,7 +9,7 @@ import { canonicalBytes } from "../canonical.mjs";
 import { canonicalizeReceiptEventValue } from "../../canonical.mjs";
 import { validateRelayArtifact as defaultValidateRelayArtifact } from "./artifact.mjs";
 import { validateRelayArtifactWithFacts as defaultValidateRelayArtifactWithFacts } from "./artifact.mjs";
-import { readAndSignTokenCommitment as defaultReadAndSignTokenCommitment, verifyTokenCommitment } from "./preflight.mjs";
+import { readAndSignTokenCommitment as defaultReadAndSignTokenCommitment, verifyPreflightKeyEnrollment, verifyTokenCommitment } from "./preflight.mjs";
 import { payerMandateDigest, verifyPayerMandate } from "../payer-mandate.mjs";
 import { paymentRequestDigest, verifyPaymentRequest } from "../payment-request.mjs";
 import { DEMO_INTENT_POLICY } from "../demo-intent-policy.mjs";
@@ -531,10 +531,10 @@ async function rereadTokenCommitment(localState, dependencies) {
   if (!same(commitment, localState.tokenCommitment)) invalid();
 }
 function validateLocalCheckpoint(checkpoint, scope) {
-  if (!dataExact(checkpoint.preflight, ["outputPath", "planPath", "privateKeyPath", "publicArtifact", "publicArtifactPath"]) || !dataExact(checkpoint.preflight.publicArtifact, ["paymentMoved", "publicKey", "repositorySha", "role"]) || !Array.isArray(checkpoint.invitations) || checkpoint.invitations.length !== 2 || checkpoint.preflight.planPath !== `${safePrivateRoot(checkpoint.stateRoot)}/preflight/plan.json` || checkpoint.preflight.outputPath !== `${safePrivateRoot(checkpoint.stateRoot)}/preflight/report.json` || checkpoint.preflight.privateKeyPath !== `${checkpoint.stateRoot}/preflight/preflight.ed25519.pem` || checkpoint.preflight.publicArtifactPath !== `${checkpoint.stateRoot}/preflight/preflight-key-enrollment.json`) invalid();
+  if (!dataExact(checkpoint.preflight, ["outputPath", "planPath", "privateKeyPath", "publicArtifact", "publicArtifactPath"]) || !Array.isArray(checkpoint.invitations) || checkpoint.invitations.length !== 2 || checkpoint.preflight.planPath !== `${safePrivateRoot(checkpoint.stateRoot)}/preflight/plan.json` || checkpoint.preflight.outputPath !== `${safePrivateRoot(checkpoint.stateRoot)}/preflight/report.json` || checkpoint.preflight.privateKeyPath !== `${checkpoint.stateRoot}/preflight/preflight.ed25519.pem` || checkpoint.preflight.publicArtifactPath !== `${checkpoint.stateRoot}/preflight/preflight-key-enrollment.json`) invalid();
   const enrollment = verifyCoordinationEnrollment(JSON.parse(Buffer.from(checkpoint.enrollmentBase64, "base64").toString("utf8")));
   if (!Buffer.from(checkpoint.enrollmentBase64, "base64").equals(canonicalBytes(enrollment)) || !matchingCoordinationIdentity(checkpoint.coordinationIdentity, enrollment) || (scope.capabilityDigest !== undefined && enrollment.capabilityDigest !== scope.capabilityDigest) || enrollment.releaseId !== scope.releaseId || enrollment.repositorySha !== scope.repositorySha || enrollment.role !== scope.role || enrollment.sessionId !== scope.sessionId) invalid();
-  const artifact = checkpoint.preflight.publicArtifact;
+  const artifact = verifyPreflightKeyEnrollment(checkpoint.preflight.publicArtifact, { repositorySha: enrollment.repositorySha, role: enrollment.role });
   if (artifact.paymentMoved !== false || artifact.publicKey !== enrollment.preflightKey.publicKey || artifact.repositorySha !== enrollment.repositorySha || artifact.role !== enrollment.role) invalid();
   for (const [index, run] of ["rehearsal", "stakeholder"].entries()) {
     const invitation = checkpoint.invitations[index];
