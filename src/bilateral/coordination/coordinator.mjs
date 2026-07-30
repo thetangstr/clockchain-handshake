@@ -1397,6 +1397,7 @@ async function verifyRun({ dependencies, persisted, release, releaseRoot, subjec
     const matched = replay.filter((event) => event.kind === "VERIFICATION_PASSED" && event.role === "operator" && event.subjectRun === subjectRun && event.eventDigest === existing.eventDigest && event.artifactDigest === existing.artifactDigest);
     if (matched.length !== 1) invalid();
     const verified = descriptorState({ checkpoints: persisted.checkpoints, release, state: verifiedState });
+    await dependencies.writeState({ releaseRoot, state: verified });
     if (typeof dependencies.writeConsoleState === "function") {
       await dependencies.writeConsoleState({
         lifecycleView: verified,

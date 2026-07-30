@@ -1150,8 +1150,7 @@ async function runProductionCoordinatorChild(input) {
     await phase("coordinator-enrollment");
     if (!value.coordinatorFirst && !resumed) await waitForEnrollmentConfirmations(base.readEvents, [payerProcess, payeeProcess]);
     let verifierProcess = null;
-    let beforeVerifier = null;
-    let afterVerifier = null;
+    const verifierRuns = {};
     const runVerifierChild = async (args) => {
       await phase("coordinator-verifier");
       if (!Array.isArray(args) || args[0] !== join(value.repositoryRoot, "scripts/verify-bilateral-results.mjs")) fail();
@@ -1161,7 +1160,11 @@ async function runProductionCoordinatorChild(input) {
         await base.readEvents({ after: null, waitMs: 0 });
       }
       const descriptor = args[args.indexOf("--descriptor") + 1];
+      const outputDirectory = args[args.indexOf("--output") + 1];
       if (!absolute(descriptor)) fail();
+      if (!absolute(outputDirectory)) fail();
+      const subjectRun = outputDirectory.split("/").at(-1);
+      if (!["rehearsal", "stakeholder"].includes(subjectRun)) fail();
       const owners = await descriptorOwners(descriptor);
       if (value.scenario === "descriptor-swap") {
         const envelope = JSON.parse(await readFile(descriptor, "utf8"));
@@ -1177,11 +1180,16 @@ async function runProductionCoordinatorChild(input) {
           hash_type: "SHA-256",
         });
       }
-      await writeExclusive(value.children.verifier.configPath, { arguments: args.slice(1), fake: value.fake, owners, scenario: value.scenario, schema: SCHEMA });
+      const configPath = `${value.children.verifier.configPath}.${subjectRun}`;
+      const logs = {
+        stderr: `${value.children.verifier.logs.stderr}.${subjectRun}`,
+        stdout: `${value.children.verifier.logs.stdout}.${subjectRun}`,
+      };
+      await writeExclusive(configPath, { arguments: args.slice(1), fake: value.fake, owners, scenario: value.scenario, schema: SCHEMA });
       await phase("coordinator-verifier-before-snapshot");
-      beforeVerifier = (await createFakeBilateralClockchainHttpClient(value.fake).snapshot()).readCounters;
+      const beforeVerifier = (await createFakeBilateralClockchainHttpClient(value.fake).snapshot()).readCounters;
       await phase("coordinator-verifier-start");
-      verifierProcess = await start({ logs: value.children.verifier.logs, mode: "verifier", path: value.children.verifier.configPath });
+      verifierProcess = await start({ logs, mode: "verifier", path: configPath });
       active.add(verifierProcess);
       await phase("coordinator-verifier-wait");
       const result = await waitForChild(verifierProcess);
@@ -1207,7 +1215,14 @@ async function runProductionCoordinatorChild(input) {
         await writeFile(markerPath, markerBytes, { mode: 0o600 });
       }
       await phase("coordinator-verifier-after-snapshot");
-      afterVerifier = (await createFakeBilateralClockchainHttpClient(value.fake).snapshot()).readCounters;
+      const afterVerifier = (await createFakeBilateralClockchainHttpClient(value.fake).snapshot()).readCounters;
+      verifierRuns[subjectRun] = Object.freeze({
+        configPath,
+        logs,
+        pid: verifierProcess.pid,
+        readCountersAfterVerifier: afterVerifier,
+        readCountersBeforeVerifier: beforeVerifier,
+      });
       return 0;
     };
     // Production runtime owns the verifier staging, pin checks, and verdict
@@ -1232,6 +1247,16 @@ async function runProductionCoordinatorChild(input) {
       if (!current || current.paymentMoved !== false) fail();
       current = Object.freeze({ ...release, ...current });
     }
+    const coordinatorState = (state) => Object.freeze({
+      capabilityDigests: state.capabilityDigests,
+      checkpoints: state.checkpoints,
+      paymentMoved: false,
+      releaseId: state.releaseId,
+      repositorySha: state.repositorySha,
+      schema: state.schema,
+      sessionId: state.sessionId,
+      state: state.state,
+    });
     await phase("coordinator-run");
     for (let turn = 0; turn < 64; turn += 1) {
       await phase(`coordinator-run-${current.state.toLowerCase()}`);
@@ -1260,16 +1285,37 @@ async function runProductionCoordinatorChild(input) {
       const next = await runProductionCoordinator({ dependencies: runDependencies, release: current, releaseRoot: config.releaseRoot.path });
       if (!next || next.paymentMoved !== false) fail();
       current = Object.freeze({ ...current, ...next });
-      if (current.state === "REHEARSAL_VERIFIED") break;
+      const returnedState = coordinatorState(current);
+      const persistedState = await runDependencies.readState({ releaseRoot: config.releaseRoot.path });
+      if (
+        canonicalJson(JSON.parse(JSON.stringify(persistedState))) !==
+        canonicalJson(JSON.parse(JSON.stringify(returnedState)))
+      ) {
+        await phase(`coordinator-persisted-mismatch-${String(returnedState.state).toLowerCase()}-${String(persistedState?.state).toLowerCase()}`);
+        fail();
+      }
+      if (current.state === (value.scenario === "success" ? "STAKEHOLDER_VERIFIED" : "REHEARSAL_VERIFIED")) break;
     }
-    if (current.state !== "REHEARSAL_VERIFIED" || beforeVerifier === null || afterVerifier === null || verifierProcess === null) fail();
+    if (
+      current.state !== (value.scenario === "success" ? "STAKEHOLDER_VERIFIED" : "REHEARSAL_VERIFIED") ||
+      verifierRuns.rehearsal === undefined ||
+      (value.scenario === "success" && verifierRuns.stakeholder === undefined) ||
+      verifierProcess === null
+    ) {
+      await phase(`coordinator-incomplete-${current.state.toLowerCase()}-${Object.keys(verifierRuns).join("_") || "none"}`);
+      fail();
+    }
     failurePhase = "coordinator-report";
     const finalDependencies = injectedRuntime.runDependencies(current);
-    const [authenticatedRelayEvents, publication] = await Promise.all([
+    const [authenticatedRelayEvents, rehearsalPublication, stakeholderPublication] = await Promise.all([
       finalDependencies.readEvents({ after: null, waitMs: 0 }),
       finalDependencies.readVerifierPublication({ subjectRun: "rehearsal" }),
+      value.scenario === "success"
+        ? finalDependencies.readVerifierPublication({ subjectRun: "stakeholder" })
+        : Promise.resolve(null),
     ]);
-    if (!Array.isArray(authenticatedRelayEvents) || !publication || typeof publication.publicationDigest !== "string") fail();
+    if (!Array.isArray(authenticatedRelayEvents) || !rehearsalPublication || typeof rehearsalPublication.publicationDigest !== "string") fail();
+    if (value.scenario === "success" && (!stakeholderPublication || typeof stakeholderPublication.publicationDigest !== "string")) fail();
     const consoleStatePath = join(config.releaseRoot.path, "console-state.json");
     await writeExclusive(value.report, {
       authenticatedRelayEvents,
@@ -1280,12 +1326,17 @@ async function runProductionCoordinatorChild(input) {
       payee: { pid: payeeProcess?.pid ?? null },
       paymentMoved: false,
       mcpMilestones,
-      readCountersAfterVerifier: afterVerifier,
-      readCountersBeforeVerifier: beforeVerifier,
+      readCountersAfterVerifier: verifierRuns.rehearsal.readCountersAfterVerifier,
+      readCountersBeforeVerifier: verifierRuns.rehearsal.readCountersBeforeVerifier,
       release: { releaseId: current.releaseId, repositorySha: current.repositorySha, sessionId: current.sessionId },
       schema: COORDINATOR_SCHEMA,
-      verifier: { pid: verifierProcess.pid },
-      verifierPublicationDigest: publication.publicationDigest,
+      verifier: { pid: verifierRuns.rehearsal.pid },
+      verifierPublicationDigest: rehearsalPublication.publicationDigest,
+      verifierPublications: {
+        rehearsal: rehearsalPublication.publicationDigest,
+        stakeholder: stakeholderPublication?.publicationDigest ?? null,
+      },
+      verifiers: verifierRuns,
     });
   } finally {
     await drainWatchers().catch(() => {});

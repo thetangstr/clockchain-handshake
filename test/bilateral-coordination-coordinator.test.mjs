@@ -635,6 +635,104 @@ test("publishes the exact release-bound verifier claim with its authenticated ev
   assert.deepEqual({ ...appendedPublication }, publication);
 });
 
+test("persists verified coordinator state when recovering an already appended verifier event", async () => {
+  const fixture = signedReplayFixture();
+  const set = await enrollmentSetBytes({
+    payee: await enrollment("payee", 1, fixture.keys.payee),
+    payer: await enrollment("payer", 3, fixture.keys.payer),
+  });
+  const append = (role, kind, artifactDigest = null, subjectRun = "release") =>
+    fixture.append({ artifactDigest, kind, role, subjectRun });
+  append("payer", "ENROLLMENT_CONFIRMED");
+  append("payee", "ENROLLMENT_CONFIRMED");
+  const enrollmentReceipt = append("operator", "ENROLLMENT_RECEIPT");
+  const funding = append("operator", "WAIT_FOR_FUNDING");
+  append("payer", "FUNDING_INPUTS_READY");
+  append("payee", "FUNDING_INPUTS_READY");
+  append("payer", "TOKEN_READY", "a".repeat(64));
+  append("payee", "TOKEN_READY", "b".repeat(64));
+  const plan = append("operator", "PREFLIGHT_PLAN_READY", "1".repeat(64));
+  append("payer", "PREFLIGHT_PARTICIPANT_READY", "2".repeat(64));
+  append("payee", "PREFLIGHT_PARTICIPANT_READY", "3".repeat(64));
+  const registration = append("operator", "REGISTER_REHEARSAL", "4".repeat(64), "rehearsal");
+  const payerIdentity = append("payer", "IDENTITY_PACKAGE_READY", "5".repeat(64), "rehearsal");
+  const payeeIdentity = append("payee", "IDENTITY_PACKAGE_READY", "6".repeat(64), "rehearsal");
+  append("payer", "PAYER_MANDATE_READY", "c".repeat(64), "rehearsal");
+  append("payee", "PAYMENT_REQUEST_READY", "d".repeat(64), "rehearsal");
+  append("payer", "PAYMENT_REQUEST_MATCHED", null, "rehearsal");
+  const descriptor = append("operator", "REHEARSAL_DESCRIPTOR_READY", "7".repeat(64), "rehearsal");
+  append("payer", "DESCRIPTOR_ACCEPTED", descriptor.artifactDigest, "rehearsal");
+  append("payee", "DESCRIPTOR_ACCEPTED", descriptor.artifactDigest, "rehearsal");
+  const start = append("operator", "START_REHEARSAL", null, "rehearsal");
+  const payeeStarted = append("payee", "ROLE_STARTED", null, "rehearsal");
+  const payerStarted = append("payer", "ROLE_STARTED", null, "rehearsal");
+  const payeePackage = append("payee", "ROLE_PACKAGE_READY", "8".repeat(64), "rehearsal");
+  const payerPackage = append("payer", "ROLE_PACKAGE_READY", "9".repeat(64), "rehearsal");
+  const verdict = append("operator", "VERIFICATION_PASSED", "e".repeat(64), "rehearsal");
+  const release = {
+    capabilityDigests: ["a".repeat(64), "b".repeat(64)],
+    paymentMoved: false,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema: COORDINATOR_STATE_SCHEMA,
+    sessionId: SESSION_ID,
+  };
+  const eventCheckpoint = (action, event, role, subjectRun, artifactDigest = event.artifactDigest) => ({
+    action,
+    artifactDigest,
+    eventDigest: event.eventDigest,
+    role,
+    status: "EVENT_APPENDED",
+    subjectRun,
+  });
+  const persisted = {
+    ...release,
+    checkpoints: [
+      eventCheckpoint("ENROLLMENT_RECEIPT", enrollmentReceipt, "operator", "release"),
+      eventCheckpoint("WAIT_FOR_FUNDING", funding, "operator", "release"),
+      eventCheckpoint("PREFLIGHT_PLAN", plan, "operator", "release"),
+      eventCheckpoint("REGISTER_REHEARSAL", registration, "operator", "rehearsal"),
+      eventCheckpoint("IDENTITY_PACKAGE", payerIdentity, "payer", "rehearsal"),
+      eventCheckpoint("IDENTITY_PACKAGE", payeeIdentity, "payee", "rehearsal"),
+      eventCheckpoint("REHEARSAL_DESCRIPTOR", descriptor, "operator", "rehearsal"),
+      eventCheckpoint("START_REHEARSAL", start, "operator", "rehearsal", descriptor.artifactDigest),
+      eventCheckpoint("ROLE_STARTED", payeeStarted, "payee", "rehearsal", descriptor.artifactDigest),
+      eventCheckpoint("ROLE_STARTED", payerStarted, "payer", "rehearsal", descriptor.artifactDigest),
+      eventCheckpoint("ROLE_PACKAGE", payeePackage, "payee", "rehearsal"),
+      eventCheckpoint("ROLE_PACKAGE", payerPackage, "payer", "rehearsal"),
+      eventCheckpoint("REHEARSAL_VERDICT", verdict, "operator", "rehearsal"),
+    ],
+    state: "REHEARSAL_PACKAGES_READY",
+  };
+  const publication = {
+    paymentMoved: false,
+    publicationDigest: verdict.artifactDigest,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.bilateral-verifier-publication/v1",
+    sessionId: SESSION_ID,
+    status: "VERIFICATION_PASSED",
+    subjectRun: "rehearsal",
+  };
+  const writes = [];
+  const result = await runCoordinatorCore({
+    dependencies: {
+      ...rawReplayDependencies({ fixture, set, verifierPublication: publication }),
+      appendVerifiedEvent: async () => assert.fail("must not append a duplicate verifier event"),
+      createVerifiedEvent: async () => assert.fail("must not create a duplicate verifier event"),
+      launchVerifier: async () => assert.fail("must not relaunch the verifier"),
+      readState: async () => persisted,
+      validatePublishedBilateralVerdict: async () => publication,
+      writeState: async ({ state }) => writes.push(state),
+    },
+    release,
+    releaseRoot: "/private/release",
+  });
+  assert.equal(result.state, "REHEARSAL_VERIFIED");
+  assert.equal(writes.at(-1)?.state, "REHEARSAL_VERIFIED");
+  assert.deepEqual(writes.at(-1)?.checkpoints.map((checkpoint) => ({ ...checkpoint })), persisted.checkpoints);
+});
+
 test("persists two private manifests only after one atomic two-role capability registration", async (t) => {
   const root = await privateRoot(t);
   const writes = [];

@@ -116,6 +116,24 @@ const EXPECTED_REHEARSAL_RELAY_EFFECTS = Object.freeze([
   "payer:ROLE_STARTED:rehearsal",
   "payer:TOKEN_READY:release",
 ].sort());
+const EXPECTED_TWO_RUN_RELAY_EFFECTS = Object.freeze([
+  ...EXPECTED_REHEARSAL_RELAY_EFFECTS,
+  "operator:REGISTER_STAKEHOLDER:stakeholder",
+  "operator:STAKEHOLDER_DESCRIPTOR_READY:stakeholder",
+  "operator:START_STAKEHOLDER:stakeholder",
+  "operator:VERIFICATION_PASSED:stakeholder",
+  "payee:DESCRIPTOR_ACCEPTED:stakeholder",
+  "payee:IDENTITY_PACKAGE_READY:stakeholder",
+  "payee:PAYMENT_REQUEST_READY:stakeholder",
+  "payee:ROLE_PACKAGE_READY:stakeholder",
+  "payee:ROLE_STARTED:stakeholder",
+  "payer:DESCRIPTOR_ACCEPTED:stakeholder",
+  "payer:IDENTITY_PACKAGE_READY:stakeholder",
+  "payer:PAYER_MANDATE_READY:stakeholder",
+  "payer:PAYMENT_REQUEST_MATCHED:stakeholder",
+  "payer:ROLE_PACKAGE_READY:stakeholder",
+  "payer:ROLE_STARTED:stakeholder",
+].sort());
 
 async function command(file, args, options = {}) { return execFile(file, args, { encoding: "utf8", ...options }); }
 function canonicalJson(value) { if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return JSON.stringify(value); if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`; return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`; }
@@ -509,7 +527,7 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
   };
 }
 
-test("real coordinator and supervisors gate one isolated three-transition process session", { concurrency: false }, async (t) => {
+test("one long-lived Payer and Requestor span rehearsal and stakeholder with two fresh verifiers", { concurrency: false }, async (t) => {
   const session = await createProcessSession(t);
   const coordinator = session.startCoordinator();
   t.after(() => stopGroup(coordinator.child));
@@ -530,8 +548,17 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   const snapshot = JSON.parse(await readFile(session.fakeState, "utf8"));
   const payerResult = JSON.parse(await readFile(join(session.outputs.payer, "party-result.json"), "utf8"));
   const payeeResult = JSON.parse(await readFile(join(session.outputs.payee, "party-result.json"), "utf8"));
+  const stakeholderOutputs = {
+    payee: join(session.roleRoots.payee, "stakeholder", "result"),
+    payer: join(session.roleRoots.payer, "stakeholder", "result"),
+    verifier: join(session.releaseRoot, "verifier", "stakeholder"),
+  };
+  const stakeholderPayerResult = JSON.parse(await readFile(join(stakeholderOutputs.payer, "party-result.json"), "utf8"));
+  const stakeholderPayeeResult = JSON.parse(await readFile(join(stakeholderOutputs.payee, "party-result.json"), "utf8"));
   const descriptorEnvelope = JSON.parse(await readFile(join(session.roleRoots.payer, "rehearsal", "descriptor.json"), "utf8"));
+  const stakeholderDescriptorEnvelope = JSON.parse(await readFile(join(session.roleRoots.payer, "stakeholder", "descriptor.json"), "utf8"));
   const verdict = JSON.parse(await readFile(join(session.outputs.verifier, "bilateral-verdict.json"), "utf8"));
+  const stakeholderVerdict = JSON.parse(await readFile(join(stakeholderOutputs.verifier, "bilateral-verdict.json"), "utf8"));
   const coordinatorReport = JSON.parse(await readFile(session.report, "utf8"));
   assert.deepEqual(
     coordinatorReport.mcpMilestones.map(({ stage }) => stage),
@@ -542,14 +569,22 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   assert.match(coordinatorReport.release.sessionId, /^[0-9a-f-]{36}$/);
   assert.equal(descriptorEnvelope.descriptor.payer.displayName, "Payer");
   assert.equal(descriptorEnvelope.descriptor.payee.displayName, "Requestor");
+  assert.equal(stakeholderDescriptorEnvelope.descriptor.payer.displayName, "Payer");
+  assert.equal(stakeholderDescriptorEnvelope.descriptor.payee.displayName, "Requestor");
+  assert.notEqual(stakeholderDescriptorEnvelope.descriptor.payer.agentId, descriptorEnvelope.descriptor.payer.agentId);
+  assert.notEqual(stakeholderDescriptorEnvelope.descriptor.payee.agentId, descriptorEnvelope.descriptor.payee.agentId);
   assert.ok(Array.isArray(coordinatorReport.authenticatedRelayEvents));
-  assert.equal(coordinatorReport.coordinatorState, "REHEARSAL_VERIFIED");
+  assert.equal(coordinatorReport.coordinatorState, "STAKEHOLDER_VERIFIED");
   assert.match(coordinatorReport.verifierPublicationDigest, /^[0-9a-f]{64}$/);
+  assert.deepEqual(Object.keys(coordinatorReport.verifierPublications).sort(), ["rehearsal", "stakeholder"]);
+  assert.equal(coordinatorReport.verifierPublications.rehearsal, coordinatorReport.verifierPublicationDigest);
+  assert.match(coordinatorReport.verifierPublications.stakeholder, /^[0-9a-f]{64}$/);
+  assert.notEqual(coordinatorReport.verifierPublications.rehearsal, coordinatorReport.verifierPublications.stakeholder);
   assert.deepEqual(
     coordinatorReport.authenticatedRelayEvents
       .map((event) => `${event.role}:${event.kind}:${event.subjectRun}`)
       .sort(),
-    EXPECTED_REHEARSAL_RELAY_EFFECTS,
+    EXPECTED_TWO_RUN_RELAY_EFFECTS,
   );
   assert.equal(
     new Set(coordinatorReport.authenticatedRelayEvents.map(({ eventDigest }) => eventDigest)).size,
@@ -567,37 +602,61 @@ test("real coordinator and supervisors gate one isolated three-transition proces
     }
   }
   const verificationEvents = coordinatorReport.authenticatedRelayEvents.filter(({ kind }) => kind === "VERIFICATION_PASSED");
-  assert.equal(verificationEvents.length, 1);
-  assert.equal(verificationEvents[0].artifactDigest, coordinatorReport.verifierPublicationDigest);
-  assert.equal(coordinatorReport.authenticatedRelayEvents.at(-1).eventDigest, verificationEvents[0].eventDigest);
-  const counterDelta = Object.fromEntries(Object.keys(coordinatorReport.readCountersAfterVerifier).map((key) => [
-    key,
-    coordinatorReport.readCountersAfterVerifier[key] - coordinatorReport.readCountersBeforeVerifier[key],
-  ]));
-  assert.deepEqual(counterDelta, {
-    generateAuditTrail: 3,
-    getBlock: 5,
-    resolveAgent: 5,
-    searchActions: 4,
-    snapshot: 1,
-    verifyCrossParty: 3,
-  });
+  assert.equal(verificationEvents.length, 2);
+  assert.deepEqual(
+    verificationEvents.map(({ artifactDigest, subjectRun }) => [subjectRun, artifactDigest]),
+    [
+      ["rehearsal", coordinatorReport.verifierPublications.rehearsal],
+      ["stakeholder", coordinatorReport.verifierPublications.stakeholder],
+    ],
+  );
+  assert.ok(
+    coordinatorReport.authenticatedRelayEvents.findIndex(({ kind, subjectRun }) => kind === "VERIFICATION_PASSED" && subjectRun === "rehearsal") <
+    coordinatorReport.authenticatedRelayEvents.findIndex(({ kind, subjectRun }) => kind === "REGISTER_STAKEHOLDER" && subjectRun === "stakeholder"),
+  );
+  for (const run of ["rehearsal", "stakeholder"]) {
+    const verifier = coordinatorReport.verifiers[run];
+    assert.ok(Number.isInteger(verifier.pid) && verifier.pid > 0);
+    const counterDelta = Object.fromEntries(Object.keys(verifier.readCountersAfterVerifier).map((key) => [
+      key,
+      verifier.readCountersAfterVerifier[key] - verifier.readCountersBeforeVerifier[key],
+    ]));
+    assert.deepEqual(counterDelta, {
+      generateAuditTrail: 3,
+      getBlock: 5,
+      resolveAgent: 5,
+      searchActions: 4,
+      snapshot: 1,
+      verifyCrossParty: 3,
+    });
+  }
   const pids = [
     session.fake.child.pid,
     session.relay.child.pid,
     coordinatorReport.coordinatorPid,
     coordinatorReport.payee.pid,
     coordinatorReport.payer.pid,
-    coordinatorReport.verifier.pid,
+    coordinatorReport.verifiers.rehearsal.pid,
+    coordinatorReport.verifiers.stakeholder.pid,
   ];
-  assert.equal(new Set(pids).size, 6);
+  assert.notEqual(coordinatorReport.verifiers.rehearsal.pid, coordinatorReport.verifiers.stakeholder.pid);
+  assert.equal(new Set(pids).size, 7);
   assert.ok(pids.every((pid) => Number.isInteger(pid) && pid > 0));
-  for (const value of [snapshot, coordinatorReport, payerResult, payeeResult, verdict]) assertPaymentNeverMoved(value);
-  const protocolAnchors = snapshot.calls.logAction.filter(({ asset_reference_id }) => ["proposal", "acceptance", "acknowledgment"].map((slot) => sessionKey(payerResult.sessionDigest, slot)).includes(asset_reference_id));
-  assert.deepEqual(protocolAnchors.map(({ asset_reference_id }) => asset_reference_id), ["proposal", "acceptance", "acknowledgment"].map((slot) => sessionKey(payerResult.sessionDigest, slot)));
+  for (const value of [snapshot, coordinatorReport, payerResult, payeeResult, verdict, stakeholderPayerResult, stakeholderPayeeResult, stakeholderVerdict]) assertPaymentNeverMoved(value);
+  const protocolReferences = (result) => ["proposal", "acceptance", "acknowledgment"].map((slot) => sessionKey(result.sessionDigest, slot));
+  const protocolAnchorsFor = (result) => snapshot.calls.logAction.filter(({ asset_reference_id }) => protocolReferences(result).includes(asset_reference_id));
+  const protocolAnchors = protocolAnchorsFor(payerResult);
+  const stakeholderProtocolAnchors = protocolAnchorsFor(stakeholderPayerResult);
+  assert.deepEqual(protocolAnchors.map(({ asset_reference_id }) => asset_reference_id), protocolReferences(payerResult));
+  assert.deepEqual(stakeholderProtocolAnchors.map(({ asset_reference_id }) => asset_reference_id), protocolReferences(stakeholderPayerResult));
   assert.equal(protocolAnchors.length, 3);
-  assert.equal(snapshot.writeCount, 3);
-  assert.equal(snapshot.calls.logAction.length, 3);
+  assert.equal(stakeholderProtocolAnchors.length, 3);
+  assert.deepEqual(
+    snapshot.calls.logAction.map(({ asset_reference_id }) => asset_reference_id),
+    [...protocolReferences(payerResult), ...protocolReferences(stakeholderPayerResult)],
+  );
+  assert.equal(snapshot.writeCount, 6);
+  assert.equal(snapshot.calls.logAction.length, 6);
   const preflightSnapshot = JSON.parse(await readFile(session.preflightFakeState, "utf8"));
   assert.equal(preflightSnapshot.writeCount, 2);
   assert.equal(preflightSnapshot.paymentMoved, false);
@@ -608,10 +667,20 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   assert.deepEqual(payerResult.transitions.map(({ message }) => message.kind), ["proposal", "acceptance", "acknowledgment"]);
   assert.equal(payerResult.transitions.at(-1).message.outcome, "ACKNOWLEDGED");
   assert.equal(payeeResult.transitions[1].message.decision, "ACCEPT");
+  assert.equal(stakeholderPayerResult.transitions.length, 3);
+  assert.ok(stakeholderPayeeResult.transitions.length >= 2);
+  assert.deepEqual(stakeholderPayeeResult.transitions.slice(0, 2), stakeholderPayerResult.transitions.slice(0, 2));
+  assert.deepEqual(stakeholderPayerResult.transitions.map(({ message }) => message.kind), ["proposal", "acceptance", "acknowledgment"]);
+  assert.equal(stakeholderPayerResult.transitions.at(-1).message.outcome, "ACKNOWLEDGED");
+  assert.equal(stakeholderPayeeResult.transitions[1].message.decision, "ACCEPT");
   assert.equal(payerResult.localVerdict, "LOCAL_OK");
   assert.equal(payeeResult.localVerdict, "LOCAL_OK");
+  assert.equal(stakeholderPayerResult.localVerdict, "LOCAL_OK");
+  assert.equal(stakeholderPayeeResult.localVerdict, "LOCAL_OK");
   assert.equal(verdict.outcome, AUTHORIZE);
+  assert.equal(stakeholderVerdict.outcome, AUTHORIZE);
   assert.equal(verdict.transitions.length, 3);
+  assert.equal(stakeholderVerdict.transitions.length, 3);
   for (const [index, transition] of payerResult.transitions.entries()) {
     const digest = transitionDigest(transition.message);
     assert.equal(transition.digest, digest);
@@ -628,12 +697,34 @@ test("real coordinator and supervisors gate one isolated three-transition proces
       upperBoundMs: transition.upperBoundMs,
     });
   }
+  for (const [index, transition] of stakeholderPayerResult.transitions.entries()) {
+    const digest = transitionDigest(transition.message);
+    assert.equal(transition.digest, digest);
+    assert.equal(transition.onChain.anchoredHash, digest);
+    assert.equal(stakeholderProtocolAnchors[index].asset_hash, digest);
+    assert.deepEqual(transition.message.amount, { currency: "USD", moved: false, value: "100" });
+    assert.deepEqual(stakeholderVerdict.transitions[index], {
+      anchoredHash: digest,
+      blockHeight: transition.onChain.blockHeight,
+      blockTimeRaw: transition.blockTimeRaw,
+      digest,
+      kind: transition.message.kind,
+      ledgerId: transition.onChain.ledgerId,
+      upperBoundMs: transition.upperBoundMs,
+    });
+  }
   const [proposal, acceptance, acknowledgment] = payerResult.transitions;
+  const [stakeholderProposal, stakeholderAcceptance, stakeholderAcknowledgment] = stakeholderPayerResult.transitions;
   assert.equal(proposal.message.predecessor, null);
   assert.deepEqual(acceptance.message.predecessor, triple(proposal));
   assert.deepEqual(acknowledgment.message.predecessor, triple(acceptance));
   assert.deepEqual(acknowledgment.message.proposal, triple(proposal));
+  assert.equal(stakeholderProposal.message.predecessor, null);
+  assert.deepEqual(stakeholderAcceptance.message.predecessor, triple(stakeholderProposal));
+  assert.deepEqual(stakeholderAcknowledgment.message.predecessor, triple(stakeholderAcceptance));
+  assert.deepEqual(stakeholderAcknowledgment.message.proposal, triple(stakeholderProposal));
   assert.equal(new Set(payerResult.transitions.map((transition) => transition.onChain.ledgerId)).size, 3);
+  assert.equal(new Set(stakeholderPayerResult.transitions.map((transition) => transition.onChain.ledgerId)).size, 3);
   const heights = payerResult.transitions.map((transition) => BigInt(transition.onChain.blockHeight));
   assert.ok(heights[0] < heights[1] && heights[1] < heights[2]);
   const blockTimes = payerResult.transitions.map((transition) => {
@@ -650,30 +741,39 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   }
   const payerCli = lastJsonLine(await readFile(session.logs.payer.stdout, "utf8"), (line) => Object.hasOwn(line, "state"));
   const payeeCli = lastJsonLine(await readFile(session.logs.payee.stdout, "utf8"), (line) => Object.hasOwn(line, "state"));
+  const payerStdoutLines = parseJsonLines(await readFile(session.logs.payer.stdout, "utf8"));
+  const payeeStdoutLines = parseJsonLines(await readFile(session.logs.payee.stdout, "utf8"));
+  assert.equal(payerStdoutLines.filter((line) => line.status === "PAYER_MCP_READY").length, 1);
+  assert.equal(payeeStdoutLines.filter((line) => line.status === "HANDSHAKE_REQUIRED").length, 1);
+  assert.equal(payeeStdoutLines.filter((line) => line.status === "REQUESTOR_SUPERVISOR_START").length, 1);
+  assert.equal(payerStdoutLines.filter((line) => line.state === "ACKNOWLEDGED").length, 2);
+  assert.equal(payeeStdoutLines.filter((line) => line.state === "ACCEPTED").length, 2);
   assert.equal(payerCli.state, "ACKNOWLEDGED");
   assert.equal(payeeCli.state, "ACCEPTED");
   const payerIntakeRecord = JSON.parse(await readFile(join(session.roleRoots.payer, "payer-mcp-intake", `${PAYER_MCP_INTAKE_REQUEST_ID}.json`), "utf8"));
+  assert.deepEqual(await readdir(join(session.roleRoots.payer, "payer-mcp-intake")), [`${PAYER_MCP_INTAKE_REQUEST_ID}.json`]);
   const requestorIntakeResult = JSON.parse(await readFile(join(session.roleRoots.payee, "payer-mcp-handshake-required.json"), "utf8"));
   assert.equal(payerIntakeRecord.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
   assert.equal(requestorIntakeResult.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
   assert.equal(payerIntakeRecord.intakeDigest, requestorIntakeResult.intakeDigest);
   const mandate = JSON.parse(await readFile(join(session.roleRoots.payer, "rehearsal", "payer-mandate.json"), "utf8"));
   const request = JSON.parse(await readFile(join(session.roleRoots.payee, "rehearsal", "payment-request.json"), "utf8"));
+  const stakeholderMandate = JSON.parse(await readFile(join(session.roleRoots.payer, "stakeholder", "payer-mandate.json"), "utf8"));
+  const stakeholderRequest = JSON.parse(await readFile(join(session.roleRoots.payee, "stakeholder", "payment-request.json"), "utf8"));
   assert.equal(mandate.mandate.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
   assert.equal(request.request.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
+  assert.equal(stakeholderMandate.mandate.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
+  assert.equal(stakeholderRequest.request.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
   assert.equal(mandate.mandate.intakeDigest, payerIntakeRecord.intakeDigest);
   assert.equal(request.request.intakeDigest, payerIntakeRecord.intakeDigest);
-  await assert.rejects(
-    readFile(join(session.roleRoots.payer, "stakeholder", "payer-mandate.json"), "utf8"),
-    { code: "ENOENT" },
-  );
-  await assert.rejects(
-    readFile(join(session.roleRoots.payee, "stakeholder", "payment-request.json"), "utf8"),
-    { code: "ENOENT" },
-  );
+  assert.equal(stakeholderMandate.mandate.intakeDigest, payerIntakeRecord.intakeDigest);
+  assert.equal(stakeholderRequest.request.intakeDigest, payerIntakeRecord.intakeDigest);
   await assertCompletion(session.outputs.payer, ".party-result.complete.json", "party-result.json", "PARTY-RESULT.md");
   await assertCompletion(session.outputs.payee, ".party-result.complete.json", "party-result.json", "PARTY-RESULT.md");
   await assertCompletion(session.outputs.verifier, ".bilateral-verdict.complete.json", "bilateral-verdict.json", "BILATERAL-VERDICT.md");
+  await assertCompletion(stakeholderOutputs.payer, ".party-result.complete.json", "party-result.json", "PARTY-RESULT.md");
+  await assertCompletion(stakeholderOutputs.payee, ".party-result.complete.json", "party-result.json", "PARTY-RESULT.md");
+  await assertCompletion(stakeholderOutputs.verifier, ".bilateral-verdict.complete.json", "bilateral-verdict.json", "BILATERAL-VERDICT.md");
   const consolePort = await availablePort();
   const startConsole = () => spawned([
     "bin/handshake-console.mjs",
@@ -723,7 +823,7 @@ test("real coordinator and supervisors gate one isolated three-transition proces
       Object.fromEntries(Object.entries(projection.session.observations).map(([service, observation]) => [service, observation.health])),
       { relay: "UNAVAILABLE", watcher: "UNAVAILABLE" },
     );
-    assert.deepEqual(projection.anchors.map(({ digest }) => digest), payerResult.transitions.map(({ digest }) => digest));
+    assert.deepEqual(projection.anchors.map(({ digest }) => digest), stakeholderPayerResult.transitions.map(({ digest }) => digest));
     assert.equal(projection.session.releaseId, coordinatorReport.release.releaseId);
     assert.equal(projection.session.repositorySha, coordinatorReport.release.repositorySha);
     assert.equal(projection.session.sessionId, coordinatorReport.release.sessionId);
@@ -733,13 +833,22 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   assert.equal(restartedConsole.output().stdout.includes("AUTHORIZED"), false);
   assert.equal(restartedConsole.output().stderr.includes("AUTHORIZED"), false);
   await assertPrivateFile(coordinatorReport.consoleStatePath);
-  const namedLogs = Object.fromEntries(await Promise.all(["payer", "payee", "verifier"].map(async (name) => [name, {
+  const namedLogs = Object.fromEntries(await Promise.all(["payer", "payee"].map(async (name) => [name, {
     stderr: await readFile(session.logs[name].stderr, "utf8"),
     stdout: await readFile(session.logs[name].stdout, "utf8"),
   }])));
-  assert.equal(namedLogs.verifier.stdout, `${AUTHORIZE}\n`);
-  assert.equal(namedLogs.verifier.stderr, "");
-  for (const [name, log] of Object.entries(namedLogs)) if (name !== "verifier") { assert.equal(log.stdout.includes(AUTHORIZE), false); assert.equal(log.stderr.includes(AUTHORIZE), false); }
+  const verifierLogs = Object.fromEntries(await Promise.all(["rehearsal", "stakeholder"].map(async (run) => [run, {
+    stderr: await readFile(coordinatorReport.verifiers[run].logs.stderr, "utf8"),
+    stdout: await readFile(coordinatorReport.verifiers[run].logs.stdout, "utf8"),
+  }])));
+  for (const log of Object.values(verifierLogs)) {
+    assert.equal(log.stdout, `${AUTHORIZE}\n`);
+    assert.equal(log.stderr, "");
+  }
+  for (const log of Object.values(namedLogs)) {
+    assert.equal(log.stdout.includes(AUTHORIZE), false);
+    assert.equal(log.stderr.includes(AUTHORIZE), false);
+  }
   const fundingLines = coordinatorExit.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter(({ schema }) => schema === "clockchain.bilateral-funding-addresses/v1");
   assert.equal(fundingLines.length, 1);
   assert.equal(fundingLines[0].addresses.length, 4);
@@ -783,9 +892,13 @@ test("real coordinator and supervisors gate one isolated three-transition proces
     await readFile(session.preflightFakeState, "utf8"),
     await readFile(coordinatorReport.consoleStatePath, "utf8"),
     await readFile(session.report, "utf8"),
-    ...await Promise.all(["payer", "payee", "verifier"].flatMap((name) => [
+    ...await Promise.all(["payer", "payee"].flatMap((name) => [
       readFile(session.logs[name].stdout, "utf8"),
       readFile(session.logs[name].stderr, "utf8"),
+    ])),
+    ...await Promise.all(["rehearsal", "stakeholder"].flatMap((run) => [
+      readFile(coordinatorReport.verifiers[run].logs.stdout, "utf8"),
+      readFile(coordinatorReport.verifiers[run].logs.stderr, "utf8"),
     ])),
     ...(await Promise.all((await readdir(join(session.root, "relay-state"), { recursive: true })).map(async (name) => {
       const path = join(session.root, "relay-state", name);
@@ -798,7 +911,10 @@ test("real coordinator and supervisors gate one isolated three-transition proces
   }
   assert.equal((await readFile(new URL("helpers/bilateral-coordination-child.mjs", import.meta.url), "utf8")).includes(AUTHORIZE), false);
   await assertPrivateFile(session.report, { canonical: true });
-  for (const log of Object.values(session.logs)) { await assertPrivateFile(log.stdout); await assertPrivateFile(log.stderr); }
+  for (const log of [session.logs.payer, session.logs.payee, coordinatorReport.verifiers.rehearsal.logs, coordinatorReport.verifiers.stakeholder.logs]) {
+    await assertPrivateFile(log.stdout);
+    await assertPrivateFile(log.stderr);
+  }
   for (const root of Object.values(session.roleRoots)) await assertRoot(root);
   assert.notEqual(session.roleRoots.payer, session.roleRoots.payee);
   const roleConfigurations = [session.configurations.payer, session.configurations.payee];
@@ -823,9 +939,16 @@ test("real coordinator and supervisors gate one isolated three-transition proces
     const fingerprints = await Promise.all(paths.map(async (path) => sha256(await readFile(path))));
     assert.equal(new Set(fingerprints).size, paths.length);
   }
-  assert.equal(new Set(Object.values(session.outputs)).size, 3);
-  for (const output of Object.values(session.outputs)) await assertRoot(output);
-  for (const pid of [coordinatorReport.coordinatorPid, coordinatorReport.payer.pid, coordinatorReport.payee.pid, coordinatorReport.verifier.pid]) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  const outputRoots = [...Object.values(session.outputs), ...Object.values(stakeholderOutputs)];
+  assert.equal(new Set(outputRoots).size, 6);
+  for (const output of outputRoots) await assertRoot(output);
+  for (const pid of [
+    coordinatorReport.coordinatorPid,
+    coordinatorReport.payer.pid,
+    coordinatorReport.payee.pid,
+    coordinatorReport.verifiers.rehearsal.pid,
+    coordinatorReport.verifiers.stakeholder.pid,
+  ]) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
   for (const pid of [session.fake.child.pid, session.relay.child.pid]) assert.doesNotThrow(() => process.kill(pid, 0));
 });
 
