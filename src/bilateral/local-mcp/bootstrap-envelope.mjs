@@ -48,6 +48,7 @@ const TAG_LENGTH = 16;
 const MIN_MANIFEST_BYTES = 1;
 const MAX_MANIFEST_BYTES = 65_536;
 const HKDF_INFO = Buffer.from("clockchain.requestor-bootstrap-envelope/v1", "utf8");
+const HKDF_SEPARATOR = Buffer.from([0]);
 
 export class RequestorBootstrapEnvelopeError extends Error {
   constructor() {
@@ -118,26 +119,37 @@ function contextSnapshot(value) {
   });
 }
 
-function exactBase64url(value, decodedLength = null) {
+function maxBase64urlLength(decodedLength) {
+  const remainder = decodedLength % 3;
+  return Math.floor(decodedLength / 3) * 4 + (remainder === 0 ? 0 : remainder + 1);
+}
+
+function exactBase64url(value, { decodedLength = null, maxDecodedLength = null } = {}) {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
     !BASE64URL_PATTERN.test(value) ||
     value.includes("=")
   ) invalid();
+  if (decodedLength !== null && value.length !== maxBase64urlLength(decodedLength)) invalid();
+  if (maxDecodedLength !== null && value.length > maxBase64urlLength(maxDecodedLength)) invalid();
   let decoded;
   try {
     decoded = Buffer.from(value, "base64url");
   } catch {
     invalid();
   }
-  if (decoded.length === 0 || (decodedLength !== null && decoded.length !== decodedLength)) invalid();
+  if (
+    decoded.length === 0 ||
+    (decodedLength !== null && decoded.length !== decodedLength) ||
+    (maxDecodedLength !== null && decoded.length > maxDecodedLength)
+  ) invalid();
   if (decoded.toString("base64url") !== value) invalid();
   return decoded;
 }
 
 function publicKeyFromRawBase64url(value) {
-  const raw = exactBase64url(value, RAW_X25519_KEY_LENGTH);
+  const raw = exactBase64url(value, { decodedLength: RAW_X25519_KEY_LENGTH });
   try {
     return createPublicKey({
       key: Buffer.concat([PUBLIC_KEY_DER_PREFIX, raw]),
@@ -152,15 +164,17 @@ function publicKeyFromRawBase64url(value) {
 function privateKeyFromExport(value) {
   const wrapped = exactDataObject(value, PRIVATE_KEY_KEYS);
   if (wrapped.format !== PRIVATE_KEY_FORMAT) invalid();
-  const der = exactBase64url(wrapped.value, PRIVATE_KEY_DER_PREFIX.length + RAW_X25519_KEY_LENGTH);
-  if (!der.subarray(0, PRIVATE_KEY_DER_PREFIX.length).equals(PRIVATE_KEY_DER_PREFIX)) invalid();
+  const der = exactBase64url(wrapped.value, { decodedLength: PRIVATE_KEY_DER_PREFIX.length + RAW_X25519_KEY_LENGTH });
   try {
+    if (!der.subarray(0, PRIVATE_KEY_DER_PREFIX.length).equals(PRIVATE_KEY_DER_PREFIX)) invalid();
     const privateKey = createPrivateKey({ key: der, format: "der", type: "pkcs8" });
     if (privateKey.asymmetricKeyType !== "x25519") invalid();
     return privateKey;
   } catch (error) {
     if (error instanceof RequestorBootstrapEnvelopeError) throw error;
     invalid();
+  } finally {
+    der.fill(0);
   }
 }
 
@@ -179,8 +193,9 @@ function rawPublicKey(publicKey) {
 }
 
 function keyExport(privateKey) {
+  let der;
   try {
-    const der = privateKey.export({ format: "der", type: "pkcs8" });
+    der = privateKey.export({ format: "der", type: "pkcs8" });
     if (
       der.length !== PRIVATE_KEY_DER_PREFIX.length + RAW_X25519_KEY_LENGTH ||
       !der.subarray(0, PRIVATE_KEY_DER_PREFIX.length).equals(PRIVATE_KEY_DER_PREFIX)
@@ -192,6 +207,8 @@ function keyExport(privateKey) {
   } catch (error) {
     if (error instanceof RequestorBootstrapEnvelopeError) throw error;
     invalid();
+  } finally {
+    if (der) der.fill(0);
   }
 }
 
@@ -204,15 +221,15 @@ function envelopeSnapshot(value) {
   ) invalid();
   return Object.freeze({
     algorithm: result.algorithm,
-    ciphertext: exactBase64url(result.ciphertextBase64url),
+    ciphertext: exactBase64url(result.ciphertextBase64url, { maxDecodedLength: MAX_MANIFEST_BYTES }),
     ciphertextBase64url: result.ciphertextBase64url,
     ephemeralPublicKey: result.ephemeralPublicKey,
     ephemeralPublicKeyObject: publicKeyFromRawBase64url(result.ephemeralPublicKey),
-    iv: exactBase64url(result.ivBase64url, IV_LENGTH),
+    iv: exactBase64url(result.ivBase64url, { decodedLength: IV_LENGTH }),
     ivBase64url: result.ivBase64url,
     paymentMoved: false,
     schema: result.schema,
-    tag: exactBase64url(result.tagBase64url, TAG_LENGTH),
+    tag: exactBase64url(result.tagBase64url, { decodedLength: TAG_LENGTH }),
     tagBase64url: result.tagBase64url,
   });
 }
@@ -234,7 +251,7 @@ function manifestSnapshot(value) {
   return value;
 }
 
-function deriveAesKey({ context, privateKey, publicKey, ephemeralPublicKeyBytes }) {
+function deriveAesKey({ contextBytes, privateKey, publicKey, ephemeralPublicKeyBytes }) {
   let sharedSecret;
   let aesKey;
   try {
@@ -242,8 +259,8 @@ function deriveAesKey({ context, privateKey, publicKey, ephemeralPublicKeyBytes 
     aesKey = Buffer.from(hkdfSync(
       "sha256",
       sharedSecret,
-      canonicalBytes(context),
-      Buffer.concat([HKDF_INFO, ephemeralPublicKeyBytes]),
+      contextBytes,
+      Buffer.concat([HKDF_INFO, HKDF_SEPARATOR, contextBytes, HKDF_SEPARATOR, ephemeralPublicKeyBytes]),
       32,
     ));
     return { aesKey, sharedSecret };
@@ -254,7 +271,7 @@ function deriveAesKey({ context, privateKey, publicKey, ephemeralPublicKeyBytes 
   }
 }
 
-export async function createRequestorBootstrapKey() {
+export function createRequestorBootstrapKey() {
   const { privateKey, publicKey } = generateKeyPairSync("x25519");
   return Object.freeze({
     privateKey: keyExport(privateKey),
@@ -262,22 +279,23 @@ export async function createRequestorBootstrapKey() {
   });
 }
 
-export async function sealRequestorBootstrapManifest({ context, manifestBytes, requestorPublicKey }) {
+export function sealRequestorBootstrapManifest({ context, manifestBytes, requestorPublicKey }) {
   const aad = contextSnapshot(context);
+  const contextBytes = canonicalBytes(aad);
   const plaintext = manifestSnapshot(manifestBytes);
   const recipientPublicKey = publicKeyFromRawBase64url(requestorPublicKey);
   const ephemeral = generateKeyPairSync("x25519");
   const ephemeralPublicKeyBytes = rawPublicKey(ephemeral.publicKey);
   const iv = randomBytes(IV_LENGTH);
   const { aesKey, sharedSecret } = deriveAesKey({
-    context: aad,
+    contextBytes,
     privateKey: ephemeral.privateKey,
     publicKey: recipientPublicKey,
     ephemeralPublicKeyBytes,
   });
   try {
     const cipher = createCipheriv("aes-256-gcm", aesKey, iv);
-    cipher.setAAD(canonicalBytes(aad));
+    cipher.setAAD(contextBytes);
     const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
     const tag = cipher.getAuthTag();
     return Object.freeze({
@@ -297,20 +315,21 @@ export async function sealRequestorBootstrapManifest({ context, manifestBytes, r
   }
 }
 
-export async function openRequestorBootstrapEnvelope({ context, envelope, requestorPrivateKey }) {
+export function openRequestorBootstrapEnvelope({ context, envelope, requestorPrivateKey }) {
   const aad = contextSnapshot(context);
+  const contextBytes = canonicalBytes(aad);
   const sealed = envelopeSnapshot(envelope);
   const privateKey = privateKeyFromExport(requestorPrivateKey);
-  const ephemeralPublicKeyBytes = exactBase64url(sealed.ephemeralPublicKey, RAW_X25519_KEY_LENGTH);
+  const ephemeralPublicKeyBytes = exactBase64url(sealed.ephemeralPublicKey, { decodedLength: RAW_X25519_KEY_LENGTH });
   const { aesKey, sharedSecret } = deriveAesKey({
-    context: aad,
+    contextBytes,
     privateKey,
     publicKey: sealed.ephemeralPublicKeyObject,
     ephemeralPublicKeyBytes,
   });
   try {
     const decipher = createDecipheriv("aes-256-gcm", aesKey, sealed.iv);
-    decipher.setAAD(canonicalBytes(aad));
+    decipher.setAAD(contextBytes);
     decipher.setAuthTag(sealed.tag);
     const plaintext = Buffer.concat([
       decipher.update(sealed.ciphertext),

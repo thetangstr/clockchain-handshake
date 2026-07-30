@@ -1,4 +1,11 @@
 import assert from "node:assert/strict";
+import {
+  createCipheriv,
+  createPublicKey,
+  diffieHellman,
+  generateKeyPairSync,
+  hkdfSync,
+} from "node:crypto";
 import test from "node:test";
 
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
@@ -17,6 +24,8 @@ const SESSION_ID = "22222222-3333-4444-8555-666666666666";
 const SESSION_ID_V7 = "01890f0d-5d3b-7cc7-9f4b-123456789abc";
 const PRIVATE_CANARY = "requestor-private-canary";
 const KEY_CANARY = "requestor-key-canary";
+const PUBLIC_KEY_DER_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
+const LEGACY_HKDF_INFO = Buffer.from(REQUESTOR_BOOTSTRAP_ENVELOPE_SCHEMA, "utf8");
 
 function context(overrides = {}) {
   return {
@@ -62,24 +71,73 @@ function assertSecretFree(error) {
   assert.doesNotMatch(serialized, new RegExp(KEY_CANARY));
 }
 
-async function assertRejectsSecretFree(fn) {
-  await assert.rejects(
-    async () => fn(),
-    (error) => {
-      assertSecretFree(error);
-      return true;
-    },
-  );
+function assertThrowsSecretFree(fn) {
+  assert.throws(fn, (error) => {
+    assertSecretFree(error);
+    return true;
+  });
 }
 
-test("seals and opens one exact requestor bootstrap envelope without payment movement", async () => {
-  const requestorKey = await createRequestorBootstrapKey();
+function assertNotPromise(value) {
+  assert.notEqual(typeof value?.then, "function");
+  return value;
+}
+
+function publicKeyFromRawBase64url(value) {
+  return createPublicKey({
+    key: Buffer.concat([PUBLIC_KEY_DER_PREFIX, Buffer.from(value, "base64url")]),
+    format: "der",
+    type: "spki",
+  });
+}
+
+function rawPublicKey(publicKey) {
+  return publicKey.export({ format: "der", type: "spki" }).subarray(PUBLIC_KEY_DER_PREFIX.length);
+}
+
+function legacyInfoOmittedContextEnvelope({ contextValue, manifestValue, requestorPublicKey }) {
+  const ephemeral = generateKeyPairSync("x25519");
+  const ephemeralPublicKeyBytes = rawPublicKey(ephemeral.publicKey);
+  const sharedSecret = diffieHellman({
+    privateKey: ephemeral.privateKey,
+    publicKey: publicKeyFromRawBase64url(requestorPublicKey),
+  });
+  const contextBytes = canonicalBytes(contextValue);
+  const aesKey = Buffer.from(hkdfSync(
+    "sha256",
+    sharedSecret,
+    contextBytes,
+    Buffer.concat([LEGACY_HKDF_INFO, ephemeralPublicKeyBytes]),
+    32,
+  ));
+  try {
+    const iv = Buffer.alloc(12, 7);
+    const cipher = createCipheriv("aes-256-gcm", aesKey, iv);
+    cipher.setAAD(contextBytes);
+    const ciphertext = Buffer.concat([cipher.update(manifestValue), cipher.final()]);
+    return {
+      algorithm: REQUESTOR_BOOTSTRAP_ENVELOPE_ALGORITHM,
+      ciphertextBase64url: ciphertext.toString("base64url"),
+      ephemeralPublicKey: ephemeralPublicKeyBytes.toString("base64url"),
+      ivBase64url: iv.toString("base64url"),
+      paymentMoved: false,
+      schema: REQUESTOR_BOOTSTRAP_ENVELOPE_SCHEMA,
+      tagBase64url: cipher.getAuthTag().toString("base64url"),
+    };
+  } finally {
+    sharedSecret.fill(0);
+    aesKey.fill(0);
+  }
+}
+
+test("seals and opens one exact requestor bootstrap envelope without payment movement", () => {
+  const requestorKey = assertNotPromise(createRequestorBootstrapKey());
   const bytes = manifestBytes();
-  const envelope = await sealRequestorBootstrapManifest({
+  const envelope = assertNotPromise(sealRequestorBootstrapManifest({
     context: context(),
     manifestBytes: bytes,
     requestorPublicKey: requestorKey.publicKey,
-  });
+  }));
 
   assert.deepEqual(Object.keys(requestorKey), ["privateKey", "publicKey"]);
   assert.equal(typeof requestorKey.privateKey, "object");
@@ -104,41 +162,57 @@ test("seals and opens one exact requestor bootstrap envelope without payment mov
   assert.doesNotMatch(JSON.stringify(envelope), new RegExp(PRIVATE_CANARY));
   assert.doesNotMatch(String(requestorKey.privateKey), new RegExp(KEY_CANARY));
 
-  const opened = await openRequestorBootstrapEnvelope({
+  const opened = assertNotPromise(openRequestorBootstrapEnvelope({
     context: context(),
     envelope,
     requestorPrivateKey: requestorKey.privateKey,
-  });
+  }));
   assert.deepEqual(opened, bytes);
 });
 
-test("accepts repository session UUID versions while keeping claim nonce v4", async () => {
-  const requestorKey = await createRequestorBootstrapKey();
+test("accepts repository session UUID versions while keeping claim nonce v4", () => {
+  const requestorKey = assertNotPromise(createRequestorBootstrapKey());
   const bytes = manifestBytes(manifest({ sessionId: SESSION_ID_V7 }));
-  const envelope = await sealRequestorBootstrapManifest({
+  const envelope = sealRequestorBootstrapManifest({
     context: context({ sessionId: SESSION_ID_V7 }),
     manifestBytes: bytes,
     requestorPublicKey: requestorKey.publicKey,
   });
 
-  const opened = await openRequestorBootstrapEnvelope({
+  const opened = openRequestorBootstrapEnvelope({
     context: context({ sessionId: SESSION_ID_V7 }),
     envelope,
     requestorPrivateKey: requestorKey.privateKey,
   });
   assert.deepEqual(opened, bytes);
-  await assertRejectsSecretFree(() => sealRequestorBootstrapManifest({
+  assertThrowsSecretFree(() => sealRequestorBootstrapManifest({
     context: context({ claimNonce: SESSION_ID_V7, sessionId: SESSION_ID_V7 }),
     manifestBytes: bytes,
     requestorPublicKey: requestorKey.publicKey,
   }));
 });
 
-test("rejects hostile context, envelope, key, and manifest inputs without leaking private material", async () => {
-  const requestorKey = await createRequestorBootstrapKey();
-  const wrongKey = await createRequestorBootstrapKey();
+test("rejects legacy HKDF info that omitted the canonical context binding", () => {
+  const requestorKey = assertNotPromise(createRequestorBootstrapKey());
   const bytes = manifestBytes();
-  const envelope = await sealRequestorBootstrapManifest({
+  const legacyEnvelope = legacyInfoOmittedContextEnvelope({
+    contextValue: context(),
+    manifestValue: bytes,
+    requestorPublicKey: requestorKey.publicKey,
+  });
+
+  assertThrowsSecretFree(() => openRequestorBootstrapEnvelope({
+    context: context(),
+    envelope: legacyEnvelope,
+    requestorPrivateKey: requestorKey.privateKey,
+  }));
+});
+
+test("rejects hostile context, envelope, key, and manifest inputs without leaking private material", () => {
+  const requestorKey = assertNotPromise(createRequestorBootstrapKey());
+  const wrongKey = assertNotPromise(createRequestorBootstrapKey());
+  const bytes = manifestBytes();
+  const envelope = sealRequestorBootstrapManifest({
     context: context(),
     manifestBytes: bytes,
     requestorPublicKey: requestorKey.publicKey,
@@ -157,7 +231,7 @@ test("rejects hostile context, envelope, key, and manifest inputs without leakin
     ["payment moved", () => context({ paymentMoved: true })],
   ];
   for (const [, makeContext] of contextCases) {
-    await assertRejectsSecretFree(() => openRequestorBootstrapEnvelope({
+    assertThrowsSecretFree(() => openRequestorBootstrapEnvelope({
       context: makeContext(),
       envelope,
       requestorPrivateKey: requestorKey.privateKey,
@@ -179,14 +253,22 @@ test("rejects hostile context, envelope, key, and manifest inputs without leakin
   ]) {
     const candidate = structuredClone(envelope);
     change(candidate);
-    await assertRejectsSecretFree(() => openRequestorBootstrapEnvelope({
+    assertThrowsSecretFree(() => openRequestorBootstrapEnvelope({
       context: context(),
       envelope: candidate,
       requestorPrivateKey: requestorKey.privateKey,
     }));
   }
 
-  await assertRejectsSecretFree(() => openRequestorBootstrapEnvelope({
+  const oversizedCiphertext = structuredClone(envelope);
+  oversizedCiphertext.ciphertextBase64url = Buffer.alloc(65_537, 0x61).toString("base64url");
+  assertThrowsSecretFree(() => openRequestorBootstrapEnvelope({
+    context: context(),
+    envelope: oversizedCiphertext,
+    requestorPrivateKey: requestorKey.privateKey,
+  }));
+
+  assertThrowsSecretFree(() => openRequestorBootstrapEnvelope({
     context: context(),
     envelope,
     requestorPrivateKey: wrongKey.privateKey,
@@ -198,13 +280,13 @@ test("rejects hostile context, envelope, key, and manifest inputs without leakin
     `${requestorKey.publicKey}=`,
     requestorKey.publicKey.slice(1),
   ]) {
-    await assertRejectsSecretFree(() => sealRequestorBootstrapManifest({
+    assertThrowsSecretFree(() => sealRequestorBootstrapManifest({
       context: context(),
       manifestBytes: bytes,
       requestorPublicKey: badPublicKey,
     }));
   }
-  await assertRejectsSecretFree(() => openRequestorBootstrapEnvelope({
+  assertThrowsSecretFree(() => openRequestorBootstrapEnvelope({
     context: context(),
     envelope,
     requestorPrivateKey: { canary: KEY_CANARY },
@@ -215,7 +297,7 @@ test("rejects hostile context, envelope, key, and manifest inputs without leakin
     Buffer.alloc(65_537, 0x61),
     Buffer.from(`{"schema":"x","privateSeed":"${PRIVATE_CANARY}"}`, "utf8"),
   ]) {
-    await assertRejectsSecretFree(() => sealRequestorBootstrapManifest({
+    assertThrowsSecretFree(() => sealRequestorBootstrapManifest({
       context: context(),
       manifestBytes: badManifestBytes,
       requestorPublicKey: requestorKey.publicKey,
