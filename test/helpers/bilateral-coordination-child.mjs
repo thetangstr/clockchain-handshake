@@ -54,6 +54,9 @@ const PROCESS_SCENARIOS = new Set([
   "stale-verifier-publication",
   "mismatched-verifier-publication",
 ]);
+const FAULT_COMMANDS = new Set(["identity", "party-result", "preflight", "unknown"]);
+const FAULT_ROLES = new Set(["payee", "payer"]);
+const FAULT_SUBJECT_RUNS = new Set(["rehearsal", "release", "stakeholder", "unknown"]);
 let failurePhase = "dispatch";
 
 function fail() {
@@ -101,6 +104,46 @@ function sleep(ms) {
 
 function absolute(path) {
   return typeof path === "string" && path.startsWith("/") && path.length < 4096;
+}
+
+function safeStackLocations(stack) {
+  return String(stack ?? "")
+    .match(/(?:bin|scripts|src|test)\/[A-Za-z0-9_./-]+\.mjs:\d+:\d+/g)
+    ?.slice(0, 4)
+    .join(",") ?? "";
+}
+
+function validFault(value) {
+  return value === null || exact(value, ["command", "role", "subjectRun"])
+    && FAULT_COMMANDS.has(value.command)
+    && value.command !== "unknown"
+    && FAULT_ROLES.has(value.role)
+    && FAULT_SUBJECT_RUNS.has(value.subjectRun)
+    && value.subjectRun !== "unknown";
+}
+
+function launcherCommandCategory(command) {
+  if (command === "scripts/probe-bilateral-rendezvous.mjs") return "preflight";
+  if (command === "scripts/register-bilateral-identity.mjs") return "identity";
+  if (command === "bin/handshake-propose.mjs" || command === "bin/handshake-accept.mjs") return "party-result";
+  fail();
+}
+
+function launcherSubjectRun(command, args) {
+  const output = Array.isArray(args) ? args[args.indexOf("--output") + 1] : undefined;
+  if (command === "scripts/probe-bilateral-rendezvous.mjs") return "release";
+  if (typeof output !== "string") fail();
+  if (output.includes("/stakeholder/")) return "stakeholder";
+  if (output.includes("/rehearsal/")) return "rehearsal";
+  fail();
+}
+
+function launcherDiagnostic({ command, locations = "", role, subjectRun, type }) {
+  if (!["ROLE_CHILD_EXITED", "ROLE_LAUNCHER_FAILED"].includes(type)) fail();
+  if (!FAULT_ROLES.has(role) || !FAULT_COMMANDS.has(command) || !FAULT_SUBJECT_RUNS.has(subjectRun)) fail();
+  if (type === "ROLE_LAUNCHER_FAILED" && (command === "unknown" || subjectRun === "unknown")) fail();
+  const safeLocations = locations === "" ? "" : `;locations=${locations}`;
+  return `${type}:role=${role};command=${command};subjectRun=${subjectRun}${safeLocations}`;
 }
 
 function parse(argv) {
@@ -154,7 +197,7 @@ function validRequestPayment(value) {
 }
 
 function validRoleConfiguration(value, role) {
-  if (!exact(value, ["agentIds", "clockMs", "controlBarrier", "fake", "launchManifestPath", "payerMcpServer", "preflightFake", "repositoryRoot", "requestPayment", "role", "scenario", "schema", "sepoliaRpc", "startBarrier", "stateRoot", "token"])
+  if (!exact(value, ["agentIds", "clockMs", "controlBarrier", "fake", "fault", "launchManifestPath", "payerMcpServer", "preflightFake", "repositoryRoot", "requestPayment", "role", "scenario", "schema", "sepoliaRpc", "startBarrier", "stateRoot", "token"])
     || value.schema !== ROLE_SCHEMA
     || value.role !== role
     || !validFake(value.fake)
@@ -174,6 +217,7 @@ function validRoleConfiguration(value, role) {
     || !/^[1-9][0-9]*$/.test(value.agentIds.stakeholder)
     || value.agentIds.rehearsal === value.agentIds.stakeholder || !Number.isSafeInteger(value.clockMs) || value.clockMs < 0
     || !PROCESS_SCENARIOS.has(value.scenario)
+    || !validFault(value.fault)
     || !validPayerMcpServer(value.payerMcpServer)
     || !validRequestPayment(value.requestPayment)) fail();
   if (value.controlBarrier !== null && (!exact(value.controlBarrier, ["ready", "release"]) || !absolute(value.controlBarrier.ready) || !absolute(value.controlBarrier.release))) fail();
@@ -276,6 +320,19 @@ function supervisorLauncher(value, role, owners, inspector) {
   return async ({ args, command }) => {
     if (!Array.isArray(args) || !["scripts/probe-bilateral-rendezvous.mjs", "scripts/register-bilateral-identity.mjs", "bin/handshake-propose.mjs", "bin/handshake-accept.mjs"].includes(command)) fail();
     try {
+      const category = launcherCommandCategory(command);
+      const subjectRun = launcherSubjectRun(command, args);
+      if (value.fault?.role === role && value.fault.command === category && value.fault.subjectRun === subjectRun) {
+        const diagnostic = launcherDiagnostic({
+          command: category,
+          locations: safeStackLocations(new Error().stack),
+          role,
+          subjectRun,
+          type: "ROLE_LAUNCHER_FAILED",
+        });
+        process.stderr.write(`${diagnostic}\n`);
+        return Object.freeze({ ambiguous: false, exitCode: 1 });
+      }
       if (command === "bin/handshake-propose.mjs" || command === "bin/handshake-accept.mjs") {
         let readinessState = "pending";
         let resolveReadiness;
@@ -385,7 +442,16 @@ function supervisorLauncher(value, role, owners, inspector) {
       }
       const code = await registration(args);
       return Object.freeze({ ambiguous: false, exitCode: code === 0 ? 0 : 1 });
-    } catch {
+    } catch (error) {
+      const category = launcherCommandCategory(command);
+      const subjectRun = launcherSubjectRun(command, args);
+      process.stderr.write(`${launcherDiagnostic({
+        command: category,
+        locations: safeStackLocations(error?.stack),
+        role,
+        subjectRun,
+        type: "ROLE_LAUNCHER_FAILED",
+      })}\n`);
       return Object.freeze({ ambiguous: false, exitCode: 1 });
     }
   };
@@ -696,6 +762,69 @@ async function waitForChild(child) {
     child.once("close", (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
   });
 }
+
+async function readSafeLauncherDiagnostic(logs, role) {
+  const stderr = await readFile(logs.stderr, "utf8").catch(() => "");
+  const prefix = "ROLE_LAUNCHER_FAILED:";
+  const lines = stderr.trim().split("\n").filter((line) => line.startsWith(prefix));
+  const parsed = /^ROLE_LAUNCHER_FAILED:role=(payee|payer);command=(identity|party-result|preflight);subjectRun=(rehearsal|release|stakeholder)(?:;locations=([A-Za-z0-9_./:,-]+))?$/.exec(lines.at(-1) ?? "");
+  if (parsed === null || parsed[1] !== role) {
+    return launcherDiagnostic({
+      command: "unknown",
+      role,
+      subjectRun: "unknown",
+      type: "ROLE_CHILD_EXITED",
+    });
+  }
+  return launcherDiagnostic({
+    command: parsed[2],
+    locations: parsed[4] ?? "",
+    role: parsed[1],
+    subjectRun: parsed[3],
+    type: "ROLE_CHILD_EXITED",
+  });
+}
+
+function roleChildExitedError(diagnostic) {
+  process.stderr.write(`${diagnostic}\n`);
+  const error = new Error(diagnostic);
+  error.code = "ROLE_CHILD_EXITED";
+  return error;
+}
+
+function passiveChildExit(child) {
+  if (childExited(child)) return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+}
+
+function watchOriginalRoleExit({ child, logs, role }) {
+  const promise = (async () => {
+    const exit = await passiveChildExit(child);
+    if (
+      exit.code === 0 &&
+      exit.signal === null &&
+      await hasSinglePartyCompletion(logs.stdout, role)
+    ) {
+      return new Promise(() => {});
+    }
+    throw roleChildExitedError(await readSafeLauncherDiagnostic(logs, role));
+  })();
+  promise.catch(() => {});
+  return promise;
+}
+
+async function raceRoleExit(promise, watchers, onRoleExit = async () => {}) {
+  try {
+    return await Promise.race([promise, ...watchers]);
+  } catch (error) {
+    if (error?.code === "ROLE_CHILD_EXITED") await onRoleExit(error);
+    throw error;
+  }
+}
+
 async function start(configuration, { resume = false } = {}) {
   const stdout = await open(configuration.logs.stdout, resume ? "a" : "wx", 0o600);
   const stderr = await open(configuration.logs.stderr, resume ? "a" : "wx", 0o600);
@@ -811,7 +940,7 @@ function validCoordinatorRole(value) {
 }
 
 function validCoordinatorConfiguration(value) {
-  if (!exact(value, ["arguments", "barrier", "children", "clockMs", "coordinatorFirst", "fake", "payerMcp", "preflightFake", "repositoryRoot", "report", "scenario", "schema"])
+  if (!exact(value, ["arguments", "barrier", "children", "clockMs", "coordinatorFirst", "fake", "fault", "payerMcp", "preflightFake", "repositoryRoot", "report", "scenario", "schema"])
     || value.schema !== COORDINATOR_SCHEMA
     || typeof value.coordinatorFirst !== "boolean"
     || !Array.isArray(value.arguments)
@@ -838,6 +967,7 @@ function validCoordinatorConfiguration(value) {
     || !validFake(value.preflightFake)
     || !absolute(value.repositoryRoot)
     || !absolute(value.report) || !Number.isSafeInteger(value.clockMs) || value.clockMs < 0
+    || !validFault(value.fault)
     || !PROCESS_SCENARIOS.has(value.scenario)) fail();
   if (value.barrier !== null && (!exact(value.barrier, ["ready", "release"]) || !absolute(value.barrier.ready) || !absolute(value.barrier.release))) fail();
   return value;
@@ -959,6 +1089,7 @@ function supervisorConfiguration(value, role, release, requestPayment = null) {
     clockMs: value.clockMs,
     controlBarrier: value.barrier,
     fake: value.fake,
+    fault: value.fault?.role === role ? value.fault : null,
     launchManifestPath: manifest.path,
     payerMcpServer: role === "payer" ? Object.freeze({
       host: value.payerMcp.host,
@@ -1067,6 +1198,15 @@ async function assertSinglePartyCompletion(path, role) {
   assertExactPartyCompletionLine(completions[0], role);
 }
 
+async function hasSinglePartyCompletion(path, role) {
+  try {
+    await assertSinglePartyCompletion(path, role);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function descriptorOwners(path) {
   const bytes = await readFile(path);
   const checked = await validateRelayArtifactWithFacts({ artifactType: "signed-descriptor", bytes, expectedDigest: createHash("sha256").update(bytes).digest("hex"), secretCanaries: [] });
@@ -1090,6 +1230,7 @@ async function runProductionCoordinatorChild(input) {
   let runtime;
   let payerProcess = null;
   let payeeProcess = null;
+  const roleExitWatchers = [];
   const mcpMilestones = [];
   let drainWatchers = async () => {};
   try {
@@ -1155,15 +1296,24 @@ async function runProductionCoordinatorChild(input) {
       ? Promise.resolve().then(() => runProductionCoordinator({ dependencies: firstRunDependencies, release, releaseRoot: config.releaseRoot.path }))
       : null;
     coordinatorFirstRun?.catch(() => {});
+    const markRoleExit = async (error) => {
+      await phase("coordinator-role-early-exit");
+    };
+    const guardRoleExits = (promise) => raceRoleExit(promise, roleExitWatchers, markRoleExit);
     await phase("coordinator-role-start");
     if (!resumed) {
       await writeOrReuseExact(value.children.payer.configPath, supervisorConfiguration(value, "payer", release));
       payerProcess = await start({ logs: value.children.payer.logs, mode: "payer", path: value.children.payer.configPath });
       active.add(payerProcess);
+      roleExitWatchers.push(watchOriginalRoleExit({
+        child: payerProcess,
+        logs: value.children.payer.logs,
+        role: "payer",
+      }));
       await phase("coordinator-role-bootstrap");
-      await waitForRoleBootstrap(privateRoleBarrier(value, "payer").ready, "payer");
+      await guardRoleExits(waitForRoleBootstrap(privateRoleBarrier(value, "payer").ready, "payer"));
       await writeOrReuseExact(privateRoleBarrier(value, "payer").release, { release: true });
-      const payerMcpReady = await waitForPayerMcpReady(value.children.payer.logs.stdout, payerProcess);
+      const payerMcpReady = await guardRoleExits(waitForPayerMcpReady(value.children.payer.logs.stdout, payerProcess));
       mcpMilestones.push(Object.freeze({ paymentMoved: false, sequence: "0", stage: "PAYER_MCP_READY", url: payerMcpReady.url }));
       const requestPayment = Object.freeze({
         intakeRequestId: value.payerMcp.intakeRequestId,
@@ -1174,8 +1324,13 @@ async function runProductionCoordinatorChild(input) {
       await writeOrReuseExact(value.children.payee.configPath, supervisorConfiguration(value, "payee", release, requestPayment));
       payeeProcess = await start({ logs: value.children.payee.logs, mode: "payee", path: value.children.payee.configPath });
       active.add(payeeProcess);
-      await waitForRequestorSupervisorStart(value.children.payee.logs.stdout, payeeProcess);
-      await waitForRoleBootstrap(privateRoleBarrier(value, "payee").ready, "payee");
+      roleExitWatchers.push(watchOriginalRoleExit({
+        child: payeeProcess,
+        logs: value.children.payee.logs,
+        role: "payee",
+      }));
+      await guardRoleExits(waitForRequestorSupervisorStart(value.children.payee.logs.stdout, payeeProcess));
+      await guardRoleExits(waitForRoleBootstrap(privateRoleBarrier(value, "payee").ready, "payee"));
       mcpMilestones.push(
         Object.freeze({ paymentMoved: false, sequence: "1", stage: "HANDSHAKE_REQUIRED" }),
         Object.freeze({ paymentMoved: false, sequence: "2", stage: "REQUESTOR_SUPERVISOR_START" }),
@@ -1183,7 +1338,7 @@ async function runProductionCoordinatorChild(input) {
     }
     const base = coordinatorDependencies;
     await phase("coordinator-enrollment");
-    if (!value.coordinatorFirst && !resumed) await waitForEnrollmentConfirmations(base.readEvents, [payerProcess, payeeProcess]);
+    if (!value.coordinatorFirst && !resumed) await guardRoleExits(waitForEnrollmentConfirmations(base.readEvents, [payerProcess, payeeProcess]));
     let verifierProcess = null;
     const verifierRuns = {};
     const runVerifierChild = async (args) => {
@@ -1227,7 +1382,7 @@ async function runProductionCoordinatorChild(input) {
       verifierProcess = await start({ logs, mode: "verifier", path: configPath });
       active.add(verifierProcess);
       await phase("coordinator-verifier-wait");
-      const result = await waitForChild(verifierProcess);
+      const result = await guardRoleExits(waitForChild(verifierProcess));
       active.delete(verifierProcess);
       if (result.code !== 0 || result.signal !== null) return null;
       if (["stale-verifier-publication", "mismatched-verifier-publication"].includes(value.scenario)) {
@@ -1269,11 +1424,11 @@ async function runProductionCoordinatorChild(input) {
       createFundingAdmissionClient,
       repositoryRoot: value.repositoryRoot,
       now: base.now,
-      sleeper: base.sleeper,
+      sleeper: (delay) => guardRoleExits(base.sleeper(delay)),
       waitForFunding: boundedFunding,
       runVerifierChild,
     });
-    let current = value.coordinatorFirst ? await coordinatorFirstRun : release;
+    let current = value.coordinatorFirst ? await guardRoleExits(coordinatorFirstRun) : release;
     if (value.coordinatorFirst && !resumed) {
       if (!current || current.paymentMoved !== false || current.state !== "FUNDING_READY") fail();
       current = Object.freeze({ ...release, ...current });
@@ -1318,7 +1473,8 @@ async function runProductionCoordinatorChild(input) {
         });
       }
       drainWatchers = runDependencies.drainWatchers;
-      const next = await runProductionCoordinator({ dependencies: runDependencies, release: current, releaseRoot: config.releaseRoot.path });
+      const coordinatorTurn = runProductionCoordinator({ dependencies: runDependencies, release: current, releaseRoot: config.releaseRoot.path });
+      const next = await guardRoleExits(coordinatorTurn);
       if (!next || next.paymentMoved !== false) fail();
       current = Object.freeze({ ...current, ...next });
       const returnedState = coordinatorState(current);
@@ -1348,8 +1504,8 @@ async function runProductionCoordinatorChild(input) {
       if (payerProcess === null || payeeProcess === null) fail();
       await phase("coordinator-role-completion-wait");
       await Promise.all([
-        waitForPartyCompletion(value.children.payer.logs.stdout, payerProcess, "payer"),
-        waitForPartyCompletion(value.children.payee.logs.stdout, payeeProcess, "payee"),
+        guardRoleExits(waitForPartyCompletion(value.children.payer.logs.stdout, payerProcess, "payer")),
+        guardRoleExits(waitForPartyCompletion(value.children.payee.logs.stdout, payeeProcess, "payee")),
       ]);
       await phase("coordinator-role-exit-wait");
       const [payerExit, payeeExit] = await Promise.all([

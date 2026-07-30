@@ -277,7 +277,7 @@ test("process child is inert when directly discovered by node:test but rejects a
   assert.match(direct.stderr, /^PROCESS_CHILD_FAILED:dispatch/m);
 });
 
-async function createProcessSession(t, { barrier = null, coordinatorFirst = barrier === null, scenario = "success" } = {}) {
+async function createProcessSession(t, { barrier = null, coordinatorFirst = barrier === null, fault = null, scenario = "success" } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bilateral-process-e2e-")));
   await chmod(root, 0o700);
   t.after(() => rm(root, { force: true, recursive: true }));
@@ -474,6 +474,7 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
     clockMs: SHARED_TEST_CLOCK_MS,
     coordinatorFirst,
     fake: fakeReady,
+    fault,
     payerMcp: {
       certificatePath: payerMcpCertificate,
       fingerprint: payerMcpFingerprint,
@@ -528,6 +529,52 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
   };
 }
 
+test("coordinator fails fast with sanitized diagnostics when original payer exits before completion", { concurrency: false }, async (t) => {
+  const session = await createProcessSession(t, {
+    fault: {
+      command: "preflight",
+      role: "payer",
+      subjectRun: "release",
+    },
+  });
+  const coordinator = session.startCoordinator();
+  t.after(() => stopGroup(coordinator.child));
+  const startedAt = Date.now();
+  const exit = await within(coordinator.wait(), 20_000).catch(async (error) => {
+    const phase = await readFile(`${session.report}.phase`, "utf8").catch(() => "");
+    const roleLogs = await Promise.all(["payer", "payee"].flatMap((role) => [
+      readFile(session.logs[role].stdout, "utf8").catch(() => ""),
+      readFile(session.logs[role].stderr, "utf8").catch(() => ""),
+    ]));
+    throw new Error(`${error.message}\nphase=${JSON.stringify(phase.trim())}\ncoordinator=${JSON.stringify(coordinator.output())}\nroles=${roleLogs.join("\n")}`);
+  });
+  const elapsedMs = Date.now() - startedAt;
+  const phase = await readFile(`${session.report}.phase`, "utf8").catch(() => "");
+  const roleLogs = await Promise.all(["payer", "payee"].flatMap((role) => [
+    readFile(session.logs[role].stdout, "utf8").catch(() => ""),
+    readFile(session.logs[role].stderr, "utf8").catch(() => ""),
+  ]));
+  const diagnosticSurface = [
+    exit.stdout,
+    exit.stderr,
+    phase,
+    ...roleLogs,
+  ].join("\n");
+  assert.notEqual(exit.code, 0);
+  assert.equal(exit.signal, null);
+  assert.ok(elapsedMs < 20_000, `elapsedMs=${elapsedMs}`);
+  assert.match(exit.stderr, /^PROCESS_CHILD_FAILED:coordinator-role-early-exit:ROLE_CHILD_EXITED:/m);
+  assert.match(diagnosticSurface, /ROLE_CHILD_EXITED:role=payer;command=preflight;subjectRun=release/);
+  assert.equal(diagnosticSurface.includes("subjectRun=rehearsal"), false);
+  assert.equal(diagnosticSurface.includes(session.root), false);
+  assert.equal(diagnosticSurface.includes(session.operatorToken), false);
+  assert.equal(diagnosticSurface.includes(session.operatorPrivateKey), false);
+  assert.equal(diagnosticSurface.includes("payer-process-token"), false);
+  assert.equal(diagnosticSurface.includes("payee-process-token"), false);
+  assert.equal(diagnosticSurface.includes(AUTHORIZE), false);
+  await assert.rejects(readFile(session.report, "utf8"), { code: "ENOENT" });
+});
+
 test("one long-lived Payer and Requestor span rehearsal and stakeholder with two fresh verifiers", { concurrency: false }, async (t) => {
   const session = await createProcessSession(t);
   const coordinator = session.startCoordinator();
@@ -538,9 +585,12 @@ test("one long-lived Payer and Requestor span rehearsal and stakeholder with two
   ]));
   const coordinatorExit = await within(coordinator.wait(), PROCESS_PHASE_DEADLINE_MS).catch(async (error) => {
     const roleDiagnostics = await readRoleDiagnostics();
-    throw new Error(`${error.message}\ncoordinator=${JSON.stringify(coordinator.output())}\nroles=${roleDiagnostics.join("\n")}\nrelay=${JSON.stringify(session.relay.output())}`);
+    const phase = await readFile(`${session.report}.phase`, "utf8").catch(() => "");
+    throw new Error(`${error.message}\nphase=${JSON.stringify(phase.trim())}\ncoordinator=${JSON.stringify(coordinator.output())}\nroles=${roleDiagnostics.join("\n")}\nrelay=${JSON.stringify(session.relay.output())}`);
   });
   const roleDiagnostics = await readRoleDiagnostics();
+  assert.equal(roleDiagnostics.join("\n").includes("ROLE_CHILD_EXITED"), false);
+  assert.equal(roleDiagnostics.join("\n").includes("ROLE_LAUNCHER_FAILED"), false);
   assert.deepEqual(
     { code: coordinatorExit.code, signal: coordinatorExit.signal },
     { code: 0, signal: null },
