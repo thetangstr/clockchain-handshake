@@ -37,6 +37,15 @@ const STOP_GRACE_MS = 1_000;
 const BARRIER_DEADLINE_MS = 90_000;
 const ROLE_SCHEMA = "clockchain.bilateral-coordination-process-supervisor/v1";
 const COORDINATOR_SCHEMA = "clockchain.bilateral-coordination-process-coordinator/v1";
+const VERIFIER_READ_COUNTER_SCHEMA = "clockchain.bilateral-verifier-read-counters/v1";
+const READ_COUNTER_METHODS = Object.freeze([
+  "generateAuditTrail",
+  "getBlock",
+  "resolveAgent",
+  "searchActions",
+  "snapshot",
+  "verifyCrossParty",
+]);
 const PROCESS_SCENARIOS = new Set([
   "success",
   "missing-mandate",
@@ -194,6 +203,41 @@ function validRequestPayment(value) {
     && value.mcpUrl.endsWith("/mcp")
     && absolute(value.tlsCertificatePath)
     && /^[0-9a-f]{64}$/.test(value.tlsFingerprint);
+}
+
+function zeroReadCounters() {
+  return Object.fromEntries(READ_COUNTER_METHODS.map((method) => [method, 0]));
+}
+
+function validReadCounters(value) {
+  return exact(value, READ_COUNTER_METHODS)
+    && READ_COUNTER_METHODS.every((method) => Number.isSafeInteger(value[method]) && value[method] >= 0);
+}
+
+async function readVerifierReadCounterRecord(path) {
+  const info = await lstat(path);
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || (info.mode & 0o777) !== 0o600 || info.size < 2 || info.size > 1024) fail();
+  const text = await readFile(path, "utf8");
+  const value = JSON.parse(text);
+  if (
+    !exact(value, ["readCounters", "schema"])
+    || value.schema !== VERIFIER_READ_COUNTER_SCHEMA
+    || !validReadCounters(value.readCounters)
+    || canonicalJson(value) !== text
+  ) fail();
+  return value.readCounters;
+}
+
+function countedVerifierClockchainClient(fake, readCounters) {
+  const client = createFakeBilateralClockchainHttpClient(fake);
+  const wrapped = { ...client };
+  for (const method of READ_COUNTER_METHODS) {
+    wrapped[method] = async (...args) => {
+      readCounters[method] += 1;
+      return client[method](...args);
+    };
+  }
+  return Object.freeze(wrapped);
 }
 
 function validRoleConfiguration(value, role) {
@@ -700,15 +744,17 @@ async function runRole(value, role) {
 }
 
 async function runVerifier(value) {
-  if (!exact(value, ["arguments", "fake", "owners", "scenario", "schema"])
+  if (!exact(value, ["arguments", "fake", "owners", "readCounterOutput", "scenario", "schema"])
     || value.schema !== SCHEMA
     || !Array.isArray(value.arguments)
     || !validFake(value.fake)
     || !validOwners(value.owners)
+    || !absolute(value.readCounterOutput)
     || !PROCESS_SCENARIOS.has(value.scenario)) fail();
+  const readCounters = zeroReadCounters();
   const result = await verifierMain(value.arguments, {
     buildVerifierInput: (values) => buildDefaultVerifierInput(values, {
-      createClockchainClient: () => createFakeBilateralClockchainHttpClient(value.fake),
+      createClockchainClient: () => countedVerifierClockchainClient(value.fake, readCounters),
       createIdentityClient: () => identity(value.owners),
     }),
     ...(["stale-verifier-publication", "mismatched-verifier-publication"].includes(value.scenario)
@@ -716,6 +762,10 @@ async function runVerifier(value) {
       : {}),
   });
   if (result !== 0) fail();
+  await writeExclusive(value.readCounterOutput, {
+    readCounters,
+    schema: VERIFIER_READ_COUNTER_SCHEMA,
+  });
 }
 
 async function tlsProbe(relay) {
@@ -1376,13 +1426,13 @@ async function runProductionCoordinatorChild(input) {
         });
       }
       const configPath = `${value.children.verifier.configPath}.${subjectRun}`;
+      const readCounterOutput = `${configPath}.read-counters`;
       const logs = {
         stderr: `${value.children.verifier.logs.stderr}.${subjectRun}`,
         stdout: `${value.children.verifier.logs.stdout}.${subjectRun}`,
       };
-      await writeExclusive(configPath, { arguments: args.slice(1), fake: value.fake, owners, scenario: value.scenario, schema: SCHEMA });
+      await writeExclusive(configPath, { arguments: args.slice(1), fake: value.fake, owners, readCounterOutput, scenario: value.scenario, schema: SCHEMA });
       await phase("coordinator-verifier-before-snapshot");
-      const beforeVerifier = (await createFakeBilateralClockchainHttpClient(value.fake).snapshot()).readCounters;
       await phase("coordinator-verifier-start");
       verifierProcess = await start({ logs, mode: "verifier", path: configPath });
       active.add(verifierProcess);
@@ -1410,13 +1460,13 @@ async function runProductionCoordinatorChild(input) {
         await writeFile(markerPath, markerBytes, { mode: 0o600 });
       }
       await phase("coordinator-verifier-after-snapshot");
-      const afterVerifier = (await createFakeBilateralClockchainHttpClient(value.fake).snapshot()).readCounters;
+      const afterVerifier = await readVerifierReadCounterRecord(readCounterOutput);
       verifierRuns[subjectRun] = Object.freeze({
         configPath,
         logs,
         pid: verifierProcess.pid,
         readCountersAfterVerifier: afterVerifier,
-        readCountersBeforeVerifier: beforeVerifier,
+        readCountersBeforeVerifier: zeroReadCounters(),
       });
       return 0;
     };

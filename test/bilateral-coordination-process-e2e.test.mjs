@@ -668,6 +668,14 @@ test("one long-lived Payer and Requestor span rehearsal and stakeholder with two
   for (const run of ["rehearsal", "stakeholder"]) {
     const verifier = coordinatorReport.verifiers[run];
     assert.ok(Number.isInteger(verifier.pid) && verifier.pid > 0);
+    assert.deepEqual(verifier.readCountersBeforeVerifier, {
+      generateAuditTrail: 0,
+      getBlock: 0,
+      resolveAgent: 0,
+      searchActions: 0,
+      snapshot: 0,
+      verifyCrossParty: 0,
+    });
     const counterDelta = Object.fromEntries(Object.keys(verifier.readCountersAfterVerifier).map((key) => [
       key,
       verifier.readCountersAfterVerifier[key] - verifier.readCountersBeforeVerifier[key],
@@ -677,7 +685,7 @@ test("one long-lived Payer and Requestor span rehearsal and stakeholder with two
       getBlock: 5,
       resolveAgent: 5,
       searchActions: 4,
-      snapshot: 1,
+      snapshot: 0,
       verifyCrossParty: 3,
     });
   }
