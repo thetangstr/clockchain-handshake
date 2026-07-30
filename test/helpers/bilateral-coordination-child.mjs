@@ -1230,6 +1230,7 @@ async function runProductionCoordinatorChild(input) {
   let runtime;
   let payerProcess = null;
   let payeeProcess = null;
+  const monitorRoleExits = value.scenario === "success";
   const roleExitWatchers = [];
   const mcpMilestones = [];
   let drainWatchers = async () => {};
@@ -1305,11 +1306,13 @@ async function runProductionCoordinatorChild(input) {
       await writeOrReuseExact(value.children.payer.configPath, supervisorConfiguration(value, "payer", release));
       payerProcess = await start({ logs: value.children.payer.logs, mode: "payer", path: value.children.payer.configPath });
       active.add(payerProcess);
-      roleExitWatchers.push(watchOriginalRoleExit({
-        child: payerProcess,
-        logs: value.children.payer.logs,
-        role: "payer",
-      }));
+      if (monitorRoleExits) {
+        roleExitWatchers.push(watchOriginalRoleExit({
+          child: payerProcess,
+          logs: value.children.payer.logs,
+          role: "payer",
+        }));
+      }
       await phase("coordinator-role-bootstrap");
       await guardRoleExits(waitForRoleBootstrap(privateRoleBarrier(value, "payer").ready, "payer"));
       await writeOrReuseExact(privateRoleBarrier(value, "payer").release, { release: true });
@@ -1324,11 +1327,13 @@ async function runProductionCoordinatorChild(input) {
       await writeOrReuseExact(value.children.payee.configPath, supervisorConfiguration(value, "payee", release, requestPayment));
       payeeProcess = await start({ logs: value.children.payee.logs, mode: "payee", path: value.children.payee.configPath });
       active.add(payeeProcess);
-      roleExitWatchers.push(watchOriginalRoleExit({
-        child: payeeProcess,
-        logs: value.children.payee.logs,
-        role: "payee",
-      }));
+      if (monitorRoleExits) {
+        roleExitWatchers.push(watchOriginalRoleExit({
+          child: payeeProcess,
+          logs: value.children.payee.logs,
+          role: "payee",
+        }));
+      }
       await guardRoleExits(waitForRequestorSupervisorStart(value.children.payee.logs.stdout, payeeProcess));
       await guardRoleExits(waitForRoleBootstrap(privateRoleBarrier(value, "payee").ready, "payee"));
       mcpMilestones.push(

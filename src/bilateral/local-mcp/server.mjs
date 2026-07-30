@@ -22,6 +22,7 @@ const CAPABILITY_PATTERN = /^[0-9a-f]{64}$/;
 const JSON_CONTENT_TYPE = "application/json";
 const JSON_ACCEPT = "application/json, text/event-stream";
 const GENERIC_FAILURE = Object.freeze({ error: "PAYER_MCP_PROTOCOL_FAILED", paymentMoved: false });
+const PARSER_FAILURE_RESPONSE = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
 const SINGLETON_HEADERS = new Set([
   "accept",
   "authorization",
@@ -34,6 +35,18 @@ const SINGLETON_HEADERS = new Set([
 
 function fail() {
   throw new Error("Payer MCP server failed safely.");
+}
+
+function closeParserFailureSocket(socket) {
+  if (socket?.writable === true && typeof socket.end === "function") {
+    try {
+      socket.end(PARSER_FAILURE_RESPONSE);
+      return;
+    } catch {}
+  }
+  try {
+    socket?.destroy?.();
+  } catch {}
 }
 
 function validateHost(host) {
@@ -554,6 +567,7 @@ export function createPayerMcpServer({
       server = candidate;
       candidate.headersTimeout = HEADER_TIMEOUT_MS;
       candidate.requestTimeout = REQUEST_TIMEOUT_MS;
+      candidate.on?.("clientError", (_error, socket) => closeParserFailureSocket(socket));
       await new Promise((resolve, reject) => {
         const onError = (error) => {
           if (server === candidate) server = undefined;

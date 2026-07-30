@@ -499,6 +499,53 @@ test("configures the exact MCP server header and request timeouts", async (t) =>
   assert.equal(created.requestTimeout, 10_000);
 });
 
+test("returns one generic raw response for parser-level client errors", async (t) => {
+  let clientError;
+  const fixture = await makeFixture(t, {
+    createHttpsServer() {
+      const listeners = new Map();
+      return {
+        address: () => ({ address: "127.0.0.1", family: "IPv4", port: 9443 }),
+        close: (callback) => callback(),
+        headersTimeout: 0,
+        listen(_port, _host, callback) {
+          callback();
+        },
+        off(event) {
+          listeners.delete(event);
+        },
+        on(event, listener) {
+          if (event === "clientError") clientError = listener;
+          listeners.set(event, listener);
+        },
+        once(event, listener) {
+          listeners.set(event, listener);
+        },
+        requestTimeout: 0,
+      };
+    },
+  });
+  let destroyed = false;
+  let response = "";
+  assert.equal(typeof clientError, "function");
+  clientError(new Error("parser-canary"), {
+    destroy() {
+      destroyed = true;
+    },
+    end(bytes) {
+      response = String(bytes);
+    },
+    writable: true,
+  });
+  assert.equal(destroyed, false);
+  assert.equal(
+    response,
+    "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+  );
+  assert.equal(response.includes("parser-canary"), false);
+  await fixture.server.stop();
+});
+
 test("uses generic capability failures, rate limits failed auth, caps session requests, body and header count", async (t) => {
   let now = 1_000;
   const fixture = await makeFixture(t, { nowMs: () => now });
