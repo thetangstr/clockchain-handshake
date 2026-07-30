@@ -203,6 +203,15 @@ test("projects supervisor status lines through an exact secret-free allowlist", 
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payer", state: "AUTHORIZED", status: "PARTY_COMPLETE" }));
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "operator", state: "ACKNOWLEDGED", status: "PARTY_COMPLETE" }));
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, privateKeyPem: "secret", role: "payer", state: "ACKNOWLEDGED", status: "PARTY_COMPLETE" }));
+  const hiddenPartyCompleteSecret = { paymentMoved: false, role: "payer", state: "ACKNOWLEDGED", status: "PARTY_COMPLETE" };
+  Object.defineProperty(hiddenPartyCompleteSecret, "privateKeyPem", { value: "secret" });
+  assert.throws(() => createSupervisorStatusLine(hiddenPartyCompleteSecret));
+  const symbolPartyCompleteSecret = { paymentMoved: false, role: "payer", state: "ACKNOWLEDGED", status: "PARTY_COMPLETE" };
+  symbolPartyCompleteSecret[Symbol("privateKeyPem")] = "secret";
+  assert.throws(() => createSupervisorStatusLine(symbolPartyCompleteSecret));
+  const accessorPartyCompleteState = { paymentMoved: false, role: "payer", status: "PARTY_COMPLETE" };
+  Object.defineProperty(accessorPartyCompleteState, "state", { enumerable: true, get: () => "ACKNOWLEDGED" });
+  assert.throws(() => createSupervisorStatusLine(accessorPartyCompleteState));
 });
 
 test("supervisor CLI emits only the generic coordination failure line", () => {

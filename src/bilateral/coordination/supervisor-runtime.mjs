@@ -62,6 +62,16 @@ const canonicalJson = (value) => {
   if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) fail();
   return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
 };
+const PARTY_COMPLETE_KEYS = Object.freeze(["paymentMoved", "role", "state", "status"]);
+function assertExactPartyCompleteStatus(value) {
+  if (!value || Object.getPrototypeOf(value) !== Object.prototype) fail();
+  const ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.length !== PARTY_COMPLETE_KEYS.length || !PARTY_COMPLETE_KEYS.every((key) => ownKeys.includes(key))) fail();
+  for (const key of PARTY_COMPLETE_KEYS) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !("value" in descriptor)) fail();
+  }
+}
 const canonicalEnrollmentSetBytes = (value) => Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(value)), "utf8");
 const relayPackageBytes = (value) => Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(value)), "utf8");
 export async function createPrivateRoot(root) {
@@ -411,7 +421,8 @@ export function createSupervisorStatusLine(value) {
     return `${canonicalJson({ code: "COORDINATION_SUPERVISOR_FAILED", paymentMoved: false })}\n`;
   }
   if (value?.status === "PARTY_COMPLETE") {
-    if (!value || Object.getPrototypeOf(value) !== Object.prototype || Object.keys(value).length !== 4 || !Object.hasOwn(value, "paymentMoved") || !Object.hasOwn(value, "role") || !Object.hasOwn(value, "state") || !Object.hasOwn(value, "status") || value.paymentMoved !== false || !["payer", "payee"].includes(value.role)) fail();
+    assertExactPartyCompleteStatus(value);
+    if (value.paymentMoved !== false || !["payer", "payee"].includes(value.role)) fail();
     if ((value.role === "payer" && value.state !== "ACKNOWLEDGED") || (value.role === "payee" && value.state !== "ACCEPTED")) fail();
     return `${canonicalJson({ paymentMoved: false, role: value.role, state: value.state, status: "PARTY_COMPLETE" })}\n`;
   }
