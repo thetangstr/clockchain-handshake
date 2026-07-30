@@ -32,6 +32,9 @@ const BILATERAL_PUBLIC_DOCUMENTS = Object.freeze([
 ]);
 const BILATERAL_COMPATIBILITY_DOCUMENTS = Object.freeze([
 ]);
+const BILATERAL_SUPPORTING_DOCUMENTS = Object.freeze([
+  "docs/runbooks/payer-mcp-external-relay.md",
+]);
 const SUPPORTING_DOCUMENTS = Object.freeze([
   "invites/README.md",
 ]);
@@ -64,6 +67,7 @@ const REQUIRED_LINKS = Object.freeze({
     "../../docs/runbooks/bilateral-demo-day.md",
     "../../prompts/run-requestor-bilateral-demo.md",
     "../../prompts/run-payer-bilateral-demo.md",
+    "./payer-mcp-external-relay.md",
     "https://clockchain-research.vercel.app/handshake/run",
   ]),
   "docs/runbooks/bilateral-demo-day.md": Object.freeze([
@@ -71,6 +75,7 @@ const REQUIRED_LINKS = Object.freeze({
     "./bilateral-demo-quick-start.md",
     "../../prompts/run-requestor-bilateral-demo.md",
     "../../prompts/run-payer-bilateral-demo.md",
+    "./payer-mcp-external-relay.md",
     "https://clockchain-research.vercel.app/handshake/run",
   ]),
   "docs/runbooks/bilateral-demo-live-handoff.md": Object.freeze([
@@ -78,8 +83,10 @@ const REQUIRED_LINKS = Object.freeze({
     "./bilateral-demo-quick-start.md",
     "../../prompts/run-requestor-bilateral-demo.md",
     "../../prompts/run-payer-bilateral-demo.md",
+    "./payer-mcp-external-relay.md",
     "https://clockchain-research.vercel.app/handshake/run",
   ]),
+  "docs/runbooks/payer-mcp-external-relay.md": Object.freeze([]),
 });
 const FAILURE_CODE_DOCUMENT = "DEMO.md";
 const FAILURE_CODE_ROW_PATTERN =
@@ -306,9 +313,9 @@ const BILATERAL_COMMON_REQUIREMENTS = Object.freeze([
       /\bThe protocol does not download message bytes from Clockchain\.|\bcommercial-intent evidence, not\s+authorization anchors\b/i,
   }),
   Object.freeze({
-    label: "local Payer MCP intake",
+    label: "Payer-owned MCP intake",
     pattern:
-      /\bPayer-owned local TLS MCP `\/mcp` endpoint for payment intake\b[\s\S]*\bhosted Clockchain MCP server is not used for `request_payment`/i,
+      /\bPayer-owned TLS MCP `\/mcp` endpoint for payment intake\b[\s\S]*\bhosted Clockchain MCP server\s+is\s+not\s+used\s+for\s+`request_payment`/i,
   }),
 ]);
 const PAYER_ROLE_COMMAND = `node bin/handshake-propose.mjs \\
@@ -430,6 +437,7 @@ const PAYER_SUPERVISOR_COMMAND = `npm run bilateral:supervisor -- \\
   --state "$PAYER_SUPERVISOR_STATE" \\
   --payer-mcp-host "$PAYER_MCP_HOST" \\
   --payer-mcp-port "$PAYER_MCP_PORT" \\
+  --payer-mcp-public-url "$PAYER_MCP_PUBLIC_URL" \\
   --payer-mcp-tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \\
   --payer-mcp-tls-private-key "$PAYER_MCP_TLS_PRIVATE_KEY"`;
 const REQUESTOR_REQUEST_PAYMENT_COMMAND = `npm run bilateral:request-payment -- \\
@@ -444,7 +452,7 @@ function bilateralContractFailures(relativePath, contents) {
   const failures = [];
   if (/https:\/\/mcp\.clockchain\.network\/mcp/i.test(contents)) {
     failures.push(
-      `${relativePath}: must not describe hosted Clockchain MCP as the payment-intake entry point; use the Payer-owned local TLS MCP /mcp flow.`,
+      `${relativePath}: must not describe hosted Clockchain MCP as the payment-intake entry point; use the Payer-owned TLS MCP /mcp flow.`,
     );
   }
   if (
@@ -551,7 +559,7 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact supervisor command",
-        /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/,
+        /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/,
       ],
       ["PAYER_MCP_READY gate", /\bPAYER_MCP_READY\b/],
       [
@@ -616,11 +624,11 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact startup order",
-        /\brelay -> coordinator -> console -> funding readiness -> Payer local MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+        /\brelay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
       ],
       [
-        "local Payer MCP only",
-        /\bPayer-owned local TLS MCP `\/mcp` endpoint\b/i,
+        "Payer-owned MCP only",
+        /\bPayer-owned TLS MCP `\/mcp` endpoint\b/i,
       ],
       ["automated primary flow", /\bAutomated primary flow\b/i],
       [
@@ -884,11 +892,11 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact startup order",
-        /\brelay -> coordinator -> console -> funding readiness -> Payer local MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+        /\brelay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
       ],
       [
-        "local Payer MCP only",
-        /\bPayer-owned local TLS MCP `\/mcp` endpoint\b/i,
+        "Payer-owned MCP only",
+        /\bPayer-owned TLS MCP `\/mcp` endpoint\b/i,
       ],
       [
         "read-only advisory console",
@@ -1028,19 +1036,19 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "Payer MCP exact IP",
-        /\bPAYER_MCP_HOST\b[^.\n]*\bexact numeric Payer IP\b[^.\n]*\breachable from Requestor\b[\s\S]*\bsame computer\b[^.\n]*\b127\.0\.0\.1\b[\s\S]*\btwo computers\b[^.\n]*\bPayer LAN IP\b[\s\S]*\btest "\$PAYER_MCP_HOST" != "0\.0\.0\.0"/i,
+        /\bexport PAYER_MCP_HOST="127\.0\.0\.1"[\s\S]*\bexport PAYER_MCP_PUBLIC_IP="\$\{PAYER_MCP_PUBLIC_IP:\?set operator-provided AWS Elastic IP\}"/i,
       ],
       [
         "Payer MCP certificate generation",
-        /\bPAYER_MCP_TLS_ROOT="\$\{PAYER_SUPERVISOR_STATE%\/\}\.payer-mcp-tls"[\s\S]*\bmkdir -p "\$PAYER_MCP_TLS_ROOT"[\s\S]*\bsubjectAltName=IP:\$PAYER_MCP_HOST\b[\s\S]*chmod 0600 "\$PAYER_MCP_TLS_CERTIFICATE"[\s\S]*PAYER_MCP_TLS_FINGERPRINT="\$\(openssl x509 -in "\$PAYER_MCP_TLS_CERTIFICATE" -outform DER \| openssl dgst -sha256 -binary \| xxd -p -c 256\)"[\s\S]*\bgrep -Eq '\^\[0-9a-f\]\{64\}\$'[\s\S]*\bpreserves supervisor restart scanning\b/i,
+        /\bPAYER_MCP_TLS_ROOT="\$\{PAYER_SUPERVISOR_STATE%\/\}\.payer-mcp-tls"[\s\S]*\bmkdir -p "\$PAYER_MCP_TLS_ROOT"[\s\S]*\bsubjectAltName=IP:\$PAYER_MCP_PUBLIC_IP\b[\s\S]*chmod 0600 "\$PAYER_MCP_TLS_CERTIFICATE"[\s\S]*PAYER_MCP_TLS_FINGERPRINT="\$\(openssl x509 -in "\$PAYER_MCP_TLS_CERTIFICATE" -outform DER \| openssl dgst -sha256 -binary \| xxd -p -c 256\)"[\s\S]*\bgrep -Eq '\^\[0-9a-f\]\{64\}\$'[\s\S]*\bpreserves supervisor restart scanning\b/i,
       ],
       [
         "exact startup order",
-        /\brelay -> coordinator -> console -> funding readiness -> Payer local MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+        /\brelay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
       ],
       [
-        "local Payer MCP only",
-        /\bPayer-owned local TLS MCP `\/mcp` endpoint\b/i,
+        "Payer-owned MCP only",
+        /\bPayer-owned TLS MCP `\/mcp` endpoint\b/i,
       ],
       [
         "coordinator-owned funding record",
@@ -1434,7 +1442,7 @@ function readmeRoleplayFailures(contents) {
   }
   if (
     !contents.includes(
-      "relay -> coordinator -> console -> funding readiness -> Payer local MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED",
+      "relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED",
     )
   ) {
     failures.push(
@@ -2229,6 +2237,7 @@ export async function checkDocumentation({
     ...PUBLIC_DOCUMENTS,
     ...BILATERAL_PUBLIC_DOCUMENTS,
     ...BILATERAL_COMPATIBILITY_DOCUMENTS,
+    ...BILATERAL_SUPPORTING_DOCUMENTS,
   ]) {
     const path = await canonicalRegularFile(
       root,
@@ -2319,6 +2328,14 @@ export async function checkDocumentation({
         ),
       );
     }
+    if (BILATERAL_SUPPORTING_DOCUMENTS.includes(relativePath)) {
+      failures.push(
+        ...bilateralNamingAndMovementFailures(
+          relativePath,
+          contents,
+        ),
+      );
+    }
     failures.push(
       ...structuredSafetyFailures(relativePath, contents),
       ...(PUBLIC_DOCUMENTS.includes(relativePath)
@@ -2398,6 +2415,7 @@ export async function main({
       PUBLIC_DOCUMENTS.length +
       BILATERAL_PUBLIC_DOCUMENTS.length +
       BILATERAL_COMPATIBILITY_DOCUMENTS.length +
+      BILATERAL_SUPPORTING_DOCUMENTS.length +
       SUPPORTING_DOCUMENTS.length
     } gated documents).\n`,
   );

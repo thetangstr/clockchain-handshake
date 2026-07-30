@@ -3,7 +3,9 @@
 Use this start-here checklist with the [repository overview](../../README.md),
 the [full runbook](../../docs/runbooks/bilateral-demo-day.md), the
 [Payer prompt](../../prompts/run-payer-bilateral-demo.md), and the
-[Requestor prompt](../../prompts/run-requestor-bilateral-demo.md). The full runbook is
+[Requestor prompt](../../prompts/run-requestor-bilateral-demo.md). Use the
+[external Payer MCP relay runbook](./payer-mcp-external-relay.md) when the role
+computers are on different networks. The full runbook is
 authoritative for recovery and low-level commands. The public
 [live-demo helper](https://clockchain-research.vercel.app/handshake/run)
 explains these steps without receiving live session evidence.
@@ -18,11 +20,16 @@ aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that
 Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and
 `ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`. The protocol does not download message bytes from Clockchain.
 
-This demo uses a Payer-owned local TLS MCP `/mcp` endpoint for payment intake.
-The hosted Clockchain MCP server is not used for `request_payment`. Requestor
-asks Payer's local MCP for payment, receives exact `HANDSHAKE_REQUIRED`, and
+This demo uses a Payer-owned TLS MCP `/mcp` endpoint for payment intake. It
+binds only to Payer loopback. AWS forwards raw TCP and does not terminate Payer
+MCP TLS. The hosted Clockchain MCP server is not used for `request_payment`.
+Requestor asks Payer's MCP for payment, receives exact `HANDSHAKE_REQUIRED`, and
 only then the Requestor wrapper starts the supervisor that follows Payer's
 signed mandate.
+
+Preserve the assigned private state root unchanged. Underfunding is pending
+until the bounded eight-minute funding deadline. Do not retry a consumed launch
+manifest.
 
 ## Before everyone starts
 
@@ -65,7 +72,8 @@ signed mandate.
 - Use the Payer prompt and only the Payer private state directory.
 - Confirm the clean exact reviewed SHA and Node.js 22 before running the supervisor.
 - Use only `payer.launch.json` plus Payer-owned local MCP TLS files.
-- Start Payer's local MCP/supervisor first and wait for exact `PAYER_MCP_READY`.
+- Start Payer's raw-TCP tunnel, then its MCP/supervisor, and wait for exact
+  `PAYER_MCP_READY`.
 - Stop if Requestor's manifest, operator files, funding files, token files, or private bytes are visible.
 - Payer may reach local `PROPOSED` and `ACKNOWLEDGED`; Payer never emits `AUTHORIZED`.
 
@@ -85,7 +93,7 @@ signed mandate.
 ## Funding and execution order
 
 The startup control order is exactly:
-`relay -> coordinator -> console -> funding readiness -> Payer local MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
+`relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
 Funding readiness means validating and arming the reusable Sepolia treasury
 lane; the funding batch transfers only after the coordinator's signed address
 record is ready.
@@ -94,8 +102,8 @@ record is ready.
 2. Human operator starts coordinator after relay readiness.
 3. Human operator starts the loopback-default read-only advisory console.
 4. Human operator validates and arms the reusable Sepolia treasury funding lane.
-5. Human operator delivers `payer.launch.json` only to Payer. Payer starts the
-   Payer-owned local TLS MCP/supervisor.
+5. Human operator delivers `payer.launch.json` only to Payer. Payer starts its
+   non-terminating reverse SSH tunnel, then its loopback TLS MCP/supervisor.
 6. Payer waits for exact `PAYER_MCP_READY` and shares only the public MCP URL,
    public TLS certificate, and lowercase 64-hex certificate fingerprint.
 7. Human operator delivers `payee.launch.json` only to Requestor. Requestor

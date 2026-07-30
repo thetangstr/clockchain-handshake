@@ -39,6 +39,9 @@ const BILATERAL_PUBLIC_DOCUMENTS = Object.freeze([
 ]);
 const BILATERAL_COMPATIBILITY_DOCUMENTS = Object.freeze([
 ]);
+const BILATERAL_SUPPORTING_DOCUMENTS = Object.freeze([
+  "docs/runbooks/payer-mcp-external-relay.md",
+]);
 const SUPPORT_FILES = Object.freeze([
   "package.json",
   "bin/handshake-demo.mjs",
@@ -91,6 +94,7 @@ async function temporaryDocumentationFixture(t) {
     ...PUBLIC_DOCUMENTS,
     ...BILATERAL_PUBLIC_DOCUMENTS,
     ...BILATERAL_COMPATIBILITY_DOCUMENTS,
+    ...BILATERAL_SUPPORTING_DOCUMENTS,
     ...SUPPORT_FILES,
   ]) {
     const destination = join(directory, relativePath);
@@ -173,8 +177,9 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
     PUBLIC_DOCUMENTS.length +
       BILATERAL_PUBLIC_DOCUMENTS.length +
       BILATERAL_COMPATIBILITY_DOCUMENTS.length +
+      BILATERAL_SUPPORTING_DOCUMENTS.length +
       SUPPORT_FILES.filter((path) => path === "invites/README.md").length,
-    9,
+    10,
   );
   for (const [relativePath, contents] of documents) {
     assert.match(contents, /Clockchain(?:®)?/);
@@ -201,7 +206,7 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
     );
     assert.match(
       contents,
-      /\bPayer-owned local TLS MCP `\/mcp` endpoint for payment intake\b[\s\S]*\bhosted Clockchain MCP server is not used for `request_payment`/i,
+      /\bPayer-owned TLS MCP `\/mcp` endpoint for payment intake\b[\s\S]*\bhosted Clockchain MCP server\s+is\s+not\s+used\s+for\s+`request_payment`/i,
       relativePath,
     );
   }
@@ -332,7 +337,7 @@ test("automated bilateral happy path limits the user to four fundings and two su
   }
   assert.match(
     payer,
-    /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/,
+    /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/,
   );
   assert.doesNotMatch(payer, /npm run bilateral:request-payment/);
   assert.match(payer, /\bPAYER_MCP_READY\b/);
@@ -387,6 +392,44 @@ test("automated bilateral happy path limits the user to four fundings and two su
   }
 });
 
+test("manual role instructions preserve long-lived state and use a non-terminating external MCP relay", async () => {
+  const files = await Promise.all([
+    "prompts/run-payer-bilateral-demo.md",
+    "prompts/run-requestor-bilateral-demo.md",
+    "docs/runbooks/bilateral-demo-quick-start.md",
+    "docs/runbooks/bilateral-demo-day.md",
+    "docs/runbooks/bilateral-demo-live-handoff.md",
+    "docs/runbooks/payer-mcp-external-relay.md",
+  ].map(async (relativePath) => ({
+    contents: await readFile(join(ROOT_DIRECTORY, relativePath), "utf8"),
+    relativePath,
+  })));
+
+  for (const { contents, relativePath } of files) {
+    assert.match(contents, /Preserve the assigned private state root unchanged\./i, relativePath);
+    assert.match(contents, /Underfunding\s+is\s+pending\s+until\s+the\s+bounded\s+eight-minute\s+funding\s+deadline\./i, relativePath);
+    assert.match(contents, /Do\s+not\s+retry\s+a\s+consumed\s+launch\s+manifest\./i, relativePath);
+    assert.match(contents, /AWS\s+forwards\s+raw\s+TCP\s+and\s+does\s+not\s+terminate\s+Payer\s+MCP\s+TLS\./i, relativePath);
+  }
+
+  const payer = files.find(({ relativePath }) => relativePath === "prompts/run-payer-bilateral-demo.md").contents;
+  const requestor = files.find(({ relativePath }) => relativePath === "prompts/run-requestor-bilateral-demo.md").contents;
+  const relay = files.find(({ relativePath }) => relativePath === "docs/runbooks/payer-mcp-external-relay.md").contents;
+  assert.match(payer, /Start this long-lived process exactly once\./i);
+  assert.match(payer, /Do not start a replacement supervisor\./i);
+  assert.match(payer, /--payer-mcp-host "\$PAYER_MCP_HOST"[\s\S]*--payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL"/);
+  assert.match(payer, /export PAYER_MCP_HOST="127\.0\.0\.1"/);
+  assert.doesNotMatch(payer, /export PAYER_MCP_HOST="0\.0\.0\.0"/);
+  assert.match(requestor, /Start this long-lived request-payment wrapper exactly once\./i);
+  assert.match(requestor, /Do not start a replacement request-payment wrapper or supervisor\./i);
+  assert.match(requestor, /exact `PAYER_MCP_READY` public URL,\s+certificate, and fingerprint tuple/i);
+  assert.match(relay, /GatewayPorts clientspecified/);
+  assert.match(relay, /ExitOnForwardFailure=yes/);
+  assert.match(relay, /ServerAliveInterval=30/);
+  assert.match(relay, /-R "0\.0\.0\.0:\$\{PAYER_MCP_PUBLIC_PORT\}:127\.0\.0\.1:\$\{PAYER_MCP_PORT\}"/);
+  assert.match(relay, /never stores the MCP capability, TLS private key, request, response,\s+or intake record/i);
+});
+
 test("bilateral roleplay docs require three machines and live relay readiness", async () => {
   const [readme, runbook, quickStart, requestor, payer] = await Promise.all([
     readFile(join(ROOT_DIRECTORY, "README.md"), "utf8"),
@@ -421,18 +464,16 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /RELAY_ADVERTISED_IP[^.\n]*numeric IP[^.\n]*reachable by both role computers/i);
   assert.match(primaryRunbook, /subjectAltName=IP:\$RELAY_ADVERTISED_IP/);
   assert.match(primaryRunbook, /RELAY_TLS_FINGERPRINT=.*openssl x509/i);
-  assert.match(primaryRunbook, /PAYER_MCP_HOST[^.\n]*exact numeric Payer IP[^.\n]*reachable from Requestor/i);
-  assert.match(primaryRunbook, /same computer[^.\n]*127\.0\.0\.1/i);
-  assert.match(primaryRunbook, /two computers[^.\n]*Payer LAN IP/i);
-  assert.doesNotMatch(primaryRunbook, /export PAYER_MCP_HOST="127\.0\.0\.1"/);
-  assert.match(primaryRunbook, /test "\$PAYER_MCP_HOST" != "0\.0\.0\.0"/);
+  assert.match(primaryRunbook, /export PAYER_MCP_HOST="127\.0\.0\.1"/);
+  assert.match(primaryRunbook, /export PAYER_MCP_PUBLIC_IP="\$\{PAYER_MCP_PUBLIC_IP:\?set operator-provided AWS Elastic IP\}"/);
+  assert.match(primaryRunbook, /export PAYER_MCP_PUBLIC_URL="https:\/\/\$PAYER_MCP_PUBLIC_IP:\$PAYER_MCP_PUBLIC_PORT\/mcp"/);
   assert.doesNotMatch(primaryRunbook, /export PAYER_MCP_HOST="0\.0\.0\.0"/);
   assert.doesNotMatch(primaryRunbook, /PAYER_MCP_TLS_PRIVATE_KEY="\$BILATERAL_RELEASE_ROOT/);
   assert.doesNotMatch(primaryRunbook, /\$PAYER_SUPERVISOR_STATE\/tls/);
   assert.match(primaryRunbook, /Payer machine:[\s\S]*export PAYER_MCP_TLS_ROOT="\$\{PAYER_SUPERVISOR_STATE%\/\}\.payer-mcp-tls"/);
   assert.match(primaryRunbook, /export PAYER_MCP_TLS_PRIVATE_KEY="\$PAYER_MCP_TLS_ROOT\/payer-mcp\.key"/);
   assert.match(primaryRunbook, /preserves supervisor restart scanning/i);
-  assert.match(primaryRunbook, /subjectAltName=IP:\$PAYER_MCP_HOST/);
+  assert.match(primaryRunbook, /subjectAltName=IP:\$PAYER_MCP_PUBLIC_IP/);
   assert.match(primaryRunbook, /chmod 0600 "\$PAYER_MCP_TLS_CERTIFICATE"/);
   assert.doesNotMatch(primaryRunbook, /chmod 0644 "\$PAYER_MCP_TLS_CERTIFICATE"/);
   assert.match(primaryRunbook, /PAYER_MCP_TLS_FINGERPRINT="\$\(openssl x509 -in "\$PAYER_MCP_TLS_CERTIFICATE" -outform DER \| openssl dgst -sha256 -binary \| xxd -p -c 256\)"/);
@@ -452,9 +493,9 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /npm run bilateral:fund -- \\/);
   assert.match(
     primaryRunbook,
-    /relay -> coordinator -> console -> funding readiness -> Payer local MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED/,
+    /relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED/,
   );
-  assert.match(primaryRunbook, /\bPayer-owned local TLS MCP `\/mcp` endpoint\b/i);
+  assert.match(primaryRunbook, /\bPayer-owned TLS MCP `\/mcp` endpoint\b/i);
   assert.doesNotMatch(primaryRunbook, /https:\/\/mcp\.clockchain\.network\/mcp/i);
   assert.match(primaryRunbook, /--funding-record "\$FUNDING_RECORD_FILE"/);
   assert.match(primaryRunbook, /--journal-directory "\$FUNDING_JOURNAL_DIR"/);
@@ -513,7 +554,7 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(payer, /mkdir -p "\$PAYER_MCP_TLS_ROOT"/);
   assert.match(payer, /export PAYER_MCP_TLS_PRIVATE_KEY="\$PAYER_MCP_TLS_ROOT\/payer-mcp\.key"/);
   assert.match(payer, /preserves supervisor restart scanning/i);
-  assert.match(payer, /subjectAltName=IP:\$PAYER_MCP_HOST/);
+  assert.match(payer, /subjectAltName=IP:\$PAYER_MCP_PUBLIC_IP/);
   assert.match(payer, /chmod 0600 "\$PAYER_MCP_TLS_CERTIFICATE"/);
   assert.doesNotMatch(payer, /chmod 0644 "\$PAYER_MCP_TLS_CERTIFICATE"/);
   assert.match(payer, /PAYER_MCP_TLS_FINGERPRINT="\$\(openssl x509 -in "\$PAYER_MCP_TLS_CERTIFICATE" -outform DER \| openssl dgst -sha256 -binary \| xxd -p -c 256\)"/);
@@ -617,7 +658,7 @@ test("live bilateral handoff pins the public operator checklist without secrets"
     "utf8",
   );
   const startupOrder =
-    "relay -> coordinator -> console -> funding readiness -> Payer local MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED";
+    "relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED";
 
   assert.doesNotMatch(handoff, new RegExp(RETIRED_LIVE_HANDOFF_RELEASE_SHA));
   assert.match(handoff, /BILATERAL_REPOSITORY_SHA[^.\n]*operator-provided exact reviewed 40-character SHA/i);
@@ -649,18 +690,16 @@ test("live bilateral handoff pins the public operator checklist without secrets"
   assert.match(handoff, /openssl req -x509 -newkey rsa:3072 -nodes/);
   assert.match(handoff, /subjectAltName=IP:\$RELAY_ADVERTISED_IP/);
   assert.match(handoff, /RELAY_TLS_FINGERPRINT="\$\(openssl x509/);
-  assert.match(handoff, /PAYER_MCP_HOST[^.\n]*exact numeric Payer IP[^.\n]*reachable from Requestor/i);
-  assert.match(handoff, /same computer[^.\n]*127\.0\.0\.1/i);
-  assert.match(handoff, /two computers[^.\n]*Payer LAN IP/i);
-  assert.doesNotMatch(handoff, /export PAYER_MCP_HOST="127\.0\.0\.1"/);
-  assert.match(handoff, /test "\$PAYER_MCP_HOST" != "0\.0\.0\.0"/);
+  assert.match(handoff, /export PAYER_MCP_HOST="127\.0\.0\.1"/);
+  assert.match(handoff, /export PAYER_MCP_PUBLIC_IP="\$\{PAYER_MCP_PUBLIC_IP:\?set operator-provided AWS Elastic IP\}"/);
+  assert.match(handoff, /export PAYER_MCP_PUBLIC_URL="https:\/\/\$PAYER_MCP_PUBLIC_IP:\$PAYER_MCP_PUBLIC_PORT\/mcp"/);
   assert.doesNotMatch(handoff, /export PAYER_MCP_HOST="0\.0\.0\.0"/);
   assert.doesNotMatch(handoff, /PAYER_MCP_TLS_PRIVATE_KEY="\$BILATERAL_RELEASE_ROOT/);
   assert.doesNotMatch(handoff, /\$PAYER_SUPERVISOR_STATE\/tls/);
   assert.match(handoff, /Payer supervisor:[\s\S]*export PAYER_MCP_TLS_ROOT="\$\{PAYER_SUPERVISOR_STATE%\/\}\.payer-mcp-tls"/);
   assert.match(handoff, /export PAYER_MCP_TLS_PRIVATE_KEY="\$PAYER_MCP_TLS_ROOT\/payer-mcp\.key"/);
   assert.match(handoff, /preserves supervisor restart scanning/i);
-  assert.match(handoff, /subjectAltName=IP:\$PAYER_MCP_HOST/);
+  assert.match(handoff, /subjectAltName=IP:\$PAYER_MCP_PUBLIC_IP/);
   assert.match(handoff, /chmod 0600 "\$PAYER_MCP_TLS_CERTIFICATE"/);
   assert.doesNotMatch(handoff, /chmod 0644 "\$PAYER_MCP_TLS_CERTIFICATE"/);
   assert.match(handoff, /PAYER_MCP_TLS_FINGERPRINT="\$\(openssl x509 -in "\$PAYER_MCP_TLS_CERTIFICATE" -outform DER \| openssl dgst -sha256 -binary \| xxd -p -c 256\)"/);
@@ -668,7 +707,7 @@ test("live bilateral handoff pins the public operator checklist without secrets"
   assert.match(handoff, /npm run bilateral:relay -- \\/);
   assert.match(handoff, /npm run bilateral:coordinator -- \\/);
   assert.match(handoff, /npm run bilateral:console -- \\/);
-  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/);
+  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/);
   assert.match(handoff, /\bwait\b[\s\S]*\bPAYER_MCP_READY\b/i);
   assert.match(handoff, /npm run bilateral:request-payment -- \\\n  --launch-manifest "\$REQUESTOR_LAUNCH_MANIFEST" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --mcp-url "\$PAYER_MCP_URL" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE" \\\n  --tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --tls-fingerprint "\$PAYER_MCP_TLS_FINGERPRINT"/);
   assert.match(handoff, /\bHANDSHAKE_REQUIRED\b[\s\S]*\bRequestor supervisor\b/i);
@@ -807,7 +846,7 @@ test("turnkey bilateral docs pin the mandate, console, funding, and readiness co
   const helperUrl =
     "https://clockchain-research.vercel.app/handshake/run";
   const startupOrder =
-    "relay -> coordinator -> console -> funding readiness -> Payer local MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED";
+    "relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED";
 
   assert.match(
     payerPrompt,
@@ -2576,6 +2615,6 @@ test("reports the true gated document count", async () => {
   assert.equal(exitCode, 0);
   assert.equal(
     stdout.text(),
-    "Documentation checks passed (9 gated documents).\n",
+    "Documentation checks passed (10 gated documents).\n",
   );
 });

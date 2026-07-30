@@ -23,10 +23,12 @@ authorization anchors. The only Clockchain authorization anchors are exactly:
 
 For a session that the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and `ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`.
 
-This demo uses a Payer-owned local TLS MCP `/mcp` endpoint for payment intake.
-The hosted Clockchain MCP server is not used for `request_payment`. Requestor
-first asks Payer's local MCP for payment; Payer's MCP tells Requestor that it
-must complete the handshake before payment can be considered.
+This demo uses a Payer-owned TLS MCP `/mcp` endpoint for payment intake. The
+endpoint binds only to Payer's loopback interface and reaches Requestor through
+an operator-provided AWS raw-TCP relay. The hosted Clockchain MCP server is not
+used for `request_payment`. AWS forwards raw TCP and does not terminate Payer
+MCP TLS. Requestor first asks Payer's MCP for payment; Payer's MCP tells
+Requestor that it must complete the handshake before payment can be considered.
 
 Only the operator's fresh aggregate verifier may emit the authorizing verdict.
 Payer may report local progress and marker-complete public artifact digests, but
@@ -51,49 +53,69 @@ test "$(git rev-parse HEAD)" = "$BILATERAL_REPOSITORY_SHA"
 npm ci --ignore-scripts
 ```
 
-Keep Payer's private state root separate from the
-operator and Requestor roots.
+Keep Payer's private state root separate from the operator and Requestor roots.
+Preserve the assigned private state root unchanged. Underfunding is pending
+until the bounded eight-minute funding deadline. Do not retry a consumed launch
+manifest.
 
-The operator privately provides one role-specific launch-manifest path and one
-fresh private state directory. Generate the local TLS MCP certificate and
-private key in a Payer-owned sibling TLS root outside `PAYER_SUPERVISOR_STATE`,
-with the certificate SAN matching the exact numeric Payer IP reachable from
-Requestor. Same computer uses `127.0.0.1`; two computers use the Payer LAN IP.
-Never bind Payer MCP to `0.0.0.0`, and never read or print the private key. The
-sibling TLS root preserves supervisor restart scanning while operator never
-handles the key.
+The operator privately provides one role-specific launch-manifest path, one
+fresh private state directory, the AWS relay's stable Elastic IP and public
+port, and a preconfigured Payer-owned SSH host alias. Generate the TLS MCP
+certificate and private key in a Payer-owned sibling TLS root outside
+`PAYER_SUPERVISOR_STATE`, with the certificate SAN matching the exact AWS
+Elastic IP. Never bind Payer MCP to `0.0.0.0`, and never read or print the
+private key. The sibling TLS root preserves supervisor restart scanning while
+the operator and AWS relay never handle the key.
 
 ```sh
-export PAYER_MCP_HOST="${PAYER_MCP_HOST:?set exact numeric Payer IP reachable from Requestor; same computer 127.0.0.1, two computers Payer LAN IP}"
+export PAYER_MCP_HOST="127.0.0.1"
 export PAYER_MCP_PORT="9443"
+export PAYER_MCP_PUBLIC_IP="${PAYER_MCP_PUBLIC_IP:?set operator-provided AWS Elastic IP}"
+export PAYER_MCP_PUBLIC_PORT="${PAYER_MCP_PUBLIC_PORT:?set operator-provided public relay port}"
+export PAYER_MCP_PUBLIC_URL="https://$PAYER_MCP_PUBLIC_IP:$PAYER_MCP_PUBLIC_PORT/mcp"
+export PAYER_MCP_RELAY_SSH_HOST="${PAYER_MCP_RELAY_SSH_HOST:?set preconfigured Payer-owned SSH host alias}"
 export PAYER_MCP_TLS_ROOT="${PAYER_SUPERVISOR_STATE%/}.payer-mcp-tls"
 mkdir -p "$PAYER_MCP_TLS_ROOT"
 chmod 0700 "$PAYER_MCP_TLS_ROOT"
 export PAYER_MCP_TLS_CERTIFICATE="$PAYER_MCP_TLS_ROOT/payer-mcp.crt"
 export PAYER_MCP_TLS_PRIVATE_KEY="$PAYER_MCP_TLS_ROOT/payer-mcp.key"
-printf '%s\n' "$PAYER_MCP_HOST" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
-test "$PAYER_MCP_HOST" != "0.0.0.0"
+printf '%s\n' "$PAYER_MCP_PUBLIC_IP" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
 openssl req -x509 -newkey rsa:3072 -nodes \
   -keyout "$PAYER_MCP_TLS_PRIVATE_KEY" \
   -out "$PAYER_MCP_TLS_CERTIFICATE" \
-  -subj "/CN=$PAYER_MCP_HOST" \
-  -addext "subjectAltName=IP:$PAYER_MCP_HOST" \
+  -subj "/CN=$PAYER_MCP_PUBLIC_IP" \
+  -addext "subjectAltName=IP:$PAYER_MCP_PUBLIC_IP" \
   -days 1
 chmod 0600 "$PAYER_MCP_TLS_PRIVATE_KEY"
 chmod 0600 "$PAYER_MCP_TLS_CERTIFICATE"
 PAYER_MCP_TLS_FINGERPRINT="$(openssl x509 -in "$PAYER_MCP_TLS_CERTIFICATE" -outform DER | openssl dgst -sha256 -binary | xxd -p -c 256)"
 printf '%s\n' "$PAYER_MCP_TLS_FINGERPRINT" | grep -Eq '^[0-9a-f]{64}$'
 
+ssh -N \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -R "0.0.0.0:${PAYER_MCP_PUBLIC_PORT}:127.0.0.1:${PAYER_MCP_PORT}" \
+  "$PAYER_MCP_RELAY_SSH_HOST"
+```
+
+Leave that SSH command running. In a second terminal, from the same detached
+checkout with the same environment, start this long-lived process exactly once.
+Run:
+
+```sh
 npm run bilateral:supervisor -- \
   --launch-manifest "$PAYER_LAUNCH_MANIFEST" \
   --state "$PAYER_SUPERVISOR_STATE" \
   --payer-mcp-host "$PAYER_MCP_HOST" \
   --payer-mcp-port "$PAYER_MCP_PORT" \
+  --payer-mcp-public-url "$PAYER_MCP_PUBLIC_URL" \
   --payer-mcp-tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
   --payer-mcp-tls-private-key "$PAYER_MCP_TLS_PRIVATE_KEY"
 ```
 
-Start Payer's one long-lived supervisor exactly once.
+Do not start a replacement supervisor. If the tunnel or supervisor exits,
+report the exit and preserve state; do not consume another manifest.
 
 The supervisor stays alive across both runs: rehearsal first, then stakeholder.
 It creates and retains Payer's coordination key, preflight key, one token, and
@@ -125,10 +147,15 @@ Payer receives or derives these private inputs and paths:
   lowercase hexadecimal characters.
 - `PAYER_LAUNCH_MANIFEST`: Payer's operator-signed launch manifest.
 - `PAYER_SUPERVISOR_STATE`: Payer's mode-`0700` private supervisor state root.
-- `PAYER_MCP_HOST`: exact numeric Payer IP reachable from Requestor. Use
-  `127.0.0.1` only when both roles run on the same computer; use the Payer LAN
-  IP for two computers. Never use `0.0.0.0`.
-- `PAYER_MCP_PORT`: Payer-owned local MCP bind port.
+- `PAYER_MCP_HOST`: exact loopback bind address `127.0.0.1`. Never use
+  `0.0.0.0`.
+- `PAYER_MCP_PORT`: Payer-owned loopback MCP bind port.
+- `PAYER_MCP_PUBLIC_IP`: operator-provided stable AWS Elastic IP.
+- `PAYER_MCP_PUBLIC_PORT`: operator-provided public raw-TCP relay port.
+- `PAYER_MCP_PUBLIC_URL`: exact public HTTPS `/mcp` URL reported by
+  `PAYER_MCP_READY`.
+- `PAYER_MCP_RELAY_SSH_HOST`: preconfigured Payer-owned SSH host alias. Do not
+  open or print its private key.
 - `PAYER_MCP_TLS_ROOT`: Payer-owned sibling TLS root, exactly
   `${PAYER_SUPERVISOR_STATE%/}.payer-mcp-tls`, mode `0700`.
 - `PAYER_MCP_TLS_CERTIFICATE`: Payer-generated local MCP public TLS certificate

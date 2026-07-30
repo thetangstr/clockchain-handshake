@@ -24,11 +24,13 @@ authorization anchors. The only Clockchain authorization anchors are exactly:
 
 For a session that the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and `ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`.
 
-This demo uses a Payer-owned local TLS MCP `/mcp` endpoint for payment intake.
-The hosted Clockchain MCP server is not used for `request_payment`. Payer must
-be ready first and must provide only the public MCP URL, public TLS certificate,
-and lowercase 64-hex certificate fingerprint through the operator-approved
-public channel.
+This demo uses a Payer-owned TLS MCP `/mcp` endpoint for payment intake. Payer
+keeps the service loopback-only and exposes it through an operator-provided AWS
+raw-TCP relay. The hosted Clockchain MCP server is not used for
+`request_payment`. AWS forwards raw TCP and does not terminate Payer MCP TLS.
+Payer must be ready first and must provide only the public MCP URL, public TLS
+certificate, and lowercase 64-hex certificate fingerprint through the
+operator-approved public channel.
 
 Only the operator's fresh aggregate verifier may emit the authorizing verdict.
 Requestor may report local progress and marker-complete public artifact digests,
@@ -53,14 +55,16 @@ test "$(git rev-parse HEAD)" = "$BILATERAL_REPOSITORY_SHA"
 npm ci --ignore-scripts
 ```
 
-Keep Requestor's private state root separate from the
-operator and Payer roots.
+Keep Requestor's private state root separate from the operator and Payer roots.
+Preserve the assigned private state root unchanged. Underfunding is pending
+until the bounded eight-minute funding deadline. Do not retry a consumed launch
+manifest.
 
 The operator privately provides one Requestor launch-manifest path, one fresh
-private state directory, and Payer's public MCP details after Payer reports
-`PAYER_MCP_READY`. Do not start `npm run bilateral:supervisor` directly.
-Generate one fresh canonical UUIDv4 intake request ID, then start the
-request-payment wrapper exactly once:
+private state directory, and the exact `PAYER_MCP_READY` public URL,
+certificate, and fingerprint tuple after Payer reports readiness. Do not start `npm run bilateral:supervisor` directly. Generate one fresh canonical UUIDv4
+intake request ID. Start this long-lived request-payment wrapper exactly once.
+Run:
 
 ```sh
 REQUESTOR_INTAKE_REQUEST_ID="$(node -e 'console.log(require("node:crypto").randomUUID())')"
@@ -77,6 +81,10 @@ The wrapper must visibly emit exact `HANDSHAKE_REQUIRED`; the wrapper alone then
 starts the Requestor supervisor and stays attached. Treat any other status,
 missing status, changed MCP TLS certificate, changed fingerprint, or direct
 supervisor instruction as a fail-closed stop.
+
+Do not start a replacement request-payment wrapper or supervisor. If the
+wrapper exits, report the exit and preserve state; do not consume another
+manifest.
 
 The supervisor stays alive across both runs: rehearsal first, then stakeholder.
 It creates and retains Requestor's coordination key, preflight key, one token,
@@ -103,8 +111,9 @@ Requestor receives or derives these private inputs and paths:
 - `REQUESTOR_LAUNCH_MANIFEST`: Requestor's operator-signed launch manifest.
 - `REQUESTOR_INTAKE_REQUEST_ID`: one fresh canonical UUIDv4 for this payment
   request.
-- `PAYER_MCP_URL`: Payer-owned local TLS MCP `/mcp` URL from `PAYER_MCP_READY`.
-- `PAYER_MCP_TLS_CERTIFICATE`: transferred Payer-owned local MCP public TLS
+- `PAYER_MCP_URL`: Payer-owned public TLS MCP `/mcp` URL from
+  `PAYER_MCP_READY`.
+- `PAYER_MCP_TLS_CERTIFICATE`: transferred Payer-owned public TLS
   certificate path.
 - `PAYER_MCP_TLS_FINGERPRINT`: pinned lowercase 64-hex certificate fingerprint
   from `PAYER_MCP_READY`.

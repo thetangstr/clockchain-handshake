@@ -3,7 +3,9 @@
 Use this operator handoff with the [full runbook](./bilateral-demo-day.md), the
 [three-computer quick-start](./bilateral-demo-quick-start.md), the
 [Payer prompt](../../prompts/run-payer-bilateral-demo.md), and the
-[Requestor prompt](../../prompts/run-requestor-bilateral-demo.md). The canonical
+[Requestor prompt](../../prompts/run-requestor-bilateral-demo.md). Use the
+[external Payer MCP relay runbook](./payer-mcp-external-relay.md) for the
+cross-network MCP setup. The canonical
 stakeholder helper route is
 [https://clockchain-research.vercel.app/handshake/run](https://clockchain-research.vercel.app/handshake/run).
 The route is the required public start surface; live session evidence never goes
@@ -19,11 +21,16 @@ aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that
 Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and
 `ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`. The protocol does not download message bytes from Clockchain.
 
-This demo uses a Payer-owned local TLS MCP `/mcp` endpoint for payment intake.
-The hosted Clockchain MCP server is not used for `request_payment`. Requestor
-asks Payer's local MCP for payment, receives exact `HANDSHAKE_REQUIRED`, and
+This demo uses a Payer-owned TLS MCP `/mcp` endpoint for payment intake. It
+binds only to Payer loopback. AWS forwards raw TCP and does not terminate Payer
+MCP TLS. The hosted Clockchain MCP server is not used for `request_payment`.
+Requestor asks Payer's MCP for payment, receives exact `HANDSHAKE_REQUIRED`, and
 only then the Requestor wrapper starts the supervisor that follows Payer's
 signed mandate.
+
+Preserve the assigned private state root unchanged. Underfunding is pending
+until the bounded eight-minute funding deadline. Do not retry a consumed launch
+manifest.
 
 ## Release and computers
 
@@ -39,7 +46,7 @@ worktree, wrong SHA, branch checkout, wrong Node.js major version, dependency
 install drift, or any extra command.
 
 The startup control order is exactly:
-`relay -> coordinator -> console -> funding readiness -> Payer local MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
+`relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
 
 `implementation-complete and rehearsal-ready` means local code, tests, docs, and
 release packaging are ready, but the physical funded run has not passed. Only a
@@ -215,41 +222,57 @@ surfaces, not authority sources.
 Payer supervisor:
 
 ```sh
-export PAYER_MCP_HOST="${PAYER_MCP_HOST:?set exact numeric Payer IP reachable from Requestor; same computer 127.0.0.1, two computers Payer LAN IP}"
+export PAYER_MCP_HOST="127.0.0.1"
 export PAYER_MCP_PORT="9443"
+export PAYER_MCP_PUBLIC_IP="${PAYER_MCP_PUBLIC_IP:?set operator-provided AWS Elastic IP}"
+export PAYER_MCP_PUBLIC_PORT="${PAYER_MCP_PUBLIC_PORT:?set operator-provided public relay port}"
+export PAYER_MCP_PUBLIC_URL="https://$PAYER_MCP_PUBLIC_IP:$PAYER_MCP_PUBLIC_PORT/mcp"
+export PAYER_MCP_RELAY_SSH_HOST="${PAYER_MCP_RELAY_SSH_HOST:?set preconfigured Payer-owned SSH host alias}"
 export PAYER_MCP_TLS_ROOT="${PAYER_SUPERVISOR_STATE%/}.payer-mcp-tls"
 mkdir -p "$PAYER_MCP_TLS_ROOT"
 chmod 0700 "$PAYER_MCP_TLS_ROOT"
 export PAYER_MCP_TLS_CERTIFICATE="$PAYER_MCP_TLS_ROOT/payer-mcp.crt"
 export PAYER_MCP_TLS_PRIVATE_KEY="$PAYER_MCP_TLS_ROOT/payer-mcp.key"
-printf '%s\n' "$PAYER_MCP_HOST" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
-test "$PAYER_MCP_HOST" != "0.0.0.0"
+printf '%s\n' "$PAYER_MCP_PUBLIC_IP" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
 openssl req -x509 -newkey rsa:3072 -nodes \
   -keyout "$PAYER_MCP_TLS_PRIVATE_KEY" \
   -out "$PAYER_MCP_TLS_CERTIFICATE" \
-  -subj "/CN=$PAYER_MCP_HOST" \
-  -addext "subjectAltName=IP:$PAYER_MCP_HOST" \
+  -subj "/CN=$PAYER_MCP_PUBLIC_IP" \
+  -addext "subjectAltName=IP:$PAYER_MCP_PUBLIC_IP" \
   -days 1
 chmod 0600 "$PAYER_MCP_TLS_PRIVATE_KEY"
 chmod 0600 "$PAYER_MCP_TLS_CERTIFICATE"
 PAYER_MCP_TLS_FINGERPRINT="$(openssl x509 -in "$PAYER_MCP_TLS_CERTIFICATE" -outform DER | openssl dgst -sha256 -binary | xxd -p -c 256)"
 printf '%s\n' "$PAYER_MCP_TLS_FINGERPRINT" | grep -Eq '^[0-9a-f]{64}$'
 
+ssh -N \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -R "0.0.0.0:${PAYER_MCP_PUBLIC_PORT}:127.0.0.1:${PAYER_MCP_PORT}" \
+  "$PAYER_MCP_RELAY_SSH_HOST"
+```
+
+Keep the tunnel attached. In a second Payer terminal, start this long-lived
+process exactly once:
+
+```sh
 npm run bilateral:supervisor -- \
   --launch-manifest "$PAYER_LAUNCH_MANIFEST" \
   --state "$PAYER_SUPERVISOR_STATE" \
   --payer-mcp-host "$PAYER_MCP_HOST" \
   --payer-mcp-port "$PAYER_MCP_PORT" \
+  --payer-mcp-public-url "$PAYER_MCP_PUBLIC_URL" \
   --payer-mcp-tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
   --payer-mcp-tls-private-key "$PAYER_MCP_TLS_PRIVATE_KEY"
 ```
 
-`PAYER_MCP_HOST` must be the exact numeric Payer IP reachable from Requestor:
-same computer uses `127.0.0.1`; two computers use the Payer LAN IP. Never bind
-Payer MCP to `0.0.0.0`. The Payer MCP certificate SAN must match the exact
-`PAYER_MCP_HOST`. The private key stays on Payer and is never read or printed.
-The sibling TLS root preserves supervisor restart scanning because it is outside
-`PAYER_SUPERVISOR_STATE`, while operator never handles the key.
+Payer MCP binds only to `127.0.0.1`; never bind it to `0.0.0.0`. The certificate
+SAN matches the stable `PAYER_MCP_PUBLIC_IP`, while the raw-TCP relay preserves
+end-to-end Payer TLS. The private key stays on Payer and is never read or
+printed. The sibling TLS root preserves supervisor restart scanning because it
+is outside `PAYER_SUPERVISOR_STATE`, while operator and AWS never handle the
+key. Do not start a replacement supervisor.
 
 Wait for exact `PAYER_MCP_READY`. The status line includes the public MCP URL.
 Transfer only that public URL, the public TLS certificate, and the lowercase
@@ -272,7 +295,8 @@ npm run bilateral:request-payment -- \
 
 Requestor must visibly receive exact `HANDSHAKE_REQUIRED`; the wrapper alone
 then starts the Requestor supervisor and stays attached. Requestor must not run
-`npm run bilateral:supervisor` directly.
+`npm run bilateral:supervisor` directly. Start this long-lived request-payment
+wrapper exactly once. Do not start a replacement wrapper or supervisor.
 
 The user eventual actions are only funding four generated addresses and
 starting two physical role sessions. Human operator owns everything else.
