@@ -197,6 +197,21 @@ test("projects supervisor status lines through an exact secret-free allowlist", 
     createSupervisorStatusLine({ paymentMoved: false, role: "payee", state: "ACCEPTED", status: "PARTY_COMPLETE" }),
     '{"paymentMoved":false,"role":"payee","state":"ACCEPTED","status":"PARTY_COMPLETE"}\n',
   );
+  let proxyGetCount = 0;
+  const proxiedPartyComplete = new Proxy(
+    { paymentMoved: false, role: "payer", state: "ACKNOWLEDGED", status: "PARTY_COMPLETE" },
+    {
+      get(target, property, receiver) {
+        proxyGetCount += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    },
+  );
+  assert.equal(
+    createSupervisorStatusLine(proxiedPartyComplete),
+    '{"paymentMoved":false,"role":"payer","state":"ACKNOWLEDGED","status":"PARTY_COMPLETE"}\n',
+  );
+  assert.equal(proxyGetCount, 0);
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: true, role: "payer", status: "WAITING_FOR_PEER" }));
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payer", state: "ACCEPTED", status: "PARTY_COMPLETE" }));
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payee", state: "ACKNOWLEDGED", status: "PARTY_COMPLETE" }));

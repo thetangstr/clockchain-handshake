@@ -63,14 +63,17 @@ const canonicalJson = (value) => {
   return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
 };
 const PARTY_COMPLETE_KEYS = Object.freeze(["paymentMoved", "role", "state", "status"]);
-function assertExactPartyCompleteStatus(value) {
+function exactPartyCompleteStatus(value) {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype) fail();
   const ownKeys = Reflect.ownKeys(value);
   if (ownKeys.length !== PARTY_COMPLETE_KEYS.length || !PARTY_COMPLETE_KEYS.every((key) => ownKeys.includes(key))) fail();
+  const status = {};
   for (const key of PARTY_COMPLETE_KEYS) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (!descriptor?.enumerable || !("value" in descriptor)) fail();
+    status[key] = descriptor.value;
   }
+  return Object.freeze(status);
 }
 function ownSelectorValue(value, key) {
   if (!value || typeof value !== "object") return undefined;
@@ -430,10 +433,10 @@ export function createSupervisorStatusLine(value) {
   }
   const status = ownSelectorValue(value, "status");
   if (status === "PARTY_COMPLETE") {
-    assertExactPartyCompleteStatus(value);
-    if (value.paymentMoved !== false || !["payer", "payee"].includes(value.role)) fail();
-    if ((value.role === "payer" && value.state !== "ACKNOWLEDGED") || (value.role === "payee" && value.state !== "ACCEPTED")) fail();
-    return `${canonicalJson({ paymentMoved: false, role: value.role, state: value.state, status: "PARTY_COMPLETE" })}\n`;
+    const terminalStatus = exactPartyCompleteStatus(value);
+    if (terminalStatus.paymentMoved !== false || !["payer", "payee"].includes(terminalStatus.role) || terminalStatus.status !== "PARTY_COMPLETE") fail();
+    if ((terminalStatus.role === "payer" && terminalStatus.state !== "ACKNOWLEDGED") || (terminalStatus.role === "payee" && terminalStatus.state !== "ACCEPTED")) fail();
+    return `${canonicalJson({ paymentMoved: false, role: terminalStatus.role, state: terminalStatus.state, status: "PARTY_COMPLETE" })}\n`;
   }
   if (!value || value.paymentMoved !== false || !["payer", "payee"].includes(value.role) || !["WAITING_FOR_PEER", "PEER_READY", "PAYER_MCP_READY"].includes(status)) fail();
   if (status === "PAYER_MCP_READY") {
