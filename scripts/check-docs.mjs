@@ -460,7 +460,7 @@ const EXTRA_HERMES_ITEM_PATTERN =
 const POST_FUNDING_HERMES_REQUEST_PATTERN =
   /\b(?:required|needed|requested|ask(?:\s+for)?|require|request|prompt(?:\s+for)?)\b/i;
 const PROHIBITED_POST_FUNDING_HERMES_REQUEST_PATTERN =
-  /\b(?:(?:do\s+not|don't|never|must\s+not|mustn't|cannot|can't)\s+(?:ask(?:\s+for)?|require|request|prompt(?:\s+for)?)\b[^.\n;]*\b(?:additional|another|new)\s+Hermes\s+(?:message|prompt|card)\b[^.\n;]*\bafter operator funding\b|\bafter operator funding\b[^.\n;]*\b(?:do\s+not|don't|never|must\s+not|mustn't|cannot|can't)\s+(?:ask(?:\s+for)?|require|request|prompt(?:\s+for)?)\b[^.\n;]*\b(?:additional|another|new)\s+Hermes\s+(?:message|prompt|card)\b)/gi;
+  /\b(?:(?:do\s+not|don't|never|must\s+not|mustn't|cannot|can't)\s+(?:ask(?:\s+for)?|require|request|prompt(?:\s+for)?)\b[^.\n,;]*\b(?:additional|another|new)\s+Hermes\s+(?:message|prompt|card)\b[^.\n,;]*\bafter operator funding\b|\bafter operator funding\b[\s,]*\b(?:do\s+not|don't|never|must\s+not|mustn't|cannot|can't)\s+(?:ask(?:\s+for)?|require|request|prompt(?:\s+for)?)\b[^.\n,;]*\b(?:additional|another|new)\s+Hermes\s+(?:message|prompt|card)\b)/gi;
 
 function contradictsNoPostFundingHermes(contents) {
   return contents
@@ -470,7 +470,7 @@ function contradictsNoPostFundingHermes(contents) {
       (sentence) => {
         const residual = sentence.replaceAll(
           PROHIBITED_POST_FUNDING_HERMES_REQUEST_PATTERN,
-          "",
+          " after operator funding ",
         );
         return (
           POST_FUNDING_CONTEXT_PATTERN.test(residual) &&

@@ -1039,6 +1039,14 @@ test("documentation checker rejects contradictory post-funding Hermes prompts", 
       "unrelated never clause",
       "Never share secrets, and ask for another Hermes prompt after operator funding.",
     ],
+    [
+      "context-first safe phrase then required message",
+      "After operator funding, do not request another Hermes prompt, but an additional Hermes message is required.",
+    ],
+    [
+      "safe phrase with context then required message",
+      "Do not request another Hermes prompt after operator funding, but an additional Hermes message is required.",
+    ],
   ];
 
   for (const [diagnostic, contradiction] of cases) {
