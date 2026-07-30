@@ -9,6 +9,7 @@
   "scripts": {
     "bilateral:console": "node bin/handshake-console.mjs",
     "bilateral:coordinator": "node bin/handshake-coordinator.mjs",
+    "bilateral:bootstrap-broker": "node bin/handshake-bootstrap-broker.mjs",
     "bilateral:fund": "node scripts/fund-bilateral-addresses.mjs",
     "bilateral:public-monitor": "node scripts/publish-public-monitor.mjs",
     "bilateral:request-payment": "node bin/handshake-request-payment.mjs",
