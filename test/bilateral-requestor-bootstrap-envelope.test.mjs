@@ -14,6 +14,7 @@ const CLAIM_NONCE = "11111111-2222-4333-8444-555555555555";
 const RELEASE_ID = "release-a";
 const REPOSITORY_SHA = "a".repeat(40);
 const SESSION_ID = "22222222-3333-4444-8555-666666666666";
+const SESSION_ID_V7 = "01890f0d-5d3b-7cc7-9f4b-123456789abc";
 const PRIVATE_CANARY = "requestor-private-canary";
 const KEY_CANARY = "requestor-key-canary";
 
@@ -109,6 +110,28 @@ test("seals and opens one exact requestor bootstrap envelope without payment mov
     requestorPrivateKey: requestorKey.privateKey,
   });
   assert.deepEqual(opened, bytes);
+});
+
+test("accepts repository session UUID versions while keeping claim nonce v4", async () => {
+  const requestorKey = await createRequestorBootstrapKey();
+  const bytes = manifestBytes(manifest({ sessionId: SESSION_ID_V7 }));
+  const envelope = await sealRequestorBootstrapManifest({
+    context: context({ sessionId: SESSION_ID_V7 }),
+    manifestBytes: bytes,
+    requestorPublicKey: requestorKey.publicKey,
+  });
+
+  const opened = await openRequestorBootstrapEnvelope({
+    context: context({ sessionId: SESSION_ID_V7 }),
+    envelope,
+    requestorPrivateKey: requestorKey.privateKey,
+  });
+  assert.deepEqual(opened, bytes);
+  await assertRejectsSecretFree(() => sealRequestorBootstrapManifest({
+    context: context({ claimNonce: SESSION_ID_V7, sessionId: SESSION_ID_V7 }),
+    manifestBytes: bytes,
+    requestorPublicKey: requestorKey.publicKey,
+  }));
 });
 
 test("rejects hostile context, envelope, key, and manifest inputs without leaking private material", async () => {

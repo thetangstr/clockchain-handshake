@@ -36,6 +36,7 @@ const ENVELOPE_KEYS = Object.freeze([
 const PRIVATE_KEY_KEYS = Object.freeze(["format", "value"]);
 const PRIVATE_KEY_FORMAT = "pkcs8-der-base64url";
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const LOWERCASE_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const PRINTABLE_ASCII_PATTERN = /^[ -~]+$/;
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -106,7 +107,7 @@ function contextSnapshot(value) {
     result.paymentMoved !== false ||
     !printable(result.releaseId) ||
     !LOWERCASE_SHA_PATTERN.test(result.repositorySha) ||
-    !UUID_V4_PATTERN.test(result.sessionId)
+    !UUID_PATTERN.test(result.sessionId)
   ) invalid();
   return Object.freeze({
     claimNonce: result.claimNonce,
