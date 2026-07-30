@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createGitInspector, createPrivateRoot, createPrivateSupervisorStateStore, createProductionSupervisorDependencies, createSupervisorLauncher, createSupervisorStatusLine, createVerifierPublicationVerifier, scanSupervisorCheckpointDirectories } from "../src/bilateral/coordination/supervisor-runtime.mjs";
+import { createFundingInputVerifier, createGitInspector, createPrivateRoot, createPrivateSupervisorStateStore, createProductionSupervisorDependencies, createSupervisorLauncher, createSupervisorStatusLine, createVerifierPublicationVerifier, scanSupervisorCheckpointDirectories } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { verifyRepositoryState } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { ensureToken } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { ensureInvitations } from "../src/bilateral/coordination/supervisor-runtime.mjs";
@@ -719,6 +719,13 @@ test("production dependencies construct the local MCP server only for the Payer 
   });
   await writeLaunchManifest(manifestPath, manifest);
   const calls = [];
+  const fundingAddresses = {
+    rehearsal: `0x${"7".repeat(40)}`,
+    stakeholder: `0x${"8".repeat(40)}`,
+  };
+  let fundingCalls = 0;
+  let fundingNow = 0;
+  const fundingSleeps = [];
   const dependencies = await createProductionSupervisorDependencies({
     createPayerMcpServer: (input) => {
       calls.push(input);
@@ -728,6 +735,7 @@ test("production dependencies construct the local MCP server only for the Payer 
       };
     },
     launchManifestPath: manifestPath,
+    now: () => fundingNow,
     payerMcpServerOptions: {
       host: "127.0.0.1",
       port: 9443,
@@ -735,6 +743,18 @@ test("production dependencies construct the local MCP server only for the Payer 
       tlsPrivateKeyPem,
     },
     probe: async () => ({ clean: true, head: repositorySha }),
+    sepoliaRpc: async ({ method }) => {
+      const round = Math.floor(fundingCalls / 4);
+      fundingCalls += 1;
+      const value = method === "eth_getBalance" && round > 0
+        ? 10_000_000_000_000_000n
+        : 0n;
+      return `0x${value.toString(16)}`;
+    },
+    sleeper: async (milliseconds) => {
+      fundingSleeps.push(milliseconds);
+      fundingNow += milliseconds;
+    },
     stateRoot: root,
   });
   assert.equal(typeof dependencies.startPayerMcpServer, "function");
@@ -747,6 +767,32 @@ test("production dependencies construct the local MCP server only for the Payer 
   assert.equal(typeof calls[0].intakeStore.writeIntake, "function");
   assert.equal(Object.hasOwn(calls[0], "bootstrapCapability"), false);
   assert.equal(Object.hasOwn(calls[0], "payerMcpIntakeCapability"), false);
+  const fundingEnrollment = enrollmentFixture({
+    addresses: fundingAddresses,
+    releaseId: "release-mcp-server",
+    repositorySha,
+    role: "payer",
+    sessionId: manifest.sessionId,
+  });
+  assert.deepEqual(await dependencies.verifyFundingInputs({
+    addresses: [
+      fundingAddresses.rehearsal,
+      fundingAddresses.stakeholder,
+    ],
+    enrollmentSet: {
+      enrollments: {
+        payer: {
+          enrollmentBase64: canonicalBytes(fundingEnrollment).toString("base64"),
+        },
+      },
+      repositorySha,
+      sessionId: manifest.sessionId,
+    },
+    repositorySha,
+    role: "payer",
+    sessionId: manifest.sessionId,
+  }), { paymentMoved: false });
+  assert.deepEqual(fundingSleeps, [5_000]);
 
   const payeeManifestPath = join(manifestRoot, "payee-launch-manifest.json");
   const { manifest: payeeManifest } = createLaunchManifest({
@@ -1048,6 +1094,159 @@ test("builds the production Sepolia funding RPC seam without an injected RPC fun
   assert.equal(await rpc({ method: "eth_getBalance", params: [`0x${"1".repeat(40)}`, "latest"] }), "0x11c37937e08000");
   assert.equal(await rpc({ method: "eth_getTransactionCount", params: [`0x${"1".repeat(40)}`, "latest"] }), "0x0");
   assert.deepEqual(calls, [["balance", { address: `0x${"1".repeat(40)}` }], ["nonce", { address: `0x${"1".repeat(40)}`, blockTag: "latest" }]]);
+});
+
+test("waits through zero and partial balances until both enrollment-bound addresses are ready", async () => {
+  const repositorySha = "a".repeat(40);
+  const sessionId = "8f953393-86d0-4f99-9d6a-102f525fbecd";
+  const addresses = {
+    rehearsal: `0x${"1".repeat(40)}`,
+    stakeholder: `0x${"2".repeat(40)}`,
+  };
+  const enrollment = enrollmentFixture({
+    addresses,
+    releaseId: "release-funding-wait",
+    repositorySha,
+    role: "payer",
+    sessionId,
+  });
+  const enrollmentSet = {
+    enrollments: {
+      payer: {
+        enrollmentBase64: canonicalBytes(enrollment).toString("base64"),
+      },
+    },
+    repositorySha,
+    sessionId,
+  };
+  const observations = [
+    {
+      balances: [0n, 0n],
+      nonces: [0n, 0n],
+    },
+    {
+      balances: [10_000_000_000_000_000n, 0n],
+      nonces: [0n, 0n],
+    },
+    {
+      balances: [
+        10_000_000_000_000_000n,
+        10_000_000_000_000_000n,
+      ],
+      nonces: [0n, 0n],
+    },
+  ];
+  const calls = [];
+  let nowMs = 0;
+  const sleeps = [];
+  const sepoliaRpc = async ({ method, params }) => {
+    const addressIndex = params[0] === addresses.rehearsal ? 0 : 1;
+    const round = Math.floor(calls.length / 4);
+    calls.push([method, params[0]]);
+    const observation = observations[Math.min(round, observations.length - 1)];
+    const value = method === "eth_getBalance"
+      ? observation.balances[addressIndex]
+      : observation.nonces[addressIndex];
+    return `0x${value.toString(16)}`;
+  };
+  const verify = createFundingInputVerifier({
+    intervalMs: 5_000,
+    now: () => nowMs,
+    sepoliaRpc,
+    sleeper: async (milliseconds) => {
+      sleeps.push(milliseconds);
+      nowMs += milliseconds;
+    },
+  });
+
+  assert.deepEqual(await verify({
+    addresses: [addresses.rehearsal, addresses.stakeholder],
+    enrollmentSet,
+    repositorySha,
+    role: "payer",
+    sessionId,
+  }), { paymentMoved: false });
+  assert.deepEqual(sleeps, [5_000, 5_000]);
+  assert.equal(calls.length, 12);
+});
+
+test("fails closed immediately for invalid funding and at the bounded underfunding deadline", async () => {
+  const repositorySha = "b".repeat(40);
+  const sessionId = "29ba5f3a-46b4-420a-b807-6346eb7a42b2";
+  const addresses = {
+    rehearsal: `0x${"3".repeat(40)}`,
+    stakeholder: `0x${"4".repeat(40)}`,
+  };
+  const enrollment = enrollmentFixture({
+    addresses,
+    releaseId: "release-funding-failure",
+    repositorySha,
+    role: "payee",
+    sessionId,
+  });
+  const input = {
+    addresses: [addresses.rehearsal, addresses.stakeholder],
+    enrollmentSet: {
+      enrollments: {
+        payee: {
+          enrollmentBase64: canonicalBytes(enrollment).toString("base64"),
+        },
+      },
+      repositorySha,
+      sessionId,
+    },
+    repositorySha,
+    role: "payee",
+    sessionId,
+  };
+
+  for (const values of [
+    { balance: 20_000_000_000_000_001n, nonce: 0n },
+    { balance: 10_000_000_000_000_000n, nonce: 1n },
+    { balance: "malformed", nonce: 0n },
+  ]) {
+    let sleeps = 0;
+    const verify = createFundingInputVerifier({
+      now: () => 0,
+      sepoliaRpc: async ({ method }) => {
+        const value = method === "eth_getBalance" ? values.balance : values.nonce;
+        return typeof value === "bigint" ? `0x${value.toString(16)}` : value;
+      },
+      sleeper: async () => {
+        sleeps += 1;
+      },
+    });
+    await assert.rejects(verify(input));
+    assert.equal(sleeps, 0);
+  }
+
+  let mismatchedRpcCalls = 0;
+  await assert.rejects(createFundingInputVerifier({
+    now: () => 0,
+    sepoliaRpc: async () => {
+      mismatchedRpcCalls += 1;
+      return "0x0";
+    },
+    sleeper: async () => {},
+  })({
+    ...input,
+    addresses: [...input.addresses].reverse(),
+  }));
+  assert.equal(mismatchedRpcCalls, 0);
+
+  let nowMs = 0;
+  const sleeps = [];
+  const deadlineVerifier = createFundingInputVerifier({
+    intervalMs: 300_000,
+    now: () => nowMs,
+    sepoliaRpc: async () => "0x0",
+    sleeper: async (milliseconds) => {
+      sleeps.push(milliseconds);
+      nowMs += milliseconds;
+    },
+  });
+  await assert.rejects(deadlineVerifier(input));
+  assert.deepEqual(sleeps, [300_000, 180_000]);
 });
 
 test("pins Git inspection to a clean frozen repository object despite poisoned environment", async () => {

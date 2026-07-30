@@ -349,6 +349,9 @@ function rpcQuantity(value) {
   return BigInt(value);
 }
 
+export const SUPERVISOR_FUNDING_DEADLINE_MS = 8 * 60_000;
+export const SUPERVISOR_FUNDING_INTERVAL_MS = 5_000;
+
 export function createProductionSepoliaRpc({ createClient = createPublicClient, rpcUrl = RPC_URL } = {}) {
   if (typeof createClient !== "function" || typeof rpcUrl !== "string") fail();
   let endpoint;
@@ -364,18 +367,41 @@ export function createProductionSepoliaRpc({ createClient = createPublicClient, 
   };
 }
 
-function fundingVerifier(sepoliaRpc) {
-  return async ({ addresses, enrollmentSet, repositorySha, role, sessionId }) => {
-    if (typeof sepoliaRpc !== "function" || !Array.isArray(addresses) || addresses.length !== 2 || new Set(addresses).size !== 2 || enrollmentSet?.repositorySha !== repositorySha || enrollmentSet?.sessionId !== sessionId || !["payer", "payee"].includes(role)) fail();
-    const local = enrollmentSet.enrollments?.[role] && parseCoordinationEnrollment(Buffer.from(enrollmentSet.enrollments[role].enrollmentBase64, "base64"));
-    if (!local || !canonicalBytes(addresses).equals(canonicalBytes([local.invitations.rehearsal.address, local.invitations.stakeholder.address]))) fail();
-    for (const address of addresses) {
-      if (typeof address !== "string" || !/^0x[0-9a-f]{40}$/.test(address)) fail();
-      const [balance, nonce] = await Promise.all([sepoliaRpc({ method: "eth_getBalance", params: [address, "latest"] }), sepoliaRpc({ method: "eth_getTransactionCount", params: [address, "latest"] })]);
-      const wei = rpcQuantity(balance);
-      if (wei < 5_000_000_000_000_000n || wei > 20_000_000_000_000_000n || rpcQuantity(nonce) !== 0n) fail();
+function validateFundingInput({ addresses, enrollmentSet, repositorySha, role, sessionId } = {}) {
+  if (!Array.isArray(addresses) || addresses.length !== 2 || new Set(addresses).size !== 2 || enrollmentSet?.repositorySha !== repositorySha || enrollmentSet?.sessionId !== sessionId || !["payer", "payee"].includes(role)) fail();
+  const local = enrollmentSet.enrollments?.[role] && parseCoordinationEnrollment(Buffer.from(enrollmentSet.enrollments[role].enrollmentBase64, "base64"));
+  if (!local || addresses[0] !== local.invitations.rehearsal.address || addresses[1] !== local.invitations.stakeholder.address) fail();
+  for (const address of addresses) if (typeof address !== "string" || !/^0x[0-9a-f]{40}$/.test(address)) fail();
+  return addresses;
+}
+
+export function createFundingInputVerifier({
+  intervalMs = SUPERVISOR_FUNDING_INTERVAL_MS,
+  now = Date.now,
+  sepoliaRpc,
+  sleeper = (milliseconds) => new Promise((resolve_) => setTimeout(resolve_, milliseconds)),
+} = {}) {
+  if (typeof sepoliaRpc !== "function" || typeof now !== "function" || typeof sleeper !== "function" || !Number.isSafeInteger(intervalMs) || intervalMs < 1) fail();
+  return async (input) => {
+    const addresses = validateFundingInput(input);
+    const startedAt = now();
+    const deadline = startedAt + SUPERVISOR_FUNDING_DEADLINE_MS;
+    if (!Number.isSafeInteger(startedAt) || startedAt < 0 || !Number.isSafeInteger(deadline)) fail();
+    let previous = startedAt;
+    for (;;) {
+      let pending = false;
+      for (const address of addresses) {
+        const [balance, nonce] = await Promise.all([sepoliaRpc({ method: "eth_getBalance", params: [address, "latest"] }), sepoliaRpc({ method: "eth_getTransactionCount", params: [address, "latest"] })]);
+        const wei = rpcQuantity(balance);
+        if (wei > 20_000_000_000_000_000n || rpcQuantity(nonce) !== 0n) fail();
+        pending ||= wei < 5_000_000_000_000_000n;
+      }
+      const current = now();
+      if (!Number.isSafeInteger(current) || current < previous || current >= deadline) fail();
+      if (!pending) return Object.freeze({ paymentMoved: false });
+      previous = current;
+      await sleeper(Math.min(intervalMs, deadline - current));
     }
-    return Object.freeze({ paymentMoved: false });
   };
 }
 
@@ -578,7 +604,7 @@ export async function ensureInvitations({ capabilityDigest, releaseId, repositor
   if (proofs[0].address === proofs[1].address || proofs[0].secretPath === proofs[1].secretPath || proofs[0].signature === proofs[1].signature) fail();
   return Object.freeze(proofs);
 }
-export async function createProductionSupervisorDependencies({ createPayerMcpServer = createDefaultPayerMcpServer, launchManifestPath, payerMcpServerOptions, stateRoot, probe, repositoryRoot = SUPERVISOR_REPOSITORY_ROOT, sepoliaRpc, createSepoliaClient } = {}) {
+export async function createProductionSupervisorDependencies({ createPayerMcpServer = createDefaultPayerMcpServer, launchManifestPath, now = Date.now, payerMcpServerOptions, sleeper = (milliseconds) => new Promise((resolve_) => setTimeout(resolve_, milliseconds)), stateRoot, probe, repositoryRoot = SUPERVISOR_REPOSITORY_ROOT, sepoliaRpc, createSepoliaClient } = {}) {
   const store = await createPrivateSupervisorStateStore({ stateRoot });
   await createFixedRunDirectories(stateRoot);
   const repositoryInspector = createGitInspector(repositoryRoot);
@@ -638,7 +664,7 @@ export async function createProductionSupervisorDependencies({ createPayerMcpSer
     requestId() { return randomUUID(); },
     async readAndSignTokenCommitment(input) { return readAndSignTokenCommitment(input); },
     verifyEnrollmentSet: enrollmentVerifier({ tlsCertificatePem }),
-    verifyFundingInputs: fundingVerifier(sepoliaRpc ?? createProductionSepoliaRpc({ createClient: createSepoliaClient })),
+    verifyFundingInputs: createFundingInputVerifier({ now, sepoliaRpc: sepoliaRpc ?? createProductionSepoliaRpc({ createClient: createSepoliaClient }), sleeper }),
     verifyVerifierPublication: createVerifierPublicationVerifier(),
     writeStatus(value) { process.stdout.write(createSupervisorStatusLine(value)); },
     launcher: createSupervisorLauncher(),
