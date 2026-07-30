@@ -189,7 +189,20 @@ test("projects supervisor status lines through an exact secret-free allowlist", 
     createSupervisorStatusLine({ paymentMoved: false, privateKeyPem: "secret", role: "payer", status: "PAYER_MCP_READY", url: "https://127.0.0.1:9443/mcp" }),
     '{"paymentMoved":false,"role":"payer","status":"PAYER_MCP_READY","url":"https://127.0.0.1:9443/mcp"}\n',
   );
+  assert.equal(
+    createSupervisorStatusLine({ paymentMoved: false, role: "payer", state: "ACKNOWLEDGED", status: "PARTY_COMPLETE" }),
+    '{"paymentMoved":false,"role":"payer","state":"ACKNOWLEDGED","status":"PARTY_COMPLETE"}\n',
+  );
+  assert.equal(
+    createSupervisorStatusLine({ paymentMoved: false, role: "payee", state: "ACCEPTED", status: "PARTY_COMPLETE" }),
+    '{"paymentMoved":false,"role":"payee","state":"ACCEPTED","status":"PARTY_COMPLETE"}\n',
+  );
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: true, role: "payer", status: "WAITING_FOR_PEER" }));
+  assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payer", state: "ACCEPTED", status: "PARTY_COMPLETE" }));
+  assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payee", state: "ACKNOWLEDGED", status: "PARTY_COMPLETE" }));
+  assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payer", state: "AUTHORIZED", status: "PARTY_COMPLETE" }));
+  assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "operator", state: "ACKNOWLEDGED", status: "PARTY_COMPLETE" }));
+  assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, privateKeyPem: "secret", role: "payer", state: "ACKNOWLEDGED", status: "PARTY_COMPLETE" }));
 });
 
 test("supervisor CLI emits only the generic coordination failure line", () => {

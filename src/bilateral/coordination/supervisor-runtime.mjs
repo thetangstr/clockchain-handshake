@@ -410,6 +410,11 @@ export function createSupervisorStatusLine(value) {
     if (!Object.hasOwn(value, "paymentMoved") || value.paymentMoved !== false) fail();
     return `${canonicalJson({ code: "COORDINATION_SUPERVISOR_FAILED", paymentMoved: false })}\n`;
   }
+  if (value?.status === "PARTY_COMPLETE") {
+    if (!value || Object.getPrototypeOf(value) !== Object.prototype || Object.keys(value).length !== 4 || !Object.hasOwn(value, "paymentMoved") || !Object.hasOwn(value, "role") || !Object.hasOwn(value, "state") || !Object.hasOwn(value, "status") || value.paymentMoved !== false || !["payer", "payee"].includes(value.role)) fail();
+    if ((value.role === "payer" && value.state !== "ACKNOWLEDGED") || (value.role === "payee" && value.state !== "ACCEPTED")) fail();
+    return `${canonicalJson({ paymentMoved: false, role: value.role, state: value.state, status: "PARTY_COMPLETE" })}\n`;
+  }
   if (!value || value.paymentMoved !== false || !["payer", "payee"].includes(value.role) || !["WAITING_FOR_PEER", "PEER_READY", "PAYER_MCP_READY"].includes(value.status)) fail();
   if (value.status === "PAYER_MCP_READY") {
     if (value.role !== "payer" || typeof value.url !== "string") fail();
