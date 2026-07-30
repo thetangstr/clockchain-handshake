@@ -447,12 +447,30 @@ const REQUESTOR_REQUEST_PAYMENT_COMMAND = `npm run bilateral:request-payment -- 
   --state "$REQUESTOR_SUPERVISOR_STATE" \\
   --tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \\
   --tls-fingerprint "$PAYER_MCP_TLS_FINGERPRINT"`;
+const PAYER_TERMINAL_ROLE_JSON =
+  /\{"paymentMoved":false,"role":"payer","state":"ACKNOWLEDGED","status":"PARTY_COMPLETE"\}/;
+const REQUESTOR_TERMINAL_ROLE_JSON =
+  /\{"paymentMoved":false,"role":"payee","state":"ACCEPTED","status":"PARTY_COMPLETE"\}/;
+const CONTRADICTORY_POST_FUNDING_HERMES_PATTERN =
+  /\b(?:(?:an?\s+)?(?:additional|another|new)\s+Hermes\s+(?:message|prompt|card)\s+(?:is\s+)?(?:required|needed|requested)|(?:ask|require|request|prompt)\b[^.\n]*\b(?:additional|another|new)\s+Hermes\s+(?:message|prompt|card))\b[^.\n]*\bafter operator funding\b|\bafter operator funding\b[^.\n]*\b(?:(?:an?\s+)?(?:additional|another|new)\s+Hermes\s+(?:message|prompt|card)\s+(?:is\s+)?(?:required|needed|requested)|(?:ask|require|request|prompt)\b[^.\n]*\b(?:additional|another|new)\s+Hermes\s+(?:message|prompt|card))/i;
 
 function bilateralContractFailures(relativePath, contents) {
   const failures = [];
   if (/https:\/\/mcp\.clockchain\.network\/mcp/i.test(contents)) {
     failures.push(
       `${relativePath}: must not describe hosted Clockchain MCP as the payment-intake entry point; use the Payer-owned TLS MCP /mcp flow.`,
+    );
+  }
+  if (
+    CONTRADICTORY_POST_FUNDING_HERMES_PATTERN.test(
+      contents.replaceAll(
+        "No additional Hermes message is required after operator funding.",
+        "",
+      ),
+    )
+  ) {
+    failures.push(
+      `${relativePath}: contradicts the no post-funding Hermes message contract.`,
     );
   }
   if (
@@ -517,7 +535,7 @@ function bilateralContractFailures(relativePath, contents) {
       ["Requestor local state", /\bACCEPTED\b/],
       [
         "Requestor terminal PARTY_COMPLETE",
-        /\bPARTY_COMPLETE\b[\s\S]*\brole payee\b[\s\S]*\bstate ACCEPTED\b[\s\S]*\bpaymentMoved:false\b|\bpaymentMoved:false\b[\s\S]*\brole payee\b[\s\S]*\bstate ACCEPTED\b[\s\S]*\bPARTY_COMPLETE\b/i,
+        REQUESTOR_TERMINAL_ROLE_JSON,
       ],
       [
         "Requestor non-authorizing terminal role finish",
@@ -588,7 +606,7 @@ function bilateralContractFailures(relativePath, contents) {
       ["Payer local state", /\bACKNOWLEDGED\b/],
       [
         "Payer terminal PARTY_COMPLETE",
-        /\bPARTY_COMPLETE\b[\s\S]*\brole payer\b[\s\S]*\bstate ACKNOWLEDGED\b[\s\S]*\bpaymentMoved:false\b|\bpaymentMoved:false\b[\s\S]*\brole payer\b[\s\S]*\bstate ACKNOWLEDGED\b[\s\S]*\bPARTY_COMPLETE\b/i,
+        PAYER_TERMINAL_ROLE_JSON,
       ],
       [
         "Payer non-authorizing terminal role finish",
@@ -680,12 +698,12 @@ function bilateralContractFailures(relativePath, contents) {
         /\bNo additional Hermes message is required after operator funding\./,
       ],
       [
-        "Payer waits for terminal role completion",
-        /\bPayer\b[^.\n]*\bPARTY_COMPLETE\b[^.\n]*\bACKNOWLEDGED\b/i,
+        "Payer exact terminal role completion",
+        PAYER_TERMINAL_ROLE_JSON,
       ],
       [
-        "Requestor waits for terminal role completion",
-        /\bRequestor\b[^.\n]*\bPARTY_COMPLETE\b[^.\n]*\bACCEPTED\b/i,
+        "Requestor exact terminal role completion",
+        REQUESTOR_TERMINAL_ROLE_JSON,
       ],
       ["one preflight for both runs", /\bone\b[^.]*\bpreflight\b[^.]*\bboth runs\b/i],
       ["one token per role", /\bone token per role\b[^.]*\bboth runs\b/i],
@@ -979,12 +997,12 @@ function bilateralContractFailures(relativePath, contents) {
         /\bNo additional Hermes message is required after operator funding\./,
       ],
       [
-        "Payer waits for terminal role completion",
-        /\bPayer\b[^.\n]*\bPARTY_COMPLETE\b[^.\n]*\bACKNOWLEDGED\b/i,
+        "Payer exact terminal role completion",
+        PAYER_TERMINAL_ROLE_JSON,
       ],
       [
-        "Requestor waits for terminal role completion",
-        /\bRequestor\b[^.\n]*\bPARTY_COMPLETE\b[^.\n]*\bACCEPTED\b/i,
+        "Requestor exact terminal role completion",
+        REQUESTOR_TERMINAL_ROLE_JSON,
       ],
       [
         "verdict sequence",
@@ -1103,12 +1121,12 @@ function bilateralContractFailures(relativePath, contents) {
         /\bNo additional Hermes message is required after operator funding\./,
       ],
       [
-        "Payer waits for terminal role completion",
-        /\bPayer\b[^.\n]*\bPARTY_COMPLETE\b[^.\n]*\bACKNOWLEDGED\b/i,
+        "Payer exact terminal role completion",
+        PAYER_TERMINAL_ROLE_JSON,
       ],
       [
-        "Requestor waits for terminal role completion",
-        /\bRequestor\b[^.\n]*\bPARTY_COMPLETE\b[^.\n]*\bACCEPTED\b/i,
+        "Requestor exact terminal role completion",
+        REQUESTOR_TERMINAL_ROLE_JSON,
       ],
       [
         "safe 0.05 budget",

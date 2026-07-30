@@ -68,6 +68,10 @@ const LIVE_HANDOFF_HELPER_URL =
   "https://clockchain-research.vercel.app/handshake/run";
 const LIVE_HANDOFF_TREASURY_ADDRESS =
   "0x157a377e4181f3f87c7f6efed5ddc340ccc00dce";
+const PAYER_TERMINAL_ROLE_JSON =
+  '{"paymentMoved":false,"role":"payer","state":"ACKNOWLEDGED","status":"PARTY_COMPLETE"}';
+const REQUESTOR_TERMINAL_ROLE_JSON =
+  '{"paymentMoved":false,"role":"payee","state":"ACCEPTED","status":"PARTY_COMPLETE"}';
 
 function memoryOutput() {
   let value = "";
@@ -223,10 +227,7 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
   assert.match(requestor, /Requestor[^.]*requestor/i);
   assert.match(requestor, /node bin\/handshake-accept\.mjs/);
   assert.match(requestor, /ACCEPTED/);
-  assert.match(
-    requestor,
-    /PARTY_COMPLETE[\s\S]*role payee[\s\S]*state ACCEPTED[\s\S]*paymentMoved:false|paymentMoved:false[\s\S]*role payee[\s\S]*state ACCEPTED[\s\S]*PARTY_COMPLETE/i,
-  );
+  assert.ok(requestor.includes(REQUESTOR_TERMINAL_ROLE_JSON));
   assert.match(
     requestor,
     /role-local finish[\s\S]*not authorization[\s\S]*never emit `AUTHORIZED`|not authorization[\s\S]*role-local finish[\s\S]*never emit `AUTHORIZED`/i,
@@ -238,10 +239,7 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
   assert.match(payer, /Payer[^.]*payer/i);
   assert.match(payer, /node bin\/handshake-propose\.mjs/);
   assert.match(payer, /ACKNOWLEDGED/);
-  assert.match(
-    payer,
-    /PARTY_COMPLETE[\s\S]*role payer[\s\S]*state ACKNOWLEDGED[\s\S]*paymentMoved:false|paymentMoved:false[\s\S]*role payer[\s\S]*state ACKNOWLEDGED[\s\S]*PARTY_COMPLETE/i,
-  );
+  assert.ok(payer.includes(PAYER_TERMINAL_ROLE_JSON));
   assert.match(
     payer,
     /role-local finish[\s\S]*not authorization[\s\S]*never emit `AUTHORIZED`|not authorization[\s\S]*role-local finish[\s\S]*never emit `AUTHORIZED`/i,
@@ -255,9 +253,15 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
     "docs/runbooks/bilateral-demo-day.md",
     "docs/runbooks/bilateral-demo-live-handoff.md",
   ]) {
+    const contents = documents.get(relativePath);
     assert.match(
-      documents.get(relativePath),
+      contents,
       /No additional Hermes message is required after operator funding\./,
+      relativePath,
+    );
+    assert.ok(contents.includes(PAYER_TERMINAL_ROLE_JSON), relativePath);
+    assert.ok(
+      contents.includes(REQUESTOR_TERMINAL_ROLE_JSON),
       relativePath,
     );
   }
@@ -1011,6 +1015,59 @@ test("documentation checker rejects non-reachable bilateral relay drift", async 
         failure.includes("reachable numeric relay"),
     ),
   );
+});
+
+test("documentation checker rejects contradictory post-funding Hermes prompts", async (t) => {
+  const cases = [
+    [
+      "additional Hermes message",
+      "An additional Hermes message is required after operator funding.",
+    ],
+    [
+      "another Hermes prompt",
+      "Ask for another Hermes prompt after operator funding.",
+    ],
+    [
+      "new Hermes card",
+      "Require a new Hermes card after operator funding.",
+    ],
+  ];
+
+  for (const [diagnostic, contradiction] of cases) {
+    await t.test(diagnostic, async () => {
+      const directory = await temporaryDocumentationFixture(t);
+      const path = join(
+        directory,
+        "docs/runbooks/bilateral-demo-day.md",
+      );
+      const contents = await readFile(path, "utf8");
+      assert.match(
+        contents,
+        /No additional Hermes message is required after operator funding\./,
+      );
+      await writeFile(
+        path,
+        contents.replace(
+          "No additional Hermes message is required after operator funding.",
+          `No additional Hermes message is required after operator funding. ${contradiction}`,
+        ),
+      );
+
+      const failures = await checkDocumentation({
+        rootDirectory: directory,
+      });
+      assert.ok(
+        failures.some(
+          (failure) =>
+            failure.includes("bilateral-demo-day.md") &&
+            failure.includes(
+              "contradicts the no post-funding Hermes message contract",
+            ),
+        ),
+        failures.join("\n"),
+      );
+    });
+  }
 });
 
 test("documentation checker rejects bilateral manifest and funding drift", async (t) => {

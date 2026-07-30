@@ -31,7 +31,7 @@ Preserve the assigned private state root unchanged. Underfunding is pending
 until the bounded eight-minute funding deadline. Do not retry a consumed launch
 manifest.
 
-No additional Hermes message is required after operator funding. Payer remains attached until `PARTY_COMPLETE` with `ACKNOWLEDGED`; Requestor remains attached until `PARTY_COMPLETE` with `ACCEPTED`. These endpoints are not authorization; only the fresh aggregate verifier may emit `AUTHORIZED`.
+No additional Hermes message is required after operator funding. Payer remains attached until `{"paymentMoved":false,"role":"payer","state":"ACKNOWLEDGED","status":"PARTY_COMPLETE"}`. Requestor remains attached until `{"paymentMoved":false,"role":"payee","state":"ACCEPTED","status":"PARTY_COMPLETE"}`. These role-local completions are not authorization; only the fresh aggregate verifier may emit `AUTHORIZED`.
 
 ## Before everyone starts
 
