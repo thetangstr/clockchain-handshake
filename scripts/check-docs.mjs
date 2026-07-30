@@ -413,6 +413,8 @@ const FUNDING_COMMAND = `npm run bilateral:fund -- \\
   --journal-directory "$FUNDING_JOURNAL_DIR" \\
   --keystore "$SEPOLIA_TREASURY_KEYSTORE" \\
   --rpc-url-file "$SEPOLIA_RPC_URL_FILE"`;
+const FUNDING_JOURNAL_PREP_COMMAND =
+  'install -d -m 0700 "$FUNDING_JOURNAL_DIR"';
 const RELAY_COMMAND = `npm run bilateral:relay -- \\
   --host "\${RELAY_LISTEN_HOST:-$RELAY_ADVERTISED_IP}" \\
   --port "$RELAY_PORT" \\
@@ -483,6 +485,52 @@ function contradictsNoPostFundingHermes(contents) {
 
 function bilateralContractFailures(relativePath, contents) {
   const failures = [];
+  const fundingCommandPositions = tokenOccurrences(
+    contents,
+    "npm run bilateral:fund",
+  );
+  if (fundingCommandPositions.length > 0) {
+    if (
+      fundingCommandPositions.some(
+        (index) =>
+          contents.lastIndexOf(
+            FUNDING_JOURNAL_PREP_COMMAND,
+            index,
+          ) === -1,
+      )
+    ) {
+      failures.push(
+        `${relativePath}: missing private funding journal directory creation before every funding command.`,
+      );
+    }
+    if (
+      !/\bcreates?\b[\s\S]{0,160}\bfunding journal\b[\s\S]{0,160}\bonce\b[\s\S]{0,160}\bbefore\b[\s\S]{0,160}\bbatch\b/i.test(
+        contents,
+      )
+    ) {
+      failures.push(
+        `${relativePath}: missing private funding journal directory create-once-before-batch instruction.`,
+      );
+    }
+    if (
+      !/\bpreserves?\b[\s\S]{0,160}\bfunding journal\b[\s\S]{0,160}\breplay\/recovery\b/i.test(
+        contents,
+      )
+    ) {
+      failures.push(
+        `${relativePath}: missing private funding journal directory replay/recovery preservation instruction.`,
+      );
+    }
+    if (
+      !/\bnever\b[\s\S]{0,160}\bdeletes?\b[\s\S]{0,160}\brecreates?\b[\s\S]{0,160}\bfunding journal\b[\s\S]{0,160}\bafter\b[\s\S]{0,160}\battempt\b/i.test(
+        contents,
+      )
+    ) {
+      failures.push(
+        `${relativePath}: missing private funding journal directory no-delete-recreate-after-attempt instruction.`,
+      );
+    }
+  }
   if (/https:\/\/mcp\.clockchain\.network\/mcp/i.test(contents)) {
     failures.push(
       `${relativePath}: must not describe hosted Clockchain MCP as the payment-intake entry point; use the Payer-owned TLS MCP /mcp flow.`,

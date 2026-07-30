@@ -315,11 +315,12 @@ The Requestor request must match the Payer mandate before the sequence may conti
 `PROPOSED` -> `ACCEPTED` -> `ACKNOWLEDGED`.
 
 Use the coordinator-owned `$BILATERAL_RELEASE_ROOT/funding-addresses.json` file
-directly; do not copy or rewrite the funding record. Save the coordinator-owned `$BILATERAL_RELEASE_ROOT/funding-addresses.json` as the mode-`0600` record file for the funding command, then run one treasury funding batch:
+directly; do not copy or rewrite the funding record. Save the coordinator-owned `$BILATERAL_RELEASE_ROOT/funding-addresses.json` as the mode-`0600` record file for the funding command. Create the funding journal directory once before the batch, preserve the funding journal for replay/recovery, and never delete or recreate the funding journal after any funding attempt.
 
 ```sh
 export FUNDING_RECORD_FILE="$BILATERAL_RELEASE_ROOT/funding-addresses.json"
 export FUNDING_JOURNAL_DIR="$BILATERAL_OPERATOR_ROOT/funding-journal"
+install -d -m 0700 "$FUNDING_JOURNAL_DIR"
 
 npm run bilateral:fund -- \
   --funding-record "$FUNDING_RECORD_FILE" \

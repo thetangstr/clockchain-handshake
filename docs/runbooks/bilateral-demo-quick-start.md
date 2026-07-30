@@ -114,9 +114,13 @@ record is ready.
 8. The supervisors automatically create the Payer-signed mandate and matching
    Requestor-signed request; no operator-authored terms or manual artifact copy is allowed.
 9. Coordinator writes coordinator-owned `funding-addresses.json`.
-10. Human operator runs `npm run bilateral:fund` once to make exactly four
+10. Human operator creates the funding journal directory once before the batch
+   with `install -d -m 0700 "$FUNDING_JOURNAL_DIR"`, preserves the funding journal
+   for replay/recovery, and never deletes or recreates the funding journal after
+   any funding attempt.
+11. Human operator runs `npm run bilateral:fund` once to make exactly four
    `0.01 Sepolia ETH` allocations from the reusable treasury.
-11. The protocol order is `PROPOSED` -> `ACCEPTED` -> `ACKNOWLEDGED` -> operator verification -> `AUTHORIZED`.
+12. The protocol order is `PROPOSED` -> `ACCEPTED` -> `ACKNOWLEDGED` -> operator verification -> `AUTHORIZED`.
 
 ## What counts as success
 

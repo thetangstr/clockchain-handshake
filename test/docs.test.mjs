@@ -1212,6 +1212,117 @@ test("documentation checker rejects bilateral manifest and funding drift", async
   }
 });
 
+test("documentation checker rejects funding commands without private journal preparation", async (t) => {
+  const prepCommand =
+    'install -d -m 0700 "$FUNDING_JOURNAL_DIR"';
+  const fundingCommand = "npm run bilateral:fund --";
+  const fundingBlock = `npm run bilateral:fund -- \\
+  --funding-record "$FUNDING_RECORD_FILE" \\
+  --journal-directory "$FUNDING_JOURNAL_DIR" \\
+  --keystore "$SEPOLIA_TREASURY_KEYSTORE" \\
+  --rpc-url-file "$SEPOLIA_RPC_URL_FILE"`;
+  const lifecycleText =
+    "Create the funding journal directory once before the batch, preserve the funding journal for replay/recovery, and never delete or recreate the funding journal after any funding attempt.";
+
+  const assertDayRunbookFailure = async ({
+    diagnostic,
+    mutate,
+  }) => {
+    const directory = await temporaryDocumentationFixture(t);
+    const path = join(
+      directory,
+      "docs/runbooks/bilateral-demo-day.md",
+    );
+    const contents = await readFile(path, "utf8");
+    assert.ok(contents.includes(prepCommand));
+    assert.ok(contents.includes(fundingCommand));
+    assert.ok(contents.includes(lifecycleText));
+    const replacement = mutate(contents);
+    assert.notEqual(replacement, contents);
+    await writeFile(path, replacement);
+
+    const failures = await checkDocumentation({
+      rootDirectory: directory,
+    });
+    assert.ok(
+      failures.some(
+        (failure) =>
+          failure.includes("bilateral-demo-day.md") &&
+          failure.includes(diagnostic),
+      ),
+      failures.join("\n"),
+    );
+  };
+
+  await t.test("missing prep command", async () => {
+    await assertDayRunbookFailure({
+      diagnostic:
+        "private funding journal directory creation before every funding command",
+      mutate: (contents) => contents.replace(prepCommand, ""),
+    });
+  });
+
+  await t.test("prep command after funding command", async () => {
+    await assertDayRunbookFailure({
+      diagnostic:
+        "private funding journal directory creation before every funding command",
+      mutate: (contents) =>
+        contents.replace(
+          `${prepCommand}\n\n${fundingBlock}`,
+          `${fundingBlock}\n${prepCommand}`,
+        ),
+    });
+  });
+
+  await t.test("second funding command before prep command", async () => {
+    await assertDayRunbookFailure({
+      diagnostic:
+        "private funding journal directory creation before every funding command",
+      mutate: (contents) =>
+        contents.replace(
+          prepCommand,
+          `${fundingBlock}\n${prepCommand}`,
+        ),
+    });
+  });
+
+  await t.test("missing create-once-before-batch lifecycle", async () => {
+    await assertDayRunbookFailure({
+      diagnostic:
+        "private funding journal directory create-once-before-batch instruction",
+      mutate: (contents) =>
+        contents.replace(
+          lifecycleText,
+          "Preserve the funding journal for replay/recovery, and never delete or recreate the funding journal after any funding attempt.",
+        ),
+    });
+  });
+
+  await t.test("missing replay-recovery lifecycle", async () => {
+    await assertDayRunbookFailure({
+      diagnostic:
+        "private funding journal directory replay/recovery preservation instruction",
+      mutate: (contents) =>
+        contents.replace(
+          lifecycleText,
+          "Create the funding journal directory once before the batch, and never delete or recreate the funding journal after any funding attempt.",
+        ),
+    });
+  });
+
+  await t.test("missing no-delete-recreate lifecycle", async () => {
+    await assertDayRunbookFailure({
+      diagnostic:
+        "private funding journal directory no-delete-recreate-after-attempt instruction",
+      mutate: (contents) =>
+        contents.replace(
+          lifecycleText,
+          "Create the funding journal directory once before the batch, and preserve the funding journal for replay/recovery.",
+        ),
+    });
+  });
+});
+
 test("documentation checker rejects bilateral safety-contract drift", async (t) => {
   const directory = await temporaryDocumentationFixture(t);
   const path = join(
