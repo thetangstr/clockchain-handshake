@@ -451,8 +451,29 @@ const PAYER_TERMINAL_ROLE_JSON =
   /\{"paymentMoved":false,"role":"payer","state":"ACKNOWLEDGED","status":"PARTY_COMPLETE"\}/;
 const REQUESTOR_TERMINAL_ROLE_JSON =
   /\{"paymentMoved":false,"role":"payee","state":"ACCEPTED","status":"PARTY_COMPLETE"\}/;
-const CONTRADICTORY_POST_FUNDING_HERMES_PATTERN =
-  /\b(?:(?:an?\s+)?(?:additional|another|new)\s+Hermes\s+(?:message|prompt|card)\s+(?:is\s+)?(?:required|needed|requested)|(?:ask|require|request|prompt)\b[^.\n]*\b(?:additional|another|new)\s+Hermes\s+(?:message|prompt|card))\b[^.\n]*\bafter operator funding\b|\bafter operator funding\b[^.\n]*\b(?:(?:an?\s+)?(?:additional|another|new)\s+Hermes\s+(?:message|prompt|card)\s+(?:is\s+)?(?:required|needed|requested)|(?:ask|require|request|prompt)\b[^.\n]*\b(?:additional|another|new)\s+Hermes\s+(?:message|prompt|card))/i;
+const NO_POST_FUNDING_HERMES_SENTENCE =
+  "No additional Hermes message is required after operator funding.";
+const POST_FUNDING_CONTEXT_PATTERN =
+  /\bafter operator funding\b/i;
+const EXTRA_HERMES_ITEM_PATTERN =
+  /\b(?:additional|another|new)\s+Hermes\s+(?:message|prompt|card)\b/i;
+const POST_FUNDING_HERMES_REQUEST_PATTERN =
+  /\b(?:required|needed|requested|ask(?:\s+for)?|require|request|prompt(?:\s+for)?)\b/i;
+const POST_FUNDING_HERMES_NEGATION_PATTERN =
+  /\b(?:no|not|never|do\s+not|don't|must\s+not|mustn't|cannot|can't)\b/i;
+
+function contradictsNoPostFundingHermes(contents) {
+  return contents
+    .replaceAll(NO_POST_FUNDING_HERMES_SENTENCE, "")
+    .split(/[.!?\r\n]+/)
+    .some(
+      (sentence) =>
+        POST_FUNDING_CONTEXT_PATTERN.test(sentence) &&
+        EXTRA_HERMES_ITEM_PATTERN.test(sentence) &&
+        POST_FUNDING_HERMES_REQUEST_PATTERN.test(sentence) &&
+        !POST_FUNDING_HERMES_NEGATION_PATTERN.test(sentence),
+    );
+}
 
 function bilateralContractFailures(relativePath, contents) {
   const failures = [];
@@ -461,14 +482,7 @@ function bilateralContractFailures(relativePath, contents) {
       `${relativePath}: must not describe hosted Clockchain MCP as the payment-intake entry point; use the Payer-owned TLS MCP /mcp flow.`,
     );
   }
-  if (
-    CONTRADICTORY_POST_FUNDING_HERMES_PATTERN.test(
-      contents.replaceAll(
-        "No additional Hermes message is required after operator funding.",
-        "",
-      ),
-    )
-  ) {
+  if (contradictsNoPostFundingHermes(contents)) {
     failures.push(
       `${relativePath}: contradicts the no post-funding Hermes message contract.`,
     );

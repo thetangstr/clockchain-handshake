@@ -1070,6 +1070,54 @@ test("documentation checker rejects contradictory post-funding Hermes prompts", 
   }
 });
 
+test("documentation checker accepts negated post-funding Hermes prohibitions", async (t) => {
+  const cases = [
+    [
+      "do not request",
+      "Do not request another Hermes prompt after operator funding.",
+    ],
+    [
+      "never ask",
+      "Never ask for an additional Hermes message after operator funding.",
+    ],
+  ];
+
+  for (const [diagnostic, prohibition] of cases) {
+    await t.test(diagnostic, async () => {
+      const directory = await temporaryDocumentationFixture(t);
+      const path = join(
+        directory,
+        "docs/runbooks/bilateral-demo-day.md",
+      );
+      const contents = await readFile(path, "utf8");
+      assert.match(
+        contents,
+        /No additional Hermes message is required after operator funding\./,
+      );
+      await writeFile(
+        path,
+        contents.replace(
+          "No additional Hermes message is required after operator funding.",
+          `No additional Hermes message is required after operator funding. ${prohibition}`,
+        ),
+      );
+
+      const failures = await checkDocumentation({
+        rootDirectory: directory,
+      });
+      assert.ok(
+        failures.every(
+          (failure) =>
+            !failure.includes(
+              "contradicts the no post-funding Hermes message contract",
+            ),
+        ),
+        failures.join("\n"),
+      );
+    });
+  }
+});
+
 test("documentation checker rejects bilateral manifest and funding drift", async (t) => {
   const cases = [
     [
