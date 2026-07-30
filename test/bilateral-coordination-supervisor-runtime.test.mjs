@@ -212,6 +212,17 @@ test("projects supervisor status lines through an exact secret-free allowlist", 
   const accessorPartyCompleteState = { paymentMoved: false, role: "payer", status: "PARTY_COMPLETE" };
   Object.defineProperty(accessorPartyCompleteState, "state", { enumerable: true, get: () => "ACKNOWLEDGED" });
   assert.throws(() => createSupervisorStatusLine(accessorPartyCompleteState));
+  let statusGetterInvoked = false;
+  const accessorPartyCompleteStatus = { paymentMoved: false, role: "payer", state: "ACKNOWLEDGED" };
+  Object.defineProperty(accessorPartyCompleteStatus, "status", {
+    enumerable: true,
+    get: () => {
+      statusGetterInvoked = true;
+      return "PARTY_COMPLETE";
+    },
+  });
+  assert.throws(() => createSupervisorStatusLine(accessorPartyCompleteStatus));
+  assert.equal(statusGetterInvoked, false);
 });
 
 test("supervisor CLI emits only the generic coordination failure line", () => {

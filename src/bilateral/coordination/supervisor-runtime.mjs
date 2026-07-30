@@ -72,6 +72,13 @@ function assertExactPartyCompleteStatus(value) {
     if (!descriptor?.enumerable || !("value" in descriptor)) fail();
   }
 }
+function ownSelectorValue(value, key) {
+  if (!value || typeof value !== "object") return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor) return undefined;
+  if (!descriptor.enumerable || !("value" in descriptor)) fail();
+  return descriptor.value;
+}
 const canonicalEnrollmentSetBytes = (value) => Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(value)), "utf8");
 const relayPackageBytes = (value) => Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(value)), "utf8");
 export async function createPrivateRoot(root) {
@@ -416,25 +423,27 @@ export function createFundingInputVerifier({
 }
 
 export function createSupervisorStatusLine(value) {
-  if (value?.code === "COORDINATION_SUPERVISOR_FAILED") {
+  const code = ownSelectorValue(value, "code");
+  if (code === "COORDINATION_SUPERVISOR_FAILED") {
     if (!Object.hasOwn(value, "paymentMoved") || value.paymentMoved !== false) fail();
     return `${canonicalJson({ code: "COORDINATION_SUPERVISOR_FAILED", paymentMoved: false })}\n`;
   }
-  if (value?.status === "PARTY_COMPLETE") {
+  const status = ownSelectorValue(value, "status");
+  if (status === "PARTY_COMPLETE") {
     assertExactPartyCompleteStatus(value);
     if (value.paymentMoved !== false || !["payer", "payee"].includes(value.role)) fail();
     if ((value.role === "payer" && value.state !== "ACKNOWLEDGED") || (value.role === "payee" && value.state !== "ACCEPTED")) fail();
     return `${canonicalJson({ paymentMoved: false, role: value.role, state: value.state, status: "PARTY_COMPLETE" })}\n`;
   }
-  if (!value || value.paymentMoved !== false || !["payer", "payee"].includes(value.role) || !["WAITING_FOR_PEER", "PEER_READY", "PAYER_MCP_READY"].includes(value.status)) fail();
-  if (value.status === "PAYER_MCP_READY") {
+  if (!value || value.paymentMoved !== false || !["payer", "payee"].includes(value.role) || !["WAITING_FOR_PEER", "PEER_READY", "PAYER_MCP_READY"].includes(status)) fail();
+  if (status === "PAYER_MCP_READY") {
     if (value.role !== "payer" || typeof value.url !== "string") fail();
     let url;
     try { url = new URL(value.url); } catch { fail(); }
     if (url.protocol !== "https:" || url.username || url.password || url.hash || url.search || url.pathname !== "/mcp") fail();
-    return `${canonicalJson({ paymentMoved: false, role: value.role, status: value.status, url: value.url })}\n`;
+    return `${canonicalJson({ paymentMoved: false, role: value.role, status, url: value.url })}\n`;
   }
-  return `${canonicalJson({ paymentMoved: false, role: value.role, status: value.status })}\n`;
+  return `${canonicalJson({ paymentMoved: false, role: value.role, status })}\n`;
 }
 
 export function createVerifierPublicationVerifier() {
