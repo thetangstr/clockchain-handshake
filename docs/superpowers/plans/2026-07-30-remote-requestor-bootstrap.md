@@ -4,7 +4,7 @@
 
 **Goal:** Let a remote stakeholder paste one public Requestor prompt and complete the Handshake without receiving, attaching, or locating private files.
 
-**Architecture:** A public Payer MCP accepts the single armed canonical intake and forwards it to an operator-owned loopback bootstrap broker. The broker seals the fresh payee launch manifest to a Requestor-generated X25519 key, while the public monitor provides only public MCP/TLS discovery. The Requestor wrapper discovers, calls, decrypts, validates, and starts the existing supervisor without printing secrets.
+**Architecture:** The Payer TLS service exposes a separately armed public bootstrap claim before its unchanged authenticated MCP lifecycle. An operator-owned loopback broker approves the Requestor-key fingerprint and seals the fresh payee launch manifest to that key; a separate operator-signed discovery document supplies public MCP/TLS data. The Requestor wrapper discovers, claims, decrypts, calls the existing authenticated `request_payment`, validates exact `HANDSHAKE_REQUIRED`, and starts the existing supervisor without printing secrets.
 
 **Tech Stack:** Node.js 22 ES modules, `node:crypto` X25519/HKDF/AES-256-GCM, `node:https`, existing canonical validators and private-file helpers, `node:test`, AWS S3 public monitor.
 
@@ -15,14 +15,13 @@
 - Create `src/bilateral/local-mcp/bootstrap-envelope.mjs`: exact sealed-envelope schema, X25519/HKDF/AES-GCM sealing and opening, AAD construction, and zeroization.
 - Create `src/bilateral/local-mcp/bootstrap-broker.mjs`: private loopback broker, exactly-once journal, manifest validation, and ciphertext-only response.
 - Create `bin/handshake-bootstrap-broker.mjs`: strict broker CLI.
-- Modify `src/bilateral/local-mcp/payment-intake.mjs`: bind the Requestor public key and sealed bootstrap envelope into exact intake/result schemas.
-- Modify `src/bilateral/local-mcp/server.mjs`: make the armed intake public and obtain ciphertext from the loopback broker.
+- Modify `src/bilateral/local-mcp/server.mjs`: add a separately armed public `/bootstrap` claim while leaving MCP bearer authentication unchanged.
 - Modify `src/bilateral/local-mcp/client.mjs`: public discovery, ephemeral key persistence, TLS download/pinning, and local envelope opening.
 - Modify `bin/handshake-request-payment.mjs`: replace manifest/certificate inputs with discovery URL and private state root.
 - Modify `src/bilateral/coordination/supervisor-runtime.mjs` and `bin/handshake-supervisor.mjs`: pass the broker client to the Payer MCP without exposing the payee manifest.
-- Modify `scripts/publish-public-monitor.mjs` and `src/bilateral/coordination/public-monitor.mjs`: publish only public MCP/TLS discovery and the public certificate.
+- Create `scripts/publish-requestor-discovery.mjs`: publish the operator-signed MCP/TLS discovery and public certificate without changing advisory monitor authority.
 - Modify `package.json`: add `bilateral:bootstrap-broker`.
-- Modify focused local-MCP, CLI, supervisor-runtime, public-monitor, and process-E2E tests.
+- Modify focused local-MCP, CLI, supervisor-runtime, discovery, and process-E2E tests.
 - Modify role prompts and runbooks so Requestor receives one public command path and no private file handoff.
 
 ### Task 1: Sealed bootstrap envelope
@@ -44,7 +43,7 @@ import {
 
 const requestor = createRequestorBootstrapKey();
 const context = {
-  intakeRequestId: "11111111-1111-4111-8111-111111111111",
+  claimNonce: "11111111-1111-4111-8111-111111111111",
   paymentMoved: false,
   releaseId: "release-0123456789abcdef",
   repositorySha: "a".repeat(40),
@@ -66,7 +65,7 @@ assert.deepEqual(
 ```
 
 Add table tests for extra/missing fields, malformed base64url, wrong key,
-wrong intake/release/session/SHA, `paymentMoved:true`, ciphertext/tag mutation,
+wrong claim/release/session/SHA, `paymentMoved:true`, ciphertext/tag mutation,
 oversized manifest, and noncanonical bytes. Assert the envelope and errors never
 contain manifest or private-key canaries.
 
@@ -139,12 +138,14 @@ Exercise a loopback-only server configured with:
 ```
 
 Require `Authorization: Bearer <operator-created broker capability>`, an exact
-canonical claim containing `intakeRequestId`, `requestorPublicKey`,
-`repositorySha`, and `paymentMoved:false`, and a ciphertext-only response.
-Assert identical retry returns byte-identical ciphertext while a second key,
-intake ID, SHA, expired manifest, symlink, wrong permissions, duplicate JSON
-key, or changed manifest fails closed. Scan responses and journal bytes for
-plaintext manifest canaries and raw capabilities.
+canonical claim containing `claimNonce`, `requestorPublicKey`,
+`repositorySha`, and `paymentMoved:false`, and an explicit pending state. Add an
+operator approval operation bound to the exact claim/public-key fingerprint.
+Assert identical retry returns byte-identical operator-signed ciphertext after
+approval while a second key, nonce, SHA, expired manifest, unapproved claim,
+symlink, wrong permissions, duplicate JSON key, or changed manifest fails
+closed. Scan responses and journal bytes for plaintext manifest canaries and raw
+capabilities.
 
 - [ ] **Step 2: Run the broker test and observe the missing-module failure**
 
@@ -172,7 +173,7 @@ Add:
 "bilateral:bootstrap-broker": "node bin/handshake-bootstrap-broker.mjs"
 ```
 
-The CLI accepts exact flags:
+The CLI supports `serve` and `approve` modes. `serve` accepts exact flags:
 
 ```text
 --capability-file
@@ -182,6 +183,9 @@ The CLI accepts exact flags:
 --repository-sha
 --state
 ```
+
+`approve` accepts exact `--state` and `--claim-fingerprint` flags and records
+approval only for one already-pending exact claim.
 
 - [ ] **Step 5: Run focused broker tests**
 
@@ -197,38 +201,35 @@ Expected: PASS.
 
 Commit broker, CLI, script, and tests.
 
-### Task 3: Public Payer MCP intake with sealed bootstrap
+### Task 3: Public bootstrap route with unchanged authenticated Payer MCP
 
 **Files:**
-- Modify: `src/bilateral/local-mcp/payment-intake.mjs`
 - Modify: `src/bilateral/local-mcp/server.mjs`
 - Modify: `src/bilateral/local-mcp/client.mjs`
 - Modify: `src/bilateral/coordination/supervisor-runtime.mjs`
 - Modify: `bin/handshake-supervisor.mjs`
-- Modify: `test/bilateral-local-mcp-payment-intake.test.mjs`
 - Modify: `test/bilateral-local-mcp-server.test.mjs`
 - Modify: `test/bilateral-local-mcp-client.test.mjs`
 - Modify: `test/bilateral-coordination-supervisor-runtime.test.mjs`
 
 - [ ] **Step 1: Write failing intake/server tests**
 
-Add `requestorBootstrapPublicKey` to the exact payment input. Add
-`bootstrapEnvelope` to the exact `HANDSHAKE_REQUIRED` result. Require a broker
-callback:
+Add an armed `/bootstrap` claim before MCP routing. Require a broker callback:
 
 ```js
 const result = await claimRequestorBootstrap({
-  intakeRequestId,
+  claimNonce,
   paymentMoved: false,
   repositorySha,
   requestorPublicKey,
 });
 ```
 
-Prove the MCP accepts no bearer header only when `publicRequestorIntake:true`,
-remains bounded to one canonical tool call, returns only a sealed envelope, and
-fails on broker error, duplicate claim, extra fields, mismatched context, or
-legacy bearer substitution.
+Prove only `/bootstrap` accepts no bearer header when explicitly armed, returns
+only a pending state or operator-signed sealed envelope, and fails on broker
+error, duplicate claim, extra fields, mismatched context, or replay. Prove every
+`/mcp` lifecycle request still requires the recovered manifest's original
+bearer and the payment intake/result schema is byte-for-byte unchanged.
 
 - [ ] **Step 2: Run focused tests and observe schema/auth failures**
 
@@ -236,20 +237,19 @@ Run:
 
 ```sh
 node --test \
-  test/bilateral-local-mcp-payment-intake.test.mjs \
   test/bilateral-local-mcp-server.test.mjs \
   test/bilateral-local-mcp-client.test.mjs \
   test/bilateral-coordination-supervisor-runtime.test.mjs
 ```
 
-Expected: FAIL on missing public-key/envelope fields and public-intake mode.
+Expected: FAIL because `/bootstrap` does not exist.
 
 - [ ] **Step 3: Implement the exact MCP and supervisor wiring**
 
-The server skips bearer authentication only for the explicit armed public
-Requestor mode. All MCP protocol/session/body limits remain. The Payer
-supervisor receives only broker URL plus broker capability file and creates the
-broker client; it never reads the payee manifest.
+The server routes the exact armed `/bootstrap` request before its existing MCP
+bearer path. All MCP protocol/session/body limits remain. The Payer supervisor
+receives only broker URL plus broker capability file and creates the broker
+client; it never reads the payee manifest.
 
 - [ ] **Step 4: Run focused tests**
 
@@ -266,10 +266,9 @@ Commit MCP schema, server/client, supervisor wiring, and tests.
 **Files:**
 - Modify: `bin/handshake-request-payment.mjs`
 - Modify: `src/bilateral/local-mcp/client.mjs`
-- Modify: `src/bilateral/coordination/public-monitor.mjs`
-- Modify: `scripts/publish-public-monitor.mjs`
+- Create: `scripts/publish-requestor-discovery.mjs`
 - Modify: `test/bilateral-request-payment-cli.test.mjs`
-- Modify: `test/bilateral-public-monitor.test.mjs`
+- Create: `test/bilateral-requestor-discovery.test.mjs`
 
 - [ ] **Step 1: Write failing CLI and monitor tests**
 
@@ -281,20 +280,26 @@ Replace the Requestor CLI flags with:
 --state
 ```
 
-The discovery record must contain exact public fields:
+The operator-signed discovery record must contain exact public fields:
 
 ```js
 {
   certificateFingerprint,
   certificateUrl,
+  expiresAtMs,
+  operatorKeyId,
   publicUrl,
+  releaseId,
   repositorySha,
+  sessionId,
+  signature,
 }
 ```
 
 Tests must prove the CLI generates a private key, downloads and fingerprints
-the public certificate, calls MCP without a bearer, decrypts to a mode-`0600`
-manifest inside state, validates it, emits only the fixed
+the public certificate, claims bootstrap without a bearer, decrypts to a
+mode-`0600` manifest in a sibling bootstrap root, performs the existing MCP
+call with the recovered bearer, validates it, emits only the fixed
 `HANDSHAKE_REQUIRED` line, and starts the supervisor once. Reject HTTP
 discovery/certificate URLs, cross-origin redirects, stale monitor data, wrong
 SHA, wrong certificate, existing destination, and stdout secret canaries.
@@ -306,7 +311,7 @@ Run:
 ```sh
 node --test \
   test/bilateral-request-payment-cli.test.mjs \
-  test/bilateral-public-monitor.test.mjs
+  test/bilateral-requestor-discovery.test.mjs
 ```
 
 Expected: FAIL because the legacy manifest/certificate flags are still
@@ -314,11 +319,12 @@ required.
 
 - [ ] **Step 3: Implement discovery, private key state, decryption, and monitor publication**
 
-The monitor publisher uploads the public certificate to the configured S3
-bucket, validates its fingerprint locally, and publishes its HTTPS object URL
-with the current Payer URL and reviewed SHA. It never opens the TLS private key.
-The Requestor writes the decrypted manifest under its private state root and
-passes that internal path to the unchanged supervisor API.
+The discovery publisher uploads the public certificate to the configured S3
+bucket, validates its fingerprint locally, signs the exact discovery with the
+reviewed operator key, and publishes it separately from advisory `latest.json`.
+It never opens the TLS private key. The Requestor verifies the signature from
+the reviewed checkout, writes the decrypted manifest under a sibling private
+bootstrap root, and passes that internal path to the unchanged supervisor API.
 
 - [ ] **Step 4: Run focused tests**
 
@@ -388,11 +394,10 @@ Run:
 node --test \
   test/bilateral-requestor-bootstrap-envelope.test.mjs \
   test/bilateral-requestor-bootstrap-broker.test.mjs \
-  test/bilateral-local-mcp-payment-intake.test.mjs \
   test/bilateral-local-mcp-server.test.mjs \
   test/bilateral-local-mcp-client.test.mjs \
   test/bilateral-request-payment-cli.test.mjs \
-  test/bilateral-public-monitor.test.mjs \
+  test/bilateral-requestor-discovery.test.mjs \
   test/bilateral-coordination-supervisor-runtime.test.mjs \
   test/bilateral-coordination-process-e2e.test.mjs
 npm run docs:check
