@@ -13,8 +13,6 @@ import { transitionDigest } from "../src/bilateral/messages.mjs";
 import { sessionKey } from "../src/bilateral/refid.mjs";
 import { createFakeBilateralClockchainHttpClient } from "./helpers/fake-bilateral-clockchain-service.mjs";
 import { COORDINATOR_CLI_FLAGS } from "../src/bilateral/coordination/coordinator-runtime.mjs";
-import { runSupervisor } from "../src/bilateral/coordination/supervisor.mjs";
-import { createProductionSupervisorDependencies, createSupervisorStatusLine } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { decryptInvitation } from "../src/invitation.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -124,6 +122,7 @@ const EXPECTED_TWO_RUN_RELAY_EFFECTS = Object.freeze([
   "operator:STAKEHOLDER_DESCRIPTOR_READY:stakeholder",
   "operator:START_STAKEHOLDER:stakeholder",
   "operator:VERIFICATION_PASSED:stakeholder",
+  "operator:COMPLETE_RELEASE:release",
   "payee:DESCRIPTOR_ACCEPTED:stakeholder",
   "payee:IDENTITY_PACKAGE_READY:stakeholder",
   "payee:PAYMENT_REQUEST_READY:stakeholder",
@@ -547,52 +546,6 @@ test("one long-lived Payer and Requestor span rehearsal and stakeholder with two
     { code: 0, signal: null },
     `${coordinatorExit.stderr}\n${roleDiagnostics.join("\n")}\n${session.relay.output().stderr}`,
   );
-  const fixedClockEnvironment = {
-    ...process.env,
-    CLOCKCHAIN_BILATERAL_TEST_CLOCK_MS: String(SHARED_TEST_CLOCK_MS),
-    NODE_OPTIONS: [
-      process.env.NODE_OPTIONS,
-      `--import=${join(ROOT, "test/helpers/bilateral-fixed-clock.mjs")}`,
-    ].filter(Boolean).join(" "),
-  };
-  const coordinatorConfig = JSON.parse(await readFile(session.configurations.coordinator, "utf8"));
-  const completionCoordinator = await command(process.execPath, [
-    "bin/handshake-coordinator.mjs",
-    ...coordinatorConfig.arguments,
-  ], { cwd: session.clone, env: fixedClockEnvironment });
-  assert.equal(completionCoordinator.stdout.includes(AUTHORIZE), false);
-  assert.equal(completionCoordinator.stderr, "");
-  for (const role of ["payer", "payee"]) {
-    const roleConfig = JSON.parse(await readFile(session.configurations[role], "utf8"));
-    const completionStdout = [];
-    const productionDependencies = await createProductionSupervisorDependencies({
-      launchManifestPath: roleConfig.launchManifestPath,
-      repositoryRoot: session.clone,
-      sepoliaRpc: async () => "0x0",
-      stateRoot: roleConfig.stateRoot,
-    });
-    const checkpoint = await productionDependencies.readState(roleConfig.stateRoot);
-    const activeLaunchState = await productionDependencies.validateActiveLaunchState(checkpoint.activeLaunchState);
-    const transport = await productionDependencies.createTransport(activeLaunchState);
-    const client = await productionDependencies.createResumedCoordinationClient({
-      activeLaunchState,
-      coordinationIdentity: checkpoint.coordinationIdentity,
-      senderState: checkpoint.senderState,
-      transport,
-    });
-    await runSupervisor({
-      client,
-      dependencies: {
-        ...productionDependencies,
-        writeStatus(value) { completionStdout.push(createSupervisorStatusLine(value)); },
-      },
-      localState: {
-        ...checkpoint,
-        operatorPublicKey: await productionDependencies.resolveOperatorPublicKey(activeLaunchState),
-      },
-    });
-    await writeFile(session.logs[role].stdout, completionStdout.join(""), { flag: "a", mode: 0o600 });
-  }
   const snapshot = JSON.parse(await readFile(session.fakeState, "utf8"));
   const payerResult = JSON.parse(await readFile(join(session.outputs.payer, "party-result.json"), "utf8"));
   const payeeResult = JSON.parse(await readFile(join(session.outputs.payee, "party-result.json"), "utf8"));
@@ -622,7 +575,7 @@ test("one long-lived Payer and Requestor span rehearsal and stakeholder with two
   assert.notEqual(stakeholderDescriptorEnvelope.descriptor.payer.agentId, descriptorEnvelope.descriptor.payer.agentId);
   assert.notEqual(stakeholderDescriptorEnvelope.descriptor.payee.agentId, descriptorEnvelope.descriptor.payee.agentId);
   assert.ok(Array.isArray(coordinatorReport.authenticatedRelayEvents));
-  assert.equal(coordinatorReport.coordinatorState, "STAKEHOLDER_VERIFIED");
+  assert.equal(coordinatorReport.coordinatorState, "COMPLETE");
   assert.match(coordinatorReport.verifierPublicationDigest, /^[0-9a-f]{64}$/);
   assert.deepEqual(Object.keys(coordinatorReport.verifierPublications).sort(), ["rehearsal", "stakeholder"]);
   assert.equal(coordinatorReport.verifierPublications.rehearsal, coordinatorReport.verifierPublicationDigest);

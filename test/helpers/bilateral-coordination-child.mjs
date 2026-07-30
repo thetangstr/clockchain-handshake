@@ -1032,6 +1032,41 @@ async function waitForRequestorSupervisorStart(path, child) {
   return seen[0];
 }
 
+function expectedPartyCompletion(role) {
+  if (!["payer", "payee"].includes(role)) fail();
+  return Object.freeze({
+    paymentMoved: false,
+    role,
+    state: role === "payer" ? "ACKNOWLEDGED" : "ACCEPTED",
+    status: "PARTY_COMPLETE",
+  });
+}
+
+function assertExactPartyCompletionLine(line, role) {
+  const expected = expectedPartyCompletion(role);
+  if (!exact(line, ["paymentMoved", "role", "state", "status"])) fail();
+  if (canonicalJson(line) !== canonicalJson(expected)) fail();
+  return line;
+}
+
+async function waitForPartyCompletion(path, child, role) {
+  return waitForJsonLine(path, (line) => {
+    if (line?.status !== "PARTY_COMPLETE") return null;
+    return assertExactPartyCompletionLine(line, role);
+  }, child);
+}
+
+async function assertSinglePartyCompletion(path, role) {
+  const lines = (await readFile(path, "utf8")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  const verifierOnlyStatus = ["AUTHOR", "IZED"].join("");
+  for (const line of lines) {
+    if (line?.state === verifierOnlyStatus || line?.status === verifierOnlyStatus) fail();
+  }
+  const completions = lines.filter((line) => line?.status === "PARTY_COMPLETE");
+  if (completions.length !== 1) fail();
+  assertExactPartyCompletionLine(completions[0], role);
+}
+
 async function descriptorOwners(path) {
   const bytes = await readFile(path);
   const checked = await validateRelayArtifactWithFacts({ artifactType: "signed-descriptor", bytes, expectedDigest: createHash("sha256").update(bytes).digest("hex"), secretCanaries: [] });
@@ -1257,6 +1292,7 @@ async function runProductionCoordinatorChild(input) {
       sessionId: state.sessionId,
       state: state.state,
     });
+    const targetState = value.scenario === "success" ? "COMPLETE" : "REHEARSAL_VERIFIED";
     await phase("coordinator-run");
     for (let turn = 0; turn < 64; turn += 1) {
       await phase(`coordinator-run-${current.state.toLowerCase()}`);
@@ -1287,23 +1323,51 @@ async function runProductionCoordinatorChild(input) {
       current = Object.freeze({ ...current, ...next });
       const returnedState = coordinatorState(current);
       const persistedState = await runDependencies.readState({ releaseRoot: config.releaseRoot.path });
+      const expectedPersistedState = returnedState.state === "COMPLETE"
+        ? Object.freeze({ ...returnedState, state: "STAKEHOLDER_VERIFIED" })
+        : returnedState;
       if (
         canonicalJson(JSON.parse(JSON.stringify(persistedState))) !==
-        canonicalJson(JSON.parse(JSON.stringify(returnedState)))
+        canonicalJson(JSON.parse(JSON.stringify(expectedPersistedState)))
       ) {
         await phase(`coordinator-persisted-mismatch-${String(returnedState.state).toLowerCase()}-${String(persistedState?.state).toLowerCase()}`);
         fail();
       }
-      if (current.state === (value.scenario === "success" ? "STAKEHOLDER_VERIFIED" : "REHEARSAL_VERIFIED")) break;
+      if (current.state === targetState) break;
     }
     if (
-      current.state !== (value.scenario === "success" ? "STAKEHOLDER_VERIFIED" : "REHEARSAL_VERIFIED") ||
+      current.state !== targetState ||
       verifierRuns.rehearsal === undefined ||
       (value.scenario === "success" && verifierRuns.stakeholder === undefined) ||
       verifierProcess === null
     ) {
       await phase(`coordinator-incomplete-${current.state.toLowerCase()}-${Object.keys(verifierRuns).join("_") || "none"}`);
       fail();
+    }
+    if (value.scenario === "success") {
+      if (payerProcess === null || payeeProcess === null) fail();
+      await phase("coordinator-role-completion-wait");
+      await Promise.all([
+        waitForPartyCompletion(value.children.payer.logs.stdout, payerProcess, "payer"),
+        waitForPartyCompletion(value.children.payee.logs.stdout, payeeProcess, "payee"),
+      ]);
+      await phase("coordinator-role-exit-wait");
+      const [payerExit, payeeExit] = await Promise.all([
+        waitForChild(payerProcess),
+        waitForChild(payeeProcess),
+      ]);
+      active.delete(payerProcess);
+      active.delete(payeeProcess);
+      if (
+        payerExit.code !== 0 ||
+        payerExit.signal !== null ||
+        payeeExit.code !== 0 ||
+        payeeExit.signal !== null
+      ) fail();
+      await Promise.all([
+        assertSinglePartyCompletion(value.children.payer.logs.stdout, "payer"),
+        assertSinglePartyCompletion(value.children.payee.logs.stdout, "payee"),
+      ]);
     }
     failurePhase = "coordinator-report";
     const finalDependencies = injectedRuntime.runDependencies(current);
