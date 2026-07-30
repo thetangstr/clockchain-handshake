@@ -1031,6 +1031,14 @@ test("documentation checker rejects contradictory post-funding Hermes prompts", 
       "new Hermes card",
       "Require a new Hermes card after operator funding.",
     ],
+    [
+      "unrelated do-not clause",
+      "Do not change the funding record, but an additional Hermes message is required after operator funding.",
+    ],
+    [
+      "unrelated never clause",
+      "Never share secrets, and ask for another Hermes prompt after operator funding.",
+    ],
   ];
 
   for (const [diagnostic, contradiction] of cases) {
@@ -1079,6 +1087,10 @@ test("documentation checker accepts negated post-funding Hermes prohibitions", a
     [
       "never ask",
       "Never ask for an additional Hermes message after operator funding.",
+    ],
+    [
+      "context-first do not request",
+      "After operator funding, do not request another Hermes prompt.",
     ],
   ];
 
