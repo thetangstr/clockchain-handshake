@@ -7,6 +7,7 @@ import {
   validatePassResult,
 } from "../src/evidence.mjs";
 import {
+  HANDSHAKE_FAILURE_CATEGORIES,
   HandshakeStageError,
   runHandshake,
 } from "../src/run.mjs";
@@ -39,6 +40,81 @@ const EXIT_CODES = Object.freeze({
   verification: 4,
   redaction: 5,
 });
+const DEFAULT_EXIT_CODE = 4;
+const UNEXPECTED_FAILURE_CODE = "HANDSHAKE_UNEXPECTED_FAILURE";
+const DIRECTORY_FAILURE_CODE =
+  "HANDSHAKE_OUTPUT_DIRECTORY_IN_USE";
+const UNPRINTABLE_PATTERN =
+  /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+export const FAILURE_HINTS = Object.freeze({
+  HANDSHAKE_CONFIGURATION:
+    "The command line, HANDSHAKE_INVITE_FILE, or output path is invalid; correct the invocation and start the demo again.",
+  HANDSHAKE_INVITATION_READ_FAILED:
+    "The invitation file could not be read safely; ask the operator to confirm its path and permissions without opening it.",
+  HANDSHAKE_INVITATION_DECRYPTION_FAILED:
+    "The invitation could not be authenticated; ask the operator for a fresh invitation instead of retrying this one.",
+  [DIRECTORY_FAILURE_CODE]:
+    "This directory already holds result.json or RESULT.md from an earlier run; start the demo in a new empty directory instead of rerunning here.",
+  HANDSHAKE_REGISTRATION_RECOVERY_FAILED:
+    "The public registration checkpoint could not be written or read back; keep this directory and ask the operator to inspect it.",
+  HANDSHAKE_REGISTRATION_FAILED:
+    "Ethereum identity registration did not complete; keep this directory, wait 30 seconds, and start the demo once more here with the same invitation.",
+  HANDSHAKE_TOKEN_MINT_FAILED:
+    "The ephemeral Clockchain demo token could not be minted; keep this directory, wait 30 seconds, and start the demo once more here.",
+  HANDSHAKE_MCP_CLIENT_FAILED:
+    "The Clockchain client could not be prepared; confirm outbound HTTPS access, then start the demo once more in this directory.",
+  HANDSHAKE_IDENTITY_RESOLUTION_FAILED:
+    "Clockchain did not resolve the registered identity as expected; stop and ask the operator to inspect live state.",
+  HANDSHAKE_TIMESTAMP_FAILED:
+    "Clockchain consensus time was unavailable; keep this directory, wait 30 seconds, and start the demo once more here.",
+  HANDSHAKE_ATTESTATION_FAILED:
+    "The single-shot receipt write failed or had already started in this directory, so a receipt may exist; stop and ask the operator to inspect live state before any further write.",
+  HANDSHAKE_RECEIPT_COMPLETION_FAILED:
+    "The receipt did not reach a confirmed block anchor; stop and ask the operator to inspect the receipt before any further write.",
+  HANDSHAKE_RECEIPT_VERIFICATION_FAILED:
+    "The receipt commitment did not verify against the recorded block; stop and ask the operator to inspect the receipt, and do not start the demo again here.",
+  HANDSHAKE_CROSS_PARTY_VERIFICATION_FAILED:
+    "Cross-party verification against the immutable block failed; stop and ask the operator to inspect the block, and do not start the demo again here.",
+  HANDSHAKE_EVIDENCE_FAILED:
+    "Sanitized evidence failed validation or could not be written; keep this directory, report the code, and do not call the run successful.",
+  HANDSHAKE_STAGE_FAILED:
+    "The runner reported an unknown stage; treat it as a defect and report the terminal output to the operator.",
+  [UNEXPECTED_FAILURE_CODE]:
+    "The runner raised an untyped error; treat it as a defect and report the terminal output to the operator.",
+});
+export const FAILURE_EXIT_CODES = Object.freeze(
+  Object.fromEntries(
+    Object.entries({
+      ...HANDSHAKE_FAILURE_CATEGORIES,
+      [UNEXPECTED_FAILURE_CODE]: "protocol",
+    }).map(([code, category]) => [
+      code,
+      EXIT_CODES[category] ?? DEFAULT_EXIT_CODE,
+    ]),
+  ),
+);
+
+function directoryLabel(value) {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 4_096 &&
+    !UNPRINTABLE_PATTERN.test(value)
+    ? value
+    : null;
+}
+
+function failureHint(code, outputDirectory) {
+  const hint = Object.hasOwn(FAILURE_HINTS, code)
+    ? FAILURE_HINTS[code]
+    : FAILURE_HINTS[UNEXPECTED_FAILURE_CODE];
+  if (code !== DIRECTORY_FAILURE_CODE) {
+    return hint;
+  }
+  const label = directoryLabel(outputDirectory);
+  return label === null
+    ? hint
+    : `${hint} Directory: ${label}`;
+}
 
 function configurationError() {
   return new HandshakeStageError({
@@ -166,12 +242,14 @@ export async function main({
   stderr = process.stderr,
   run = runHandshake,
 } = {}) {
+  let reportedDirectory;
   try {
     if (typeof run !== "function") {
       throw configurationError();
     }
     const { invitationFile, outputDirectory } =
       parseArguments(argv, env, cwd);
+    reportedDirectory = outputDirectory;
     const result = await run({
       invitationFile,
       outputDirectory,
@@ -191,10 +269,14 @@ export async function main({
     const safe = cliError(error);
     try {
       writeLine(stderr, `FAILED [${safe.code}]`);
+      writeLine(
+        stderr,
+        `Hint: ${failureHint(safe.code, reportedDirectory)}`,
+      );
     } catch {
       // There is no safe fallback when the caller's error stream is unusable.
     }
-    return EXIT_CODES[safe.category] ?? 4;
+    return EXIT_CODES[safe.category] ?? DEFAULT_EXIT_CODE;
   }
 }
 

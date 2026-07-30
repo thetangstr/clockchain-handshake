@@ -121,8 +121,21 @@ public RPC load, and Clockchain token rate limits can extend that budget. Read
 operations use bounded retries; receipt writes are single-shot so an ambiguous
 network response cannot silently create a duplicate.
 
+That 30–90 second figure describes a healthy run, not the ceiling. Receipt
+completion carries an explicit elapsed-time budget of 120 seconds, and the poll
+already in flight when that budget is crossed adds a 1.5 second poll interval
+plus one bounded transport call of at most 102 seconds. A throttled
+receipt-completion stage is therefore bounded at 223.5 seconds, roughly
+3 minutes 43 seconds, and then fails closed as
+`HANDSHAKE_RECEIPT_COMPLETION_FAILED` with exit `4`. Other stages carry their own
+bounded waits. Do not stop the process at 90 seconds; wait for the terminal
+`PASS` line or the `FAILED [CODE]` line.
+
 On a public RPC or token rate-limit failure before receipt submission, preserve
 the temporary directory and its `.handshake-registration-recovery.json` file.
+That file holds either the pre-broadcast registration intent recorded before the
+first Ethereum write or the public checkpoint recorded after it; both are public
+records, and deleting either one can strand an already-broadcast registration.
 Wait 30 seconds, then run `npm run demo` once more in that same directory with the
 same `HANDSHAKE_INVITE_FILE`. The runner verifies the public checkpoint against
 Ethereum before resuming and does not repeat a confirmed registration.
@@ -135,12 +148,54 @@ transaction, change the registry or RPC target, or claim success. Preserve only
 the public failure code and ask the operator to inspect live state before another
 write.
 
+## Failure codes
+
+A failed run prints the machine-readable line `FAILED [CODE]` and then one
+`Hint:` line for the operator. The process exit code follows the failure
+category: `2` configuration, `3` network, `4` protocol or verification, and `5`
+redaction. The table lists the exit each code normally produces. A stage that
+fails through a differently typed cause exits with that cause's category
+instead, so a redaction fault while writing evidence exits `5` while still
+reporting `HANDSHAKE_EVIDENCE_FAILED`.
+
+| Code | Cause | Exit | Next action |
+| --- | --- | --- | --- |
+| `HANDSHAKE_CONFIGURATION` | Invalid arguments, invitation environment value, or an output path that is not a usable directory. | 2 | Correct the invocation, name a usable output directory, and start the run again. |
+| `HANDSHAKE_INVITATION_READ_FAILED` | The invitation file could not be read safely. | 2 | Ask the operator to confirm its path and permissions; do not open the file. |
+| `HANDSHAKE_INVITATION_DECRYPTION_FAILED` | The invitation failed local authentication. | 2 | Ask the operator for a fresh invitation. |
+| `HANDSHAKE_OUTPUT_DIRECTORY_IN_USE` | The directory already holds result.json or RESULT.md from an earlier run. | 2 | Start again in a new empty directory; the existing evidence was left untouched and no chain or receipt write happened. |
+| `HANDSHAKE_REGISTRATION_RECOVERY_FAILED` | The public checkpoint could not be written or read back. | 2 | Keep the directory and ask the operator to inspect it. |
+| `HANDSHAKE_REGISTRATION_FAILED` | The Ethereum identity write did not complete. | 4 | Keep the directory, wait 30 seconds, then run once more here. |
+| `HANDSHAKE_TOKEN_MINT_FAILED` | The ephemeral Clockchain token was refused or rate limited. | 3 | Keep the directory, wait 30 seconds, then run once more here. |
+| `HANDSHAKE_MCP_CLIENT_FAILED` | The Clockchain client could not be prepared. | 2 | Confirm outbound HTTPS access, then run once more here. |
+| `HANDSHAKE_IDENTITY_RESOLUTION_FAILED` | Clockchain did not resolve the registered identity as expected. | 4 | Stop and ask the operator to inspect live state. |
+| `HANDSHAKE_TIMESTAMP_FAILED` | Clockchain consensus time was unavailable. | 3 | Keep the directory, wait 30 seconds, then run once more here. |
+| `HANDSHAKE_ATTESTATION_FAILED` | The single-shot receipt write failed or had already started in this directory, so a receipt may exist. | 4 | Stop and ask the operator to inspect live state before any further write. |
+| `HANDSHAKE_RECEIPT_COMPLETION_FAILED` | The receipt reached no confirmed block anchor. | 4 | Stop and ask the operator to inspect the receipt. |
+| `HANDSHAKE_RECEIPT_VERIFICATION_FAILED` | The recomputed commitment did not match the recorded receipt. | 4 | Stop, ask the operator to inspect the receipt, and do not rerun. |
+| `HANDSHAKE_CROSS_PARTY_VERIFICATION_FAILED` | Verification against the immutable block failed. | 4 | Stop, ask the operator to inspect the block, and do not rerun. |
+| `HANDSHAKE_EVIDENCE_FAILED` | Sanitized evidence failed validation or could not be written into the prepared output directory. | 4 | Keep the directory, report the code, and do not call the run successful. |
+| `HANDSHAKE_STAGE_FAILED` | The runner reported an unknown stage. | 4 | Treat it as a defect and report the terminal output. |
+| `HANDSHAKE_UNEXPECTED_FAILURE` | The runner raised an untyped error. | 4 | Treat it as a defect and report the terminal output. |
+
+No code is evidence of success, and no code discloses an invitation, key, or
+token.
+
 ## Interpretation
 
 Clockchain currently has one testnet validator. “Anchored and independently
 re-verifiable” means another reader can recompute the commitment and inspect the
 recorded block; it does not turn the current testnet into a multi-validator
 security guarantee.
+
+The run submits the `trust_handshake` receipt with `allow_degraded: true`.
+Deployed Clockchain write tools refuse a degraded validator pool by default; this
+demo opts in, so it writes the receipt even when the pool reports one node and
+zero node participation. `result.json` records the pool health observed at
+submission, including `totalNodes`, `nodeParticipationPct`, and
+`degradedAtSubmission`. An anchored receipt still means the commitment is
+recorded in an immutable block and can be re-verified independently by another
+reader; it does not mean the anchor carries multi-validator consensus strength.
 
 The `keyless` result describes receipt verification against public block data. It
 does not mean anonymous access to the hosted MCP transport, and it does not grant

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Clockchain Handshake Console</title>
+<link rel="stylesheet" href="/assets/styles.css">
+<main>
+  <h1>Handshake operator console</h1>
+  <section aria-labelledby="actors-heading">
+    <h2 id="actors-heading">Actors</h2>
+    <dl>
+      <dt>Operator</dt><dd id="operator-health">Loading</dd>
+      <dt>Payer</dt><dd id="payer-health">Loading</dd>
+      <dt>Requestor</dt><dd id="requestor-health">Loading</dd>
+    </dl>
+  </section>
+  <section aria-labelledby="evidence-heading">
+    <h2 id="evidence-heading">Evidence</h2>
+    <dl>
+      <dt>Request</dt><dd id="request-status">Loading</dd>
+      <dt>Mandate</dt><dd id="mandate-status">Loading</dd>
+      <dt>Deadline</dt><dd id="deadline-freshness">Loading</dd>
+      <dt>Verifier</dt><dd id="verifier-state">Loading</dd>
+    </dl>
+  </section>
+  <section aria-labelledby="timeline-heading">
+    <h2 id="timeline-heading">Timeline</h2>
+    <ol id="anchor-timeline"></ol>
+  </section>
+  <section aria-labelledby="operations-heading">
+    <h2 id="operations-heading">Operations</h2>
+    <dl>
+      <dt>Relay</dt><dd id="relay-advisory">Loading</dd>
+      <dt>Watcher</dt><dd id="watcher-advisory">Loading</dd>
+      <dt>Recovery</dt><dd id="failure-recovery">Loading</dd>
+    </dl>
+  </section>
+</main>
+<script src="/assets/app.js"></script>

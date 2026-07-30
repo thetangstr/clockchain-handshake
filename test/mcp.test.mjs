@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
+import test, { mock } from "node:test";
 
 import {
   McpConfigurationError,
   McpNetworkError,
   McpProtocolError,
+  McpRateLimitedError,
   McpVerificationError,
+  READ_RETRY_TOOL_NAMES,
+  WRITE_TOOL_NAMES,
   assertAnchoredReceipt,
   assertCrossPartyVerification,
   assertReceiptVerification,
@@ -17,6 +20,18 @@ import {
   parseSseJsonRpc,
   parseToolResult,
 } from "../src/mcp.mjs";
+
+// Transport bounds observed by the tests below. Each term is pinned by its own
+// test, so the composite worst case cannot drift silently:
+//   DEFAULT_REQUEST_TIMEOUT_MS  10_000 ("times out a default request ...")
+//   DEFAULT_MAX_ATTEMPTS             4 ("retries a throttled read ...")
+//   MAX_TOTAL_RETRY_WAIT_MS     62_000 ("bounds cumulative retry waiting ...")
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_MAX_ATTEMPTS = 4;
+const MAX_TOTAL_RETRY_WAIT_MS = 62_000;
+const TRANSPORT_WORST_CASE_MS =
+  DEFAULT_MAX_ATTEMPTS * DEFAULT_REQUEST_TIMEOUT_MS +
+  MAX_TOTAL_RETRY_WAIT_MS;
 
 const MCP_BASE_URL = "https://mcp.clockchain.network";
 const TOKEN = `cc_${"A".repeat(88)}.${"b".repeat(89)}`;
@@ -160,6 +175,32 @@ function assertErrorOmits(error, ...values) {
       false,
       "error diagnostic must not echo sensitive input",
     );
+  }
+}
+
+function injectedClock(startMs = 1_000) {
+  let current = startMs;
+  const delays = [];
+
+  return {
+    advance: (milliseconds) => {
+      current += milliseconds;
+    },
+    delays,
+    elapsedSince: (start) => current - start,
+    now: () => current,
+    sleeper: async (milliseconds) => {
+      delays.push(milliseconds);
+      current += milliseconds;
+    },
+  };
+}
+
+async function flushMicrotasks() {
+  for (let index = 0; index < 4; index += 1) {
+    await new Promise((resolve) => {
+      setImmediate(resolve);
+    });
   }
 }
 
@@ -1850,4 +1891,1307 @@ test("rejects invalid options and unknown initial or intermediate statuses", asy
     }),
     /interval/i,
   );
+});
+
+test("rejects an in-body rate_limited tool result instead of returning it", () => {
+  const throttled = {
+    error: "rate_limited",
+    retry_after_seconds: 31,
+  };
+
+  for (const structured of [true, false]) {
+    const error = captureThrow(() =>
+      parseToolResult(toolEnvelope(1, throttled, { structured })),
+    );
+    assert.ok(error instanceof McpRateLimitedError);
+    assert.ok(error instanceof McpNetworkError);
+    assert.equal(error.category, "network");
+    assert.equal(error.code, "MCP_RATE_LIMITED_BODY");
+    assert.match(error.message, /rate limit/i);
+    assert.equal(error.retryAfterMs, 31_000);
+  }
+
+  const isErrorWrapped = captureThrow(() =>
+    parseToolResult({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        isError: true,
+        content: [
+          { type: "text", text: JSON.stringify(throttled) },
+        ],
+      },
+    }),
+  );
+  assert.ok(isErrorWrapped instanceof McpRateLimitedError);
+  assert.equal(isErrorWrapped.retryAfterMs, 31_000);
+
+  const withoutHint = captureThrow(() =>
+    parseToolResult(toolEnvelope(1, { error: "rate_limited" })),
+  );
+  assert.ok(withoutHint instanceof McpRateLimitedError);
+  assert.equal(withoutHint.retryAfterMs, null);
+
+  assert.deepEqual(
+    parseToolResult(
+      toolEnvelope(1, { error: "not_found", retry_after_seconds: 31 }),
+    ),
+    { error: "not_found", retry_after_seconds: 31 },
+  );
+});
+
+test("waits out an in-body rate limit before retrying a read-only call", async () => {
+  const bodies = [];
+  const delays = [];
+  const client = createMcpClient({
+    fetchImpl: async (_url, init) => {
+      bodies.push(init.body);
+      const { id } = JSON.parse(init.body);
+      if (bodies.length === 1) {
+        return jsonToolResponse(id, {
+          error: "rate_limited",
+          retry_after_seconds: 31,
+        });
+      }
+      return jsonToolResponse(id, { status: "active" });
+    },
+    sleeper: async (milliseconds) => {
+      delays.push(milliseconds);
+    },
+    token: TOKEN,
+  });
+
+  assert.deepEqual(await client.resolveAgent("42"), {
+    status: "active",
+  });
+  assert.deepEqual(delays, [31_000]);
+  assert.equal(bodies.length, 2);
+  assert.equal(new Set(bodies).size, 1);
+});
+
+test("never retries a write tool throttled inside a success body", async () => {
+  let attempts = 0;
+  const client = createMcpClient({
+    fetchImpl: async (_url, init) => {
+      attempts += 1;
+      const { id } = JSON.parse(init.body);
+      return jsonToolResponse(id, {
+        error: "rate_limited",
+        retry_after_seconds: 31,
+      });
+    },
+    sleeper: async () => {
+      throw new Error("write tools must not wait and retry");
+    },
+    token: TOKEN,
+  });
+
+  const error = await captureRejection(() =>
+    client.attestAction({
+      agent_id: "42",
+      action: "trust_handshake",
+      idempotency_key: "run-throttled",
+    }),
+  );
+  assert.ok(error instanceof McpRateLimitedError);
+  assert.equal(error.code, "MCP_RATE_LIMITED_BODY");
+  assert.equal(error.retryAfterMs, 31_000);
+  assert.equal(attempts, 1);
+  assertErrorOmits(error, TOKEN);
+});
+
+test("types an HTTP 429 as a rate limit that carries retry_after", async () => {
+  const client = createMcpClient({
+    fetchImpl: async () =>
+      new Response(null, {
+        status: 429,
+        headers: { "retry-after": "31" },
+      }),
+    maxAttempts: 1,
+    token: TOKEN,
+  });
+
+  const error = await captureRejection(() =>
+    client.resolveAgent("42"),
+  );
+  assert.ok(error instanceof McpRateLimitedError);
+  assert.equal(error.code, "MCP_RATE_LIMIT");
+  assert.equal(error.retryAfterMs, 31_000);
+
+  const tokenError = await captureRejection(() =>
+    mintDemoToken({
+      fetchImpl: async () =>
+        new Response(null, {
+          status: 429,
+          headers: { "retry-after": "31" },
+        }),
+    }),
+  );
+  assert.ok(tokenError instanceof McpRateLimitedError);
+  assert.equal(tokenError.retryAfterMs, 31_000);
+  assert.match(tokenError.message, /rate limit/i);
+});
+
+test("honors a Retry-After above the previously capped wait", async () => {
+  const delays = [];
+  const client = createMcpClient({
+    fetchImpl: async (_url, init) => {
+      const { id } = JSON.parse(init.body);
+      if (delays.length === 0) {
+        return new Response(null, {
+          status: 429,
+          headers: { "retry-after": "31" },
+        });
+      }
+      return jsonToolResponse(id, { status: "active" });
+    },
+    sleeper: async (milliseconds) => {
+      delays.push(milliseconds);
+    },
+    token: TOKEN,
+  });
+
+  assert.deepEqual(await client.resolveAgent("42"), {
+    status: "active",
+  });
+  assert.deepEqual(delays, [31_000]);
+});
+
+test("accepts every RFC 9110 HTTP-date Retry-After shape and no other", async () => {
+  const cases = [
+    { expected: 31_000, header: "31" },
+    // IMF-fixdate, the preferred shape.
+    { expected: 62_000, header: "Sun, 06 Nov 2044 08:49:37 GMT" },
+    { expected: 0, header: "Sun, 06 Nov 1994 08:49:37 GMT" },
+    // RFC 850, which RFC 9110 5.6.7 says a recipient MUST accept. The
+    // two-digit year uses the 50-year sliding window, so 44 is 2044 and 94
+    // is 1994.
+    { expected: 62_000, header: "Sunday, 06-Nov-2044 08:49:37 GMT" },
+    { expected: 62_000, header: "Sunday, 06-Nov-44 08:49:37 GMT" },
+    { expected: 0, header: "Wednesday, 24-Jul-1994 19:27:50 GMT" },
+    { expected: 0, header: "Sunday, 06-Nov-94 08:49:37 GMT" },
+    // asctime, the third shape RFC 9110 requires a recipient to accept.
+    { expected: 62_000, header: "Sun Nov  6 08:49:37 2044" },
+    { expected: 0, header: "Sun Nov  6 08:49:37 1994" },
+    // The two Clockchain stamp shapes must stay rejected: a lenient
+    // Date.parse would invent a wait from them. A rejected header falls back
+    // to the rate-limit floor, never to a sub-second backoff.
+    { expected: 5_000, header: "2026-07-24T19:27:49.556027912Z" },
+    { expected: 5_000, header: "24-07-2026_19:27:50:981" },
+    { expected: 5_000, header: "" },
+    { expected: 5_000, header: "Funday, 06-Nov-2044 08:49:37 GMT" },
+    { expected: 5_000, header: "Sun, 06 Nov 2044 08:49:37 PST" },
+  ];
+
+  for (const { expected, header } of cases) {
+    const delays = [];
+    const client = createMcpClient({
+      fetchImpl: async (_url, init) => {
+        const { id } = JSON.parse(init.body);
+        if (delays.length === 0) {
+          return new Response(null, {
+            status: 429,
+            headers: { "retry-after": header },
+          });
+        }
+        return jsonToolResponse(id, { status: "active" });
+      },
+      sleeper: async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+      token: TOKEN,
+    });
+
+    assert.deepEqual(await client.resolveAgent("42"), {
+      status: "active",
+    });
+    assert.deepEqual(
+      delays,
+      [expected],
+      `Retry-After ${JSON.stringify(header)} must wait ${expected}ms`,
+    );
+  }
+});
+
+test("bounds cumulative retry waiting to a budget that binds at the default attempt cap", async () => {
+  const delays = [];
+  let attempts = 0;
+  const client = createMcpClient({
+    fetchImpl: async () => {
+      attempts += 1;
+      return new Response(null, {
+        status: 429,
+        headers: { "retry-after": "120" },
+      });
+    },
+    sleeper: async (milliseconds) => {
+      delays.push(milliseconds);
+    },
+    token: TOKEN,
+  });
+
+  const error = await captureRejection(() =>
+    client.resolveAgent("42"),
+  );
+  assert.ok(error instanceof McpRateLimitedError);
+  // The budget, not the attempt cap, is what stops this call: the default
+  // cap alone would permit three maximal waits.
+  assert.deepEqual(delays, [62_000]);
+  assert.equal(
+    delays.reduce((total, delay) => total + delay, 0),
+    MAX_TOTAL_RETRY_WAIT_MS,
+  );
+  assert.equal(attempts, 2);
+  assert.ok(attempts < DEFAULT_MAX_ATTEMPTS);
+});
+
+test("never allows a write tool into the read-only retry set", () => {
+  assert.ok(Array.isArray(READ_RETRY_TOOL_NAMES));
+  assert.ok(Array.isArray(WRITE_TOOL_NAMES));
+  assert.ok(Object.isFrozen(READ_RETRY_TOOL_NAMES));
+  assert.ok(Object.isFrozen(WRITE_TOOL_NAMES));
+
+  for (const name of ["attest_action", "log_action"]) {
+    assert.ok(
+      WRITE_TOOL_NAMES.includes(name),
+      `${name} must stay listed as an irreversible write tool`,
+    );
+  }
+  for (const name of WRITE_TOOL_NAMES) {
+    assert.equal(
+      READ_RETRY_TOOL_NAMES.includes(name),
+      false,
+      `${name} must never be retried automatically`,
+    );
+  }
+  // The bilateral protocol's three reads must be replayable through a
+  // throttle window; the write that creates the record must not be.
+  for (const name of [
+    "search_actions",
+    "get_block",
+    "generate_audit_trail",
+  ]) {
+    assert.ok(
+      READ_RETRY_TOOL_NAMES.includes(name),
+      `${name} must be retryable as a read-only tool`,
+    );
+  }
+  assert.equal(
+    READ_RETRY_TOOL_NAMES.includes("log_action"),
+    false,
+    "log_action must never enter the read-only retry set",
+  );
+  // `complete_attestation` is retry-safe because `completeReceipt` already
+  // re-issues it once per poll iteration (src/mcp.mjs `completeReceipt`), so a
+  // transport replay adds no duplication class the demo does not already
+  // create. It anchors an existing receipt rather than minting a new one.
+  assert.ok(READ_RETRY_TOOL_NAMES.includes("complete_attestation"));
+});
+
+test("honours an asctime Retry-After as UTC rather than local time", async () => {
+  // asctime carries no zone; RFC 9110 5.6.7 fixes it at UTC. A local-time
+  // reading would shift this by the host offset and clamp to 0 or the wait
+  // ceiling. Under TZ=UTC this case cannot discriminate, so it is a floor on
+  // correctness, not a proof.
+  const months = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const target = new Date(Date.now() + 30_000);
+  const pad = (value) => String(value).padStart(2, "0");
+  const header = `${days[target.getUTCDay()]} ${
+    months[target.getUTCMonth()]
+  } ${String(target.getUTCDate()).padStart(2, " ")} ${
+    pad(target.getUTCHours())
+  }:${pad(target.getUTCMinutes())}:${
+    pad(target.getUTCSeconds())
+  } ${target.getUTCFullYear()}`;
+
+  const delays = [];
+  const client = createMcpClient({
+    fetchImpl: async (_url, init) => {
+      const { id } = JSON.parse(init.body);
+      if (delays.length === 0) {
+        return new Response(null, {
+          status: 429,
+          headers: { "retry-after": header },
+        });
+      }
+      return jsonToolResponse(id, { status: "active" });
+    },
+    sleeper: async (milliseconds) => {
+      delays.push(milliseconds);
+    },
+    token: TOKEN,
+  });
+
+  assert.deepEqual(await client.resolveAgent("42"), {
+    status: "active",
+  });
+  assert.equal(delays.length, 1);
+  assert.ok(
+    delays[0] > 25_000 && delays[0] <= 30_000,
+    `asctime ${JSON.stringify(header)} must wait about 30s, got ${delays[0]}`,
+  );
+});
+
+test("times out a default request at the default request timeout", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+
+  try {
+    const client = createMcpClient({
+      fetchImpl: () => new Promise(() => {}),
+      maxAttempts: 1,
+      token: TOKEN,
+    });
+    let settled = null;
+    const call = client.resolveAgent("42").then(
+      (value) => {
+        settled = value;
+      },
+      (error) => {
+        settled = error;
+      },
+    );
+
+    mock.timers.tick(DEFAULT_REQUEST_TIMEOUT_MS - 1);
+    await flushMicrotasks();
+    assert.equal(
+      settled,
+      null,
+      `a default request must still be in flight at ${
+        DEFAULT_REQUEST_TIMEOUT_MS - 1
+      }ms`,
+    );
+
+    mock.timers.tick(1);
+    await flushMicrotasks();
+    assert.ok(
+      settled instanceof McpNetworkError,
+      `a default request must time out at ${DEFAULT_REQUEST_TIMEOUT_MS}ms`,
+    );
+    assert.equal(settled.code, "MCP_TIMEOUT");
+    await call;
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("retries a throttled read to the default attempt cap with the rate-limit floor", async () => {
+  const delays = [];
+  let attempts = 0;
+  const client = createMcpClient({
+    fetchImpl: async () => {
+      attempts += 1;
+      return new Response(null, { status: 429 });
+    },
+    sleeper: async (milliseconds) => {
+      delays.push(milliseconds);
+    },
+    token: TOKEN,
+  });
+
+  const error = await captureRejection(() =>
+    client.resolveAgent("42"),
+  );
+  assert.ok(error instanceof McpRateLimitedError);
+  assert.equal(error.retryAfterMs, null);
+  assert.equal(attempts, DEFAULT_MAX_ATTEMPTS);
+  // A throttle without a usable hint waits the observed rate-limit floor, not
+  // a sub-second backoff that would retry straight back into the throttle.
+  assert.deepEqual(delays, [5_000, 5_000, 5_000]);
+});
+
+test("spaces transport and 5xx retries by a reachable bounded backoff", async () => {
+  const delays = [];
+  let attempts = 0;
+  const client = createMcpClient({
+    fetchImpl: async () => {
+      attempts += 1;
+      return new Response(null, { status: 503 });
+    },
+    maxAttempts: 6,
+    sleeper: async (milliseconds) => {
+      delays.push(milliseconds);
+    },
+    token: TOKEN,
+  });
+
+  const error = await captureRejection(() =>
+    client.resolveAgent("42"),
+  );
+  assert.ok(error instanceof McpNetworkError);
+  assert.equal(error.code, "MCP_SERVICE_UNAVAILABLE");
+  assert.equal(attempts, 6);
+  // The ceiling must be reachable: the last delay is the cap, not 1_600.
+  assert.deepEqual(delays, [100, 200, 400, 800, 1_000]);
+
+  assert.throws(
+    () => createMcpClient({ maxAttempts: 7, token: TOKEN }),
+    /attempts/i,
+  );
+});
+
+test("bounds one receipt completion by an explicit elapsed-time deadline", async () => {
+  const pending = agentReceipt({ id: "receipt-slow", status: "pending" });
+  const clock = injectedClock(0);
+  const started = clock.now();
+  let calls = 0;
+  const client = {
+    async completeAttestation(receipt) {
+      calls += 1;
+      // Each poll costs a whole worst-case transport call.
+      clock.advance(TRANSPORT_WORST_CASE_MS);
+      return { ...receipt, stage: calls };
+    },
+  };
+
+  const error = await captureRejection(() =>
+    completeReceipt(client, pending, {
+      attempts: 8,
+      intervalMs: 1_500,
+      now: clock.now,
+      sleeper: clock.sleeper,
+    }),
+  );
+
+  assert.ok(error instanceof McpVerificationError);
+  assert.equal(error.code, "MCP_RECEIPT_DEADLINE");
+  assert.equal(calls, 2);
+  assert.deepEqual(clock.delays, [1_500, 1_500]);
+  // Worst case is the deadline plus the one poll already in flight when it
+  // is crossed: 120_000 + 1_500 + 102_000.
+  const worstCaseMs = 120_000 + 1_500 + TRANSPORT_WORST_CASE_MS;
+  assert.equal(worstCaseMs, 223_500);
+  assert.ok(
+    clock.elapsedSince(started) <= worstCaseMs,
+    `one receipt completion must stay inside ${worstCaseMs}ms`,
+  );
+  assert.equal(clock.elapsedSince(started), 207_000);
+});
+
+test("rejects an invalid completion deadline or clock", async () => {
+  const pending = agentReceipt({ id: "receipt-clock", status: "pending" });
+  const client = {
+    async completeAttestation(receipt) {
+      return receipt;
+    },
+  };
+
+  await assert.rejects(
+    completeReceipt(client, pending, { deadlineMs: 0 }),
+    /deadline/i,
+  );
+  await assert.rejects(
+    completeReceipt(client, pending, { now: null }),
+    /clock/i,
+  );
+
+  let calls = 0;
+  const clockError = await captureRejection(() =>
+    completeReceipt(client, pending, {
+      now: () => Number.NaN,
+      sleeper: async () => {},
+    }),
+  );
+  assert.ok(clockError instanceof McpConfigurationError);
+  assert.match(clockError.message, /clock/i);
+  assert.equal(calls, 0);
+});
+
+test("reads the throttle hint from either observed retry_after key", async () => {
+  const cases = [
+    { expected: 31_000, payload: { retry_after_seconds: 31 } },
+    { expected: 31_000, payload: { retry_after: 31 } },
+    { expected: 31_000, payload: { retry_after: "31" } },
+    // retry_after_seconds wins when both are present.
+    {
+      expected: 31_000,
+      payload: { retry_after: 5, retry_after_seconds: 31 },
+    },
+    { expected: 62_000, payload: { retry_after: 120 } },
+    { expected: null, payload: { retry_after_ms: 31_000 } },
+    { expected: null, payload: { retry_after: "soon" } },
+    { expected: null, payload: { retry_after: -1 } },
+  ];
+
+  for (const { expected, payload } of cases) {
+    const error = captureThrow(() =>
+      parseToolResult(
+        toolEnvelope(1, { error: "rate_limited", ...payload }),
+      ),
+    );
+    assert.ok(error instanceof McpRateLimitedError);
+    assert.equal(
+      error.retryAfterMs,
+      expected,
+      `${JSON.stringify(payload)} must yield ${expected}`,
+    );
+  }
+});
+
+test("waits the rate-limit floor for an in-body throttle without a hint", async () => {
+  const delays = [];
+  let attempts = 0;
+  const client = createMcpClient({
+    fetchImpl: async (_url, init) => {
+      attempts += 1;
+      const { id } = JSON.parse(init.body);
+      if (attempts === 1) {
+        return jsonToolResponse(id, { error: "rate_limited" });
+      }
+      return jsonToolResponse(id, { status: "active" });
+    },
+    sleeper: async (milliseconds) => {
+      delays.push(milliseconds);
+    },
+    token: TOKEN,
+  });
+
+  assert.deepEqual(await client.resolveAgent("42"), {
+    status: "active",
+  });
+  assert.deepEqual(delays, [5_000]);
+});
+
+test("never waits or replays a write tool that is throttled", async () => {
+  for (const throttle of ["header", "body"]) {
+    let attempts = 0;
+    const client = createMcpClient({
+      fetchImpl: async (_url, init) => {
+        attempts += 1;
+        const { id } = JSON.parse(init.body);
+        if (throttle === "header") {
+          return new Response(null, {
+            status: 429,
+            headers: { "retry-after": "31" },
+          });
+        }
+        return jsonToolResponse(id, {
+          error: "rate_limited",
+          retry_after_seconds: 31,
+        });
+      },
+      sleeper: async () => {
+        throw new Error("write tools must not wait and retry");
+      },
+      token: TOKEN,
+    });
+
+    const error = await captureRejection(() =>
+      client.attestAction({
+        agent_id: "42",
+        action: "trust_handshake",
+        idempotency_key: `run-throttled-${throttle}`,
+      }),
+    );
+    assert.ok(
+      error instanceof McpRateLimitedError,
+      `a ${throttle} throttle on a write tool must be typed`,
+    );
+    assert.equal(error.retryAfterMs, 31_000);
+    assert.equal(
+      attempts,
+      1,
+      `a ${throttle} throttle must never replay a write tool`,
+    );
+    assertErrorOmits(error, TOKEN);
+  }
+});
+
+// --- First-class bilateral tool methods -----------------------------------
+//
+// Fixtures below are derived from the OBSERVED responses recorded in
+// .context/review-2026-07-24/capabilities.json: real field names, real value
+// shapes, real hashes and heights. The operator's email in `clientId` is
+// replaced by a placeholder so no personal data lands in the repository.
+
+const OBSERVED_ASSET_HASH =
+  "4c4cf3bcf8d45b7b77d2babb936fe4b4ac6271ff8d9120484870ee0257a6cbc5";
+const OBSERVED_LEDGER_ID = "02313136-82d8-4eb0-a571-94c836661fc9";
+// A spec-4.7 conformant bilateral key: "cbv1:" + 64-hex session digest +
+// ":proposal" = 78 bytes inside the 120-byte charset bound.
+const BILATERAL_REFERENCE_ID = `cbv1:${"a".repeat(64)}:proposal`;
+
+function observedSearchRecord(overrides = {}) {
+  // The verified 13-field search_actions hit. Note assetReferenceId contains
+  // an underscore: response validation must accept legacy attest-generated
+  // ids even though the WRITE-side charset would reject them.
+  return {
+    ledgerId: OBSERVED_LEDGER_ID,
+    clientId: "operator@example.invalid",
+    walletId: "wallet-fixture",
+    assetReferenceId: "8677:trust_handshake:1784833252067",
+    assetHash: OBSERVED_ASSET_HASH,
+    hashType: "SHA-256",
+    versionNumber: 1,
+    additionalInfo: "agent attested receipt",
+    blockHeight: "1781135",
+    createdTimestamp: "23-07-2026 19:00:52:165 UTC",
+    updatedTimestamp: null,
+    assetName: null,
+    type: null,
+    ...overrides,
+  };
+}
+
+function refusingFetch(label) {
+  return async () => {
+    throw new Error(`${label} must fail before any request is sent`);
+  };
+}
+
+test("logs an action once with exact-key arguments and a normalized response", async () => {
+  const heightCases = [
+    // The log_action response shape is unverified upstream; blockHeight may
+    // be pending (null or absent) or a decimal in either wire type.
+    { expected: "1781135", response: { blockHeight: 1781135 } },
+    { expected: "1781135", response: { blockHeight: "1781135" } },
+    { expected: null, response: { blockHeight: null } },
+    { expected: null, response: {} },
+  ];
+
+  for (const { expected, response } of heightCases) {
+    const bodies = [];
+    const client = createMcpClient({
+      fetchImpl: async (_url, init) => {
+        bodies.push(init.body);
+        const { id } = JSON.parse(init.body);
+        return jsonToolResponse(id, {
+          ledgerId: OBSERVED_LEDGER_ID,
+          // Hostile or unverified extra fields must be dropped untrusted.
+          status: "anchored",
+          clientId: "operator@example.invalid",
+          ...response,
+        });
+      },
+      token: TOKEN,
+    });
+
+    const written = await client.logAction({
+      asset_reference_id: BILATERAL_REFERENCE_ID,
+      asset_hash: OBSERVED_ASSET_HASH,
+      hash_type: "SHA-256",
+      version_number: 1,
+      idempotency_key: "b".repeat(32),
+      wait: true,
+      wait_ms: 20_000,
+      allow_degraded: true,
+    });
+
+    assert.deepEqual(written, {
+      ledgerId: OBSERVED_LEDGER_ID,
+      blockHeight: expected,
+    });
+    assert.equal(bodies.length, 1);
+    const request = JSON.parse(bodies[0]);
+    assert.equal(request.params.name, "log_action");
+    assert.deepEqual(request.params.arguments, {
+      asset_reference_id: BILATERAL_REFERENCE_ID,
+      asset_hash: OBSERVED_ASSET_HASH,
+      hash_type: "SHA-256",
+      version_number: 1,
+      idempotency_key: "b".repeat(32),
+      wait: true,
+      wait_ms: 20_000,
+      allow_degraded: true,
+    });
+  }
+});
+
+test("rejects the three spec-banned log_action parameters before any request", async () => {
+  // content would hash a serialization we do not control; did mutates the
+  // reference id server-side; additional_info is punctuation-stripped and
+  // absent from the on-chain projection (design section 4.8).
+  const banned = [
+    ["content", { payment: "intent" }],
+    ["did", "did:agent:8677"],
+    ["additional_info", "session metadata"],
+  ];
+
+  for (const [key, value] of banned) {
+    const client = createMcpClient({
+      fetchImpl: refusingFetch("a banned log_action parameter"),
+      token: TOKEN,
+    });
+    const error = await captureRejection(() =>
+      client.logAction({
+        asset_reference_id: BILATERAL_REFERENCE_ID,
+        asset_hash: OBSERVED_ASSET_HASH,
+        [key]: value,
+      }),
+    );
+    assert.ok(error instanceof McpConfigurationError);
+    assert.equal(error.code, "MCP_FORBIDDEN_LOG_ACTION_FIELD");
+    assert.match(error.message, new RegExp(key));
+  }
+});
+
+test("enforces the reference-id charset and digest shape on log_action", async () => {
+  const valid = {
+    asset_reference_id: BILATERAL_REFERENCE_ID,
+    asset_hash: OBSERVED_ASSET_HASH,
+  };
+  const invalidCases = [
+    // Charset /^[0-9a-z:]{1,120}$/: lowercase, digits, colon; nothing else.
+    { asset_reference_id: BILATERAL_REFERENCE_ID.toUpperCase() },
+    { asset_reference_id: "cbv1:trust_handshake:proposal" },
+    { asset_reference_id: `cbv1:${"a".repeat(116)}` },
+    { asset_reference_id: " cbv1:a:proposal" },
+    { asset_reference_id: "" },
+    { asset_reference_id: 8677 },
+    { asset_reference_id: undefined },
+    // asset_hash must be exactly 64 lowercase hex characters.
+    { asset_hash: OBSERVED_ASSET_HASH.toUpperCase() },
+    { asset_hash: OBSERVED_ASSET_HASH.slice(0, 63) },
+    { asset_hash: `${OBSERVED_ASSET_HASH}0` },
+    { asset_hash: "g".repeat(64) },
+    { asset_hash: 1234 },
+    { asset_hash: undefined },
+    // Exact-key allowlist and typed optionals.
+    { surprise: true },
+    { hash_type: "MD5" },
+    { version_number: 0 },
+    { wait: "yes" },
+    { wait_ms: -1 },
+    { allow_degraded: "sure" },
+    { idempotency_key: "" },
+  ];
+
+  for (const overrides of invalidCases) {
+    const client = createMcpClient({
+      fetchImpl: refusingFetch("invalid log_action arguments"),
+      token: TOKEN,
+    });
+    const error = await captureRejection(() =>
+      client.logAction({ ...valid, ...overrides }),
+    );
+    assert.ok(
+      error instanceof McpConfigurationError,
+      `${JSON.stringify(overrides)} must be rejected before the request`,
+    );
+  }
+
+  // The bound is 120 bytes exactly: 120 passes, 121 fails above.
+  let sent = 0;
+  const boundaryClient = createMcpClient({
+    fetchImpl: async (_url, init) => {
+      sent += 1;
+      const { id } = JSON.parse(init.body);
+      return jsonToolResponse(id, { ledgerId: OBSERVED_LEDGER_ID });
+    },
+    token: TOKEN,
+  });
+  await boundaryClient.logAction({
+    ...valid,
+    asset_reference_id: `cbv1:${"a".repeat(115)}`,
+  });
+  assert.equal(sent, 1);
+});
+
+test("never retries or waits for a throttled log_action", async () => {
+  for (const throttle of ["header", "body"]) {
+    let attempts = 0;
+    const client = createMcpClient({
+      fetchImpl: async (_url, init) => {
+        attempts += 1;
+        const { id } = JSON.parse(init.body);
+        if (throttle === "header") {
+          return new Response(null, {
+            status: 429,
+            headers: { "retry-after": "31" },
+          });
+        }
+        return jsonToolResponse(id, {
+          error: "rate_limited",
+          retry_after_seconds: 31,
+        });
+      },
+      sleeper: async () => {
+        throw new Error("log_action must not wait and retry");
+      },
+      token: TOKEN,
+    });
+
+    const error = await captureRejection(() =>
+      client.logAction({
+        asset_reference_id: BILATERAL_REFERENCE_ID,
+        asset_hash: OBSERVED_ASSET_HASH,
+        idempotency_key: "c".repeat(32),
+      }),
+    );
+    assert.ok(
+      error instanceof McpRateLimitedError,
+      `a ${throttle} throttle on log_action must be typed`,
+    );
+    assert.equal(error.retryAfterMs, 31_000);
+    assert.equal(
+      attempts,
+      1,
+      `a ${throttle} throttle must never replay log_action`,
+    );
+    assertErrorOmits(error, TOKEN);
+  }
+});
+
+test("rejects a malformed log_action response", async () => {
+  const responses = [
+    { blockHeight: "1781135" },
+    { ledgerId: "", blockHeight: "1781135" },
+    { ledgerId: 42, blockHeight: "1781135" },
+    { ledgerId: OBSERVED_LEDGER_ID, blockHeight: "03" },
+    { ledgerId: OBSERVED_LEDGER_ID, blockHeight: "soon" },
+    { ledgerId: OBSERVED_LEDGER_ID, blockHeight: -1 },
+    { ledgerId: OBSERVED_LEDGER_ID, blockHeight: 1.5 },
+  ];
+
+  for (const payload of responses) {
+    const client = createMcpClient({
+      fetchImpl: async (_url, init) => {
+        const { id } = JSON.parse(init.body);
+        return jsonToolResponse(id, payload);
+      },
+      token: TOKEN,
+    });
+    const error = await captureRejection(() =>
+      client.logAction({
+        asset_reference_id: BILATERAL_REFERENCE_ID,
+        asset_hash: OBSERVED_ASSET_HASH,
+      }),
+    );
+    assert.ok(
+      error instanceof McpProtocolError,
+      `${JSON.stringify(payload)} must be rejected`,
+    );
+    assert.equal(error.code, "MCP_INVALID_LOG_RESULT");
+  }
+});
+
+test("returns a search_actions hit as normalized records and a miss as an empty array", async () => {
+  const client = createMcpClient({
+    fetchImpl: async (_url, init) => {
+      const { id, params } = JSON.parse(init.body);
+      assert.equal(params.name, "search_actions");
+      assert.deepEqual(params.arguments, {
+        asset_reference_id: BILATERAL_REFERENCE_ID,
+      });
+      return jsonToolResponse(id, [
+        observedSearchRecord({ forged: "extra keys must not crash" }),
+      ]);
+    },
+    token: TOKEN,
+  });
+
+  const records = await client.searchActions({
+    asset_reference_id: BILATERAL_REFERENCE_ID,
+  });
+  // Only the five fields the verification recipe reads survive; hostile
+  // extras — including the operator email in clientId — are dropped.
+  assert.deepEqual(records, [
+    {
+      ledgerId: OBSERVED_LEDGER_ID,
+      assetReferenceId: "8677:trust_handshake:1784833252067",
+      assetHash: OBSERVED_ASSET_HASH,
+      blockHeight: "1781135",
+      hashType: "SHA-256",
+    },
+  ]);
+
+  const missClient = createMcpClient({
+    fetchImpl: async (_url, init) => {
+      const { id } = JSON.parse(init.body);
+      return jsonToolResponse(id, []);
+    },
+    token: TOKEN,
+  });
+  assert.deepEqual(
+    await missClient.searchActions({
+      asset_reference_id: BILATERAL_REFERENCE_ID,
+    }),
+    [],
+  );
+});
+
+test("hard-fails a non-array search_actions result and keeps a throttle typed", async () => {
+  // Matrix row 2: a non-array is a HARD error, never "absent". The in-body
+  // rate-limit shape is ALSO a non-array object, and it must surface as the
+  // rate-limit error, not as the shape error — ordering is load-bearing.
+  const nonArrays = [
+    {},
+    { records: [] },
+    "no results",
+    null,
+  ];
+
+  for (const payload of nonArrays) {
+    const client = createMcpClient({
+      fetchImpl: async (_url, init) => {
+        const { id } = JSON.parse(init.body);
+        return jsonToolResponse(id, payload);
+      },
+      token: TOKEN,
+    });
+    const error = await captureRejection(() =>
+      client.searchActions({
+        asset_reference_id: BILATERAL_REFERENCE_ID,
+      }),
+    );
+    assert.ok(
+      error instanceof McpProtocolError,
+      `${JSON.stringify(payload)} must be a hard protocol error`,
+    );
+  }
+
+  const throttledClient = createMcpClient({
+    fetchImpl: async (_url, init) => {
+      const { id } = JSON.parse(init.body);
+      return jsonToolResponse(id, {
+        error: "rate_limited",
+        retry_after_seconds: 31,
+      });
+    },
+    maxAttempts: 1,
+    token: TOKEN,
+  });
+  const throttled = await captureRejection(() =>
+    throttledClient.searchActions({
+      asset_reference_id: BILATERAL_REFERENCE_ID,
+    }),
+  );
+  assert.ok(throttled instanceof McpRateLimitedError);
+  assert.equal(throttled instanceof McpProtocolError, false);
+  assert.equal(throttled.code, "MCP_RATE_LIMITED_BODY");
+  assert.equal(throttled.retryAfterMs, 31_000);
+});
+
+test("retries a throttled search_actions read before returning the result", async () => {
+  const delays = [];
+  let attempts = 0;
+  const client = createMcpClient({
+    fetchImpl: async (_url, init) => {
+      attempts += 1;
+      const { id } = JSON.parse(init.body);
+      if (attempts === 1) {
+        return new Response(null, {
+          status: 429,
+          headers: { "retry-after": "2" },
+        });
+      }
+      return jsonToolResponse(id, []);
+    },
+    sleeper: async (milliseconds) => {
+      delays.push(milliseconds);
+    },
+    token: TOKEN,
+  });
+
+  assert.deepEqual(
+    await client.searchActions({
+      asset_reference_id: BILATERAL_REFERENCE_ID,
+    }),
+    [],
+  );
+  assert.deepEqual(delays, [2_000]);
+  assert.equal(attempts, 2);
+});
+
+test("rejects hostile search_actions records on every field the recipe reads", async () => {
+  const hostileCases = [
+    [observedSearchRecord({ ledgerId: undefined })],
+    [observedSearchRecord({ ledgerId: "" })],
+    [observedSearchRecord({ assetReferenceId: undefined })],
+    [observedSearchRecord({ assetHash: OBSERVED_ASSET_HASH.toUpperCase() })],
+    [observedSearchRecord({ assetHash: null })],
+    [observedSearchRecord({ blockHeight: "03" })],
+    [observedSearchRecord({ blockHeight: null })],
+    [observedSearchRecord({ blockHeight: "soon" })],
+    [observedSearchRecord({ hashType: "MD5" })],
+    ["not-a-record"],
+    [null],
+    [observedSearchRecord(), "trailing junk"],
+  ];
+
+  for (const payload of hostileCases) {
+    const client = createMcpClient({
+      fetchImpl: async (_url, init) => {
+        const { id } = JSON.parse(init.body);
+        return jsonToolResponse(id, payload);
+      },
+      token: TOKEN,
+    });
+    const error = await captureRejection(() =>
+      client.searchActions({
+        asset_reference_id: BILATERAL_REFERENCE_ID,
+      }),
+    );
+    assert.ok(
+      error instanceof McpProtocolError,
+      `${JSON.stringify(payload)} must be rejected`,
+    );
+    assert.equal(error.code, "MCP_INVALID_SEARCH_RECORD");
+  }
+});
+
+test("asserts the reference-id charset before every search or audit-trail read", async () => {
+  // Spec 4.7 requires the charset before every search. The observed legacy
+  // id "8677:trust_handshake:1784833252067" contains an underscore and is
+  // deliberately rejected as an ARGUMENT even though it is accepted inside
+  // responses: the bilateral protocol only ever searches its own keys.
+  const invalidIds = [
+    "8677:trust_handshake:1784833252067",
+    "CBV1:aa:proposal",
+    `cbv1:${"a".repeat(116)}`,
+    "",
+    undefined,
+    42,
+  ];
+
+  for (const method of ["searchActions", "generateAuditTrail"]) {
+    for (const referenceId of invalidIds) {
+      const client = createMcpClient({
+        fetchImpl: refusingFetch("an invalid reference id"),
+        token: TOKEN,
+      });
+      const error = await captureRejection(() =>
+        client[method]({ asset_reference_id: referenceId }),
+      );
+      assert.ok(
+        error instanceof McpConfigurationError,
+        `${method} must reject ${JSON.stringify(referenceId)}`,
+      );
+    }
+
+    const extraKey = await captureRejection(() => {
+      const client = createMcpClient({
+        fetchImpl: refusingFetch("unexpected arguments"),
+        token: TOKEN,
+      });
+      return client[method]({
+        asset_reference_id: BILATERAL_REFERENCE_ID,
+        limit: 10,
+      });
+    });
+    assert.ok(extraKey instanceof McpConfigurationError);
+  }
+});
+
+test("fetches a block by latest or decimal height with a verbatim blockTime", async () => {
+  // Observed get_block shapes: blockHeight is a NUMBER here (a STRING in
+  // every other endpoint) and blockTime is RFC3339 with nine fractional
+  // digits, returned VERBATIM — src/bilateral/blocktime.mjs owns parsing.
+  const observedBlock = {
+    blockHeight: 1781136,
+    proposerAddress: "FE0A68F799E7D16B719B8AA82126D4C5D5352A21",
+    blockTime: "2026-07-23T19:00:52.738107464Z",
+  };
+  const heightCases = [
+    { requested: "latest", sent: "latest" },
+    { requested: "1781136", sent: "1781136" },
+    { requested: 1781136, sent: "1781136" },
+    { requested: 1781136n, sent: "1781136" },
+  ];
+
+  for (const { requested, sent } of heightCases) {
+    const client = createMcpClient({
+      fetchImpl: async (_url, init) => {
+        const { id, params } = JSON.parse(init.body);
+        assert.equal(params.name, "get_block");
+        assert.deepEqual(params.arguments, { height: sent });
+        return jsonToolResponse(id, observedBlock);
+      },
+      token: TOKEN,
+    });
+
+    const block = await client.getBlock({ height: requested });
+    assert.deepEqual(block, {
+      blockHeight: "1781136",
+      proposerAddress: "FE0A68F799E7D16B719B8AA82126D4C5D5352A21",
+      blockTime: "2026-07-23T19:00:52.738107464Z",
+    });
+  }
+
+  const invalidHeights = [
+    "01",
+    "-1",
+    "latest ",
+    "0x10",
+    1.5,
+    "",
+    undefined,
+    null,
+  ];
+  for (const height of invalidHeights) {
+    const client = createMcpClient({
+      fetchImpl: refusingFetch("an invalid block height"),
+      token: TOKEN,
+    });
+    const error = await captureRejection(() =>
+      client.getBlock({ height }),
+    );
+    assert.ok(
+      error instanceof McpConfigurationError,
+      `height ${JSON.stringify(height)} must be rejected`,
+    );
+  }
+  const extraKey = await captureRejection(() => {
+    const client = createMcpClient({
+      fetchImpl: refusingFetch("unexpected arguments"),
+      token: TOKEN,
+    });
+    return client.getBlock({ height: "latest", full: true });
+  });
+  assert.ok(extraKey instanceof McpConfigurationError);
+});
+
+test("rejects a malformed get_block response and retries a throttled one", async () => {
+  const malformed = [
+    { proposerAddress: "FE0A", blockTime: "2026-07-23T19:00:52.738107464Z" },
+    { blockHeight: "soon", proposerAddress: "FE0A", blockTime: "2026-07-23T19:00:52.738107464Z" },
+    { blockHeight: 1781136, blockTime: "2026-07-23T19:00:52.738107464Z" },
+    { blockHeight: 1781136, proposerAddress: "", blockTime: "2026-07-23T19:00:52.738107464Z" },
+    { blockHeight: 1781136, proposerAddress: "FE0A", blockTime: 1753297252738 },
+    { blockHeight: 1781136, proposerAddress: "FE0A", blockTime: "" },
+    "block",
+  ];
+
+  for (const payload of malformed) {
+    const client = createMcpClient({
+      fetchImpl: async (_url, init) => {
+        const { id } = JSON.parse(init.body);
+        return jsonToolResponse(id, payload);
+      },
+      token: TOKEN,
+    });
+    const error = await captureRejection(() =>
+      client.getBlock({ height: "latest" }),
+    );
+    assert.ok(
+      error instanceof McpProtocolError,
+      `${JSON.stringify(payload)} must be rejected`,
+    );
+  }
+
+  const delays = [];
+  let attempts = 0;
+  const throttledClient = createMcpClient({
+    fetchImpl: async (_url, init) => {
+      attempts += 1;
+      const { id } = JSON.parse(init.body);
+      if (attempts === 1) {
+        return jsonToolResponse(id, {
+          error: "rate_limited",
+          retry_after_seconds: 31,
+        });
+      }
+      return jsonToolResponse(id, {
+        blockHeight: 1869480,
+        proposerAddress: "FE0A68F799E7D16B719B8AA82126D4C5D5352A21",
+        blockTime: "2026-07-24T20:08:13.788993755Z",
+      });
+    },
+    sleeper: async (milliseconds) => {
+      delays.push(milliseconds);
+    },
+    token: TOKEN,
+  });
+  assert.deepEqual(await throttledClient.getBlock({ height: "1869480" }), {
+    blockHeight: "1869480",
+    proposerAddress: "FE0A68F799E7D16B719B8AA82126D4C5D5352A21",
+    blockTime: "2026-07-24T20:08:13.788993755Z",
+  });
+  assert.deepEqual(delays, [31_000]);
+});
+
+test("returns an audit trail only when its count matches its events", async () => {
+  // Observed generate_audit_trail response shape. The aggregate verifier
+  // gates duplicates on count === "1" per key (design section 6.5), so only
+  // that surface is trusted and returned.
+  const observedTrail = {
+    assetReferenceId: BILATERAL_REFERENCE_ID,
+    events: [
+      {
+        ledgerId: OBSERVED_LEDGER_ID,
+        assetReferenceId: BILATERAL_REFERENCE_ID,
+        assetHash: OBSERVED_ASSET_HASH,
+        time: "2026-07-23T19:04:41.057495507Z",
+        blockHeight: "1781359",
+        additionalInfo: "agent attested receipt",
+      },
+    ],
+    count: 1,
+    builtAt: "2026-07-24T20:08:30.525Z",
+  };
+
+  const client = createMcpClient({
+    fetchImpl: async (_url, init) => {
+      const { id, params } = JSON.parse(init.body);
+      assert.equal(params.name, "generate_audit_trail");
+      assert.deepEqual(params.arguments, {
+        asset_reference_id: BILATERAL_REFERENCE_ID,
+      });
+      return jsonToolResponse(id, observedTrail);
+    },
+    token: TOKEN,
+  });
+  assert.deepEqual(
+    await client.generateAuditTrail({
+      asset_reference_id: BILATERAL_REFERENCE_ID,
+    }),
+    {
+      assetReferenceId: BILATERAL_REFERENCE_ID,
+      count: "1",
+    },
+  );
+
+  const emptyClient = createMcpClient({
+    fetchImpl: async (_url, init) => {
+      const { id } = JSON.parse(init.body);
+      return jsonToolResponse(id, {
+        assetReferenceId: BILATERAL_REFERENCE_ID,
+        events: [],
+        count: 0,
+        builtAt: "2026-07-24T20:08:30.525Z",
+      });
+    },
+    token: TOKEN,
+  });
+  assert.deepEqual(
+    await emptyClient.generateAuditTrail({
+      asset_reference_id: BILATERAL_REFERENCE_ID,
+    }),
+    {
+      assetReferenceId: BILATERAL_REFERENCE_ID,
+      count: "0",
+    },
+  );
+
+  const malformed = [
+    { ...observedTrail, count: 2 },
+    { ...observedTrail, count: "1.0" },
+    { ...observedTrail, count: undefined },
+    { ...observedTrail, events: "one" },
+    { ...observedTrail, events: ["not-a-record"] },
+    { ...observedTrail, assetReferenceId: "" },
+    [],
+  ];
+  for (const payload of malformed) {
+    const failing = createMcpClient({
+      fetchImpl: async (_url, init) => {
+        const { id } = JSON.parse(init.body);
+        return jsonToolResponse(id, payload);
+      },
+      token: TOKEN,
+    });
+    const error = await captureRejection(() =>
+      failing.generateAuditTrail({
+        asset_reference_id: BILATERAL_REFERENCE_ID,
+      }),
+    );
+    assert.ok(
+      error instanceof McpProtocolError,
+      `${JSON.stringify(payload)} must be rejected`,
+    );
+    assert.equal(error.code, "MCP_INVALID_AUDIT_TRAIL");
+  }
 });

@@ -15,10 +15,84 @@ Read the [stakeholder and operator runbook](DEMO.md), the
 [standalone prompt](prompts/run-turnkey-demo.md), and the
 [invitation handling notes](invites/README.md). A
 [sanitized recovery evidence summary](docs/demo-evidence/latest.md) records the
-independently re-verified public evidence. The expected live run takes roughly
-30–90 seconds under normal testnet conditions. A passing `npm run demo` writes
-sanitized `RESULT.md` and `result.json`; neither a narrative nor a submitted
-transaction is a PASS by itself.
+independently re-verified public evidence. Live duration depends on external
+testnet services and is intentionally not documented as a timeline promise. A
+passing `npm run demo` writes sanitized `RESULT.md` and `result.json`; neither
+a narrative nor a submitted transaction is a PASS by itself. When a run stops
+instead, the
+[failure code reference](DEMO.md#failure-codes) lists every public failure code,
+the exit it produces, and the next action for the operator.
+
+## Bilateral payment-authorization demo
+
+The operator-led bilateral flow uses separate role computers. Payer is the
+payer. Requestor is the payment requestor. Start with the
+[three-computer quick-start](docs/runbooks/bilateral-demo-quick-start.md), then
+use the [bilateral demo-day runbook](docs/runbooks/bilateral-demo-day.md) and
+deliver the machine-specific [Payer prompt](prompts/run-payer-bilateral-demo.md)
+and [Requestor prompt](prompts/run-requestor-bilateral-demo.md) from one reviewed
+immutable repository SHA. The public
+[live-demo helper](https://clockchain-research.vercel.app/handshake/run)
+explains the same workflow but never receives live evidence.
+
+Demo-day role mapping is fixed. Stakeholder 1 is Payer, the payer. Stakeholder 2 is Requestor, the payment requestor. The human operator runs the relay, coordinator, watcher,
+read-only console, reusable Sepolia treasury, and fresh aggregate verifier from this Mac. The
+reusable Sepolia treasury is funding authority only for deterministic testnet
+gas top-ups through `npm run bilateral:fund`; it never signs participant
+registration, role, watcher, or verifier actions.
+
+The long-lived supervisors automatically create the Payer-signed mandate and
+the matching Requestor-signed request without operator-authored commercial terms
+or manual artifact copying. Payer anchors an exact USD 100 proposal, Requestor
+anchors an acceptance bound to that proposal, and Payer anchors the final
+acknowledgment. For a session that
+the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence
+establishes that Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and
+`ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`. The protocol does not download message
+bytes from Clockchain. Every transition and verdict preserves
+`paymentMoved: false`.
+
+The payment-intake path uses a Payer-owned TLS MCP `/mcp` endpoint that binds
+only to Payer loopback and is exposed through an AWS raw-TCP relay. The hosted
+Clockchain MCP service is not used for `request_payment`; AWS never terminates
+Payer MCP TLS. Requestor asks Payer's MCP for payment, receives
+`HANDSHAKE_REQUIRED`, and only then the Requestor wrapper starts the long-lived
+supervisor that follows the signed mandate through the relay-backed handshake.
+
+Runner local state is not operator authorization. Neither role runner nor the
+read-only watcher may emit `AUTHORIZED`; only the operator's fresh aggregate
+verifier may do so after independently refetching and validating all three
+Clockchain anchors. Missing, duplicate, reordered, expired, malformed, or
+mismatched evidence fails closed.
+
+The automated demo-day surface is CLI-first:
+
+```sh
+npm run bilateral:relay -- <operator relay paths and pinned release SHA>
+npm run bilateral:coordinator -- <operator-local paths and pinned release SHA>
+npm run bilateral:console -- --state-root <operator release root>
+npm run bilateral:supervisor -- --launch-manifest <payer manifest> --state <payer private state> --payer-mcp-host 127.0.0.1 --payer-mcp-port <port> --payer-mcp-public-url <public relay URL> --payer-mcp-tls-certificate <public cert> --payer-mcp-tls-private-key <private key>
+npm run bilateral:request-payment -- --launch-manifest <requestor manifest> --intake-request-id <uuidv4> --mcp-url <payer public mcp url> --state <requestor private state> --tls-certificate <payer public cert> --tls-fingerprint <lowercase sha256>
+```
+
+The startup control order is:
+`relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
+Here, funding means validating and arming the reusable Sepolia treasury lane
+before either role starts. The actual funding batch waits for the coordinator's
+signed address record. After enrollment reveals the four fresh addresses, the
+operator executes exactly four `0.01 Sepolia ETH` allocations.
+
+Run the Payer supervisor command once, then run the Requestor request-payment
+wrapper once after `PAYER_MCP_READY`; the wrapper starts the Requestor
+supervisor. Those two role processes span the rehearsal and stakeholder runs.
+After they enroll, the coordinator displays four signed public addresses;
+funding those four addresses is the user's only other action. Low-level
+preparation and exact-input recovery commands are confined to the runbook's
+operator-authorized recovery appendix.
+
+Passing deterministic checks makes this release rehearsal-ready, not
+live-validated. Only a funded physical rehearsal whose fresh aggregate
+verifier publishes independently re-verifiable evidence is live-validated.
 
 ## Operator-only clean-client acceptance
 
@@ -32,6 +106,12 @@ container sandbox.
 
 `npm run acceptance:clients` is supported on macOS and Linux only. The core
 `npm run demo` stakeholder flow remains platform-neutral.
+
+Before it launches either client, the harness reads each invitation owner's
+nonce from Ethereum Sepolia. `npm run acceptance:clients` therefore requires a
+reachable Ethereum Sepolia endpoint at preflight, and it fails closed: it
+refuses to start when that endpoint does not answer or when a wallet has
+already been consumed by an earlier transaction.
 
 Redaction protects captured artifacts after the clients execute, but it cannot
 prevent a malicious or compromised client from reading or exfiltrating accessible

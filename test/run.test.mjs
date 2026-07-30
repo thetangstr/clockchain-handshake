@@ -19,7 +19,11 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { main } from "../bin/handshake-demo.mjs";
+import {
+  FAILURE_EXIT_CODES,
+  FAILURE_HINTS,
+  main,
+} from "../bin/handshake-demo.mjs";
 import {
   RESULT_SCHEMA,
   SINGLE_VALIDATOR_DISCLAIMER,
@@ -30,11 +34,13 @@ import {
   writeEvidence,
 } from "../src/evidence.mjs";
 import {
+  McpConfigurationError,
   McpNetworkError,
   McpVerificationError,
   assertCrossPartyVerification,
   completeReceipt,
 } from "../src/mcp.mjs";
+import { createRegistrationIntent } from "../src/registration-internal.mjs";
 import {
   PartialRegistrationError,
   RegistrationNetworkError,
@@ -42,6 +48,8 @@ import {
   registrationDataUri,
 } from "../src/registration.mjs";
 import {
+  HANDSHAKE_FAILURE_CATEGORIES,
+  HANDSHAKE_FAILURE_CODES,
   HandshakeStageError,
   runHandshake,
 } from "../src/run.mjs";
@@ -67,6 +75,11 @@ const INVITATION_CODE = "fresh-invitation-code-canary";
 const MCP_TOKEN = `cc_${"t".repeat(48)}`;
 const DISPLAY_NAME = "Billy";
 const RECOVERY_FILE = ".handshake-registration-recovery.json";
+const RECOVERY_SCHEMA =
+  "clockchain.handshake-registration-recovery/v1";
+const INTENT_SCHEMA =
+  "clockchain.handshake-registration-intent/v1";
+const REGISTER_CALLDATA = `0x${"ab".repeat(36)}`;
 const ATTESTATION_MARKER_FILE =
   ".handshake-attestation-started.json";
 const ATTESTATION_MARKER_SCHEMA =
@@ -95,6 +108,68 @@ function registrationRecovery({ metadata = true } = {}) {
         }
       : {}),
   };
+}
+
+function registrationIntent({
+  transactionFields = {
+    maxFeePerGas: 2n,
+    maxPriorityFeePerGas: 1n,
+  },
+  ...overrides
+} = {}) {
+  return {
+    ...createRegistrationIntent({
+      address: ADDRESS,
+      displayName: DISPLAY_NAME,
+      registerCalldata: REGISTER_CALLDATA,
+      registerGas: 226_000n,
+      transactionFields,
+    }),
+    ...overrides,
+  };
+}
+
+function withoutIntentKey(key) {
+  const intent = registrationIntent();
+  delete intent[key];
+  return intent;
+}
+
+async function readCheckpointFile(directory) {
+  return JSON.parse(
+    await readFile(join(directory, RECOVERY_FILE), "utf8"),
+  );
+}
+
+async function writeCheckpointFile(directory, checkpoint) {
+  await writeFile(
+    join(directory, RECOVERY_FILE),
+    `${JSON.stringify(checkpoint, null, 2)}\n`,
+    { encoding: "utf8", mode: 0o644 },
+  );
+}
+
+function declaredConstant(source, name) {
+  const matches = [
+    ...source.matchAll(
+      new RegExp(`^const ${name} = ([0-9_]+);$`, "gm"),
+    ),
+  ];
+  assert.equal(
+    matches.length,
+    1,
+    `src/mcp.mjs must declare ${name} exactly once`,
+  );
+  return Number(matches[0][1].replaceAll("_", ""));
+}
+
+function documentedMilliseconds(section, pattern) {
+  const match = section.match(pattern);
+  assert.ok(
+    match,
+    `DEMO.md must state a figure matching ${pattern}`,
+  );
+  return Math.round(Number(match[1]) * 1_000);
 }
 
 function completedRegistration() {
@@ -379,6 +454,9 @@ function createAdapters({
       calls.push("register");
       maybeFail("register");
       captured.registrationOptions = options;
+      // The real registerIdentity records the pre-broadcast intent before it
+      // broadcasts, then upgrades it to the public recovery checkpoint.
+      await options.onCheckpoint(registrationIntent());
       await options.onCheckpoint(registrationRecovery());
       calls.push("register/checkpoint");
       return completedRegistration();
@@ -572,9 +650,12 @@ test("refuses a rerun after PASS before archiving evidence or touching an adapte
       }),
     (error) => {
       assert.ok(error instanceof HandshakeStageError);
-      assert.equal(error.stage, "attestation");
-      assert.equal(error.category, "protocol");
-      assert.equal(error.code, "HANDSHAKE_ATTESTATION_FAILED");
+      assert.equal(error.stage, "output-directory");
+      assert.equal(error.category, "configuration");
+      assert.equal(
+        error.code,
+        "HANDSHAKE_OUTPUT_DIRECTORY_IN_USE",
+      );
       return true;
     },
   );
@@ -874,6 +955,353 @@ test("resumes from the retained public checkpoint without repeating registration
   );
 });
 
+test("records the pre-broadcast intent checkpoint and upgrades it to full recovery", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const calls = [];
+  const captured = {};
+  const adapters = createAdapters({ calls, captured });
+  adapters.registerIdentity = async (options) => {
+    calls.push("register");
+    captured.registrationOptions = options;
+    await options.onCheckpoint(registrationIntent());
+    captured.intentOnDisk = await readCheckpointFile(outputDirectory);
+    await options.onCheckpoint(registrationRecovery());
+    captured.recoveryOnDisk = await readCheckpointFile(outputDirectory);
+    return completedRegistration();
+  };
+
+  const result = await runHandshake({
+    invitationFile: "/operator/invite.secret.json",
+    outputDirectory,
+    adapters,
+    now: clock(),
+    randomUUID: () => RUN_ID,
+  });
+
+  assert.equal(result.status, "PASS");
+  assert.deepEqual(captured.intentOnDisk, registrationIntent());
+  assert.deepEqual(captured.recoveryOnDisk, registrationRecovery());
+  assert.deepEqual(
+    await readCheckpointFile(outputDirectory),
+    registrationRecovery(),
+  );
+  assert.equal(
+    Object.hasOwn(captured.registrationOptions, "intent"),
+    false,
+  );
+});
+
+test("keeps the pre-broadcast intent on disk and resumes it read-only", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const intent = registrationIntent();
+  const failedCalls = [];
+  const failedAdapters = createAdapters({
+    calls: failedCalls,
+    captured: {},
+  });
+  failedAdapters.registerIdentity = async (options) => {
+    failedCalls.push("register");
+    await options.onCheckpoint(intent);
+    throw new RegistrationNetworkError(
+      `receipt wait echoed ${PRIVATE_KEY}`,
+    );
+  };
+
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters: failedAdapters,
+        now: clock(),
+        randomUUID: () => RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "registration");
+      assert.equal(error.category, "network");
+      assert.equal(error.message.includes(PRIVATE_KEY), false);
+      return true;
+    },
+  );
+  assert.deepEqual(
+    await readCheckpointFile(outputDirectory),
+    intent,
+  );
+  await assert.rejects(
+    () => stat(join(outputDirectory, "result.json")),
+    { code: "ENOENT" },
+  );
+
+  const calls = [];
+  const captured = {};
+  const adapters = createAdapters({
+    calls,
+    captured,
+    resumed: true,
+  });
+  adapters.registerIdentity = async (options) => {
+    calls.push("register");
+    captured.registrationOptions = options;
+    captured.intentOnEntry = await readCheckpointFile(outputDirectory);
+    await options.onCheckpoint(registrationRecovery());
+    return completedRegistration();
+  };
+
+  const result = await runHandshake({
+    invitationFile: "/operator/invite.secret.json",
+    outputDirectory,
+    adapters,
+    now: clock(),
+    randomUUID: () => RUN_ID,
+  });
+
+  assert.equal(result.status, "PASS");
+  assert.deepEqual(captured.registrationOptions.intent, intent);
+  assert.deepEqual(captured.intentOnEntry, intent);
+  assert.equal(calls.includes("finalize registration"), false);
+  assert.equal(calls.includes("read checkpoint"), true);
+  assert.deepEqual(
+    await readCheckpointFile(outputDirectory),
+    registrationRecovery(),
+  );
+});
+
+test("resumes a legacy-priced intent checkpoint through the register path", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const intent = registrationIntent({
+    transactionFields: { gasPrice: 3_000_000_000n },
+  });
+  await writeCheckpointFile(outputDirectory, intent);
+  const calls = [];
+  const captured = {};
+  const adapters = createAdapters({
+    calls,
+    captured,
+    resumed: true,
+  });
+  adapters.registerIdentity = async (options) => {
+    calls.push("register");
+    captured.registrationOptions = options;
+    await options.onCheckpoint(registrationRecovery());
+    return completedRegistration();
+  };
+
+  await runHandshake({
+    invitationFile: "/operator/invite.secret.json",
+    outputDirectory,
+    adapters,
+    now: clock(),
+    randomUUID: () => RUN_ID,
+  });
+
+  assert.equal(Object.hasOwn(intent, "gasPrice"), true);
+  assert.deepEqual(captured.registrationOptions.intent, intent);
+  assert.equal(calls.includes("finalize registration"), false);
+});
+
+test("refuses a registration that recorded only a pre-broadcast intent", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const calls = [];
+  const adapters = createAdapters({ calls, captured: {} });
+  adapters.registerIdentity = async (options) => {
+    calls.push("register");
+    await options.onCheckpoint(registrationIntent());
+    return completedRegistration();
+  };
+
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters,
+        now: clock(),
+        randomUUID: () => RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "registration");
+      assert.equal(error.code, "HANDSHAKE_REGISTRATION_FAILED");
+      return true;
+    },
+  );
+  assert.equal(calls.includes("mint token"), false);
+  assert.deepEqual(
+    await readCheckpointFile(outputDirectory),
+    registrationIntent(),
+  );
+  await assert.rejects(
+    () => stat(join(outputDirectory, "result.json")),
+    { code: "ENOENT" },
+  );
+});
+
+test("refuses a second pre-broadcast intent record in one run", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const calls = [];
+  const adapters = createAdapters({ calls, captured: {} });
+  adapters.registerIdentity = async (options) => {
+    calls.push("register");
+    await options.onCheckpoint(registrationIntent());
+    await options.onCheckpoint(
+      registrationIntent({ registerGas: "300000" }),
+    );
+    await options.onCheckpoint(registrationRecovery());
+    return completedRegistration();
+  };
+
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters,
+        now: clock(),
+        randomUUID: () => RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "registration");
+      assert.equal(error.code, "HANDSHAKE_REGISTRATION_FAILED");
+      return true;
+    },
+  );
+  assert.equal(calls.includes("mint token"), false);
+});
+
+test("mirrors the exact pre-broadcast intent key set from the registration module", () => {
+  assert.deepEqual(Object.keys(registrationIntent()), [
+    "schema",
+    "chainId",
+    "registryAddress",
+    "registryNamespace",
+    "address",
+    "displayName",
+    "registerNonce",
+    "registerCalldata",
+    "registerGas",
+    "maxFeePerGas",
+    "maxPriorityFeePerGas",
+  ]);
+  assert.deepEqual(
+    Object.keys(
+      registrationIntent({
+        transactionFields: { gasPrice: 3_000_000_000n },
+      }),
+    ).slice(-1),
+    ["gasPrice"],
+  );
+  assert.equal(registrationIntent().schema, INTENT_SCHEMA);
+  assert.equal(registrationRecovery().schema, RECOVERY_SCHEMA);
+});
+
+test("keeps the intent and recovery checkpoint schemas exactly discriminated", async (t) => {
+  const invalidCheckpoints = [
+    { ...registrationIntent(), schema: RECOVERY_SCHEMA },
+    { ...registrationRecovery(), schema: INTENT_SCHEMA },
+    { ...registrationRecovery({ metadata: false }), schema: INTENT_SCHEMA },
+    {
+      ...registrationRecovery(),
+      schema: `${RECOVERY_SCHEMA.slice(0, -1)}2`,
+    },
+    { ...registrationIntent(), extra: true },
+    ...Object.keys(registrationIntent()).map((key) =>
+      withoutIntentKey(key),
+    ),
+    registrationIntent({ chainId: 1 }),
+    registrationIntent({ registryAddress: ADDRESS }),
+    registrationIntent({ registryNamespace: "eip155:1:wrong" }),
+    registrationIntent({ address: REGISTRY }),
+    registrationIntent({ displayName: "Iris" }),
+    registrationIntent({ registerNonce: 1 }),
+    registrationIntent({ registerNonce: "0" }),
+    registrationIntent({ registerCalldata: "0x1" }),
+    registrationIntent({ registerCalldata: "not-hex" }),
+    registrationIntent({ registerGas: "0" }),
+    registrationIntent({ registerGas: 226_000 }),
+    registrationIntent({ maxFeePerGas: "0" }),
+    registrationIntent({ maxPriorityFeePerGas: "3" }),
+    registrationIntent({ gasPrice: "3000000000" }),
+    {
+      ...registrationIntent({
+        transactionFields: { gasPrice: 3_000_000_000n },
+      }),
+      maxFeePerGas: "2",
+    },
+  ];
+
+  for (const checkpoint of invalidCheckpoints) {
+    const outputDirectory = await temporaryDirectory(t);
+    await writeCheckpointFile(outputDirectory, checkpoint);
+    const calls = [];
+    const adapters = createAdapters({
+      calls,
+      captured: {},
+      resumed: true,
+    });
+    adapters.registerIdentity = async () => {
+      calls.push("register");
+      return completedRegistration();
+    };
+
+    await assert.rejects(
+      () =>
+        runHandshake({
+          invitationFile: "/operator/invite.secret.json",
+          outputDirectory,
+          adapters,
+          now: clock(),
+          randomUUID: () => RUN_ID,
+        }),
+      (error) => {
+        assert.ok(error instanceof HandshakeStageError);
+        assert.equal(error.stage, "registration-recovery");
+        assert.equal(error.category, "configuration");
+        return true;
+      },
+      JSON.stringify(checkpoint),
+    );
+    assert.equal(calls.includes("register"), false);
+    assert.equal(calls.includes("finalize registration"), false);
+  }
+});
+
+test("refuses to persist a checkpoint that is neither an intent nor a recovery record", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const calls = [];
+  const adapters = createAdapters({ calls, captured: {} });
+  adapters.registerIdentity = async (options) => {
+    calls.push("register");
+    await options.onCheckpoint({
+      ...registrationIntent(),
+      schema: RECOVERY_SCHEMA,
+    });
+    return completedRegistration();
+  };
+
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters,
+        now: clock(),
+        randomUUID: () => RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "registration");
+      assert.equal(error.code, "HANDSHAKE_REGISTRATION_FAILED");
+      return true;
+    },
+  );
+  await assert.rejects(
+    () => stat(join(outputDirectory, RECOVERY_FILE)),
+    { code: "ENOENT" },
+  );
+});
+
 test("fails the resumed run when the public recovery file cannot be closed safely", async (t) => {
   const outputDirectory = await temporaryDirectory(t);
   await writeFile(
@@ -1029,7 +1457,12 @@ test("refuses a legacy PASS rerun before archiving evidence or touching adapters
       }),
     (error) => {
       assert.ok(error instanceof HandshakeStageError);
-      assert.equal(error.stage, "evidence");
+      assert.equal(error.stage, "output-directory");
+      assert.equal(error.category, "configuration");
+      assert.equal(
+        error.code,
+        "HANDSHAKE_OUTPUT_DIRECTORY_IN_USE",
+      );
       return true;
     },
   );
@@ -1094,7 +1527,11 @@ test("refuses canonical evidence created by a setup callback before evidence ini
       }),
     (error) => {
       assert.ok(error instanceof HandshakeStageError);
-      assert.equal(error.stage, "evidence");
+      assert.equal(error.stage, "output-directory");
+      assert.equal(
+        error.code,
+        "HANDSHAKE_OUTPUT_DIRECTORY_IN_USE",
+      );
       return true;
     },
   );
@@ -1142,7 +1579,11 @@ test("refuses non-regular canonical evidence entries before touching adapters", 
           }),
         (error) => {
           assert.ok(error instanceof HandshakeStageError);
-          assert.equal(error.stage, "evidence");
+          assert.equal(error.stage, "output-directory");
+          assert.equal(
+            error.code,
+            "HANDSHAKE_OUTPUT_DIRECTORY_IN_USE",
+          );
           return true;
         },
       );
@@ -1184,6 +1625,7 @@ test("refuses canonical evidence injected after initialization without publishin
     (error) => {
       assert.ok(error instanceof HandshakeStageError);
       assert.equal(error.stage, "evidence");
+      assert.equal(error.code, "HANDSHAKE_EVIDENCE_FAILED");
       return true;
     },
   );
@@ -1438,6 +1880,47 @@ test("proves the output directory writable before the registration write", async
   assert.equal(registrationWrites, 0);
 });
 
+test("reports an unusable output path as an operator configuration fault", async (t) => {
+  const parent = await temporaryDirectory(t);
+  const regularFile = join(parent, "not-a-directory");
+  await writeFile(regularFile, "", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  const sealedParent = join(parent, "sealed");
+  await mkdir(sealedParent, { mode: 0o700 });
+  const unreachable = join(sealedParent, "evidence");
+  await chmod(sealedParent, 0o000);
+  t.after(() => chmod(sealedParent, 0o700).catch(() => {}));
+
+  for (const outputDirectory of [regularFile, unreachable]) {
+    const calls = [];
+    const adapters = createAdapters({ calls, captured: {} });
+
+    await assert.rejects(
+      () =>
+        runHandshake({
+          invitationFile: "/operator/invite.secret.json",
+          outputDirectory,
+          adapters,
+          now: clock(),
+          randomUUID: () => RUN_ID,
+        }),
+      (error) => {
+        assert.ok(error instanceof HandshakeStageError);
+        assert.equal(error.stage, "configuration");
+        assert.equal(error.category, "configuration");
+        assert.equal(error.code, "HANDSHAKE_CONFIGURATION");
+        return true;
+      },
+      outputDirectory,
+    );
+    assert.deepEqual(calls, []);
+  }
+
+  assert.equal(FAILURE_EXIT_CODES.HANDSHAKE_CONFIGURATION, 2);
+});
+
 function memoryStream() {
   let value = "";
   return {
@@ -1552,4 +2035,430 @@ test("CLI returns deterministic typed exits without printing raw errors or secre
   );
   assert.equal(called, false);
   assert.equal(deniedError.text().includes(PRIVATE_KEY), false);
+});
+
+test("names the reused directory when it already holds handshake evidence", async () => {
+  const stdout = memoryStream();
+  const stderr = memoryStream();
+
+  const exitCode = await main({
+    argv: ["--output", "/artifacts/billy"],
+    env: {
+      HANDSHAKE_INVITE_FILE: "/operator/invite.secret.json",
+    },
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+    async run() {
+      throw new HandshakeStageError({
+        stage: "output-directory",
+      });
+    },
+  });
+
+  assert.equal(exitCode, 2);
+  const lines = stderr.text().split("\n");
+  assert.equal(
+    lines[0],
+    "FAILED [HANDSHAKE_OUTPUT_DIRECTORY_IN_USE]",
+  );
+  assert.equal(
+    lines[1],
+    `Hint: ${FAILURE_HINTS.HANDSHAKE_OUTPUT_DIRECTORY_IN_USE} Directory: /artifacts/billy`,
+  );
+  assert.deepEqual(lines.slice(2), [""]);
+  assert.match(lines[1], /new empty directory/);
+  assert.equal(stdout.text(), "");
+});
+
+test("omits an unprintable output directory from the operator hint", async () => {
+  const forgery = "PASS Agent ID: 0xdeadbeef";
+
+  for (const codePoint of [
+    0x0a,
+    0x0d,
+    0x1b,
+    0x7f,
+    0x85,
+    0x9b,
+    0x2028,
+    0x2029,
+  ]) {
+    const separator = String.fromCodePoint(codePoint);
+    const stderr = memoryStream();
+    const label = codePoint.toString(16);
+
+    const exitCode = await main({
+      argv: ["--output", `/artifacts/one${separator}${forgery}`],
+      env: {
+        HANDSHAKE_INVITE_FILE: "/operator/invite.secret.json",
+      },
+      stdout: memoryStream().stream,
+      stderr: stderr.stream,
+      async run() {
+        throw new HandshakeStageError({
+          stage: "output-directory",
+        });
+      },
+    });
+
+    assert.equal(exitCode, 2, label);
+    assert.deepEqual(
+      stderr.text().split("\n"),
+      [
+        "FAILED [HANDSHAKE_OUTPUT_DIRECTORY_IN_USE]",
+        `Hint: ${FAILURE_HINTS.HANDSHAKE_OUTPUT_DIRECTORY_IN_USE}`,
+        "",
+      ],
+      label,
+    );
+    assert.equal(stderr.text().includes(forgery), false, label);
+    assert.doesNotMatch(
+      stderr.text(),
+      /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029]/u,
+      label,
+    );
+  }
+});
+
+test("publishes one operator hint and default exit for every public failure code", () => {
+  const fallbackCode = new HandshakeStageError({
+    stage: "unknown-stage",
+  }).code;
+
+  assert.ok(HANDSHAKE_FAILURE_CODES.length >= 15);
+  assert.equal(
+    new Set(HANDSHAKE_FAILURE_CODES).size,
+    HANDSHAKE_FAILURE_CODES.length,
+  );
+  assert.equal(
+    HANDSHAKE_FAILURE_CODES.includes(fallbackCode),
+    true,
+  );
+  for (const code of HANDSHAKE_FAILURE_CODES) {
+    assert.match(code, /^HANDSHAKE_[A-Z0-9_]+$/);
+    assert.equal(
+      typeof HANDSHAKE_FAILURE_CATEGORIES[code],
+      "string",
+    );
+  }
+
+  assert.deepEqual(
+    Object.keys(FAILURE_HINTS).sort(),
+    [
+      ...HANDSHAKE_FAILURE_CODES,
+      "HANDSHAKE_UNEXPECTED_FAILURE",
+    ].sort(),
+  );
+  assert.deepEqual(
+    Object.keys(FAILURE_EXIT_CODES).sort(),
+    Object.keys(FAILURE_HINTS).sort(),
+  );
+  for (const [code, hint] of Object.entries(FAILURE_HINTS)) {
+    assert.equal(typeof hint, "string");
+    assert.ok(hint.length > 0);
+    assert.doesNotMatch(hint, /[\r\n]/);
+    assert.equal(
+      [2, 3, 4, 5].includes(FAILURE_EXIT_CODES[code]),
+      true,
+    );
+  }
+});
+
+test("prints the machine-readable failure line before a single operator hint", async () => {
+  const stdout = memoryStream();
+  const stderr = memoryStream();
+
+  const exitCode = await main({
+    argv: [],
+    env: {
+      HANDSHAKE_INVITE_FILE: "/operator/invite.secret.json",
+    },
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+    async run() {
+      throw new HandshakeStageError({
+        stage: "token-mint",
+        category: "network",
+        code: "HANDSHAKE_TOKEN_MINT_FAILED",
+      });
+    },
+  });
+
+  assert.equal(exitCode, 3);
+  assert.deepEqual(stderr.text().split("\n"), [
+    "FAILED [HANDSHAKE_TOKEN_MINT_FAILED]",
+    `Hint: ${FAILURE_HINTS.HANDSHAKE_TOKEN_MINT_FAILED}`,
+    "",
+  ]);
+  assert.equal(stdout.text(), "");
+});
+
+test("keeps a spaced forgery in the directory hint off stdout and off its own line", async () => {
+  const forgery = "PASS Agent ID: 0xdeadbeef";
+  const stdout = memoryStream();
+  const stderr = memoryStream();
+
+  const exitCode = await main({
+    argv: ["--output", `/tmp/${forgery}`],
+    env: {
+      HANDSHAKE_INVITE_FILE: "/operator/invite.secret.json",
+    },
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+    async run() {
+      throw new HandshakeStageError({
+        stage: "output-directory",
+      });
+    },
+  });
+
+  assert.equal(exitCode, 2);
+  // The real PASS marker is a standalone stdout line, so an operator-controlled
+  // directory label must never reach stdout or start a stderr line of its own.
+  assert.equal(stdout.text(), "");
+  const lines = stderr.text().split("\n");
+  assert.equal(lines.length, 3);
+  assert.equal(
+    lines[0],
+    "FAILED [HANDSHAKE_OUTPUT_DIRECTORY_IN_USE]",
+  );
+  assert.ok(lines[1].startsWith("Hint: "));
+  assert.deepEqual(lines.slice(2), [""]);
+  for (const line of lines) {
+    assert.equal(line.startsWith("PASS"), false);
+    assert.equal(line.startsWith("Agent ID:"), false);
+  }
+});
+
+test("refuses a fresh registration that broadcast without a pre-broadcast intent", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const calls = [];
+  const adapters = createAdapters({ calls, captured: {} });
+  adapters.registerIdentity = async (options) => {
+    calls.push("register");
+    assert.equal(Object.hasOwn(options, "intent"), false);
+    // A broadcast that never recorded the pre-broadcast intent is exactly the
+    // state the checkpoint contract exists to prevent.
+    await options.onCheckpoint(registrationRecovery());
+    return completedRegistration();
+  };
+
+  await assert.rejects(
+    () =>
+      runHandshake({
+        invitationFile: "/operator/invite.secret.json",
+        outputDirectory,
+        adapters,
+        now: clock(),
+        randomUUID: () => RUN_ID,
+      }),
+    (error) => {
+      assert.ok(error instanceof HandshakeStageError);
+      assert.equal(error.stage, "registration");
+      assert.equal(error.code, "HANDSHAKE_REGISTRATION_FAILED");
+      return true;
+    },
+  );
+  assert.equal(calls.includes("mint token"), false);
+  assert.deepEqual(
+    await readCheckpointFile(outputDirectory),
+    registrationRecovery(),
+  );
+  await assert.rejects(
+    () => stat(join(outputDirectory, "result.json")),
+    { code: "ENOENT" },
+  );
+});
+
+test("accepts one re-recorded intent when a resumed attempt never broadcast", async (t) => {
+  const outputDirectory = await temporaryDirectory(t);
+  const intent = registrationIntent();
+  await writeCheckpointFile(outputDirectory, intent);
+  const calls = [];
+  const captured = {};
+  const adapters = createAdapters({
+    calls,
+    captured,
+    resumed: true,
+  });
+  const repricedIntent = registrationIntent({
+    registerGas: "300000",
+  });
+  adapters.registerIdentity = async (options) => {
+    calls.push("register");
+    captured.registrationOptions = options;
+    // The prior attempt recorded an intent and never broadcast, so the wallet
+    // nonce is still zero and registerIdentity reprices and re-records one
+    // fresh pre-broadcast intent before it broadcasts.
+    await options.onCheckpoint(repricedIntent);
+    await options.onCheckpoint(registrationRecovery());
+    return completedRegistration();
+  };
+
+  const result = await runHandshake({
+    invitationFile: "/operator/invite.secret.json",
+    outputDirectory,
+    adapters,
+    now: clock(),
+    randomUUID: () => RUN_ID,
+  });
+
+  assert.equal(result.status, "PASS");
+  assert.deepEqual(captured.registrationOptions.intent, intent);
+  assert.equal(calls.includes("finalize registration"), false);
+  assert.deepEqual(
+    await readCheckpointFile(outputDirectory),
+    registrationRecovery(),
+  );
+});
+
+test("documents the receipt completion bound the transport actually enforces", async () => {
+  const [demo, mcpSource] = await Promise.all([
+    readFile(join(REPOSITORY_ROOT, "DEMO.md"), "utf8"),
+    readFile(join(REPOSITORY_ROOT, "src/mcp.mjs"), "utf8"),
+  ]);
+  const heading = "## Timing and bounded recovery";
+  const headingIndex = demo.indexOf(heading);
+  assert.notEqual(headingIndex, -1);
+  const timing = demo
+    .slice(headingIndex)
+    .split("\n## ")[0]
+    .replace(/\s+/g, " ");
+  assert.match(
+    timing,
+    /A healthy live run normally takes 30–90 seconds\./,
+  );
+
+  // The worst case for one bounded transport call, taken from the constants
+  // src/mcp.mjs actually enforces rather than from a repeated literal.
+  const transportWorstCaseMs =
+    declaredConstant(mcpSource, "DEFAULT_MAX_ATTEMPTS") *
+      declaredConstant(
+        mcpSource,
+        "DEFAULT_REQUEST_TIMEOUT_MS",
+      ) +
+    declaredConstant(mcpSource, "MAX_TOTAL_RETRY_WAIT_MS");
+  const documentedTransportMs = documentedMilliseconds(
+    timing,
+    /bounded transport call of at most ([\d.]+) seconds/,
+  );
+  assert.equal(documentedTransportMs, transportWorstCaseMs);
+
+  const pending = submittedReceipt();
+  const idleClient = {
+    async completeAttestation(receipt) {
+      return receipt;
+    },
+  };
+  const documentedDeadlineMs = documentedMilliseconds(
+    timing,
+    /elapsed-time budget of ([\d.]+) seconds/,
+  );
+
+  // The documented budget must be the ceiling completeReceipt enforces: one
+  // millisecond more is refused outright.
+  await assert.rejects(
+    () =>
+      completeReceipt(idleClient, pending, {
+        attempts: 1,
+        deadlineMs: documentedDeadlineMs + 1,
+        intervalMs: 0,
+        now: () => 0,
+        sleeper: async () => {},
+      }),
+    (error) => {
+      assert.ok(error instanceof McpConfigurationError);
+      return true;
+    },
+  );
+
+  // ... and it is also the default: with one whole budget consumed per poll,
+  // the deadline is crossed only at the top of the third iteration.
+  let polls = 0;
+  let elapsedMs = 0;
+  await assert.rejects(
+    () =>
+      completeReceipt(
+        {
+          async completeAttestation(receipt) {
+            polls += 1;
+            elapsedMs += documentedDeadlineMs;
+            return receipt;
+          },
+        },
+        pending,
+        {
+          attempts: 8,
+          intervalMs: 0,
+          now: () => elapsedMs,
+          sleeper: async () => {},
+        },
+      ),
+    (error) => {
+      assert.ok(error instanceof McpVerificationError);
+      assert.equal(error.code, "MCP_RECEIPT_DEADLINE");
+      return true;
+    },
+  );
+  assert.equal(polls, 2);
+
+  // The documented poll interval must be the default one too.
+  const delays = [];
+  const documentedIntervalMs = documentedMilliseconds(
+    timing,
+    /adds a ([\d.]+) second poll interval/,
+  );
+  await assert.rejects(
+    () =>
+      completeReceipt(idleClient, pending, {
+        attempts: 1,
+        now: () => 0,
+        sleeper: async (milliseconds) => {
+          delays.push(milliseconds);
+        },
+      }),
+    (error) => {
+      assert.ok(error instanceof McpVerificationError);
+      assert.equal(error.code, "MCP_RECEIPT_PENDING");
+      return true;
+    },
+  );
+  assert.deepEqual(delays, [documentedIntervalMs]);
+
+  const worstCaseMs =
+    documentedDeadlineMs +
+    documentedIntervalMs +
+    transportWorstCaseMs;
+  assert.equal(
+    documentedMilliseconds(
+      timing,
+      /bounded at ([\d.]+) seconds/,
+    ),
+    worstCaseMs,
+  );
+  assert.ok(
+    timing.includes(
+      `${Math.floor(worstCaseMs / 60_000)} minutes ${Math.floor(
+        (worstCaseMs % 60_000) / 1_000,
+      )} seconds`,
+    ),
+    "DEMO.md must state the worst case in minutes and seconds",
+  );
+
+  const documentedExit = timing.match(
+    /fails closed as `(HANDSHAKE_[A-Z_]+)` with exit `(\d+)`/,
+  );
+  assert.ok(documentedExit);
+  assert.equal(
+    documentedExit[1],
+    "HANDSHAKE_RECEIPT_COMPLETION_FAILED",
+  );
+  assert.equal(
+    Number(documentedExit[2]),
+    FAILURE_EXIT_CODES.HANDSHAKE_RECEIPT_COMPLETION_FAILED,
+  );
+  assert.match(
+    timing,
+    /Do not stop the process at 90 seconds/,
+  );
 });

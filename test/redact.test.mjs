@@ -3,7 +3,10 @@ import test from "node:test";
 
 import {
   SENSITIVE_KEY,
+  SecretMaterialDetectedError,
   assertSecretFree,
+  broadSecretAssignmentPattern,
+  highEntropySecretAssignmentPattern,
   redact,
 } from "../src/redact.mjs";
 
@@ -58,7 +61,8 @@ test("redacts exact canaries inside longer strings and detects unsanitized canar
   };
   const error = captureThrow(() => assertSecretFree(input, [canary]));
 
-  assert.match(error.message, /secret material detected/i);
+  assert.ok(error instanceof SecretMaterialDetectedError);
+  assert.equal(error.code, "SECRET_MATERIAL_DETECTED");
   assert.equal(error.message.includes(canary), false);
 
   const clean = redact(input, [canary]);
@@ -119,7 +123,8 @@ test("detects labeled private keys and bearer tokens without treating transactio
   };
   const error = captureThrow(() => assertSecretFree(input));
 
-  assert.match(error.message, /secret material detected/i);
+  assert.ok(error instanceof SecretMaterialDetectedError);
+  assert.equal(error.code, "SECRET_MATERIAL_DETECTED");
   assert.equal(error.message.includes(privateKey), false);
   assert.equal(error.message.includes(bearerToken), false);
 
@@ -142,7 +147,8 @@ test("detects standalone Clockchain cc_ tokens in whole and embedded strings", (
   };
   const error = captureThrow(() => assertSecretFree(input));
 
-  assert.match(error.message, /secret material detected/i);
+  assert.ok(error instanceof SecretMaterialDetectedError);
+  assert.equal(error.code, "SECRET_MATERIAL_DETECTED");
   assert.equal(error.message.includes(token), false);
 
   const clean = redact(input);
@@ -169,5 +175,154 @@ test("accepts a sanitized object without false positives", () => {
     message: "public Clockchain evidence",
   };
 
+  assert.doesNotThrow(() => assertSecretFree(value));
+});
+
+test("throws a typed error consumers can match without parsing the message", () => {
+  const error = captureThrow(() =>
+    assertSecretFree({ privateKey: "wallet-material" }));
+
+  // Deliberately no assertion on the wording: the typed error exists so that
+  // consumers stop matching on the message. Only the type, the code, and the
+  // absence of the offending value are contractual.
+  assert.ok(error instanceof SecretMaterialDetectedError);
+  assert.equal(error.name, "SecretMaterialDetectedError");
+  assert.equal(error.code, "SECRET_MATERIAL_DETECTED");
+  assert.equal(error.message.includes("wallet-material"), false);
+});
+
+test("owns the shared high-entropy secret-assignment pattern", () => {
+  for (const prose of [
+    "Minted a Clockchain token: mcp.clockchain.network",
+    "Clockchain token = minted successfully",
+    "Result: no secret: material was printed",
+    "- Authorization: 100 USD",
+    "invite code: none",
+    "token: see docs.handshake.example for details",
+  ]) {
+    assert.equal(
+      highEntropySecretAssignmentPattern().test(prose),
+      false,
+      prose,
+    );
+  }
+  for (const leak of [
+    'invitation_code: "aGlnaEVudHJvcHlDbGllbnRUb2tlblZhbHVl"',
+    `private_key=0x${"a".repeat(64)}`,
+    "ciphertext: 3f9a2b7c1d4e5f60718293a4b5c6d7e8",
+    '{"token":"aGlnaEVudHJvcHlDbGllbnRUb2tlblZhbHVl"}',
+  ]) {
+    assert.equal(
+      highEntropySecretAssignmentPattern().test(leak),
+      true,
+      leak,
+    );
+  }
+});
+
+test("owns a broad secret-assignment pattern for schema-generated documents", () => {
+  // Short values the high-entropy floor cannot see. These are exactly the
+  // assignments HEAD caught and the entropy floor stopped catching, and they
+  // are illegitimate in an exact-key allowlist document at any length.
+  for (const leak of [
+    "token: abc123",
+    "secret: hunter2xy",
+    "token=9f8e7d6c5b4a",
+    '"invitation_code": "x1"',
+    "ciphertext: q",
+  ]) {
+    assert.equal(
+      highEntropySecretAssignmentPattern().test(leak),
+      false,
+      leak,
+    );
+    assert.equal(
+      broadSecretAssignmentPattern().test(leak),
+      true,
+      leak,
+    );
+  }
+  // An already-sanitized document still passes, so redaction is not itself
+  // grounds for refusing a run.
+  for (const sanitized of [
+    'private_key: "[REDACTED]"',
+    '{"token":"[REDACTED]"}',
+    "secret: [REDACTED]",
+  ]) {
+    assert.equal(
+      broadSecretAssignmentPattern().test(sanitized),
+      false,
+      sanitized,
+    );
+  }
+  // Benign prose DOES trip the broad rule. That is why it is confined to the
+  // canonical schema artifacts and never applied to free-form logs.
+  assert.equal(
+    broadSecretAssignmentPattern().test(
+      "Result: no secret: material was printed",
+    ),
+    true,
+  );
+});
+
+test("redacts every segment of a JWT-shaped credential", () => {
+  const jwt =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" +
+    ".eyJzdWIiOiJoYW5kc2hha2UtZGVtbyIsImlhdCI6MTcwMDAwMDB9" +
+    ".c2lnbmF0dXJlU2VnbWVudFRoYXRNdXN0Tm90U3Vydml2ZQ";
+  const [header, payload, signature] = jwt.split(".");
+
+  const cleaned = `token: ${jwt}`.replace(
+    highEntropySecretAssignmentPattern("gi"),
+    "$1[REDACTED]",
+  );
+
+  assert.equal(cleaned, `token: ${REDACTED}`);
+  for (const segment of [header, payload, signature]) {
+    assert.equal(cleaned.includes(segment), false, segment);
+  }
+});
+
+test("redacts email addresses in strings and inside structures", () => {
+  const input = {
+    clientId: "codex.agent@handshake.example",
+    note: "peer record for Claude.Agent+demo@handshake.example arrived",
+    nested: ["contact: operator@sub.handshake.example"],
+    publicText: "no address here",
+  };
+
+  const clean = redact(input);
+
+  assert.equal(clean.clientId, REDACTED);
+  assert.equal(
+    clean.note,
+    `peer record for ${REDACTED} arrived`,
+  );
+  assert.equal(clean.nested[0], `contact: ${REDACTED}`);
+  assert.equal(clean.publicText, input.publicText);
+  assert.doesNotThrow(() => assertSecretFree(clean));
+});
+
+test("detects an email address as secret material", () => {
+  const error = captureThrow(() =>
+    assertSecretFree({
+      record: "walletId codex.agent@handshake.example",
+    }));
+
+  assert.ok(error instanceof SecretMaterialDetectedError);
+  assert.equal(
+    error.message.includes("codex.agent@handshake.example"),
+    false,
+  );
+});
+
+test("keeps non-email at-signs and versioned specifiers readable", () => {
+  const value = {
+    dependency: "@anthropic-ai/sdk@1.2.3",
+    handle: "ping @operator about the run",
+    path: "/tmp/handshake@demo/result.json",
+  };
+
+  assert.deepEqual(redact(value), value);
   assert.doesNotThrow(() => assertSecretFree(value));
 });

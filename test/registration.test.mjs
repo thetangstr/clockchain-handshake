@@ -43,6 +43,10 @@ const REGISTER_HASH = `0x${"33".repeat(32)}`;
 const METADATA_HASH = `0x${"44".repeat(32)}`;
 const RETRY_METADATA_HASH = `0x${"55".repeat(32)}`;
 const UNRELATED_HASH = `0x${"66".repeat(32)}`;
+const RECOVERY_SCHEMA =
+  "clockchain.handshake-registration-recovery/v1";
+const INTENT_SCHEMA =
+  "clockchain.handshake-registration-intent/v1";
 const PILOT_MINIMUM_BALANCE_WEI = 5_000_000_000_000_000n;
 const PILOT_MAXIMUM_BALANCE_WEI = 20_000_000_000_000_000n;
 const DESCRIPTION =
@@ -462,6 +466,82 @@ function expectedRecovery(overrides = {}) {
   }
 
   return recovery;
+}
+
+function expectedIntent(overrides = {}) {
+  return {
+    schema: "clockchain.handshake-registration-intent/v1",
+    chainId: 11_155_111,
+    registryAddress: REGISTRY_ADDRESS,
+    registryNamespace: REGISTRY_NAMESPACE,
+    address: DERIVED_ADDRESS,
+    displayName: "Billy",
+    registerNonce: 0,
+    registerCalldata: encodeFunctionData({
+      abi: ERC8004_ABI,
+      functionName: "register",
+      args: [initialRegistrationURI()],
+    }),
+    registerGas: "226000",
+    maxFeePerGas: "2",
+    maxPriorityFeePerGas: "1",
+    ...overrides,
+  };
+}
+
+function legacyIntent(overrides = {}) {
+  const {
+    maxFeePerGas: _maxFeePerGas,
+    maxPriorityFeePerGas: _maxPriorityFeePerGas,
+    ...intent
+  } = expectedIntent();
+
+  return { ...intent, gasPrice: "3000000000", ...overrides };
+}
+
+function withoutIntentKey(key) {
+  const intent = expectedIntent();
+  delete intent[key];
+  return intent;
+}
+
+async function broadcastRegistrationIntent(options = {}) {
+  const persisted = [];
+  const fake = createFakeClients({
+    registerWaitError: true,
+    ...options,
+  });
+  const { rawTransactions, walletClient } = createRealSigningWallet(fake);
+  const failure = await captureRejection(() =>
+    registerIdentity({
+      privateKey: PRIVATE_KEY,
+      expectedAddress: DERIVED_ADDRESS,
+      displayName: "Billy",
+      publicClient: fake.publicClient,
+      walletClient,
+      onCheckpoint: async (record) => {
+        persisted.push(structuredClone(record));
+      },
+    }),
+  );
+
+  assert.equal(rawTransactions.length, 1);
+  assert.equal(persisted.length, 1);
+
+  return {
+    broadcastHash: keccak256(rawTransactions[0]),
+    fake,
+    failure,
+    intent: structuredClone(persisted[0]),
+  };
+}
+
+function checkpointStage(checkpoint) {
+  if (checkpoint.schema.endsWith("-intent/v1")) {
+    return "intent";
+  }
+
+  return checkpoint.metadataTx ? "metadata" : "registration";
 }
 
 function assertPublicPartialError(error, expected) {
@@ -1326,8 +1406,10 @@ test("returns a secret-free public partial checkpoint for every post-registratio
     {
       name: "registration checkpoint callback",
       options: {},
-      onCheckpoint: async () => {
-        throw new Error(`Sensitive checkpoint failure ${PRIVATE_KEY}`);
+      onCheckpoint: async (checkpoint) => {
+        if (checkpointStage(checkpoint) === "registration") {
+          throw new Error(`Sensitive checkpoint failure ${PRIVATE_KEY}`);
+        }
       },
       expected: expectedRecovery(),
     },
@@ -1392,23 +1474,33 @@ test("returns a secret-free public partial checkpoint for every post-registratio
   }
 });
 
-test("checkpoints immediately after registration and after metadata submission", async () => {
+test("checkpoints before the register broadcast, after registration, and after metadata submission", async () => {
   const fake = createFakeClients();
   const checkpoints = [];
 
   await runWithFakeClients(fake, {
     onCheckpoint: async (checkpoint) => {
-      const stage = checkpoint.metadataTx ? "metadata" : "registration";
-      fake.state.calls.push({ name: `checkpoint:${stage}` });
+      fake.state.calls.push({
+        name: `checkpoint:${checkpointStage(checkpoint)}`,
+      });
       checkpoints.push(structuredClone(checkpoint));
     },
   });
 
   assert.deepEqual(checkpoints, [
+    expectedIntent(),
     expectedRecovery(),
     expectedRecovery({ metadataTx: METADATA_HASH }),
   ]);
   const names = fake.state.calls.map(({ name }) => name);
+  assert.ok(
+    names.indexOf("checkpoint:intent") < names.indexOf("write:register"),
+    "the intent record must be written before the register broadcast",
+  );
+  assert.ok(
+    names.indexOf("estimate:register") <
+      names.indexOf("checkpoint:intent"),
+  );
   assert.ok(
     names.indexOf("wait:register") <
       names.indexOf("checkpoint:registration"),
@@ -2298,5 +2390,540 @@ test("rejects missing transaction hashes and receipt evidence fields", async () 
     const error = await captureRejection(() => runWithFakeClients(fake));
 
     assertPublicPartialError(error, expected);
+  }
+});
+
+test("recovers a fresh registration whose receipt wait failed after broadcast", async () => {
+  const persisted = [];
+  const checkpointWriter = async (record) => {
+    persisted.push(structuredClone(record));
+  };
+  const firstFake = createFakeClients({ registerWaitError: true });
+  const { rawTransactions, walletClient } =
+    createRealSigningWallet(firstFake);
+  const failure = await captureRejection(() =>
+    registerIdentity({
+      privateKey: PRIVATE_KEY,
+      expectedAddress: DERIVED_ADDRESS,
+      displayName: "Billy",
+      publicClient: firstFake.publicClient,
+      walletClient,
+      onCheckpoint: checkpointWriter,
+    }),
+  );
+
+  assert.equal(rawTransactions.length, 1);
+  const broadcastHash = keccak256(rawTransactions[0]);
+  assert.ok(failure instanceof RegistrationNetworkError);
+  assertErrorOmits(failure, PRIVATE_KEY, "Sensitive receipt failure");
+  assert.equal(
+    failure.registerTx,
+    broadcastHash,
+    "the broadcast register hash must be surfaced for hand recovery",
+  );
+  assert.equal(
+    persisted.length,
+    1,
+    "a pre-broadcast intent record must survive a failed receipt wait",
+  );
+
+  const intent = structuredClone(persisted.at(-1));
+  const secondFake = createFakeClients({
+    registerHash: broadcastHash,
+    nonces: [1],
+  });
+  const evidence = await registerIdentity({
+    privateKey: PRIVATE_KEY,
+    expectedAddress: DERIVED_ADDRESS,
+    displayName: "Billy",
+    intent,
+    publicClient: secondFake.publicClient,
+    walletClient: secondFake.walletClient,
+    onCheckpoint: checkpointWriter,
+  });
+
+  assert.equal(evidence.registerTx, broadcastHash);
+  assert.equal(evidence.agentId, "42");
+  assert.equal(
+    secondFake.state.calls.some(({ name }) => name === "write:register"),
+    false,
+    "resuming from an intent record must never re-broadcast register",
+  );
+  assert.deepEqual(persisted.slice(1), [
+    expectedRecovery({ registerTx: broadcastHash }),
+    expectedRecovery({
+      metadataTx: METADATA_HASH,
+      registerTx: broadcastHash,
+    }),
+  ]);
+});
+
+test("surfaces the broadcast hash as failure evidence when the register receipt wait fails", async () => {
+  const checkpoints = [];
+  const fake = createFakeClients({ registerWaitError: true });
+  const error = await captureRejection(() =>
+    runWithFakeClients(fake, {
+      onCheckpoint: async (checkpoint) => {
+        checkpoints.push(structuredClone(checkpoint));
+      },
+    }),
+  );
+
+  assert.ok(error instanceof RegistrationNetworkError);
+  assert.equal(error.message, "Registration receipt wait failed.");
+  assert.equal(error.category, "network");
+  assert.equal(error instanceof PartialRegistrationError, false);
+  assert.equal(error.registerTx, REGISTER_HASH);
+  assert.equal(Object.hasOwn(error, "recovery"), false);
+  assert.equal(Object.hasOwn(error, "agentId"), false);
+  assert.equal(Object.hasOwn(error, "cause"), false);
+  assert.equal(
+    JSON.parse(JSON.stringify(error)).registerTx,
+    REGISTER_HASH,
+  );
+  assertErrorOmits(error, PRIVATE_KEY, "Sensitive receipt failure");
+  assert.deepEqual(checkpoints, [expectedIntent()]);
+  assert.deepEqual(
+    fake.state.calls.slice(-2).map(({ name }) => name),
+    ["write:register", "wait:register"],
+  );
+  assert.equal(
+    fake.state.calls.some(({ name }) => name === "write:setAgentURI"),
+    false,
+  );
+});
+
+test("refuses to broadcast when the pre-broadcast intent record cannot be recorded", async () => {
+  const fake = createFakeClients();
+  const error = await captureRejection(() =>
+    runWithFakeClients(fake, {
+      onCheckpoint: async () => {
+        throw new Error(`Sensitive checkpoint failure ${PRIVATE_KEY}`);
+      },
+    }),
+  );
+
+  assert.equal(error instanceof PartialRegistrationError, false);
+  assert.ok(error instanceof RegistrationConfigurationError);
+  assert.equal(error.category, "configuration");
+  assert.match(error.message, /intent record/i);
+  assert.equal(Object.hasOwn(error, "registerTx"), false);
+  assertErrorOmits(
+    error,
+    PRIVATE_KEY,
+    "Sensitive checkpoint failure",
+  );
+  assert.equal(
+    fake.state.calls.some(({ name }) => name.startsWith("write:")),
+    false,
+  );
+  assert.deepEqual(fake.state.calls.at(-1).name, "getBalance");
+});
+
+test("wraps a typed checkpoint failure before the pre-broadcast intent record", async () => {
+  for (const failure of [
+    () =>
+      new RegistrationConfigurationError(
+        `Sensitive checkpoint failure ${PRIVATE_KEY}`,
+      ),
+    () =>
+      new RegistrationNetworkError(
+        `Sensitive checkpoint failure ${PRIVATE_KEY}`,
+      ),
+  ]) {
+    const fake = createFakeClients();
+    const error = await captureRejection(() =>
+      runWithFakeClients(fake, {
+        onCheckpoint: async () => {
+          throw failure();
+        },
+      }),
+    );
+
+    assert.equal(error instanceof PartialRegistrationError, false);
+    assert.ok(error instanceof RegistrationConfigurationError);
+    assert.equal(error.category, "configuration");
+    assert.match(
+      error.message,
+      /intent record could not be recorded/i,
+    );
+    assertErrorOmits(
+      error,
+      PRIVATE_KEY,
+      "Sensitive checkpoint failure",
+    );
+    assert.equal(
+      fake.state.calls.some(({ name }) => name.startsWith("write:")),
+      false,
+    );
+  }
+});
+
+test("keeps the pre-broadcast intent record failure typed for a degenerate fee quote", async () => {
+  let reads = 0;
+  const poisonedQuote = {
+    get maxFeePerGas() {
+      reads += 1;
+      return reads > 4 ? 0n : 2n;
+    },
+    maxPriorityFeePerGas: 1n,
+  };
+  const fake = createFakeClients({ feeQuotes: [poisonedQuote] });
+  const error = await captureRejection(() =>
+    runWithFakeClients(fake),
+  );
+
+  assert.equal(error instanceof PartialRegistrationError, false);
+  assert.ok(error instanceof RegistrationConfigurationError);
+  assert.equal(error.category, "configuration");
+  assert.equal(error.code, "HANDSHAKE_REGISTRATION_CONFIGURATION");
+  assert.match(error.message, /intent record is invalid/i);
+  assert.equal(
+    fake.state.calls.some(({ name }) => name.startsWith("write:")),
+    false,
+  );
+});
+
+test("preserves the typed registration failure when the error cannot carry the transaction", async () => {
+  const sealedFailure = Object.preventExtensions(
+    new Error("Registration receipt status read failed."),
+  );
+  const fake = createFakeClients({
+    registerReceipt: {
+      get status() {
+        throw sealedFailure;
+      },
+      transactionHash: REGISTER_HASH,
+      blockNumber: 123_456n,
+      logs: [],
+    },
+  });
+  const error = await captureRejection(() =>
+    runWithFakeClients(fake),
+  );
+
+  assert.equal(error instanceof TypeError, false);
+  assert.equal(error, sealedFailure);
+  assert.equal(
+    error.message,
+    "Registration receipt status read failed.",
+  );
+  assert.equal(Object.hasOwn(error, "registerTx"), false);
+  assert.equal(
+    fake.state.calls.some(
+      ({ name }) => name === "write:setAgentURI",
+    ),
+    false,
+  );
+});
+
+test("resumes an intent record through a real wallet without signing a second register", async () => {
+  const { broadcastHash, intent } = await broadcastRegistrationIntent();
+  const fake = createFakeClients({
+    registerHash: broadcastHash,
+    nonces: [1],
+  });
+  const { rawTransactions, walletClient } = createRealSigningWallet(fake);
+  const evidence = await registerIdentity({
+    privateKey: PRIVATE_KEY,
+    expectedAddress: DERIVED_ADDRESS,
+    displayName: "Billy",
+    intent,
+    publicClient: fake.publicClient,
+    walletClient,
+  });
+
+  assert.equal(evidence.registerTx, broadcastHash);
+  assert.equal(rawTransactions.length, 1);
+  assert.deepEqual(
+    decodeFunctionData({
+      abi: ERC8004_ABI,
+      data: parseTransaction(rawTransactions[0]).data,
+    }).functionName,
+    "setAgentURI",
+  );
+  assert.equal(parseTransaction(rawTransactions[0]).nonce, 1);
+});
+
+test("recovers a legacy-priced registration intent without re-broadcasting", async () => {
+  const legacyFees = [{ gasPrice: 3_000_000_000n }];
+  const { broadcastHash, intent } = await broadcastRegistrationIntent({
+    feeQuotes: legacyFees,
+  });
+
+  assert.equal(intent.gasPrice, "3000000000");
+  assert.equal(Object.hasOwn(intent, "maxFeePerGas"), false);
+  assert.equal(Object.hasOwn(intent, "maxPriorityFeePerGas"), false);
+
+  const fake = createFakeClients({
+    feeQuotes: legacyFees,
+    registerHash: broadcastHash,
+    nonces: [1],
+  });
+  const evidence = await registerIdentity({
+    privateKey: PRIVATE_KEY,
+    expectedAddress: DERIVED_ADDRESS,
+    displayName: "Billy",
+    intent,
+    publicClient: fake.publicClient,
+    walletClient: fake.walletClient,
+  });
+
+  assert.equal(evidence.registerTx, broadcastHash);
+  assert.equal(
+    fake.state.calls.some(({ name }) => name === "write:register"),
+    false,
+  );
+});
+
+test("never re-broadcasts register when intent recovery cannot prove the transaction", async (t) => {
+  const { broadcastHash, intent } = await broadcastRegistrationIntent();
+  const scenarios = [
+    {
+      name: "transaction lookup failure",
+      options: { registerTransactionError: true },
+    },
+    {
+      name: "transaction sender mismatch",
+      options: {
+        registerTransactionOverrides: { from: FOREIGN_ADDRESS },
+      },
+    },
+    {
+      name: "transaction nonce mismatch",
+      options: { registerTransactionOverrides: { nonce: 1 } },
+    },
+    {
+      name: "unrelated calldata",
+      options: {
+        registerTransactionOverrides: {
+          input: encodeFunctionData({
+            abi: ERC8004_ABI,
+            functionName: "setAgentURI",
+            args: [42n, finalRegistrationURI()],
+          }),
+        },
+      },
+    },
+    {
+      name: "receipt wait failure",
+      options: { registerWaitError: true },
+    },
+    {
+      name: "reverted receipt",
+      options: { registerStatus: "reverted" },
+    },
+    {
+      name: "foreign registration event",
+      options: { eventMode: "foreign" },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const checkpoints = [];
+      const fake = createFakeClients({
+        registerHash: broadcastHash,
+        nonces: [1],
+        ...scenario.options,
+      });
+      const error = await captureRejection(() =>
+        registerIdentity({
+          privateKey: PRIVATE_KEY,
+          expectedAddress: DERIVED_ADDRESS,
+          displayName: "Billy",
+          intent,
+          publicClient: fake.publicClient,
+          walletClient: fake.walletClient,
+          onCheckpoint: async (checkpoint) => {
+            checkpoints.push(structuredClone(checkpoint));
+          },
+        }),
+      );
+
+      assert.equal(error instanceof PartialRegistrationError, false);
+      assert.equal(error.registerTx, broadcastHash);
+      assert.deepEqual(checkpoints, []);
+      assertErrorOmits(error, PRIVATE_KEY);
+      assert.equal(
+        fake.state.calls.some(({ name }) => name.startsWith("write:")),
+        false,
+      );
+    });
+  }
+});
+
+test("rejects an intent record whose calldata does not encode the invitation identity", async () => {
+  const fake = createFakeClients({ nonces: [1] });
+  const error = await captureRejection(() =>
+    registerIdentity({
+      privateKey: PRIVATE_KEY,
+      expectedAddress: DERIVED_ADDRESS,
+      displayName: "Billy",
+      intent: expectedIntent({
+        registerCalldata: encodeFunctionData({
+          abi: ERC8004_ABI,
+          functionName: "register",
+          args: [`${initialRegistrationURI()}-wrong`],
+        }),
+      }),
+      publicClient: fake.publicClient,
+      walletClient: fake.walletClient,
+    }),
+  );
+
+  assert.ok(error instanceof RegistrationConfigurationError);
+  assert.match(error.message, /intent calldata/i);
+  assert.equal(
+    fake.state.calls.some(({ name }) => name.startsWith("write:")),
+    false,
+  );
+  assert.equal(
+    fake.state.calls.some(({ name }) =>
+      name.startsWith("getTransaction:"),
+    ),
+    false,
+  );
+});
+
+test("re-records a fresh intent before broadcasting when the pending nonce is still zero", async () => {
+  const { intent } = await broadcastRegistrationIntent({
+    feeQuotes: [{ maxFeePerGas: 9n, maxPriorityFeePerGas: 4n }],
+  });
+  assert.equal(intent.maxFeePerGas, "9");
+
+  const checkpoints = [];
+  const fake = createFakeClients();
+  const evidence = await registerIdentity({
+    privateKey: PRIVATE_KEY,
+    expectedAddress: DERIVED_ADDRESS,
+    displayName: "Billy",
+    intent,
+    publicClient: fake.publicClient,
+    walletClient: fake.walletClient,
+    onCheckpoint: async (checkpoint) => {
+      checkpoints.push(structuredClone(checkpoint));
+    },
+  });
+
+  assert.equal(evidence.registerTx, REGISTER_HASH);
+  assert.deepEqual(checkpoints[0], expectedIntent());
+  assert.deepEqual(
+    checkpoints.map((checkpoint) => checkpointStage(checkpoint)),
+    ["intent", "registration", "metadata"],
+  );
+  assert.equal(
+    fake.state.calls.filter(({ name }) => name === "write:register")
+      .length,
+    1,
+  );
+});
+
+test("keeps the nonce gate absolute when no intent record is available", async () => {
+  for (const intent of [undefined, null]) {
+    const fake = createFakeClients({ nonce: 1 });
+    const error = await captureRejection(() =>
+      registerIdentity({
+        privateKey: PRIVATE_KEY,
+        expectedAddress: DERIVED_ADDRESS,
+        displayName: "Billy",
+        intent,
+        publicClient: fake.publicClient,
+        walletClient: fake.walletClient,
+      }),
+    );
+
+    assert.ok(error instanceof RegistrationConfigurationError);
+    assert.match(error.message, /nonce must be zero/i);
+    assert.deepEqual(
+      fake.state.calls.map(({ name }) => name),
+      [
+        "getChainId",
+        "getCode",
+        "read:getVersion",
+        "getTransactionCount",
+      ],
+    );
+  }
+});
+
+test("strictly validates the intent record schema before any RPC call", async () => {
+  const invalidIntents = [
+    { ...expectedIntent(), extra: true },
+    withoutIntentKey("registerGas"),
+    withoutIntentKey("registerCalldata"),
+    withoutIntentKey("maxPriorityFeePerGas"),
+    expectedIntent({ schema: RECOVERY_SCHEMA }),
+    expectedIntent({ chainId: 1 }),
+    expectedIntent({ registryAddress: FOREIGN_ADDRESS }),
+    expectedIntent({ registryNamespace: "eip155:1:wrong" }),
+    expectedIntent({ address: FOREIGN_ADDRESS }),
+    expectedIntent({ address: "not-an-address" }),
+    expectedIntent({ displayName: "Iris" }),
+    expectedIntent({ displayName: "" }),
+    expectedIntent({ registerNonce: 1 }),
+    expectedIntent({ registerNonce: "0" }),
+    expectedIntent({ registerNonce: 0n }),
+    expectedIntent({ registerCalldata: "0x1" }),
+    expectedIntent({ registerCalldata: "0x" }),
+    expectedIntent({ registerCalldata: "not-hex" }),
+    expectedIntent({ registerGas: "0" }),
+    expectedIntent({ registerGas: "0226000" }),
+    expectedIntent({ registerGas: 226_000 }),
+    expectedIntent({ registerGas: 226_000n }),
+    expectedIntent({ maxFeePerGas: "0" }),
+    expectedIntent({ maxFeePerGas: "0x2" }),
+    expectedIntent({ maxPriorityFeePerGas: "-1" }),
+    expectedIntent({ maxPriorityFeePerGas: "3" }),
+    expectedIntent({ gasPrice: "2" }),
+    { ...legacyIntent(), maxFeePerGas: "2" },
+    legacyIntent({ gasPrice: "0" }),
+    legacyIntent({ gasPrice: "02" }),
+    expectedRecovery(),
+    "intent",
+    42,
+    [],
+  ];
+
+  for (const intent of invalidIntents) {
+    const fake = createFakeClients();
+    const error = await captureRejection(() =>
+      registerIdentity({
+        privateKey: PRIVATE_KEY,
+        expectedAddress: DERIVED_ADDRESS,
+        displayName: "Billy",
+        intent,
+        publicClient: fake.publicClient,
+        walletClient: fake.walletClient,
+      }),
+    );
+
+    assert.equal(error instanceof PartialRegistrationError, false);
+    assert.match(error.message, /intent record is invalid/i);
+    assert.deepEqual(fake.state.calls, []);
+  }
+});
+
+test("keeps the full recovery checkpoint schema closed to intent records", async () => {
+  for (const recovery of [
+    expectedIntent(),
+    legacyIntent(),
+    { ...expectedRecovery(), schema: INTENT_SCHEMA },
+  ]) {
+    const fake = createFakeClients();
+    const error = await captureRejection(() =>
+      finalizeIdentityRegistration({
+        privateKey: PRIVATE_KEY,
+        expectedAddress: DERIVED_ADDRESS,
+        displayName: "Billy",
+        recovery,
+        publicClient: fake.publicClient,
+        walletClient: fake.walletClient,
+      }),
+    );
+
+    assert.equal(error instanceof PartialRegistrationError, false);
+    assert.match(error.message, /recovery checkpoint is invalid/i);
+    assert.deepEqual(fake.state.calls, []);
   }
 });

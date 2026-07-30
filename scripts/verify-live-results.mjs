@@ -58,7 +58,10 @@ import {
   registrationDataUri,
 } from "../src/registration.mjs";
 import {
+  SecretMaterialDetectedError,
   assertSecretFree,
+  broadSecretAssignmentPattern,
+  highEntropySecretAssignmentPattern,
 } from "../src/redact.mjs";
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
@@ -124,7 +127,18 @@ const DEFAULT_CLIENT_COMMANDS = Object.freeze({
   }),
 });
 const SECRET_ASSIGNMENT_PATTERN =
-  /(?:private.?key|secret|token|invite(?:ation)?.?code|ciphertext)\s*["']?\s*[:=]\s*(?!"?\[REDACTED\]"?)[^\s,;}]+/i;
+  highEntropySecretAssignmentPattern();
+const CANONICAL_SECRET_ASSIGNMENT_PATTERN =
+  broadSecretAssignmentPattern();
+// result.json and RESULT.md are rendered from an exact-key allowlist, so they
+// are held to the broad rule as well as the high-entropy one. Matched against
+// the scan-relative name, so only the two root entries loadLocalResult treats
+// as canonical qualify; a nested "sub/result.json" is an ordinary artifact
+// this pipeline never generated and stays on the high-entropy rule alone.
+const CANONICAL_ARTIFACT_NAMES = Object.freeze([
+  "result.json",
+  "RESULT.md",
+]);
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 
 class LiveVerificationConfigurationError extends Error {
@@ -274,11 +288,38 @@ function isWithin(root, candidate) {
   );
 }
 
-function assertArtifactText(text, canaries) {
-  assertSecretFree(text, canaries);
+// Two heuristics with two error codes, so an operator can tell a prose-safe
+// high-entropy hit from an illegitimate assignment in a generated document.
+//
+// Residual blind spot, stated plainly: a SHORT secret assignment in a
+// NON-canonical artifact ("token: abc123" in stdout.log) is not caught here.
+// The high-entropy floor that keeps agent narration from failing a healthy run
+// is exactly what hides it. Such a value is only caught when it is an operator
+// canary, a labelled private key, a bearer or cc_ token, or an address — the
+// known-shape checks inside assertSecretFree — or, for a .json artifact, when
+// it sits under a sensitive key visible after parsing.
+function assertArtifactText(text, canaries, canonical) {
+  try {
+    assertSecretFree(text, canaries);
+  } catch (error) {
+    if (error instanceof SecretMaterialDetectedError) {
+      throw new LiveVerificationError(
+        "ARTIFACT_SECRET_DETECTED",
+      );
+    }
+    throw error;
+  }
   if (SECRET_ASSIGNMENT_PATTERN.test(text)) {
     throw new LiveVerificationError(
-      "ARTIFACT_SECRET_DETECTED",
+      "ARTIFACT_SECRET_ASSIGNMENT_SUSPECTED",
+    );
+  }
+  if (
+    canonical &&
+    CANONICAL_SECRET_ASSIGNMENT_PATTERN.test(text)
+  ) {
+    throw new LiveVerificationError(
+      "CANONICAL_ARTIFACT_SECRET_ASSIGNMENT_SUSPECTED",
     );
   }
 }
@@ -518,8 +559,13 @@ async function scanArtifactDirectory(directory, canaries) {
       }
       totalBytes += file.size;
       const { text } = file;
+      const artifactName = relative(canonicalRoot, path);
       try {
-        assertArtifactText(text, canaries);
+        assertArtifactText(
+          text,
+          canaries,
+          CANONICAL_ARTIFACT_NAMES.includes(artifactName),
+        );
       } catch (error) {
         retainScanError(error);
       }
@@ -527,7 +573,7 @@ async function scanArtifactDirectory(directory, canaries) {
         try {
           assertSecretFree(JSON.parse(text), canaries);
         } catch (error) {
-          if (/Secret material detected/i.test(error?.message)) {
+          if (error instanceof SecretMaterialDetectedError) {
             retainScanError(
               new LiveVerificationError(
                 "ARTIFACT_SECRET_DETECTED",
@@ -536,7 +582,7 @@ async function scanArtifactDirectory(directory, canaries) {
           }
         }
       }
-      files.set(relative(canonicalRoot, path), file);
+      files.set(artifactName, file);
     }
   }
   return Object.freeze({
@@ -572,8 +618,27 @@ function loadLocalResult(directory, artifactScan, canaries) {
       "RESULT_MARKDOWN_MISMATCH",
     );
   }
-  assertSecretFree(result, canaries);
-  assertSecretFree(markdown, canaries);
+  // Defence in depth only, and unreachable today: scanArtifactDirectory
+  // already ran assertSecretFree over this exact markdown text and over
+  // JSON.parse of this exact result.json text, with the identical canary set,
+  // and loadLocalResult rethrows artifactScan.error above before reaching
+  // here. Instrumenting these two calls to log on throw produced zero hits
+  // across the whole acceptance-harness suite. No test can pin the branch
+  // while it stays unreachable; it is retained because it becomes the only
+  // guard the moment the scan stops covering a canonical file. The wrap keeps
+  // SecretMaterialDetectedError's own code out of the published verdict, so a
+  // client errorCode never leaves this verifier's vocabulary.
+  try {
+    assertSecretFree(result, canaries);
+    assertSecretFree(markdown, canaries);
+  } catch (error) {
+    if (error instanceof SecretMaterialDetectedError) {
+      throw new LiveVerificationError(
+        "ARTIFACT_SECRET_DETECTED",
+      );
+    }
+    throw error;
+  }
   return {
     directory,
     jsonPath,
@@ -590,16 +655,54 @@ function hasExactKeys(value, keys) {
   );
 }
 
+function isCanonicalTimestamp(value) {
+  return (
+    typeof value === "string" &&
+    RFC3339_PATTERN.test(value) &&
+    Number.isFinite(Date.parse(value)) &&
+    new Date(value).toISOString() === value
+  );
+}
+
 function timestampMilliseconds(value) {
-  if (
-    typeof value !== "string" ||
-    !RFC3339_PATTERN.test(value) ||
-    !Number.isFinite(Date.parse(value)) ||
-    new Date(value).toISOString() !== value
-  ) {
+  if (!isCanonicalTimestamp(value)) {
     throw new LiveVerificationConfigurationError();
   }
   return Date.parse(value);
+}
+
+function resultTimestampMilliseconds(value) {
+  if (!isCanonicalTimestamp(value)) {
+    throw new LiveVerificationError(
+      "RESULT_OUTSIDE_RUN_WINDOW",
+    );
+  }
+  return Date.parse(value);
+}
+
+// Establishes only that a result's self-reported timestamps fall inside the
+// window recorded by the manifest it shipped with, so a result cannot be
+// swapped in from a different run in the same artifact set. It does NOT make
+// the evidence replay-proof: the manifest's own startedAt/completedAt are
+// operator-chosen and bound to no external clock, and
+// clockchain.consensusTime is not bound to this window at all. An operator
+// who re-signs a manifest around old results still passes this check.
+function assertResultWithinRunWindow(result, window) {
+  const startedAt = resultTimestampMilliseconds(
+    result.startedAt,
+  );
+  const completedAt = resultTimestampMilliseconds(
+    result.completedAt,
+  );
+  if (
+    startedAt < window.started ||
+    completedAt < startedAt ||
+    completedAt > window.completed
+  ) {
+    throw new LiveVerificationError(
+      "RESULT_OUTSIDE_RUN_WINDOW",
+    );
+  }
 }
 
 function commandMatches(clientName, command) {
@@ -775,7 +878,7 @@ async function validateAcceptanceManifest({
   ) {
     throw new LiveVerificationConfigurationError();
   }
-  return manifest;
+  return Object.freeze({ manifest, windows: times });
 }
 
 export async function loadAcceptanceArtifactForTesting({
@@ -1327,11 +1430,12 @@ export async function verifyLiveResults({
     ...normalizedCanaries(canaries),
     ...operatorData.canaries,
   ]);
-  const manifest = await validateAcceptanceManifest({
-    directories,
-    expectedRepositorySha: activeRepositorySha,
-    manifestFile,
-  });
+  const { manifest, windows } =
+    await validateAcceptanceManifest({
+      directories,
+      expectedRepositorySha: activeRepositorySha,
+      manifestFile,
+    });
   const artifactScans = {};
   for (const name of CLIENT_NAMES) {
     try {
@@ -1367,6 +1471,10 @@ export async function verifyLiveResults({
         directories[name],
         artifactScans[name],
         activeCanaries,
+      );
+      assertResultWithinRunWindow(
+        localResult.result,
+        windows[name],
       );
       assertOperatorIdentity(
         localResult.result,

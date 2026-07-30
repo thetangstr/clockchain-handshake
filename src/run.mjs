@@ -53,6 +53,9 @@ const RECOVERY_FILE_NAME =
   ".handshake-registration-recovery.json";
 const RECOVERY_SCHEMA =
   "clockchain.handshake-registration-recovery/v1";
+const INTENT_SCHEMA =
+  "clockchain.handshake-registration-intent/v1";
+const REGISTER_NONCE = 0;
 const MAX_RECOVERY_BYTES = 16_384;
 const ATTESTATION_MARKER_FILE_NAME =
   ".handshake-attestation-started.json";
@@ -72,6 +75,7 @@ const UUID_PATTERN =
 const DECIMAL_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/i;
 const TRANSACTION_PATTERN = /^0x[0-9a-f]{64}$/i;
+const CALLDATA_PATTERN = /^0x(?:[0-9a-f]{2})+$/i;
 const EVENT_HASH_PATTERN = /^[0-9a-f]{64}$/i;
 const BASE_RECOVERY_KEYS = Object.freeze([
   "schema",
@@ -89,6 +93,26 @@ const METADATA_RECOVERY_KEYS = Object.freeze([
   ...BASE_RECOVERY_KEYS,
   "metadataTx",
   "metadataNonce",
+]);
+const BASE_INTENT_KEYS = Object.freeze([
+  "schema",
+  "chainId",
+  "registryAddress",
+  "registryNamespace",
+  "address",
+  "displayName",
+  "registerNonce",
+  "registerCalldata",
+  "registerGas",
+]);
+const DYNAMIC_FEE_INTENT_KEYS = Object.freeze([
+  ...BASE_INTENT_KEYS,
+  "maxFeePerGas",
+  "maxPriorityFeePerGas",
+]);
+const LEGACY_FEE_INTENT_KEYS = Object.freeze([
+  ...BASE_INTENT_KEYS,
+  "gasPrice",
 ]);
 const REGISTRATION_KEYS = Object.freeze([
   "chainId",
@@ -138,6 +162,12 @@ const STAGE_DEFINITIONS = Object.freeze({
     category: "configuration",
     code: "HANDSHAKE_CONFIGURATION",
     message: "Handshake configuration is invalid.",
+  },
+  "output-directory": {
+    category: "configuration",
+    code: "HANDSHAKE_OUTPUT_DIRECTORY_IN_USE",
+    message:
+      "Handshake output directory already holds evidence from an earlier run.",
   },
   "invitation-read": {
     category: "configuration",
@@ -205,6 +235,19 @@ const STAGE_DEFINITIONS = Object.freeze({
     message: "Handshake evidence validation or persistence failed.",
   },
 });
+const FALLBACK_STAGE_CODE = "HANDSHAKE_STAGE_FAILED";
+const FALLBACK_STAGE_CATEGORY = "protocol";
+export const HANDSHAKE_FAILURE_CATEGORIES = Object.freeze({
+  ...Object.fromEntries(
+    Object.values(STAGE_DEFINITIONS).map(
+      ({ category, code }) => [code, category],
+    ),
+  ),
+  [FALLBACK_STAGE_CODE]: FALLBACK_STAGE_CATEGORY,
+});
+export const HANDSHAKE_FAILURE_CODES = Object.freeze(
+  Object.keys(HANDSHAKE_FAILURE_CATEGORIES),
+);
 const DEFAULT_ADAPTERS = Object.freeze({
   readSecretInvitation,
   decryptInvitation,
@@ -232,17 +275,27 @@ class CheckpointError extends Error {
   }
 }
 
+class ExistingEvidenceError extends Error {
+  constructor(fileName) {
+    super(
+      `Handshake final evidence already exists: ${fileName}.`,
+    );
+    this.name = "ExistingEvidenceError";
+    this.fileName = fileName;
+  }
+}
+
 export class HandshakeStageError extends Error {
   constructor({ stage, category, code }) {
     const definition = STAGE_DEFINITIONS[stage];
     const safeCategory = CATEGORY_VALUES.has(category)
       ? category
-      : definition?.category ?? "protocol";
+      : definition?.category ?? FALLBACK_STAGE_CATEGORY;
     const safeCode =
       typeof code === "string" &&
       /^HANDSHAKE_[A-Z0-9_]+$/.test(code)
         ? code
-        : definition?.code ?? "HANDSHAKE_STAGE_FAILED";
+        : definition?.code ?? FALLBACK_STAGE_CODE;
 
     super(definition?.message ?? "Handshake stage failed.");
     this.name = "HandshakeStageError";
@@ -409,6 +462,61 @@ function createRunId(randomUUID) {
   return value;
 }
 
+function isDecimal(value) {
+  return typeof value === "string" && DECIMAL_PATTERN.test(value);
+}
+
+function isPositiveDecimal(value) {
+  return isDecimal(value) && value !== "0";
+}
+
+function isRegistrationIntentValue(value) {
+  return isPlainObject(value) && value.schema === INTENT_SCHEMA;
+}
+
+function validateIntentValue(
+  intent,
+  {
+    expectedAddress,
+    expectedDisplayName,
+    category = "protocol",
+  },
+) {
+  const hasLegacyFee =
+    isPlainObject(intent) && Object.hasOwn(intent, "gasPrice");
+  const keys = hasLegacyFee
+    ? LEGACY_FEE_INTENT_KEYS
+    : DYNAMIC_FEE_INTENT_KEYS;
+
+  if (
+    !hasExactKeys(intent, keys) ||
+    intent.schema !== INTENT_SCHEMA ||
+    intent.chainId !== CHAIN_ID ||
+    intent.registryAddress !== REGISTRY_ADDRESS ||
+    intent.registryNamespace !==
+      `eip155:${CHAIN_ID}:${REGISTRY_ADDRESS}` ||
+    !addressesEqual(intent.address, expectedAddress) ||
+    intent.displayName !== expectedDisplayName ||
+    typeof intent.displayName !== "string" ||
+    intent.displayName.trim().length === 0 ||
+    intent.displayName.length > 128 ||
+    intent.registerNonce !== REGISTER_NONCE ||
+    typeof intent.registerCalldata !== "string" ||
+    !CALLDATA_PATTERN.test(intent.registerCalldata) ||
+    !isPositiveDecimal(intent.registerGas) ||
+    (hasLegacyFee
+      ? !isPositiveDecimal(intent.gasPrice)
+      : !isPositiveDecimal(intent.maxFeePerGas) ||
+        !isDecimal(intent.maxPriorityFeePerGas) ||
+        BigInt(intent.maxPriorityFeePerGas) >
+          BigInt(intent.maxFeePerGas))
+  ) {
+    throw new CheckpointError(category);
+  }
+
+  return { ...intent };
+}
+
 function validateRecoveryValue(
   recovery,
   {
@@ -459,6 +567,12 @@ function validateRecoveryValue(
   return { ...recovery };
 }
 
+function validateCheckpointValue(checkpoint, options) {
+  return isRegistrationIntentValue(checkpoint)
+    ? validateIntentValue(checkpoint, options)
+    : validateRecoveryValue(checkpoint, options);
+}
+
 function sameFile(left, right) {
   return (
     left.dev === right.dev &&
@@ -505,7 +619,7 @@ async function readRecoveryCheckpoint({
     } catch {
       throw new CheckpointError("configuration");
     }
-    result = validateRecoveryValue(recovery, {
+    result = validateCheckpointValue(recovery, {
       expectedAddress,
       expectedDisplayName,
       category: "configuration",
@@ -540,7 +654,7 @@ async function persistRecoveryCheckpoint({
   expectedDisplayName,
   canaries,
 }) {
-  const validated = validateRecoveryValue(recovery, {
+  const validated = validateCheckpointValue(recovery, {
     expectedAddress,
     expectedDisplayName,
   });
@@ -574,7 +688,7 @@ async function persistRecoveryCheckpoint({
     } finally {
       await handle.close();
     }
-    const revalidated = validateRecoveryValue(persisted, {
+    const revalidated = validateCheckpointValue(persisted, {
       expectedAddress,
       expectedDisplayName,
     });
@@ -637,8 +751,19 @@ async function assertFinalEvidenceAbsent(outputDirectory) {
       }
       throw error;
     }
-    throw new Error(
-      `Handshake final evidence already exists: ${fileName}.`,
+    throw new ExistingEvidenceError(fileName);
+  }
+}
+
+async function assertOutputDirectoryUnused(outputDirectory) {
+  try {
+    await assertFinalEvidenceAbsent(outputDirectory);
+  } catch (error) {
+    throw stageError(
+      error instanceof ExistingEvidenceError
+        ? "output-directory"
+        : "configuration",
+      error,
     );
   }
 }
@@ -876,40 +1001,65 @@ async function completeRegistration({
       canaries,
     });
 
+  const resumedIntent = isRegistrationIntentValue(checkpoint)
+    ? checkpoint
+    : null;
+
   if (checkpoint) {
     await report(
       activeAdapters,
       "registration-recovery-loaded",
     );
-    try {
-      return await activeAdapters.finalizeIdentityRegistration({
-        privateKey: decrypted.privateKey,
-        expectedAddress: decrypted.address,
-        displayName: decrypted.displayName,
-        recovery: checkpoint,
-        onCheckpoint: checkpointWriter,
-      });
-    } catch (error) {
-      if (error instanceof PartialRegistrationError) {
-        throw error;
+
+    if (resumedIntent === null) {
+      try {
+        return await activeAdapters.finalizeIdentityRegistration({
+          privateKey: decrypted.privateKey,
+          expectedAddress: decrypted.address,
+          displayName: decrypted.displayName,
+          recovery: checkpoint,
+          onCheckpoint: checkpointWriter,
+        });
+      } catch (error) {
+        if (error instanceof PartialRegistrationError) {
+          throw error;
+        }
+        throw stageError("registration", error);
       }
-      throw stageError("registration", error);
     }
   }
 
-  let checkpointWrites = 0;
-  const requiredCheckpointWriter = async (recovery) => {
-    await checkpointWriter(recovery);
-    checkpointWrites += 1;
+  let intentWrites = 0;
+  let recoveryWrites = 0;
+  const requiredCheckpointWriter = async (record) => {
+    await checkpointWriter(record);
+    if (isRegistrationIntentValue(record)) {
+      intentWrites += 1;
+      return;
+    }
+    recoveryWrites += 1;
   };
   try {
     const registration = await activeAdapters.registerIdentity({
       privateKey: decrypted.privateKey,
       expectedAddress: decrypted.address,
       displayName: decrypted.displayName,
+      ...(resumedIntent === null
+        ? {}
+        : { intent: resumedIntent }),
       onCheckpoint: requiredCheckpointWriter,
     });
-    if (checkpointWrites === 0) {
+    // A fresh registration must record exactly one pre-broadcast intent before
+    // it broadcasts, so the boundary asserts that here and not only inside the
+    // registration module. A resumed intent may legitimately be re-recorded
+    // once when the prior attempt never broadcast and the wallet nonce is still
+    // zero, so the resume path allows zero or one and never more.
+    const minimumIntentWrites = resumedIntent === null ? 1 : 0;
+    if (
+      recoveryWrites === 0 ||
+      intentWrites > 1 ||
+      intentWrites < minimumIntentWrites
+    ) {
       throw stageError("registration");
     }
     return registration;
@@ -961,11 +1111,9 @@ export async function runHandshake({
     now,
     randomUUID,
   });
+  await assertOutputDirectoryUnused(outputDirectory);
   await invokeStage("attestation", () =>
     assertAttestationNotStarted(outputDirectory),
-  );
-  await invokeStage("evidence", () =>
-    assertFinalEvidenceAbsent(outputDirectory),
   );
   const started = readClock(now);
   const runId = createRunId(randomUUID);
@@ -973,9 +1121,7 @@ export async function runHandshake({
   await invokeStage("evidence", () =>
     prepareOutputDirectory(outputDirectory),
   );
-  await invokeStage("evidence", () =>
-    assertFinalEvidenceAbsent(outputDirectory),
-  );
+  await assertOutputDirectoryUnused(outputDirectory);
   await invokeStage("evidence", () =>
     activeAdapters.beginEvidenceAttempt({
       directory: outputDirectory,
