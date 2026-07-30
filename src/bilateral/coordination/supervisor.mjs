@@ -37,6 +37,15 @@ const INTAKE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f
 const PAYER_MCP_INTAKE_RECORD_KEYS = ["digest", "intakeDigest", "intakeRequestId", "paymentMoved", "policy", "repositorySha", "request", "requestDigest", "response", "responseDigest", "schema"];
 
 function invalid() { throw new Error("Coordination supervisor operation failed safely."); }
+function partyCompletionStatus(role) {
+  if (!["payer", "payee"].includes(role)) invalid();
+  return Object.freeze({
+    paymentMoved: false,
+    role,
+    state: role === "payer" ? "ACKNOWLEDGED" : "ACCEPTED",
+    status: "PARTY_COMPLETE",
+  });
+}
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const same = (left, right) => isDeepStrictEqual(left, right);
 function exact(value, keys) { return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key)); }
@@ -891,7 +900,11 @@ export async function runSupervisor(input) {
       const persist = async (phase) => {
         if (typeof dependencies.writeState === "function") await dependencies.writeState(checkpoint(phase));
       };
-      if (["COMPLETE", "ABORTED"].includes(replay.view.state)) return Object.freeze({ ...replay, processedEventDigests: Object.freeze([...processed]) });
+      if (replay.view.state === "COMPLETE") {
+        if (typeof dependencies.writeStatus === "function") dependencies.writeStatus(partyCompletionStatus(localState.role));
+        return Object.freeze({ ...replay, processedEventDigests: Object.freeze([...processed]) });
+      }
+      if (replay.view.state === "ABORTED") return Object.freeze({ ...replay, processedEventDigests: Object.freeze([...processed]) });
       const own = (kind) => replay.events.some((entry) => entry.role === localState.role && entry.kind === kind && entry.subjectRun === "release");
       if (!own("ENROLLMENT_CONFIRMED") && typeof client.appendEvent === "function") {
         await persist("ENROLLMENT_CONFIRMING");

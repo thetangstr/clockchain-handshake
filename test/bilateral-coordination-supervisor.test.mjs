@@ -1954,7 +1954,54 @@ test("waits for peer enrollment readiness before the authoritative enrollment se
     { paymentMoved: false, role: "payer", status: "WAITING_FOR_PEER" },
     { paymentMoved: false, role: "payer", status: "PEER_READY" },
   ]);
+  assert.equal(status.some((value) => value.status === "PARTY_COMPLETE"), false);
   assert.equal(result.view.state, "BOOTSTRAPPING");
+});
+
+test("does not emit party completion for an authenticated terminal failure replay", async () => {
+  const fixture = replayFixture();
+  const parsedEnrollmentSet = parseCoordinationEnrollmentSet(fixture.set);
+  const failure = createCoordinationEnvelope({
+    artifactDigest: "f".repeat(64),
+    kind: "TERMINAL_FAILURE",
+    paymentMoved: false,
+    previousEventDigest: fixture.events[0].eventDigest,
+    privateKeyPem: pem(fixture.payer),
+    publicKey: raw(fixture.payer),
+    publicKeyId: "payer-coordination",
+    releaseId: fixture.release,
+    repositorySha: fixture.repo,
+    role: "payer",
+    schema: "clockchain.bilateral-coordination-event/v1",
+    sequence: "1",
+    sessionId: fixture.session,
+    subjectRun: "rehearsal",
+  });
+  const status = [];
+  const result = await runSupervisor({
+    client: {
+      readEnrollmentReadiness: immediateEnrollmentReadiness(fixture),
+      async readEnrollmentSet() { return parsedEnrollmentSet; },
+      async readEvents(value) {
+        assert.deepEqual(value, { after: null, waitMs: 30000 });
+        return [...fixture.events, failure];
+      },
+    },
+    dependencies: {
+      shouldContinue() { return false; },
+      writeStatus(value) { status.push(value); },
+      verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
+    },
+    localState: {
+      operatorPublicKey: raw(fixture.operator),
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      role: "payer",
+      sessionId: fixture.session,
+    },
+  });
+  assert.equal(result.view.state, "ABORTED");
+  assert.equal(status.some((value) => value.status === "PARTY_COMPLETE"), false);
 });
 
 test("starts Payer MCP after active bootstrap before enrollment readiness and stops it on return", async () => {
@@ -2015,6 +2062,7 @@ test("starts Payer MCP after active bootstrap before enrollment readiness and st
 test("stops Payer MCP when readiness polling fails after listener start", async () => {
   const fixture = replayFixture();
   const calls = [];
+  const status = [];
   await assert.rejects(runSupervisor({
     client: {
       async readEnrollmentReadiness() {
@@ -2032,6 +2080,9 @@ test("stops Payer MCP when readiness polling fails after listener start", async 
       async stopPayerMcpServer() {
         calls.push("mcp-stop");
       },
+      writeStatus(value) {
+        status.push(value);
+      },
       verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
     },
     localState: {
@@ -2044,6 +2095,8 @@ test("stops Payer MCP when readiness polling fails after listener start", async 
     },
   }));
   assert.deepEqual(calls, ["mcp-start", "readiness", "mcp-stop"]);
+  assert.deepEqual(status, [{ paymentMoved: false, role: "payer", status: "PAYER_MCP_READY", url: "https://127.0.0.1:9443/mcp" }]);
+  assert.equal(status.some((value) => value.status === "PARTY_COMPLETE"), false);
 });
 
 test("drives the authenticated startup through a token commitment without replacing its checkpoint", async () => {

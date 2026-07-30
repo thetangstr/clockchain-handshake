@@ -13,6 +13,8 @@ import { transitionDigest } from "../src/bilateral/messages.mjs";
 import { sessionKey } from "../src/bilateral/refid.mjs";
 import { createFakeBilateralClockchainHttpClient } from "./helpers/fake-bilateral-clockchain-service.mjs";
 import { COORDINATOR_CLI_FLAGS } from "../src/bilateral/coordination/coordinator-runtime.mjs";
+import { runSupervisor } from "../src/bilateral/coordination/supervisor.mjs";
+import { createProductionSupervisorDependencies, createSupervisorStatusLine } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { decryptInvitation } from "../src/invitation.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -545,6 +547,52 @@ test("one long-lived Payer and Requestor span rehearsal and stakeholder with two
     { code: 0, signal: null },
     `${coordinatorExit.stderr}\n${roleDiagnostics.join("\n")}\n${session.relay.output().stderr}`,
   );
+  const fixedClockEnvironment = {
+    ...process.env,
+    CLOCKCHAIN_BILATERAL_TEST_CLOCK_MS: String(SHARED_TEST_CLOCK_MS),
+    NODE_OPTIONS: [
+      process.env.NODE_OPTIONS,
+      `--import=${join(ROOT, "test/helpers/bilateral-fixed-clock.mjs")}`,
+    ].filter(Boolean).join(" "),
+  };
+  const coordinatorConfig = JSON.parse(await readFile(session.configurations.coordinator, "utf8"));
+  const completionCoordinator = await command(process.execPath, [
+    "bin/handshake-coordinator.mjs",
+    ...coordinatorConfig.arguments,
+  ], { cwd: session.clone, env: fixedClockEnvironment });
+  assert.equal(completionCoordinator.stdout.includes(AUTHORIZE), false);
+  assert.equal(completionCoordinator.stderr, "");
+  for (const role of ["payer", "payee"]) {
+    const roleConfig = JSON.parse(await readFile(session.configurations[role], "utf8"));
+    const completionStdout = [];
+    const productionDependencies = await createProductionSupervisorDependencies({
+      launchManifestPath: roleConfig.launchManifestPath,
+      repositoryRoot: session.clone,
+      sepoliaRpc: async () => "0x0",
+      stateRoot: roleConfig.stateRoot,
+    });
+    const checkpoint = await productionDependencies.readState(roleConfig.stateRoot);
+    const activeLaunchState = await productionDependencies.validateActiveLaunchState(checkpoint.activeLaunchState);
+    const transport = await productionDependencies.createTransport(activeLaunchState);
+    const client = await productionDependencies.createResumedCoordinationClient({
+      activeLaunchState,
+      coordinationIdentity: checkpoint.coordinationIdentity,
+      senderState: checkpoint.senderState,
+      transport,
+    });
+    await runSupervisor({
+      client,
+      dependencies: {
+        ...productionDependencies,
+        writeStatus(value) { completionStdout.push(createSupervisorStatusLine(value)); },
+      },
+      localState: {
+        ...checkpoint,
+        operatorPublicKey: await productionDependencies.resolveOperatorPublicKey(activeLaunchState),
+      },
+    });
+    await writeFile(session.logs[role].stdout, completionStdout.join(""), { flag: "a", mode: 0o600 });
+  }
   const snapshot = JSON.parse(await readFile(session.fakeState, "utf8"));
   const payerResult = JSON.parse(await readFile(join(session.outputs.payer, "party-result.json"), "utf8"));
   const payeeResult = JSON.parse(await readFile(join(session.outputs.payee, "party-result.json"), "utf8"));
@@ -746,8 +794,8 @@ test("one long-lived Payer and Requestor span rehearsal and stakeholder with two
   assert.equal(payerStdoutLines.filter((line) => line.status === "PAYER_MCP_READY").length, 1);
   assert.equal(payeeStdoutLines.filter((line) => line.status === "HANDSHAKE_REQUIRED").length, 1);
   assert.equal(payeeStdoutLines.filter((line) => line.status === "REQUESTOR_SUPERVISOR_START").length, 1);
-  assert.equal(payerStdoutLines.filter((line) => line.state === "ACKNOWLEDGED").length, 2);
-  assert.equal(payeeStdoutLines.filter((line) => line.state === "ACCEPTED").length, 2);
+  assert.equal(payerStdoutLines.filter((line) => line.state === "ACKNOWLEDGED" && line.status !== "PARTY_COMPLETE").length, 2);
+  assert.equal(payeeStdoutLines.filter((line) => line.state === "ACCEPTED" && line.status !== "PARTY_COMPLETE").length, 2);
   assert.equal(payerCli.state, "ACKNOWLEDGED");
   assert.equal(payeeCli.state, "ACCEPTED");
   const payerIntakeRecord = JSON.parse(await readFile(join(session.roleRoots.payer, "payer-mcp-intake", `${PAYER_MCP_INTAKE_REQUEST_ID}.json`), "utf8"));
@@ -848,6 +896,20 @@ test("one long-lived Payer and Requestor span rehearsal and stakeholder with two
   for (const log of Object.values(namedLogs)) {
     assert.equal(log.stdout.includes(AUTHORIZE), false);
     assert.equal(log.stderr.includes(AUTHORIZE), false);
+  }
+  const payerStatusLines = parseJsonLines(namedLogs.payer.stdout);
+  const payeeStatusLines = parseJsonLines(namedLogs.payee.stdout);
+  assert.deepEqual(
+    payerStatusLines.filter((line) => line.status === "PARTY_COMPLETE"),
+    [{ paymentMoved: false, role: "payer", state: "ACKNOWLEDGED", status: "PARTY_COMPLETE" }],
+  );
+  assert.deepEqual(
+    payeeStatusLines.filter((line) => line.status === "PARTY_COMPLETE"),
+    [{ paymentMoved: false, role: "payee", state: "ACCEPTED", status: "PARTY_COMPLETE" }],
+  );
+  for (const line of [...payerStatusLines, ...payeeStatusLines]) {
+    assert.notEqual(line.state, AUTHORIZE);
+    assert.notEqual(line.status, AUTHORIZE);
   }
   const fundingLines = coordinatorExit.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter(({ schema }) => schema === "clockchain.bilateral-funding-addresses/v1");
   assert.equal(fundingLines.length, 1);
