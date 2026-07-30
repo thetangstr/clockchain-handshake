@@ -14,6 +14,7 @@ import { payerMandateDigest, signPayerMandate } from "../src/bilateral/payer-man
 import { paymentRequestDigest, signPaymentRequest } from "../src/bilateral/payment-request.mjs";
 import { DEMO_INTENT_POLICY } from "../src/bilateral/demo-intent-policy.mjs";
 import { buildPaymentIntakeToolResult, intakeDigest } from "../src/bilateral/local-mcp/payment-intake.mjs";
+import { PREFLIGHT_KEY_ENROLLMENT_SCHEMA, PREFLIGHT_KEY_ENROLLMENT_SIGNATURE_DOMAIN } from "../src/bilateral/coordination/preflight.mjs";
 
 import {
   SUPERVISOR_COMMAND_POLICY,
@@ -27,6 +28,13 @@ import {
 import { createSupervisorLauncher } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+function preflightKeyEnrollmentSignaturePreimage(value) {
+  return Buffer.concat([Buffer.from(PREFLIGHT_KEY_ENROLLMENT_SIGNATURE_DOMAIN, "ascii"), Buffer.from(sha256(canonicalBytes(value)), "ascii")]);
+}
+function signedPreflightArtifact(pair, repositorySha, role) {
+  const unsigned = { algorithm: "ed25519", paymentMoved: false, publicKey: raw(pair), repositorySha, role, schema: PREFLIGHT_KEY_ENROLLMENT_SCHEMA };
+  return { ...unsigned, signature: sign(null, preflightKeyEnrollmentSignaturePreimage(unsigned), pair.privateKey).toString("base64") };
+}
 function deterministicRequestId(sessionId, subjectRun) {
   const digest = sha256(Buffer.from(`${sessionId}:${subjectRun}`, "utf8"));
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
@@ -35,14 +43,14 @@ const raw = (pair) => pair.publicKey.export({ format: "der", type: "spki" }).sub
 const pem = (pair) => pair.privateKey.export({ format: "pem", type: "pkcs8" });
 const independentlyVerifiedEnrollmentSet = async ({ enrollmentSet }) => enrollmentSet;
 function replayFixture({ payerInvitationAddress = `0x${"1".repeat(40)}`, payeeInvitationAddress = `0x${"3".repeat(40)}` } = {}) {
-  const payer = generateKeyPairSync("ed25519"), payee = generateKeyPairSync("ed25519"), operator = generateKeyPairSync("ed25519");
+  const payer = generateKeyPairSync("ed25519"), payee = generateKeyPairSync("ed25519"), operator = generateKeyPairSync("ed25519"), payerPreflight = generateKeyPairSync("ed25519"), payeePreflight = generateKeyPairSync("ed25519");
   const repo = "a".repeat(40), session = "8f953393-86d0-4f99-9d6a-102f525fbecd", release = "release-a";
-  const enrollment = (role, pair, address) => { const value = { capabilityDigest: sha256(role), coordinationKey: { algorithm: "ed25519", keyId: `${role}-coordination`, publicKey: raw(pair) }, invitations: { rehearsal: { address, algorithm: "eip191", signature: `0x${"0".repeat(130)}` }, stakeholder: { address: `0x${(role === "payer" ? "2" : "4").repeat(40)}`, algorithm: "eip191", signature: `0x${"0".repeat(130)}` } }, paymentMoved: false, preflightKey: { algorithm: "ed25519", keyId: `${role}-preflight`, publicKey: raw(generateKeyPairSync("ed25519")) }, releaseId: release, repositorySha: repo, role, schema: "clockchain.bilateral-coordination-enrollment/v1", sessionId: session }; return { ...value, signature: sign(null, coordinationEnrollmentSignaturePreimage(value), pair.privateKey).toString("base64") }; };
-  const payerEnrollment = enrollment("payer", payer, payerInvitationAddress), payeeEnrollment = enrollment("payee", payee, payeeInvitationAddress);
+  const enrollment = (role, pair, preflight, address) => { const value = { capabilityDigest: sha256(role), coordinationKey: { algorithm: "ed25519", keyId: `${role}-coordination`, publicKey: raw(pair) }, invitations: { rehearsal: { address, algorithm: "eip191", signature: `0x${"0".repeat(130)}` }, stakeholder: { address: `0x${(role === "payer" ? "2" : "4").repeat(40)}`, algorithm: "eip191", signature: `0x${"0".repeat(130)}` } }, paymentMoved: false, preflightKey: { algorithm: "ed25519", keyId: `${role}-preflight`, publicKey: raw(preflight) }, releaseId: release, repositorySha: repo, role, schema: "clockchain.bilateral-coordination-enrollment/v1", sessionId: session }; return { ...value, signature: sign(null, coordinationEnrollmentSignaturePreimage(value), pair.privateKey).toString("base64") }; };
+  const payerEnrollment = enrollment("payer", payer, payerPreflight, payerInvitationAddress), payeeEnrollment = enrollment("payee", payee, payeePreflight, payeeInvitationAddress);
   const entry = (value) => { const bytes = canonicalBytes(value); return { enrollmentBase64: bytes.toString("base64"), enrollmentDigest: sha256(bytes), receiptBase64: Buffer.from("{}").toString("base64") }; };
   const set = Buffer.from(JSON.stringify(canonicalizeReceiptEventValue({ enrollments: { payer: entry(payerEnrollment), payee: entry(payeeEnrollment) }, paymentMoved: false, releaseId: release, repositorySha: repo, schema: "clockchain.bilateral-coordination-enrollment-set/v1", sessionId: session })), "utf8");
   const event = (role, kind, pair) => createCoordinationEnvelope({ artifactDigest: null, kind, paymentMoved: false, previousEventDigest: null, privateKeyPem: pem(pair), publicKey: raw(pair), publicKeyId: role === "operator" ? "operator" : `${role}-coordination`, releaseId: release, repositorySha: repo, role, schema: "clockchain.bilateral-coordination-event/v1", sequence: "0", sessionId: session, subjectRun: "release" });
-  return { events: [event("payer", "ENROLLMENT_CONFIRMED", payer), event("payee", "ENROLLMENT_CONFIRMED", payee), event("operator", "ENROLLMENT_RECEIPT", operator)], operator, payee, payer, release, repo, session, set };
+  return { events: [event("payer", "ENROLLMENT_CONFIRMED", payer), event("payee", "ENROLLMENT_CONFIRMED", payee), event("operator", "ENROLLMENT_RECEIPT", operator)], operator, payee, payeePreflight, payer, payerPreflight, release, repo, session, set };
 }
 
 function immediateEnrollmentReadiness(fixture) {
@@ -2163,7 +2171,7 @@ test("resumes only through a replay-derived resumed coordination client", async 
   let resumed = 0;
   const payerEnrollment = parseCoordinationEnrollmentSet(fixture.set).enrollments.payer;
   const payer = verifyCoordinationEnrollment(JSON.parse(Buffer.from(payerEnrollment.enrollmentBase64, "base64").toString("utf8")));
-  let checkpoint = { activeLaunchState: { capabilityDigest: payer.capabilityDigest, paymentMoved: false, releaseId: fixture.release, repositorySha: fixture.repo, role: "payer", sessionId: fixture.session }, coordinationIdentity: { keyId: "payer-coordination", privateKeyPem: pem(fixture.payer), publicKey: raw(fixture.payer) }, enrollmentBase64: payerEnrollment.enrollmentBase64, intakeBinding: { intakeDigest: INTAKE_DIGEST, intakeRequestId: INTAKE_REQUEST_ID }, invitations: [{ address: payer.invitations.rehearsal.address, algorithm: "eip191", secretPath: "/secret/rehearsal", signature: payer.invitations.rehearsal.signature, subjectRun: "rehearsal" }, { address: payer.invitations.stakeholder.address, algorithm: "eip191", secretPath: "/secret/stakeholder", signature: payer.invitations.stakeholder.signature, subjectRun: "stakeholder" }], paymentMoved: false, phase: "BOOTSTRAPPED_ACTIVE", preflight: { outputPath: "/state/preflight/report.json", planPath: "/state/preflight/plan.json", privateKeyPath: "/state/preflight/preflight.ed25519.pem", publicArtifact: { paymentMoved: false, publicKey: payer.preflightKey.publicKey, repositorySha: fixture.repo, role: "payer" }, publicArtifactPath: "/state/preflight/preflight-key-enrollment.json" }, receipt: {}, rehearsal: { descriptorPath: "/state/rehearsal/descriptor.json", identityDirectory: "/state/rehearsal/identity", invitationPath: "/secret/rehearsal", resultDirectory: "/state/rehearsal/result" }, repositorySha: fixture.repo, role: "payer", schema: SUPERVISOR_STATE_SCHEMA, sessionId: fixture.session, stateRoot: "/state", stakeholder: { descriptorPath: "/state/stakeholder/descriptor.json", identityDirectory: "/state/stakeholder/identity", invitationPath: "/secret/stakeholder", resultDirectory: "/state/stakeholder/result" } };
+  let checkpoint = { activeLaunchState: { capabilityDigest: payer.capabilityDigest, paymentMoved: false, releaseId: fixture.release, repositorySha: fixture.repo, role: "payer", sessionId: fixture.session }, coordinationIdentity: { keyId: "payer-coordination", privateKeyPem: pem(fixture.payer), publicKey: raw(fixture.payer) }, enrollmentBase64: payerEnrollment.enrollmentBase64, intakeBinding: { intakeDigest: INTAKE_DIGEST, intakeRequestId: INTAKE_REQUEST_ID }, invitations: [{ address: payer.invitations.rehearsal.address, algorithm: "eip191", secretPath: "/secret/rehearsal", signature: payer.invitations.rehearsal.signature, subjectRun: "rehearsal" }, { address: payer.invitations.stakeholder.address, algorithm: "eip191", secretPath: "/secret/stakeholder", signature: payer.invitations.stakeholder.signature, subjectRun: "stakeholder" }], paymentMoved: false, phase: "BOOTSTRAPPED_ACTIVE", preflight: { outputPath: "/state/preflight/report.json", planPath: "/state/preflight/plan.json", privateKeyPath: "/state/preflight/preflight.ed25519.pem", publicArtifact: signedPreflightArtifact(fixture.payerPreflight, fixture.repo, "payer"), publicArtifactPath: "/state/preflight/preflight-key-enrollment.json" }, receipt: {}, rehearsal: { descriptorPath: "/state/rehearsal/descriptor.json", identityDirectory: "/state/rehearsal/identity", invitationPath: "/secret/rehearsal", resultDirectory: "/state/rehearsal/result" }, repositorySha: fixture.repo, role: "payer", schema: SUPERVISOR_STATE_SCHEMA, sessionId: fixture.session, stateRoot: "/state", stakeholder: { descriptorPath: "/state/stakeholder/descriptor.json", identityDirectory: "/state/stakeholder/identity", invitationPath: "/secret/stakeholder", resultDirectory: "/state/stakeholder/result" } };
   const retirements = [], scans = [];
   const supervisor = await createRoleSupervisor({ launchManifestPath: "/retired", stateRoot: "/state", dependencies: {
     async readState() { return checkpoint; },
@@ -2316,7 +2324,7 @@ test("reuses a verified local checkpoint and retires the manifest only after act
     async readState() { return persisted ?? null; },
     async verifyRepositoryState() { return true; },
     async createCoordinationIdentity() { return { keyId: "payer-coordination", privateKeyPem: pem(coordination), publicKey: raw(coordination) }; },
-    async createLocalPreflightEnrollment() { return { privateKeyPath: "/state/preflight/preflight.ed25519.pem", publicArtifact: { paymentMoved: false, publicKey: raw(preflight), repositorySha: manifest.repositorySha, role: manifest.role }, publicArtifactPath: "/state/preflight/preflight-key-enrollment.json" }; },
+    async createLocalPreflightEnrollment() { return { privateKeyPath: "/state/preflight/preflight.ed25519.pem", publicArtifact: signedPreflightArtifact(preflight, manifest.repositorySha, manifest.role), publicArtifactPath: "/state/preflight/preflight-key-enrollment.json" }; },
     async createInvitations() { return [{ subjectRun: "rehearsal", address: `0x${"1".repeat(40)}`, algorithm: "eip191", signature: `0x${"0".repeat(130)}`, secretPath: "/secret/rehearsal" }, { subjectRun: "stakeholder", address: `0x${"2".repeat(40)}`, algorithm: "eip191", signature: `0x${"0".repeat(130)}`, secretPath: "/secret/stakeholder" }]; },
     async writeState(value) { calls.push(`write:${value.phase}`); persisted = value; writes.push(value); },
     async createTransport() { calls.push("transport"); return {}; },
@@ -2342,6 +2350,23 @@ test("reuses a verified local checkpoint and retires the manifest only after act
   assert.equal(Object.hasOwn(state, "invitations"), false);
   assert.equal(JSON.stringify(state).includes(manifest.bootstrapCapability), false);
   assert.equal(JSON.stringify(state).includes("/secret/rehearsal"), false);
+
+  persisted = structuredClone(persisted);
+  persisted.preflight.publicArtifact.extra = "untrusted";
+  let hostileTransportAttempted = false;
+  dependencies.validateActiveLaunchState = async (value) => value;
+  dependencies.createTransport = () => {
+    hostileTransportAttempted = true;
+    throw new Error("hostile restart must not create transport");
+  };
+  dependencies.resolveOperatorPublicKey = () => {
+    throw new Error("hostile restart must not resolve operator authority");
+  };
+  dependencies.createResumedCoordinationClient = () => {
+    throw new Error("hostile restart must not create a resumed client");
+  };
+  await assert.rejects(createRoleSupervisor({ launchManifestPath: "/private/launch", stateRoot: "/state", dependencies }));
+  assert.equal(hostileTransportAttempted, false);
 });
 
 test("requires an independent enrollment-set verifier before replay trusts peer keys", async () => {
