@@ -219,6 +219,19 @@ npm run bilateral:console -- \
 Relay/watcher/console fields are advisory. They are coordination and display
 surfaces, not authority sources.
 
+Terminal 4 - public sanitized monitor:
+
+```sh
+npm run bilateral:public-monitor
+```
+
+The public monitor publisher reads only the loopback console projection, probes
+only the loopback Payer MCP port, and publishes an exact secret-free snapshot.
+It never publishes names, amounts, invoice data, identifiers, digests, tokens,
+paths, manifests, capabilities, keys, or evidence bytes. Keep it attached. A
+publisher or public-site failure never changes protocol state and never
+authorizes.
+
 ## Role supervisors
 
 Payer supervisor:
