@@ -33,6 +33,8 @@ Preserve the assigned private state root unchanged. Underfunding is pending
 until the bounded eight-minute funding deadline. Do not retry a consumed launch
 manifest.
 
+No additional Hermes message is required after operator funding. Payer remains attached until `PARTY_COMPLETE` with `ACKNOWLEDGED`; Requestor remains attached until `PARTY_COMPLETE` with `ACCEPTED`. These endpoints are not authorization; only the fresh aggregate verifier may emit `AUTHORIZED`.
+
 Only the operator's fresh aggregate-verifier process may issue the final
 `AUTHORIZED` verdict after independently refetching all three Clockchain
 anchors. Payer's local `ACKNOWLEDGED`, Requestor's local `ACCEPTED`, watcher output,

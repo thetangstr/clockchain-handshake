@@ -223,9 +223,44 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
   assert.match(requestor, /Requestor[^.]*requestor/i);
   assert.match(requestor, /node bin\/handshake-accept\.mjs/);
   assert.match(requestor, /ACCEPTED/);
+  assert.match(
+    requestor,
+    /PARTY_COMPLETE[\s\S]*role payee[\s\S]*state ACCEPTED[\s\S]*paymentMoved:false|paymentMoved:false[\s\S]*role payee[\s\S]*state ACCEPTED[\s\S]*PARTY_COMPLETE/i,
+  );
+  assert.match(
+    requestor,
+    /role-local finish[\s\S]*not authorization[\s\S]*never emit `AUTHORIZED`|not authorization[\s\S]*role-local finish[\s\S]*never emit `AUTHORIZED`/i,
+  );
+  assert.doesNotMatch(
+    requestor,
+    /PARTY_COMPLETE[\s\S]*role payer[\s\S]*state ACKNOWLEDGED/i,
+  );
   assert.match(payer, /Payer[^.]*payer/i);
   assert.match(payer, /node bin\/handshake-propose\.mjs/);
   assert.match(payer, /ACKNOWLEDGED/);
+  assert.match(
+    payer,
+    /PARTY_COMPLETE[\s\S]*role payer[\s\S]*state ACKNOWLEDGED[\s\S]*paymentMoved:false|paymentMoved:false[\s\S]*role payer[\s\S]*state ACKNOWLEDGED[\s\S]*PARTY_COMPLETE/i,
+  );
+  assert.match(
+    payer,
+    /role-local finish[\s\S]*not authorization[\s\S]*never emit `AUTHORIZED`|not authorization[\s\S]*role-local finish[\s\S]*never emit `AUTHORIZED`/i,
+  );
+  assert.doesNotMatch(
+    payer,
+    /PARTY_COMPLETE[\s\S]*role payee[\s\S]*state ACCEPTED/i,
+  );
+  for (const relativePath of [
+    "docs/runbooks/bilateral-demo-quick-start.md",
+    "docs/runbooks/bilateral-demo-day.md",
+    "docs/runbooks/bilateral-demo-live-handoff.md",
+  ]) {
+    assert.match(
+      documents.get(relativePath),
+      /No additional Hermes message is required after operator funding\./,
+      relativePath,
+    );
+  }
   for (const prompt of [requestor, payer]) {
     assert.match(
       prompt,

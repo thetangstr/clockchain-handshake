@@ -516,6 +516,14 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       ["Requestor local state", /\bACCEPTED\b/],
       [
+        "Requestor terminal PARTY_COMPLETE",
+        /\bPARTY_COMPLETE\b[\s\S]*\brole payee\b[\s\S]*\bstate ACCEPTED\b[\s\S]*\bpaymentMoved:false\b|\bpaymentMoved:false\b[\s\S]*\brole payee\b[\s\S]*\bstate ACCEPTED\b[\s\S]*\bPARTY_COMPLETE\b/i,
+      ],
+      [
+        "Requestor non-authorizing terminal role finish",
+        /\brole-local finish\b[\s\S]*\bnot authorization\b[\s\S]*\bnever emit `AUTHORIZED`|\bnot authorization\b[\s\S]*\brole-local finish\b[\s\S]*\bnever emit `AUTHORIZED`/i,
+      ],
+      [
         "commercial intent boundary",
         /\bCommercial Intent Boundary\b/i,
       ],
@@ -578,6 +586,14 @@ function bilateralContractFailures(relativePath, contents) {
         /\bnode bin\/handshake-propose\.mjs\b/,
       ],
       ["Payer local state", /\bACKNOWLEDGED\b/],
+      [
+        "Payer terminal PARTY_COMPLETE",
+        /\bPARTY_COMPLETE\b[\s\S]*\brole payer\b[\s\S]*\bstate ACKNOWLEDGED\b[\s\S]*\bpaymentMoved:false\b|\bpaymentMoved:false\b[\s\S]*\brole payer\b[\s\S]*\bstate ACKNOWLEDGED\b[\s\S]*\bPARTY_COMPLETE\b/i,
+      ],
+      [
+        "Payer non-authorizing terminal role finish",
+        /\brole-local finish\b[\s\S]*\bnot authorization\b[\s\S]*\bnever emit `AUTHORIZED`|\bnot authorization\b[\s\S]*\brole-local finish\b[\s\S]*\bnever emit `AUTHORIZED`/i,
+      ],
       [
         "commercial intent boundary",
         /\bCommercial Intent Boundary\b/i,
@@ -658,6 +674,18 @@ function bilateralContractFailures(relativePath, contents) {
       [
         "four-address funding action",
         /\bfund the four displayed addresses\b/i,
+      ],
+      [
+        "no post-funding Hermes message",
+        /\bNo additional Hermes message is required after operator funding\./,
+      ],
+      [
+        "Payer waits for terminal role completion",
+        /\bPayer\b[^.\n]*\bPARTY_COMPLETE\b[^.\n]*\bACKNOWLEDGED\b/i,
+      ],
+      [
+        "Requestor waits for terminal role completion",
+        /\bRequestor\b[^.\n]*\bPARTY_COMPLETE\b[^.\n]*\bACCEPTED\b/i,
       ],
       ["one preflight for both runs", /\bone\b[^.]*\bpreflight\b[^.]*\bboth runs\b/i],
       ["one token per role", /\bone token per role\b[^.]*\bboth runs\b/i],
@@ -947,6 +975,18 @@ function bilateralContractFailures(relativePath, contents) {
         /\bnpm run bilateral:fund\b/i,
       ],
       [
+        "no post-funding Hermes message",
+        /\bNo additional Hermes message is required after operator funding\./,
+      ],
+      [
+        "Payer waits for terminal role completion",
+        /\bPayer\b[^.\n]*\bPARTY_COMPLETE\b[^.\n]*\bACKNOWLEDGED\b/i,
+      ],
+      [
+        "Requestor waits for terminal role completion",
+        /\bRequestor\b[^.\n]*\bPARTY_COMPLETE\b[^.\n]*\bACCEPTED\b/i,
+      ],
+      [
         "verdict sequence",
         /\bPROPOSED\b[\s\S]*\bACCEPTED\b[\s\S]*\bACKNOWLEDGED\b[\s\S]*\boperator verification\b[\s\S]*\bAUTHORIZED\b/i,
       ],
@@ -1057,6 +1097,18 @@ function bilateralContractFailures(relativePath, contents) {
       [
         "four-address allocation",
         /\bfunds exactly four freshly generated addresses with\s+`0\.01 Sepolia ETH` each\b/i,
+      ],
+      [
+        "no post-funding Hermes message",
+        /\bNo additional Hermes message is required after operator funding\./,
+      ],
+      [
+        "Payer waits for terminal role completion",
+        /\bPayer\b[^.\n]*\bPARTY_COMPLETE\b[^.\n]*\bACKNOWLEDGED\b/i,
+      ],
+      [
+        "Requestor waits for terminal role completion",
+        /\bRequestor\b[^.\n]*\bPARTY_COMPLETE\b[^.\n]*\bACCEPTED\b/i,
       ],
       [
         "safe 0.05 budget",

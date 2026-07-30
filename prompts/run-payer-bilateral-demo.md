@@ -117,6 +117,13 @@ npm run bilateral:supervisor -- \
 Do not start a replacement supervisor. If the tunnel or supervisor exits,
 report the exit and preserve state; do not consume another manifest.
 
+`PAYER_MCP_READY`, `WAITING_FOR_PEER`, and `PEER_READY` are intermediate
+statuses. Keep the same supervisor attached through operator funding and do not
+conclude until it emits exact secret-free terminal role completion:
+`{"paymentMoved":false,"role":"payer","state":"ACKNOWLEDGED","status":"PARTY_COMPLETE"}`.
+This `PARTY_COMPLETE` status with role payer, state ACKNOWLEDGED, and
+paymentMoved:false is Payer's role-local finish; it is not authorization. Never emit `AUTHORIZED`.
+
 The supervisor stays alive across both runs: rehearsal first, then stakeholder.
 It creates and retains Payer's coordination key, preflight key, one token, and
 two invitation secrets locally. It follows only authenticated operator events

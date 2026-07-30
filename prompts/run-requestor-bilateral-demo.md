@@ -86,6 +86,15 @@ Do not start a replacement request-payment wrapper or supervisor. If the
 wrapper exits, report the exit and preserve state; do not consume another
 manifest.
 
+`HANDSHAKE_REQUIRED`, `WAITING_FOR_PEER`, and `PEER_READY` are intermediate
+statuses. Keep the same wrapper and supervisor attached through operator
+funding and do not conclude until it emits exact secret-free terminal role
+completion:
+`{"paymentMoved":false,"role":"payee","state":"ACCEPTED","status":"PARTY_COMPLETE"}`.
+This `PARTY_COMPLETE` status with role payee, state ACCEPTED, and
+paymentMoved:false is Requestor's role-local finish; it is not authorization.
+Never emit `AUTHORIZED`.
+
 The supervisor stays alive across both runs: rehearsal first, then stakeholder.
 It creates and retains Requestor's coordination key, preflight key, one token,
 and two invitation secrets locally. It follows only authenticated operator
