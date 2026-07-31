@@ -157,6 +157,69 @@ test("builds a decryptable, operator-signed Requestor response from the exact co
   assert.equal(JSON.stringify(result).includes("d".repeat(64)), false);
 });
 
+test("rejects a parseable non-Ed25519 operator key before signing a Requestor response", () => {
+  const tlsCertificatePem = certificate();
+  const fingerprint = createHash("sha256")
+    .update(new X509Certificate(tlsCertificatePem).raw)
+    .digest("hex");
+  const operator = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+  });
+  const requestor = createRequestorBootstrapKey();
+  const claim = {
+    claimNonce: "22222222-2222-4222-8222-222222222222",
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    requestorPublicKey: requestor.publicKey,
+  };
+  const manifest = createLaunchManifest({
+    expectedTlsFingerprint: fingerprint,
+    nowMs: NOW,
+    operatorKeyId: "operator",
+    payerMcpIntakeCapability: "c".repeat(64),
+    randomBytes: () => Buffer.alloc(32, 1),
+    relayUrl: "https://relay.example.test:8443",
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    role: "payee",
+    sessionId: SESSION_ID,
+    tlsCertificatePem,
+  }).manifest;
+  const manifestBytes = Buffer.from(
+    JSON.stringify(
+      canonicalizeReceiptEventValue(manifest),
+    ),
+  );
+
+  assert.throws(
+    () =>
+      buildAwsBootstrapSealedResponse({
+        claim,
+        claimFingerprint:
+          requestorBootstrapClaimFingerprint(claim),
+        config: {
+          bootstrapBrokerCapability: "d".repeat(64),
+          bootstrapBrokerUrl: "https://bootstrap.example.test/v1/requestor-claims",
+          nowMs: NOW + 1,
+          operatorKeyId: "operator",
+          operatorPrivateKeyPem: operator.privateKey.export({
+            format: "pem",
+            type: "pkcs8",
+          }),
+          publicMcpHostname: "payer.example.test",
+          releaseId: RELEASE_ID,
+          repositorySha: REPOSITORY_SHA,
+          sessionId: SESSION_ID,
+        },
+        expiresAtMs: manifest.expiresAtMs,
+        payeeLaunchManifestBytes: manifestBytes,
+        payerLaunchManifestBytes: Buffer.from("unused"),
+        role: "payee",
+      }),
+    /AWS operator bootstrap response failed safely/,
+  );
+});
+
 test("builds the exact Payer package and restricted tunnel grant without exposing either plaintext", () => {
   const relayCertificate = certificate();
   const relayFingerprint = createHash("sha256")

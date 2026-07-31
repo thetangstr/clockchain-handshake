@@ -107,13 +107,17 @@ function config(value) {
     fail();
   }
   let url;
+  let operatorPrivateKey;
   try {
     url = new URL(value.bootstrapBrokerUrl);
-    createPrivateKey(value.operatorPrivateKeyPem);
+    operatorPrivateKey = createPrivateKey(
+      value.operatorPrivateKeyPem,
+    );
   } catch {
     fail();
   }
   if (
+    operatorPrivateKey.asymmetricKeyType !== "ed25519" ||
     url.protocol !== "https:" ||
     url.username !== "" ||
     url.password !== "" ||
@@ -123,7 +127,10 @@ function config(value) {
   ) {
     fail();
   }
-  return value;
+  return Object.freeze({
+    ...value,
+    operatorPrivateKey,
+  });
 }
 
 function signature(unsigned, privateKey) {
@@ -162,9 +169,7 @@ export function buildAwsBootstrapSealedResponse(
       ),
     );
     if (Number(expiresAtMs) <= active.nowMs) fail();
-    const privateKey = createPrivateKey(
-      active.operatorPrivateKeyPem,
-    );
+    const privateKey = active.operatorPrivateKey;
     if (role === "payer") {
       if (
         payerBootstrapClaimFingerprint(value.claim) !==
