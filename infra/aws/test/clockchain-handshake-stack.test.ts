@@ -109,6 +109,31 @@ test("keeps every long-lived service stopped until runtime activation is explici
   }
 });
 
+test("permits regional CloudWatch Logs to use the customer-managed data key", () => {
+  const resources = template().toJSON()
+    .Resources as Record<
+    string,
+    {
+      Properties?: {
+        KeyPolicy?: unknown;
+      };
+      Type: string;
+    }
+  >;
+  const key = Object.values(resources).find(
+    (resource) =>
+      resource.Type === "AWS::KMS::Key",
+  );
+  assert.ok(key?.Properties?.KeyPolicy);
+  const policy = JSON.stringify(
+    key.Properties.KeyPolicy,
+  );
+  assert.match(policy, /logs\./);
+  assert.match(policy, /kms:Encrypt/);
+  assert.match(policy, /kms:GenerateDataKey/);
+  assert.match(policy, /kms:Decrypt/);
+});
+
 test("creates a two-AZ no-NAT public Fargate foundation with encrypted EFS", () => {
   const output = template();
   output.resourceCountIs("AWS::EC2::VPC", 1);

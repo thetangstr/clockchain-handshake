@@ -165,6 +165,32 @@ export class ClockchainHandshakeStack extends Stack {
       enableKeyRotation: true,
       removalPolicy: RemovalPolicy.RETAIN,
     });
+    dataKey.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:Describe*",
+        ],
+        conditions: {
+          ArnLike: {
+            "kms:EncryptionContext:aws:logs:arn":
+              `arn:${this.partition}:logs:${this.region}:${this.account}:log-group:*`,
+          },
+          StringEquals: {
+            "aws:SourceAccount": this.account,
+          },
+        },
+        principals: [
+          new iam.ServicePrincipal(
+            `logs.${this.region}.${this.urlSuffix}`,
+          ),
+        ],
+        resources: ["*"],
+      }),
+    );
     const vpc = new ec2.Vpc(this, "Vpc", {
       maxAzs: 2,
       natGateways: 0,
