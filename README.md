@@ -72,7 +72,7 @@ npm run bilateral:relay -- <operator relay paths and pinned release SHA>
 npm run bilateral:coordinator -- <operator-local paths and pinned release SHA>
 npm run bilateral:console -- --state-root <operator release root>
 npm run bilateral:supervisor -- --launch-manifest <payer manifest> --state <payer private state> --payer-mcp-host 127.0.0.1 --payer-mcp-port <port> --payer-mcp-public-url <public relay URL> --payer-mcp-tls-certificate <public cert> --payer-mcp-tls-private-key <private key>
-npm run bilateral:request-payment -- --launch-manifest <requestor manifest> --intake-request-id <uuidv4> --mcp-url <payer public mcp url> --state <requestor private state> --tls-certificate <payer public cert> --tls-fingerprint <lowercase sha256>
+npm run bilateral:request-payment -- --discovery-url <stable signed discovery URL> --intake-request-id <uuidv4> --state <requestor private state>
 ```
 
 The startup control order is:
@@ -82,13 +82,15 @@ before either role starts. The actual funding batch waits for the coordinator's
 signed address record. After enrollment reveals the four fresh addresses, the
 operator executes exactly four `0.01 Sepolia ETH` allocations.
 
-Run the Payer supervisor command once, then run the Requestor request-payment
-wrapper once after `PAYER_MCP_READY`; the wrapper starts the Requestor
-supervisor. Those two role processes span the rehearsal and stakeholder runs.
-After they enroll, the coordinator displays four signed public addresses;
-funding those four addresses is the user's only other action. Low-level
-preparation and exact-input recovery commands are confined to the runbook's
-operator-authorized recovery appendix.
+Run the Payer supervisor command once, publish one stable signed discovery URL
+after `PAYER_MCP_READY`, then give Requestor only that URL. The Requestor
+request-payment wrapper uses no attachment, launch manifest, certificate file,
+or fingerprint handoff; it starts the Requestor supervisor after the operator
+approves exactly one pending bootstrap claim. Those two role processes span the
+rehearsal and stakeholder runs. After they enroll, the coordinator displays
+four signed public addresses; funding those four addresses is the user's only
+other action. Low-level preparation and exact-input recovery commands are
+confined to the runbook's operator-authorized recovery appendix.
 
 Passing deterministic checks makes this release rehearsal-ready, not
 live-validated. Only a funded physical rehearsal whose fresh aggregate

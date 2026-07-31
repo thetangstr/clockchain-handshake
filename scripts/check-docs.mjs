@@ -1632,6 +1632,28 @@ function readmeRoleplayFailures(contents) {
     );
   }
   if (
+    !/npm run bilateral:request-payment -- --discovery-url <stable signed discovery URL> --intake-request-id <uuidv4> --state <requestor private state>/.test(
+      contents,
+    )
+  ) {
+    failures.push(
+      "README.md: missing exact signed-discovery Requestor command.",
+    );
+  }
+  for (const [label, pattern] of [
+    ["legacy Requestor launch-manifest flag", /npm run bilateral:request-payment[^\n]*--launch-manifest\b/],
+    ["legacy Requestor MCP URL flag", /npm run bilateral:request-payment[^\n]*--mcp-url\b/],
+    ["legacy Requestor TLS certificate flag", /npm run bilateral:request-payment[^\n]*--tls-certificate\b/],
+    ["legacy Requestor TLS fingerprint flag", /npm run bilateral:request-payment[^\n]*--tls-fingerprint\b/],
+  ]) {
+    if (pattern.test(contents)) failures.push(`README.md: contains ${label}.`);
+  }
+  if (!/\bstable signed discovery URL\b[\s\S]{0,240}\bno attachment\b/i.test(contents)) {
+    failures.push(
+      "README.md: missing stable signed discovery URL only/no attachment explanation.",
+    );
+  }
+  if (
     !/\bexactly four\s+`0\.01 Sepolia ETH` allocations\b/i.test(
       contents,
     )
