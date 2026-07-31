@@ -89,6 +89,7 @@ const GIT_REPOSITORY_ARGUMENTS = Object.freeze([
   "core.untrackedCache=false",
 ]);
 const FLAGS = Object.freeze([
+  "--advertised-host",
   "--host",
   "--port",
   "--repository-sha",
@@ -312,10 +313,14 @@ function parseArguments(arguments_) {
   if (!FLAGS.every((flag) => Object.hasOwn(values, flag))) {
     invalid();
   }
+  const advertisedHost = values["--advertised-host"];
   const host = values["--host"];
   const portText = values["--port"];
   const repositorySha = values["--repository-sha"];
   if (
+    !isCanonicalIpText(advertisedHost) ||
+    advertisedHost === "0.0.0.0" ||
+    advertisedHost === "::" ||
     !isCanonicalIpText(host) ||
     host === "0.0.0.0" ||
     host === "::" ||
@@ -326,6 +331,7 @@ function parseArguments(arguments_) {
     invalid();
   }
   return Object.freeze({
+    advertisedHost,
     certificatePath: resolve(
       values["--tls-certificate"],
     ),
@@ -792,11 +798,11 @@ function parseRawQuery(query, allowed) {
   return result;
 }
 
-export function createRelayRequestHandler(service, host, port, expectedRepositorySha = null) {
+export function createRelayRequestHandler(service, advertisedHost, port, expectedRepositorySha = null) {
   const expectedHost =
-    isIP(host) === 6
-      ? `[${host}]:${port}`
-      : `${host}:${port}`;
+    isIP(advertisedHost) === 6
+      ? `[${advertisedHost}]:${port}`
+      : `${advertisedHost}:${port}`;
   return async (request, response) => {
     const requestController = new AbortController();
     const abortRequest = () => {
@@ -1196,7 +1202,7 @@ export async function main(arguments_, dependencies = {}) {
     const port = bound.port;
     server.on(
       "request",
-      createRelayRequestHandler(service, options.host, port, options.repositorySha),
+      createRelayRequestHandler(service, options.advertisedHost, port, options.repositorySha),
     );
     let closePromise;
     const running = Object.freeze({

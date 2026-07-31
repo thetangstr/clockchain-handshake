@@ -416,6 +416,7 @@ const FUNDING_COMMAND = `npm run bilateral:fund -- \\
 const FUNDING_JOURNAL_PREP_COMMAND =
   'install -d -m 0700 "$FUNDING_JOURNAL_DIR"';
 const RELAY_COMMAND = `npm run bilateral:relay -- \\
+  --advertised-host "$RELAY_ADVERTISED_IP" \\
   --host "\${RELAY_LISTEN_HOST:-$RELAY_ADVERTISED_IP}" \\
   --port "$RELAY_PORT" \\
   --repository-sha "$BILATERAL_REPOSITORY_SHA" \\
@@ -810,7 +811,11 @@ function bilateralContractFailures(relativePath, contents) {
         /\bRELAY_LISTEN_HOST=0\.0\.0\.0\b[^.\n]*\ball-interface bind\b/i,
       ],
       [
-        "advertised relay bind default",
+        "advertised relay host",
+        /--advertised-host "\$RELAY_ADVERTISED_IP"/,
+      ],
+      [
+        "relay bind default",
         /--host "\$\{RELAY_LISTEN_HOST:-\$RELAY_ADVERTISED_IP\}"/,
       ],
       [

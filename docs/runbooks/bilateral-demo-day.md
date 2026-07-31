@@ -161,6 +161,7 @@ Terminal 1 - relay:
 
 ```sh
 npm run bilateral:relay -- \
+  --advertised-host "$RELAY_ADVERTISED_IP" \
   --host "${RELAY_LISTEN_HOST:-$RELAY_ADVERTISED_IP}" \
   --port "$RELAY_PORT" \
   --repository-sha "$BILATERAL_REPOSITORY_SHA" \

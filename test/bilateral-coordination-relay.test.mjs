@@ -109,14 +109,14 @@ const PAYER_CAPABILITY = Buffer.alloc(32, 0x41);
 const PAYEE_CAPABILITY = Buffer.alloc(32, 0x42);
 const execFile = promisify(execFileCallback);
 
-async function invokeRelayHandler(handler, { body = Buffer.alloc(0), contentType = "application/json", method = "POST", url }) {
+async function invokeRelayHandler(handler, { body = Buffer.alloc(0), contentType = "application/json", hostHeader = "127.0.0.1:8443", method = "POST", url }) {
   const request = new PassThrough();
   request.headers = method === "GET"
-    ? { host: "127.0.0.1:8443" }
-    : { host: "127.0.0.1:8443", "content-type": contentType };
+    ? { host: hostHeader }
+    : { host: hostHeader, "content-type": contentType };
   request.rawHeaders = method === "GET"
-    ? ["host", "127.0.0.1:8443"]
-    : ["host", "127.0.0.1:8443", "content-type", contentType];
+    ? ["host", hostHeader]
+    : ["host", hostHeader, "content-type", contentType];
   request.method = method;
   request.url = url;
   const response = new EventEmitter();
@@ -231,6 +231,39 @@ test("routes real service enrollment readiness through the handler validator", a
     schema: "clockchain.bilateral-enrollment-readiness/v1",
     sessionId: SESSION_ID,
   });
+});
+
+test("validates client Host against advertised relay address instead of local bind address", async () => {
+  const handler = createRelayRequestHandler({
+    appendEvent: async () => ({}),
+    appendVerifiedEvent: async () => ({}),
+    bootstrap: async () => ({}),
+    getArtifact: async () => Buffer.alloc(0),
+    putArtifact: async () => ({}),
+    readEnrollmentReadiness: async () => ({
+      paymentMoved: false,
+      ready: false,
+      releaseId: RELEASE_ID,
+      repositorySha: REPOSITORY_SHA,
+      schema: "clockchain.bilateral-enrollment-readiness/v1",
+      sessionId: SESSION_ID,
+    }),
+    readEnrollmentSet: async () => Buffer.alloc(0),
+    readEvents: async () => [],
+    readSessionView: async () => ({}),
+  }, "32.186.198.119", 8443, REPOSITORY_SHA);
+  const accepted = await invokeRelayHandler(handler, {
+    hostHeader: "32.186.198.119:8443",
+    method: "GET",
+    url: `/v1/sessions/${SESSION_ID}/enrollment-readiness?waitMs=0`,
+  });
+  assert.equal(accepted.status, 200);
+  const rejected = await invokeRelayHandler(handler, {
+    hostHeader: "127.0.0.1:8443",
+    method: "GET",
+    url: `/v1/sessions/${SESSION_ID}/enrollment-readiness?waitMs=0`,
+  });
+  assert.equal(rejected.status, 400);
 });
 
 test("routes the exact payer-owned inbox endpoints with canonical bytes", async () => {
@@ -533,6 +566,7 @@ async function observeRelayChild(child, host, port) {
 }
 
 function relayArguments({
+  advertisedHost = "127.0.0.1",
   certificatePath,
   host = "127.0.0.1",
   port,
@@ -541,6 +575,8 @@ function relayArguments({
   state,
 }) {
   return [
+    "--advertised-host",
+    advertisedHost,
     "--host",
     host,
     "--port",
@@ -3901,7 +3937,7 @@ test("pins fixed HTTPS deadlines and rejects every non-exact CLI flag surface be
   );
   assert.match(
     relaySource,
-    /isIP\(host\) === 6\s*\? `\[\$\{host\}\]:\$\{port\}`/,
+    /isIP\(advertisedHost\) === 6\s*\? `\[\$\{advertisedHost\}\]:\$\{port\}`/,
   );
 });
 
@@ -3959,6 +3995,47 @@ test("accepts only canonical port zero and reports the bound relay address witho
     `{"host":"127.0.0.1","paymentMoved":false,"pid":${process.pid},"port":${running.address.port},"schema":"clockchain.bilateral-relay-ready/v1"}\n`,
   );
   await running.close();
+  await running.close();
+});
+
+test("binds relay locally while validating client Host against required advertised address", async (t) => {
+  const tls = await tlsFixture(t);
+  const state = await privateRoot(t);
+  const port = await availablePort();
+  let running;
+  try {
+    running = await relayMain(
+      relayArguments({
+        advertisedHost: "127.0.0.1",
+        certificatePath: tls.certificatePath,
+        host: "127.0.0.1",
+        port,
+        privateKeyPath: tls.privateKeyPath,
+        state,
+      }),
+      { checkoutProbe: cleanCheckoutProbe },
+    );
+  } finally {
+    t.after(() => running?.close().catch(() => {}));
+  }
+  assert.equal(running.address.host, "127.0.0.1");
+  assert.equal(running.address.port, port);
+  const accepted = await httpsRequest({
+    ca: tls.certificate,
+    headers: { host: `127.0.0.1:${port}` },
+    method: "GET",
+    path: `/v1/sessions/${SESSION_ID}/events?waitMs=0`,
+    port,
+  });
+  assert.equal(accepted.statusCode, 200);
+  const rejected = await httpsRequest({
+    ca: tls.certificate,
+    headers: { host: `127.0.0.2:${port}` },
+    method: "GET",
+    path: `/v1/sessions/${SESSION_ID}/events?waitMs=0`,
+    port,
+  });
+  assert.equal(rejected.statusCode, 400);
   await running.close();
 });
 

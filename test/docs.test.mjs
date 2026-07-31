@@ -521,6 +521,7 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /REQUESTOR_INTAKE_REQUEST_ID="\$\(node -e 'console\.log\(require\("node:crypto"\)\.randomUUID\(\)\)'\)"/);
   assert.match(primaryRunbook, /https:\/\/\$RELAY_ADVERTISED_IP:\$RELAY_PORT/);
   assert.match(primaryRunbook, /127\.0\.0\.1[^.\n]*must not be the advertised relay address/i);
+  assert.match(primaryRunbook, /--advertised-host "\$RELAY_ADVERTISED_IP"/);
   assert.match(primaryRunbook, /--host "\$\{RELAY_LISTEN_HOST:-\$RELAY_ADVERTISED_IP\}"/);
   assert.match(primaryRunbook, /RELAY_LISTEN_HOST=0\.0\.0\.0[^.\n]*all-interface bind/i);
   assert.match(primaryRunbook, /chmod 0700 "\$BILATERAL_OPERATOR_ROOT" "\$BILATERAL_RELEASE_ROOT"/);
@@ -744,6 +745,7 @@ test("live bilateral handoff pins the public operator checklist without secrets"
   assert.match(handoff, /PAYER_MCP_TLS_FINGERPRINT="\$\(openssl x509 -in "\$PAYER_MCP_TLS_CERTIFICATE" -outform DER \| openssl dgst -sha256 -binary \| xxd -p -c 256\)"/);
   assert.match(handoff, /REQUESTOR_INTAKE_REQUEST_ID="\$\(node -e 'console\.log\(require\("node:crypto"\)\.randomUUID\(\)\)'\)"/);
   assert.match(handoff, /npm run bilateral:relay -- \\/);
+  assert.match(handoff, /--advertised-host "\$RELAY_ADVERTISED_IP"/);
   assert.match(handoff, /npm run bilateral:coordinator -- \\/);
   assert.match(handoff, /npm run bilateral:console -- \\/);
   assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/);

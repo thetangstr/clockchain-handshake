@@ -399,6 +399,7 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
   await mkdir(relayState, { mode: 0o700 });
   const relayArguments = [
     "bin/handshake-relay.mjs",
+    "--advertised-host", "127.0.0.1",
     "--host", "127.0.0.1",
     "--port", "0",
     "--repository-sha", repositorySha,
@@ -1217,7 +1218,7 @@ test("relay restart during a pinned long poll fails closed and recovers empty st
   await mkdir(state, { mode: 0o700 });
   const port = await availablePort();
   const repositorySha = (await command("/usr/bin/git", ["rev-parse", "HEAD"], { cwd: clone })).stdout.trim();
-  const arguments_ = ["bin/handshake-relay.mjs", "--host", "127.0.0.1", "--port", String(port), "--repository-sha", repositorySha, "--state", state, "--tls-certificate", certificate, "--tls-private-key", certificateKey];
+  const arguments_ = ["bin/handshake-relay.mjs", "--advertised-host", "127.0.0.1", "--host", "127.0.0.1", "--port", String(port), "--repository-sha", repositorySha, "--state", state, "--tls-certificate", certificate, "--tls-private-key", certificateKey];
   const first = spawned(arguments_, { cwd: clone });
   t.after(() => stop(first.child));
   assert.equal((await relayReady(first)).port, port);
