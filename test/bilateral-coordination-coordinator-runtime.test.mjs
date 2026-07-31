@@ -471,11 +471,25 @@ test("runtime release dependencies satisfy the coordinator release contract", as
       }),
     }),
     createTransport: () => ({}),
+    releaseIdentity: {
+      releaseId:
+        "release-bd7662a5eeb41614",
+      sessionId:
+        "11111111-1111-4111-8111-111111111111",
+    },
   });
 
   const release = await loadOrCreateCoordinatorRelease(config, { runtime });
 
   assert.equal(release.state, "BOOTSTRAPPING");
+  assert.equal(
+    release.releaseId,
+    "release-bd7662a5eeb41614",
+  );
+  assert.equal(
+    release.sessionId,
+    "11111111-1111-4111-8111-111111111111",
+  );
   assert.equal((await readCoordinatorState(config.releaseRoot)).releaseId, release.releaseId);
 });
 

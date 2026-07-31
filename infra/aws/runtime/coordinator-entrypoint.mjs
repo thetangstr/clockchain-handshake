@@ -12,12 +12,32 @@ export async function main({
   run = coordinatorMain,
 } = {}) {
   const input = parseRuntimeInput(env);
+  const coordinator =
+    input.coordinator;
   if (
-    !Array.isArray(input.argv) ||
-    input.argv.some(
+    coordinator === null ||
+    typeof coordinator !== "object" ||
+    Array.isArray(coordinator) ||
+    !Array.isArray(coordinator.argv) ||
+    coordinator.argv.some(
       (value) =>
         typeof value !== "string" ||
         value.includes("\0"),
+    ) ||
+    coordinator.releaseIdentity ===
+      null ||
+    typeof coordinator
+      .releaseIdentity !== "object" ||
+    Array.isArray(
+      coordinator.releaseIdentity,
+    ) ||
+    !/^release-[0-9a-f]{16}$/.test(
+      coordinator.releaseIdentity
+        .releaseId,
+    ) ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      coordinator.releaseIdentity
+        .sessionId,
     ) ||
     typeof run !== "function"
   ) {
@@ -25,7 +45,13 @@ export async function main({
       "AWS coordinator entrypoint failed safely.",
     );
   }
-  const exitCode = await run(input.argv);
+  const exitCode = await run(
+    coordinator.argv,
+    {
+      releaseIdentity:
+        coordinator.releaseIdentity,
+    },
+  );
   if (exitCode !== 0) {
     throw new Error(
       "AWS coordinator entrypoint failed safely.",

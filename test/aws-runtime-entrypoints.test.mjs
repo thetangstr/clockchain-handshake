@@ -13,6 +13,9 @@ import {
   installSecretFile,
   parseRuntimeInput,
 } from "../infra/aws/runtime/runtime-input.mjs";
+import {
+  main as coordinatorEntrypoint,
+} from "../infra/aws/runtime/coordinator-entrypoint.mjs";
 
 test("every AWS task entrypoint is present and no production entrypoint is a placeholder", async () => {
   for (const name of [
@@ -135,4 +138,32 @@ test("secret material is installed atomically with mode 0600 and never returned"
     }),
     /AWS runtime input failed safely/,
   );
+});
+
+test("coordinator entrypoint binds the operator-created release and session identity", async () => {
+  const calls = [];
+  await coordinatorEntrypoint({
+    env: {
+      AWS_RUNTIME_INPUT:
+        '{"coordinator":{"argv":["--test"],"releaseIdentity":{"releaseId":"release-bd7662a5eeb41614","sessionId":"11111111-1111-4111-8111-111111111111"}},"paymentMoved":false,"schema":"clockchain.aws-runtime-input/v1"}',
+    },
+    run: async (argv, dependencies) => {
+      calls.push([
+        argv,
+        dependencies.releaseIdentity,
+      ]);
+      return 0;
+    },
+  });
+  assert.deepEqual(calls, [
+    [
+      ["--test"],
+      {
+        releaseId:
+          "release-bd7662a5eeb41614",
+        sessionId:
+          "11111111-1111-4111-8111-111111111111",
+      },
+    ],
+  ]);
 });

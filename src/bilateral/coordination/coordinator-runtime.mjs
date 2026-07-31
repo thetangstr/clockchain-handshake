@@ -554,6 +554,40 @@ export function createProductionFundingWaiter({ createClient = createPublicClien
 
 export function createCoordinatorRuntimeDependencies(config, dependencies = {}) {
   if (!config || typeof config !== "object" || !config.releaseRoot?.path || !config.operatorIdentity || !SHA40.test(config.repositorySha)) fail();
+  const releaseIdentity =
+    dependencies.releaseIdentity;
+  if (
+    releaseIdentity !== undefined &&
+    (
+      releaseIdentity === null ||
+      typeof releaseIdentity !== "object" ||
+      Array.isArray(releaseIdentity) ||
+      Object.getPrototypeOf(
+        releaseIdentity,
+      ) !== Object.prototype ||
+      Reflect.ownKeys(
+        releaseIdentity,
+      ).length !== 2 ||
+      !Object.hasOwn(
+        releaseIdentity,
+        "releaseId",
+      ) ||
+      !Object.hasOwn(
+        releaseIdentity,
+        "sessionId",
+      ) ||
+      !/^release-[0-9a-f]{16}$/.test(
+        releaseIdentity.releaseId,
+      ) ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        releaseIdentity.sessionId,
+      ) ||
+      releaseIdentity.releaseId !==
+        `release-${createHash("sha256").update(releaseIdentity.sessionId, "utf8").digest("hex").slice(0, 16)}`
+    )
+  ) {
+    fail();
+  }
   if (
     dependencies.createLaunchManifest !== undefined &&
     typeof dependencies.createLaunchManifest !== "function"
@@ -608,8 +642,15 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
           }),
       now,
       randomUUID: () => {
-        const sessionId = randomUUID();
-        newRelease = Object.freeze({ releaseId: `release-${createHash("sha256").update(sessionId, "utf8").digest("hex").slice(0, 16)}`, sessionId });
+        const sessionId =
+          releaseIdentity?.sessionId ??
+          randomUUID();
+        newRelease = Object.freeze({
+          releaseId:
+            releaseIdentity?.releaseId ??
+            `release-${createHash("sha256").update(sessionId, "utf8").digest("hex").slice(0, 16)}`,
+          sessionId,
+        });
         return sessionId;
       },
       prepareCapabilityRegistration: async ({ capabilities }) => {
