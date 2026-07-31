@@ -8,17 +8,21 @@ import { pathToFileURL } from "node:url";
 
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 
-export const REQUESTOR_DISCOVERY_SCHEMA = "clockchain.requestor-discovery/v1";
+export const REQUESTOR_DISCOVERY_SCHEMA =
+  "clockchain.requestor-discovery/v2";
 
 const DISCOVERY_KEYS = Object.freeze([
-  "certificateFingerprint",
-  "certificateUrl",
-  "expiresAtMs",
-  "operatorKeyId",
-  "publicUrl",
+  "schema",
+  "paymentMoved",
+  "imageDigest",
   "releaseId",
-  "repositorySha",
   "sessionId",
+  "repositorySha",
+  "publicUrl",
+  "certificateUrl",
+  "certificateFingerprint",
+  "operatorKeyId",
+  "expiresAtMs",
   "signature",
 ]);
 const UNSIGNED_DISCOVERY_KEYS = DISCOVERY_KEYS.slice(0, -1);
@@ -28,6 +32,8 @@ const SHA40_PATTERN = /^[0-9a-f]{40}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const IMAGE_DIGEST_PATTERN =
+  /^[0-9]{12}\.dkr\.ecr\.[a-z]{2}-[a-z]+-[1-9]\.amazonaws\.com\/[a-z0-9][a-z0-9._/-]{0,254}@sha256:[0-9a-f]{64}$/;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const MAX_DISCOVERY_BYTES = 65_536;
 const MAX_CERTIFICATE_BYTES = 65_536;
@@ -38,6 +44,7 @@ const CLI_FLAGS = Object.freeze([
   "--certificate-path",
   "--discovery-key",
   "--expires-at-ms",
+  "--image-digest",
   "--operator-key-id",
   "--operator-private-key",
   "--public-url",
@@ -218,6 +225,10 @@ function httpsUrl(value, path = null) {
 function unsignedDiscovery(input) {
   const data = exactObject(input, UNSIGNED_DISCOVERY_KEYS);
   if (
+    data.schema !== REQUESTOR_DISCOVERY_SCHEMA ||
+    data.paymentMoved !== false ||
+    typeof data.imageDigest !== "string" ||
+    !IMAGE_DIGEST_PATTERN.test(data.imageDigest) ||
     typeof data.certificateFingerprint !== "string" ||
     !SHA256_PATTERN.test(data.certificateFingerprint) ||
     !/^(?:0|[1-9][0-9]*)$/.test(data.expiresAtMs) ||
@@ -369,6 +380,7 @@ export async function publishRequestorDiscovery({
   certificateUrl,
   discoveryKey,
   expiresAtMs,
+  imageDigest,
   operatorKeyId,
   operatorPrivateKeyPath,
   publicUrl,
@@ -396,15 +408,18 @@ export async function publishRequestorDiscovery({
   const operatorPrivateKey = createPrivateKey(operator.text);
   if (operatorPrivateKey.asymmetricKeyType !== "ed25519") fail();
   const discovery = createSignedRequestorDiscovery({
-    certificateFingerprint,
-    certificateUrl,
-    expiresAtMs,
-    operatorKeyId,
+    schema: REQUESTOR_DISCOVERY_SCHEMA,
+    paymentMoved: false,
+    imageDigest,
+    releaseId,
+    sessionId,
+    repositorySha,
     operatorPrivateKey,
     publicUrl,
-    releaseId,
-    repositorySha,
-    sessionId,
+    certificateUrl,
+    certificateFingerprint,
+    operatorKeyId,
+    expiresAtMs,
   });
   await putObject({ body: certificatePem, bucket: safeBucketName, cacheControl: "no-store,max-age=0", contentType: "application/x-pem-file", key: safeCertificateKey });
   await putObject({ body: `${JSON.stringify(discovery)}\n`, bucket: safeBucketName, cacheControl: "no-store,max-age=0", contentType: "application/json", key: safeDiscoveryKey });
@@ -445,6 +460,7 @@ function parseCliArguments(argv) {
     discoveryKey,
     discoveryUrl: publicS3Url({ bucket, key: discoveryKey, region }),
     expiresAtMs: values["--expires-at-ms"],
+    imageDigest: values["--image-digest"],
     operatorKeyId: values["--operator-key-id"],
     operatorPrivateKeyPath,
     publicUrl: values["--public-url"],
@@ -511,6 +527,7 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
     certificateFingerprint: result.certificateFingerprint,
     discoveryUrl: options.discoveryUrl,
     expiresAtMs: options.expiresAtMs,
+    imageDigest: options.imageDigest,
     operatorKeyId: options.operatorKeyId,
     paymentMoved: false,
     releaseId: options.releaseId,

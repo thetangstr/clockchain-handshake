@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createConnection } from "node:net";
 import { pathToFileURL } from "node:url";
 import {
@@ -127,7 +128,12 @@ async function publishOnce(options) {
     host: options.payerMcpHost,
     port: options.payerMcpPort,
   });
-  const observedAt = new Date().toISOString();
+  const publishedAtMs = Date.now();
+  const waitingRunId =
+    `run-${createHash("sha256")
+      .update(options.bucket)
+      .digest("hex")
+      .slice(0, 16)}`;
   let snapshot;
   try {
     const response = await fetch(options.consoleUrl, {
@@ -135,18 +141,45 @@ async function publishOnce(options) {
       signal: AbortSignal.timeout(1_500),
     });
     if (!response.ok) throw new Error(`Console returned ${response.status}.`);
-    snapshot = buildPublicMonitorSnapshot(await response.json(), {
-      observedAt,
+    const projection = await response.json();
+    const runId =
+      `run-${createHash("sha256")
+        .update(
+          `${projection.session?.releaseId ?? ""}:` +
+          `${projection.session?.sessionId ?? ""}`,
+        )
+        .digest("hex")
+        .slice(0, 16)}`;
+    snapshot = buildPublicMonitorSnapshot(projection, {
+      anchorExplorerUrls:
+        projection.anchors.map(
+          ({ block, verified }) =>
+            verified
+              ? `https://sepolia.etherscan.io/block/${block}`
+              : null,
+        ),
+      nowMs: publishedAtMs,
       payerMcpReady,
+      publishedAtMs,
+      runId,
+      sourceObservedAtMs:
+        projection.deadline?.nowMs,
+      staleAfterMs: 10_000,
+      verifierPublicationValidated:
+        projection.verifier?.status ===
+          "VERIFICATION_PASSED",
     });
   } catch {
     snapshot = buildUnavailablePublicMonitorSnapshot({
-      observedAt,
-      payerMcpReady,
+      publishedAtMs,
+      runId: waitingRunId,
+      staleAfterMs: 10_000,
     });
   }
   await uploadSnapshot(snapshot, options);
-  process.stdout.write(`PUBLIC_MONITOR_UPDATED ${snapshot.observedAt} ${snapshot.status}\n`);
+  process.stdout.write(
+    `PUBLIC_MONITOR_UPDATED ${snapshot.publishedAtMs} ${snapshot.runStatus}\n`,
+  );
 }
 
 async function main() {

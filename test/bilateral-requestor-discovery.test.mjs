@@ -20,6 +20,8 @@ const REPOSITORY_SHA = "abcdef0123456789abcdef0123456789abcdef01";
 const RELEASE_ID = "release-requestor-bootstrap";
 const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const OPERATOR_KEY_ID = "operator";
+const IMAGE_DIGEST =
+  `123456789012.dkr.ecr.us-west-2.amazonaws.com/clockchain@sha256:${"a".repeat(64)}`;
 
 function rawEd25519PublicKey(pair) {
   return pair.publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64");
@@ -62,26 +64,32 @@ test("creates and verifies exact signed Requestor discovery without private fiel
   const cert = await certificateFixture(t);
   const operator = generateKeyPairSync("ed25519");
   const discovery = createSignedRequestorDiscovery({
-    certificateFingerprint: cert.certificateFingerprint,
-    certificateUrl: "https://payer.example.test/payer-mcp.crt",
-    expiresAtMs: String(Date.now() + 60_000),
-    operatorKeyId: OPERATOR_KEY_ID,
+    schema: "clockchain.requestor-discovery/v2",
+    paymentMoved: false,
+    imageDigest: IMAGE_DIGEST,
+    releaseId: RELEASE_ID,
+    sessionId: SESSION_ID,
+    repositorySha: REPOSITORY_SHA,
     operatorPrivateKey: operator.privateKey,
     publicUrl: "https://127.0.0.1:9443/mcp",
-    releaseId: RELEASE_ID,
-    repositorySha: REPOSITORY_SHA,
-    sessionId: SESSION_ID,
+    certificateUrl: "https://payer.example.test/payer-mcp.crt",
+    certificateFingerprint: cert.certificateFingerprint,
+    operatorKeyId: OPERATOR_KEY_ID,
+    expiresAtMs: String(Date.now() + 60_000),
   });
 
   assert.deepEqual(Object.keys(discovery), [
-    "certificateFingerprint",
-    "certificateUrl",
-    "expiresAtMs",
-    "operatorKeyId",
-    "publicUrl",
+    "schema",
+    "paymentMoved",
+    "imageDigest",
     "releaseId",
-    "repositorySha",
     "sessionId",
+    "repositorySha",
+    "publicUrl",
+    "certificateUrl",
+    "certificateFingerprint",
+    "operatorKeyId",
+    "expiresAtMs",
     "signature",
   ]);
   assert.equal(JSON.stringify(discovery).includes("PRIVATE KEY"), false);
@@ -115,6 +123,7 @@ test("publisher uploads public certificate and signed discovery without opening 
     certificateUrl: "https://payer.example.test/payer-mcp.crt",
     discoveryKey: "discovery.json",
     expiresAtMs: String(Date.now() + 60_000),
+    imageDigest: IMAGE_DIGEST,
     operatorKeyId: OPERATOR_KEY_ID,
     operatorPrivateKeyPath,
     publicUrl: "https://127.0.0.1:9443/mcp",
@@ -166,6 +175,7 @@ process.stdin.on("end", () => {
       "--repository-sha", REPOSITORY_SHA,
       "--session-id", SESSION_ID,
       "--expires-at-ms", String(Date.now() + 60_000),
+      "--image-digest", IMAGE_DIGEST,
     ],
     {
       cwd: new URL("../", import.meta.url).pathname,
@@ -241,6 +251,7 @@ require("node:fs").appendFileSync(process.env.AWS_UPLOAD_LOG, "called\\n");
     "--repository-sha", REPOSITORY_SHA,
     "--session-id", SESSION_ID,
     "--expires-at-ms", String(Date.now() + 60_000),
+    "--image-digest", IMAGE_DIGEST,
   ];
   for (const mutate of [
     (args) => ["--bucket", "bad..bucket", ...args.slice(2)],
@@ -287,6 +298,7 @@ test("publisher rejects unsafe object keys and private file substitutions before
     certificateUrl: "https://payer.example.test/payer-mcp.crt",
     discoveryKey: "discovery.json",
     expiresAtMs: String(Date.now() + 60_000),
+    imageDigest: IMAGE_DIGEST,
     operatorKeyId: OPERATOR_KEY_ID,
     operatorPrivateKeyPath,
     publicUrl: "https://127.0.0.1:9443/mcp",
@@ -332,15 +344,18 @@ test("discovery verification rejects stale, wrong SHA, HTTP URLs, redirects, and
   const cert = await certificateFixture(t);
   const operator = generateKeyPairSync("ed25519");
   const valid = createSignedRequestorDiscovery({
-    certificateFingerprint: cert.certificateFingerprint,
-    certificateUrl: "https://payer.example.test/payer-mcp.crt",
-    expiresAtMs: String(Date.now() + 60_000),
-    operatorKeyId: OPERATOR_KEY_ID,
+    schema: "clockchain.requestor-discovery/v2",
+    paymentMoved: false,
+    imageDigest: IMAGE_DIGEST,
+    releaseId: RELEASE_ID,
+    sessionId: SESSION_ID,
+    repositorySha: REPOSITORY_SHA,
     operatorPrivateKey: operator.privateKey,
     publicUrl: "https://127.0.0.1:9443/mcp",
-    releaseId: RELEASE_ID,
-    repositorySha: REPOSITORY_SHA,
-    sessionId: SESSION_ID,
+    certificateUrl: "https://payer.example.test/payer-mcp.crt",
+    certificateFingerprint: cert.certificateFingerprint,
+    operatorKeyId: OPERATOR_KEY_ID,
+    expiresAtMs: String(Date.now() + 60_000),
   });
   for (const discovery of [
     { ...valid, expiresAtMs: "1" },
@@ -366,15 +381,18 @@ test("discovery wire parser rejects duplicate keys and reordered noncanonical te
   const cert = await certificateFixture(t);
   const operator = generateKeyPairSync("ed25519");
   const discovery = createSignedRequestorDiscovery({
-    certificateFingerprint: cert.certificateFingerprint,
-    certificateUrl: "https://payer.example.test/payer-mcp.crt",
-    expiresAtMs: String(Date.now() + 60_000),
-    operatorKeyId: OPERATOR_KEY_ID,
+    schema: "clockchain.requestor-discovery/v2",
+    paymentMoved: false,
+    imageDigest: IMAGE_DIGEST,
+    releaseId: RELEASE_ID,
+    sessionId: SESSION_ID,
+    repositorySha: REPOSITORY_SHA,
     operatorPrivateKey: operator.privateKey,
     publicUrl: "https://127.0.0.1:9443/mcp",
-    releaseId: RELEASE_ID,
-    repositorySha: REPOSITORY_SHA,
-    sessionId: SESSION_ID,
+    certificateUrl: "https://payer.example.test/payer-mcp.crt",
+    certificateFingerprint: cert.certificateFingerprint,
+    operatorKeyId: OPERATOR_KEY_ID,
+    expiresAtMs: String(Date.now() + 60_000),
   });
   const canonical = `${JSON.stringify(discovery)}\n`;
   assert.deepEqual(parseRequestorDiscoveryWire(canonical), discovery);
