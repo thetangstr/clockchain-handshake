@@ -5,6 +5,7 @@ import {
   chmod,
   mkdir,
   open,
+  readFile,
   rename,
   rm,
 } from "node:fs/promises";
@@ -138,7 +139,7 @@ export async function writePrivateDeploymentEvidence({
 }
 
 async function runCdk(args) {
-  await execFileAsync("npx", ["cdk", ...args], {
+  return execFileAsync("npx", ["cdk", ...args], {
     cwd: new URL("..", import.meta.url),
     encoding: "utf8",
     env: {
@@ -178,17 +179,21 @@ async function main() {
     `tunnelImage=${tunnelImage}`,
   ];
   if (process.argv.includes("--plan")) {
-    await runCdk([
+    const diff = await runCdk([
       "diff",
       "ClockchainHandshake",
       ...contexts,
-      "--fail",
     ]);
+    process.stderr.write(diff.stdout);
+    process.stderr.write(diff.stderr);
     process.stdout.write(
       `${JSON.stringify(plan, null, 2)}\n`,
     );
     return;
   }
+  const deploymentOutputs =
+    process.env.DEPLOYMENT_OUTPUTS_FILE ??
+    `/tmp/clockchain-aws-outputs-${repositorySha}.json`;
   await runCdk([
     "deploy",
     "ClockchainHandshake",
@@ -196,15 +201,46 @@ async function main() {
     "--require-approval",
     "never",
     "--outputs-file",
-    process.env.DEPLOYMENT_OUTPUTS_FILE ??
-      "/tmp/clockchain-aws-outputs.json",
+    deploymentOutputs,
   ]);
+  const outputs = JSON.parse(
+    await readFile(
+      deploymentOutputs,
+      "utf8",
+    ),
+  );
+  const evidence = {
+    account: plan.account,
+    controlPlaneImage:
+      plan.controlPlaneImage,
+    deployedAtMs: Date.now(),
+    legacyInfrastructure:
+      plan.legacyInfrastructure,
+    outputs:
+      outputs.ClockchainHandshake ?? {},
+    region: plan.region,
+    repositorySha:
+      plan.repositorySha,
+    schema:
+      "clockchain.aws-deployment-evidence/v1",
+    tunnelImage: plan.tunnelImage,
+  };
+  const evidencePath =
+    process.env.DEPLOYMENT_EVIDENCE_FILE ??
+    `/tmp/clockchain-aws-deployment-${repositorySha}.json`;
+  await writePrivateDeploymentEvidence({
+    evidence,
+    output: evidencePath,
+    repositoryRoot: process.cwd(),
+  });
   process.stdout.write(
     `${JSON.stringify(
       {
         account: plan.account,
+        evidencePath,
         legacyInfrastructure:
           plan.legacyInfrastructure,
+        outputs: evidence.outputs,
         region: plan.region,
         repositorySha:
           plan.repositorySha,
