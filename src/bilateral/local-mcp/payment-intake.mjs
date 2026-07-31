@@ -23,12 +23,29 @@ const RESULT_KEYS = [
   "paymentMoved",
   "protocol",
   "repositorySha",
+  "requestorInstructions",
   "schema",
   "status",
 ];
+const REQUESTOR_INSTRUCTION_KEYS = ["orderedSteps", "requiredCommand", "safetyRules", "summary"];
 const TOOL_RESULT_KEYS = ["structuredContent", "content"];
 const TEXT_BLOCK_KEYS = ["type", "text"];
 const AUTHORIZATION_SEQUENCE = Object.freeze(["PROPOSED", "ACCEPTED", "ACKNOWLEDGED"]);
+const REQUESTOR_ORDERED_STEPS = Object.freeze([
+  "Keep this checkout detached, clean, and at repositorySha before handling private material.",
+  "Let this command poll the Payer bootstrap broker until the operator seals the launch manifest.",
+  "After the sealed manifest is written locally, let this command call request_payment once and start the Requestor supervisor.",
+  "Stay attached until the three public anchors are visible: PROPOSED, ACCEPTED, ACKNOWLEDGED.",
+]);
+const REQUESTOR_SAFETY_RULES = Object.freeze([
+  "Do not act as Payer.",
+  "Do not change payer terms.",
+  "Do not fund addresses or move payment; paymentMoved must remain false.",
+  "Do not print or share private keys, capabilities, tokens, launch manifests, or live evidence.",
+  "Do not claim the final verdict; only the operator fresh aggregate verifier may report it.",
+]);
+const REQUESTOR_REQUIRED_COMMAND = "npm run bilateral:request-payment -- --discovery-url <signed-discovery-url> --intake-request-id <uuid-v4> --state <absolute-private-requestor-state-root>";
+const REQUESTOR_SUMMARY = "The Payer requires Clockchain Handshake before this payment request can be evaluated.";
 
 function invalid() {
   throw new Error("Payer MCP payment intake failed safely.");
@@ -124,6 +141,15 @@ function clonePolicy() {
   });
 }
 
+function cloneRequestorInstructions() {
+  return deepFreeze({
+    orderedSteps: [...REQUESTOR_ORDERED_STEPS],
+    requiredCommand: REQUESTOR_REQUIRED_COMMAND,
+    safetyRules: [...REQUESTOR_SAFETY_RULES],
+    summary: REQUESTOR_SUMMARY,
+  });
+}
+
 function validatePolicyPreview(value) {
   const preview = exactDataObject(value, ["amount", "invoiceReferencePrefix", "purpose"]);
   const amount = exactDataObject(preview.amount, AMOUNT_KEYS);
@@ -138,9 +164,32 @@ function validatePolicyPreview(value) {
   return clonePolicy();
 }
 
+function validateRequestorInstructions(value) {
+  const instructions = exactDataObject(value, REQUESTOR_INSTRUCTION_KEYS);
+  const orderedSteps = exactDenseArray(instructions.orderedSteps, REQUESTOR_ORDERED_STEPS.length);
+  const safetyRules = exactDenseArray(instructions.safetyRules, REQUESTOR_SAFETY_RULES.length);
+  if (
+    !orderedSteps.every((entry, index) => entry === REQUESTOR_ORDERED_STEPS[index]) ||
+    instructions.requiredCommand !== REQUESTOR_REQUIRED_COMMAND ||
+    !safetyRules.every((entry, index) => entry === REQUESTOR_SAFETY_RULES[index]) ||
+    instructions.summary !== REQUESTOR_SUMMARY
+  ) {
+    invalid();
+  }
+  for (const stringValue of [
+    ...orderedSteps,
+    instructions.requiredCommand,
+    ...safetyRules,
+    instructions.summary,
+  ]) {
+    assertPrintableString(stringValue);
+  }
+  return cloneRequestorInstructions();
+}
+
 export const PAYMENT_INTAKE_TOOL_DESCRIPTOR = deepFreeze({
   name: REQUEST_PAYMENT_TOOL_NAME,
-  description: "Ask this Payer to process the fixed demo payment request. A successful intake requires the Requestor to complete Clockchain Handshake; it does not move or authorize payment.",
+  description: "Ask this Payer to process the fixed demo payment request. A successful intake returns the exact public Clockchain Handshake instructions the Requestor must follow; it does not move or authorize payment.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -217,6 +266,7 @@ export function buildHandshakeRequiredResult({ repositorySha, toolInput }) {
     paymentMoved: false,
     protocol: "clockchain.bilateral-authorization/v1",
     repositorySha,
+    requestorInstructions: cloneRequestorInstructions(),
     schema: HANDSHAKE_REQUIRED_SCHEMA,
     status: "HANDSHAKE_REQUIRED",
   });
@@ -234,6 +284,7 @@ export function validateHandshakeRequiredResult({ result, repositorySha, toolInp
   const value = exactDataObject(result, RESULT_KEYS);
   const input = validatePaymentIntakeInput(toolInput);
   const preview = validatePolicyPreview(value.mandatePreview);
+  const requestorInstructions = validateRequestorInstructions(value.requestorInstructions);
   const sequence = exactDenseArray(value.authorizationSequence, AUTHORIZATION_SEQUENCE.length);
   if (
     !sequence.every((entry, index) => entry === AUTHORIZATION_SEQUENCE[index]) ||
@@ -261,6 +312,7 @@ export function validateHandshakeRequiredResult({ result, repositorySha, toolInp
     paymentMoved: false,
     protocol: value.protocol,
     repositorySha: value.repositorySha,
+    requestorInstructions,
     schema: HANDSHAKE_REQUIRED_SCHEMA,
     status: value.status,
   });

@@ -11,6 +11,7 @@ import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import { createLaunchManifest } from "../src/bilateral/coordination/manifest.mjs";
 import { bootstrapClaimFingerprint } from "../src/bilateral/local-mcp/bootstrap-broker.mjs";
 import { sealRequestorBootstrapManifest } from "../src/bilateral/local-mcp/bootstrap-envelope.mjs";
+import { buildPaymentIntakeToolResult } from "../src/bilateral/local-mcp/payment-intake.mjs";
 import { canonicalizeReceiptEventValue } from "../src/canonical.mjs";
 
 const REPOSITORY_SHA = "abcdef0123456789abcdef0123456789abcdef01";
@@ -20,6 +21,17 @@ const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const OPERATOR_KEY_ID = "operator";
 const CAPABILITY = "ab".repeat(32);
 const REPOSITORY_ROOT = resolve(new URL("../", import.meta.url).pathname);
+
+function paymentInput() {
+  return {
+    amount: { currency: "USD", value: "100" },
+    intakeRequestId: INTAKE_REQUEST_ID,
+    invoiceReference: "invoice-001",
+    paymentMoved: false,
+    purpose: "Handshake demo",
+    schema: "clockchain.payer-mcp-payment-intake/v1",
+  };
+}
 
 function rawEd25519PublicKey(pair) {
   return pair.publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64");
@@ -191,7 +203,10 @@ test("Requestor CLI exposes only one-shot discovery flags and completes bootstra
       assert.equal(input.mcpUrl, fx.discovery.publicUrl);
       assert.equal(input.tlsFingerprint, fx.discovery.certificateFingerprint);
       assert.equal(input.stateRoot, fx.stateRoot);
-      return { paymentMoved: false, status: "HANDSHAKE_REQUIRED" };
+      return buildPaymentIntakeToolResult({
+        repositorySha: REPOSITORY_SHA,
+        toolInput: paymentInput(),
+      }).structuredContent;
     },
     async runSupervisor(input) {
       calls.push(["runSupervisor", input.launchManifestPath, input.stateRoot]);
@@ -204,7 +219,10 @@ test("Requestor CLI exposes only one-shot discovery flags and completes bootstra
     },
     writeStatus(value) {
       calls.push(["writeStatus", value]);
-      assert.deepEqual(value, { paymentMoved: false, status: "HANDSHAKE_REQUIRED" });
+      assert.equal(value.status, "HANDSHAKE_REQUIRED");
+      assert.equal(value.paymentMoved, false);
+      assert.equal(value.requestorInstructions.summary, "The Payer requires Clockchain Handshake before this payment request can be evaluated.");
+      assert.equal(value.requestorInstructions.requiredCommand.includes("npm run bilateral:request-payment"), true);
       assert.equal(JSON.stringify(value).includes(CAPABILITY), false);
       assert.equal(JSON.stringify(value).includes(fx.operatorPublicKey), false);
     },

@@ -26,6 +26,7 @@ import {
   validateRequestorDiscoveryCandidate,
   verifySignedRequestorDiscovery,
 } from "../scripts/publish-requestor-discovery.mjs";
+import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import { canonicalizeReceiptEventValue } from "../src/canonical.mjs";
 
 export const REQUEST_PAYMENT_CLI_FLAGS = Object.freeze([
@@ -36,7 +37,6 @@ export const REQUEST_PAYMENT_CLI_FLAGS = Object.freeze([
 
 const execFileAsync = promisify(execFile);
 const FAILURE_LINE = '{"code":"REQUEST_PAYMENT_FAILED","paymentMoved":false}\n';
-const HANDSHAKE_REQUIRED_LINE = '{"paymentMoved":false,"status":"HANDSHAKE_REQUIRED"}\n';
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const REQUEST_PAYMENT_REPOSITORY_ROOT = resolve(fileURLToPath(new URL("../", import.meta.url)));
@@ -391,8 +391,8 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
       tlsFingerprint,
     });
     if (intakeResult?.status !== "HANDSHAKE_REQUIRED" || intakeResult.paymentMoved !== false) fail();
-    const writeStatus = dependencies.writeStatus ?? (() => process.stdout.write(HANDSHAKE_REQUIRED_LINE));
-    writeStatus(Object.freeze({ paymentMoved: false, status: "HANDSHAKE_REQUIRED" }));
+    const writeStatus = dependencies.writeStatus ?? ((value) => process.stdout.write(`${canonicalBytes(value).toString("utf8")}\n`));
+    writeStatus(intakeResult);
     const supervisor = dependencies.runSupervisor ?? (async (input) => runSupervisor({
       launchManifestPath: input.launchManifestPath,
       stateRoot: input.stateRoot,
