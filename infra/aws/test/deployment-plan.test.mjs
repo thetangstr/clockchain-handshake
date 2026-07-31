@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   assertFrozenRelease,
   createBuildPlan,
+  createDockerBuildInvocation,
 } from "../scripts/build-and-push.mjs";
 import {
   createDeploymentPlan,
@@ -62,6 +63,31 @@ test("build plan pins linux amd64 images to the exact repository SHA", () => {
     });
   }
   assert.doesNotMatch(JSON.stringify(plan), /password|secretValue|privateKey/i);
+});
+
+test("docker build always runs from the reviewed repository root", () => {
+  const plan = createBuildPlan({
+    repositorySha: SHA,
+  });
+  const invocation =
+    createDockerBuildInvocation({
+      image: plan.images[0],
+      repositoryRoot:
+        "/private/reviewed-checkout",
+      repositorySha: SHA,
+    });
+  assert.equal(
+    invocation.cwd,
+    "/private/reviewed-checkout",
+  );
+  assert.equal(
+    invocation.args.at(-1),
+    ".",
+  );
+  assert.match(
+    invocation.args.join(" "),
+    /infra\/aws\/docker\/control-plane\.Dockerfile/,
+  );
 });
 
 test("deployment plan uses image digests and fixed account without deleting legacy infrastructure", () => {

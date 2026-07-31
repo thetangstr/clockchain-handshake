@@ -8,11 +8,17 @@ import {
 } from "@aws-sdk/client-ecr";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { pathToFileURL } from "node:url";
+import {
+  fileURLToPath,
+  pathToFileURL,
+} from "node:url";
 
 const execFileAsync = promisify(execFile);
 const SHA40 = /^[0-9a-f]{40}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
+const REPOSITORY_ROOT = fileURLToPath(
+  new URL("../../../", import.meta.url),
+);
 
 export const DEFAULT_ACCOUNT = "570035913370";
 export const DEFAULT_REGION = "us-west-2";
@@ -132,9 +138,50 @@ export function createBuildPlan({
   };
 }
 
-async function runDocker(args, { input } = {}) {
+export function createDockerBuildInvocation({
+  image,
+  repositoryRoot = REPOSITORY_ROOT,
+  repositorySha,
+}) {
+  required(
+    repositorySha,
+    SHA40,
+    "Repository SHA",
+  );
+  if (
+    typeof repositoryRoot !== "string" ||
+    repositoryRoot.length === 0
+  ) {
+    throw new Error(
+      "Repository root is invalid.",
+    );
+  }
+  return {
+    args: [
+      "buildx",
+      "build",
+      "--platform",
+      image.platform,
+      "--build-arg",
+      `REPOSITORY_SHA=${repositorySha}`,
+      "--file",
+      image.dockerfile,
+      "--tag",
+      image.uri,
+      "--push",
+      ".",
+    ],
+    cwd: repositoryRoot,
+  };
+}
+
+async function runDocker(
+  args,
+  { cwd = REPOSITORY_ROOT, input } = {},
+) {
   await new Promise((resolve, reject) => {
     const child = spawn("docker", args, {
+      cwd,
       stdio: [
         input === undefined ? "ignore" : "pipe",
         "inherit",
@@ -244,20 +291,15 @@ export async function buildAndPush({
 
   const resolved = {};
   for (const image of plan.images) {
-    await runDockerCommand([
-      "buildx",
-      "build",
-      "--platform",
-      image.platform,
-      "--build-arg",
-      `REPOSITORY_SHA=${repositorySha}`,
-      "--file",
-      image.dockerfile,
-      "--tag",
-      image.uri,
-      "--push",
-      ".",
-    ]);
+    const invocation =
+      createDockerBuildInvocation({
+        image,
+        repositorySha,
+      });
+    await runDockerCommand(
+      invocation.args,
+      { cwd: invocation.cwd },
+    );
     const response = await client.send(
       new DescribeImagesCommand({
         imageIds: [
