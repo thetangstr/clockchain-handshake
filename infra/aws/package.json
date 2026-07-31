@@ -8,7 +8,13 @@
   },
   "scripts": {
     "build": "tsc --noEmit",
-    "synth": "cdk synth",
+    "deploy": "node scripts/deploy.mjs",
+    "deploy:plan": "node scripts/deploy.mjs --plan",
+    "images:bootstrap": "cdk deploy ClockchainHandshakeImages --require-approval never",
+    "images:plan": "node scripts/build-and-push.mjs --plan",
+    "images:push": "node scripts/build-and-push.mjs",
+    "integration:check": "node scripts/run-integration-checks.mjs",
+    "synth": "cdk synth ClockchainHandshakeImages",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

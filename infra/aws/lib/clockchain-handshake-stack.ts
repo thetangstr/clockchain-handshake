@@ -34,6 +34,10 @@ import { fileURLToPath } from "node:url";
 const IMAGE =
   /^[0-9]{12}\.dkr\.ecr\.[a-z]{2}-[a-z]+-[1-9]\.amazonaws\.com\/[a-z0-9][a-z0-9._/-]{0,254}@sha256:[0-9a-f]{64}$/;
 const SHA40 = /^[0-9a-f]{40}$/;
+export const CONTROL_REPOSITORY_NAME =
+  "clockchain-handshake-control-plane";
+export const TUNNEL_REPOSITORY_NAME =
+  "clockchain-handshake-tunnel";
 
 type AccessPointName =
   | "bootstrap"
@@ -72,6 +76,71 @@ export interface ClockchainHandshakeStackProps
   readonly controlPlaneImage: string;
   readonly repositorySha: string;
   readonly tunnelImage: string;
+}
+
+export class ClockchainHandshakeImagesStack extends Stack {
+  public readonly controlRepository: ecr.Repository;
+  public readonly tunnelRepository: ecr.Repository;
+
+  public constructor(
+    scope: Construct,
+    id: string,
+    props?: StackProps,
+  ) {
+    super(scope, id, props);
+    this.controlRepository =
+      this.repository(
+        "ControlPlaneRepository",
+        CONTROL_REPOSITORY_NAME,
+      );
+    this.tunnelRepository =
+      this.repository(
+        "TunnelRepository",
+        TUNNEL_REPOSITORY_NAME,
+      );
+    new CfnOutput(
+      this,
+      "ControlPlaneRepositoryUri",
+      {
+        value:
+          this.controlRepository
+            .repositoryUri,
+      },
+    );
+    new CfnOutput(
+      this,
+      "TunnelRepositoryUri",
+      {
+        value:
+          this.tunnelRepository
+            .repositoryUri,
+      },
+    );
+  }
+
+  private repository(
+    id: string,
+    repositoryName: string,
+  ): ecr.Repository {
+    const repository = new ecr.Repository(
+      this,
+      id,
+      {
+        emptyOnDelete: false,
+        imageScanOnPush: true,
+        imageTagMutability:
+          ecr.TagMutability.IMMUTABLE,
+        removalPolicy: RemovalPolicy.RETAIN,
+        repositoryName,
+      },
+    );
+    repository.addLifecycleRule({
+      maxImageCount: 20,
+      rulePriority: 1,
+      tagStatus: ecr.TagStatus.ANY,
+    });
+    return repository;
+  }
 }
 
 export class ClockchainHandshakeStack extends Stack {
@@ -135,38 +204,18 @@ export class ClockchainHandshakeStack extends Stack {
     const accessPoints =
       this.createAccessPoints(fileSystem);
 
-    const controlRepository = new ecr.Repository(
-      this,
-      "ControlPlaneRepository",
-      {
-        emptyOnDelete: false,
-        imageScanOnPush: true,
-        imageTagMutability:
-          ecr.TagMutability.IMMUTABLE,
-        removalPolicy: RemovalPolicy.RETAIN,
-      },
-    );
-    controlRepository.addLifecycleRule({
-      maxImageCount: 20,
-      rulePriority: 1,
-      tagStatus: ecr.TagStatus.ANY,
-    });
-    const tunnelRepository = new ecr.Repository(
-      this,
-      "TunnelRepository",
-      {
-        emptyOnDelete: false,
-        imageScanOnPush: true,
-        imageTagMutability:
-          ecr.TagMutability.IMMUTABLE,
-        removalPolicy: RemovalPolicy.RETAIN,
-      },
-    );
-    tunnelRepository.addLifecycleRule({
-      maxImageCount: 20,
-      rulePriority: 1,
-      tagStatus: ecr.TagStatus.ANY,
-    });
+    const controlRepository =
+      ecr.Repository.fromRepositoryName(
+        this,
+        "ControlPlaneRepository",
+        CONTROL_REPOSITORY_NAME,
+      );
+    const tunnelRepository =
+      ecr.Repository.fromRepositoryName(
+        this,
+        "TunnelRepository",
+        TUNNEL_REPOSITORY_NAME,
+      );
     const controlImage =
       ecs.ContainerImage.fromEcrRepository(
         controlRepository,

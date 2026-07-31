@@ -8,11 +8,43 @@ import { Template } from "aws-cdk-lib/assertions";
 
 import {
   ClockchainHandshakeStack,
+  ClockchainHandshakeImagesStack,
 } from "../lib/clockchain-handshake-stack.js";
 
 const IMAGE =
   "123456789012.dkr.ecr.us-west-2.amazonaws.com/clockchain@sha256:" +
   "a".repeat(64);
+
+test("creates immutable bootstrap image repositories independently of runtime images", () => {
+  const app = new App();
+  const output = Template.fromStack(
+    new ClockchainHandshakeImagesStack(
+      app,
+      "ImageTestStack",
+      {
+        env: {
+          account: "123456789012",
+          region: "us-west-2",
+        },
+      },
+    ),
+  );
+  output.resourceCountIs(
+    "AWS::ECR::Repository",
+    2,
+  );
+  output.hasResourceProperties(
+    "AWS::ECR::Repository",
+    {
+      ImageScanningConfiguration: {
+        ScanOnPush: true,
+      },
+      ImageTagMutability: "IMMUTABLE",
+      RepositoryName:
+        "clockchain-handshake-control-plane",
+    },
+  );
+});
 
 function template(): Template {
   const app = new App();

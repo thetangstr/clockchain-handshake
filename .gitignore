@@ -1,5 +1,8 @@
 node_modules/
 infra/aws/cdk.out/
+infra/aws/deployment-evidence/
+infra/aws/integration-reports/
+infra/aws/*.outputs.json
 .context/
 .omx/
 .env

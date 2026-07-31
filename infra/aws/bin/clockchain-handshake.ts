@@ -3,6 +3,7 @@
 import { App } from "aws-cdk-lib";
 
 import {
+  ClockchainHandshakeImagesStack,
   ClockchainHandshakeStack,
 } from "../lib/clockchain-handshake-stack.js";
 
@@ -23,14 +24,37 @@ function required(
 
 const app = new App();
 
-new ClockchainHandshakeStack(
+new ClockchainHandshakeImagesStack(
   app,
-  "ClockchainHandshake",
+  "ClockchainHandshakeImages",
   {
+    env: {
+      account: process.env.CDK_DEFAULT_ACCOUNT,
+      region: process.env.CDK_DEFAULT_REGION,
+    },
+  },
+);
+
+const controlPlaneImage =
+  app.node.tryGetContext(
+    "controlPlaneImage",
+  );
+const repositorySha =
+  app.node.tryGetContext("repositorySha");
+const tunnelImage =
+  app.node.tryGetContext("tunnelImage");
+
+if (
+  controlPlaneImage !== undefined ||
+  repositorySha !== undefined ||
+  tunnelImage !== undefined
+) {
+  new ClockchainHandshakeStack(
+    app,
+    "ClockchainHandshake",
+    {
     controlPlaneImage: required(
-      app.node.tryGetContext(
-        "controlPlaneImage",
-      ),
+      controlPlaneImage,
       "controlPlaneImage",
     ),
     env: {
@@ -38,14 +62,13 @@ new ClockchainHandshakeStack(
       region: process.env.CDK_DEFAULT_REGION,
     },
     repositorySha: required(
-      app.node.tryGetContext(
-        "repositorySha",
-      ),
+      repositorySha,
       "repositorySha",
     ),
     tunnelImage: required(
-      app.node.tryGetContext("tunnelImage"),
+      tunnelImage,
       "tunnelImage",
     ),
-  },
-);
+    },
+  );
+}
