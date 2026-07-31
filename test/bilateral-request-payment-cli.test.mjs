@@ -101,14 +101,14 @@ async function fixture(t) {
     nowMs: Date.now(),
     operatorKeyId: OPERATOR_KEY_ID,
     randomBytes: () => Buffer.alloc(32, 9),
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://8.8.8.8:8443",
     releaseId: RELEASE_ID,
     repositorySha: REPOSITORY_SHA,
     role: "payee",
     sessionId: SESSION_ID,
     tlsCertificatePem,
     payerMcpIntakeCapability: CAPABILITY,
-  });
+  }, { allowTestAddresses: true });
   return {
     args: [
       "--discovery-url", "https://payer.example.test/discovery.json",

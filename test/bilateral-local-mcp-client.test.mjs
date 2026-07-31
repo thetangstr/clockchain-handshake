@@ -9,9 +9,9 @@ import { test } from "node:test";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import {
   REQUESTOR_MCP_INTAKE_FILE_NAME,
-  requestBootstrapThroughPayerMcp,
+  requestBootstrapThroughPayerMcp as requestBootstrapThroughPayerMcpProduction,
   readRequestorMcpIntake,
-  requestPaymentThroughPayerMcp,
+  requestPaymentThroughPayerMcp as requestPaymentThroughPayerMcpProduction,
 } from "../src/bilateral/local-mcp/client.mjs";
 import { bootstrapClaimFingerprint } from "../src/bilateral/local-mcp/bootstrap-broker.mjs";
 import { createRequestorBootstrapKey } from "../src/bilateral/local-mcp/bootstrap-envelope.mjs";
@@ -31,6 +31,22 @@ const CAPABILITY_DIGEST = createHash("sha256")
 const INTAKE_REQUEST_ID = "00000000-0000-4000-8000-000000000000";
 const SESSION_ID = "BwcHBwcHBwcHBwcHBwcHBw";
 const BOOTSTRAP_SCHEMA = "clockchain.requestor-bootstrap-broker-response/v1";
+
+function requestBootstrapThroughPayerMcp(input, dependencies = {}) {
+  const { allowTestAddresses: _ignoredTestFlag, ...publicInput } = input;
+  return requestBootstrapThroughPayerMcpProduction(
+    publicInput,
+    { ...dependencies, allowTestAddresses: true },
+  );
+}
+
+function requestPaymentThroughPayerMcp(input, dependencies = {}) {
+  const { allowTestAddresses: _ignoredTestFlag, ...publicInput } = input;
+  return requestPaymentThroughPayerMcpProduction(
+    publicInput,
+    { ...dependencies, allowTestAddresses: true },
+  );
+}
 
 function paymentInput(overrides = {}) {
   return {
@@ -98,6 +114,7 @@ test("public Requestor bootstrap client posts exact claims without bearer over p
   };
   const requests = [];
   const result = await requestBootstrapThroughPayerMcp({
+    allowTestAddresses: true,
     bootstrapUrl: "https://127.0.0.1:4443/bootstrap",
     claim,
     requestJsonRpc: async ({ body, headers, method, url }) => {
@@ -157,6 +174,7 @@ test("public Requestor bootstrap client fails closed on malformed claims and bro
   ]) {
     await assert.rejects(
       requestBootstrapThroughPayerMcp({
+        allowTestAddresses: true,
         bootstrapUrl: "https://127.0.0.1:4443/bootstrap",
         claim,
         requestJsonRpc: async () => ({
@@ -237,6 +255,7 @@ test("pinned Requestor client completes exact MCP lifecycle, persists public int
   });
 
   const result = await requestPaymentThroughPayerMcp({
+    allowTestAddresses: true,
     capability: CAPABILITY,
     intakeRequestId: INTAKE_REQUEST_ID,
     mcpUrl: server.url,
@@ -266,6 +285,7 @@ test("client accepts byte-identical persisted Requestor intake after crash-befor
   await chmod(stateRoot, 0o700);
   t.after(() => rm(stateRoot, { force: true, recursive: true }));
   const input = {
+    allowTestAddresses: true,
     capability: CAPABILITY,
     intakeRequestId: INTAKE_REQUEST_ID,
     mcpUrl: server.url,
@@ -326,6 +346,7 @@ test("client rejects symlink state root before chmod or persistence can mutate t
 
   await assert.rejects(
     requestPaymentThroughPayerMcp({
+      allowTestAddresses: true,
       capability: CAPABILITY,
       intakeRequestId: INTAKE_REQUEST_ID,
       mcpUrl: server.url,
@@ -351,6 +372,7 @@ test("client validates durable canonical readback before returning success", asy
 
   await assert.rejects(
     requestPaymentThroughPayerMcp({
+      allowTestAddresses: true,
       capability: CAPABILITY,
       intakeRequestId: INTAKE_REQUEST_ID,
       mcpUrl: server.url,
@@ -400,6 +422,7 @@ test("client rejects unsafe existing Requestor intake files without modifying th
 
     await assert.rejects(
       requestPaymentThroughPayerMcp({
+        allowTestAddresses: true,
         capability: CAPABILITY,
         intakeRequestId: INTAKE_REQUEST_ID,
         mcpUrl: server.url,
@@ -420,6 +443,7 @@ test("client rejects transport, lifecycle, schema, result, duplicate-key, and cl
   await chmod(stateRoot, 0o700);
   t.after(() => rm(stateRoot, { force: true, recursive: true }));
   const good = {
+    allowTestAddresses: true,
     capability: CAPABILITY,
     intakeRequestId: INTAKE_REQUEST_ID,
     mcpUrl: "https://127.0.0.1:4443/mcp",
@@ -428,6 +452,19 @@ test("client rejects transport, lifecycle, schema, result, duplicate-key, and cl
     tlsCertificatePem: "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n",
     tlsFingerprint: "a".repeat(64),
   };
+  const {
+    allowTestAddresses: _testOnly,
+    ...productionInput
+  } = good;
+  await assert.rejects(
+    requestPaymentThroughPayerMcpProduction({
+      ...productionInput,
+      requestJsonRpc: async () => {
+        throw new Error("request should not be reached");
+      },
+    }),
+    /Requestor MCP client failed safely/,
+  );
   const cases = [
     { mcpUrl: "http://127.0.0.1:443/mcp" },
     { mcpUrl: "https://localhost:443/mcp" },
@@ -548,6 +585,7 @@ async function assertMockedClientFails(t, { overrides = {}, repositorySha = REPO
   const requests = [];
   await assert.rejects(
     requestPaymentThroughPayerMcp({
+      allowTestAddresses: true,
       capability: CAPABILITY,
       intakeRequestId: INTAKE_REQUEST_ID,
       mcpUrl: "https://127.0.0.1:4443/mcp",

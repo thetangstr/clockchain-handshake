@@ -9,6 +9,7 @@ import {
   buildPaymentIntakeToolResult,
 } from "./payment-intake.mjs";
 import { canonicalBytes } from "../canonical.mjs";
+import { validatePublicEndpoint as validateNetworkEndpoint } from "../network-endpoint.mjs";
 
 export const PAYER_MCP_PROTOCOL_VERSION = "2025-11-25";
 
@@ -120,7 +121,7 @@ function validatePem(value) {
   return value;
 }
 
-function validatePublicEndpoint(value, certificatePem) {
+function validatePublicEndpoint(value, certificatePem, allowTestAddresses) {
   if (value === undefined) return null;
   if (typeof value !== "string") fail();
   let url;
@@ -129,24 +130,17 @@ function validatePublicEndpoint(value, certificatePem) {
   } catch {
     fail();
   }
-  if (
-    url.protocol !== "https:" ||
-    url.pathname !== "/mcp" ||
-    url.search !== "" ||
-    url.hash !== "" ||
-    url.username !== "" ||
-    url.password !== "" ||
-    url.port === "" ||
-    net.isIP(url.hostname) === 0 ||
-    url.hostname === "0.0.0.0"
-  ) {
+  if (url.port === "") fail();
+  let endpoint;
+  try {
+    endpoint = validateNetworkEndpoint(value, {
+      allowedPaths: ["/mcp"],
+      allowTestAddresses,
+      defaultPort: Number(url.port),
+      protocols: ["https:"],
+    });
+  } catch {
     fail();
-  }
-  const port = Number(url.port);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535 || String(port) !== url.port) fail();
-  if (net.isIP(url.hostname) === 4) {
-    const octets = url.hostname.split(".");
-    if (octets.length !== 4 || octets.some((octet) => String(Number(octet)) !== octet || Number(octet) > 255)) fail();
   }
   let certificate;
   try {
@@ -154,10 +148,14 @@ function validatePublicEndpoint(value, certificatePem) {
   } catch {
     fail();
   }
-  if (certificate.checkIP(url.hostname) !== url.hostname) fail();
+  const certificateIdentity =
+    net.isIP(endpoint.hostname) === 0
+      ? certificate.checkHost(endpoint.hostname)
+      : certificate.checkIP(endpoint.hostname);
+  if (certificateIdentity !== endpoint.hostname) fail();
   return Object.freeze({
-    authority: hostAuthority(url.hostname, port),
-    url: url.href,
+    authority: hostAuthority(endpoint.hostname, endpoint.port),
+    url: endpoint.url,
   });
 }
 
@@ -650,6 +648,7 @@ function assertSessionRequest(session) {
 }
 
 export function createPayerMcpServer({
+  allowTestAddresses = false,
   capabilityDigest: expectedCapabilityDigest,
   claimRequestorBootstrap,
   createHttpsServer = https.createServer,
@@ -663,6 +662,7 @@ export function createPayerMcpServer({
   tlsCertificatePem,
   tlsPrivateKeyPem,
 } = {}) {
+  if (typeof allowTestAddresses !== "boolean") fail();
   const bindHost = validateHost(host);
   const bindPort = validatePort(port);
   const digest = validateDigest(expectedCapabilityDigest);
@@ -670,7 +670,11 @@ export function createPayerMcpServer({
   const store = validateIntakeStore(intakeStore);
   const certificate = validatePem(tlsCertificatePem);
   const privateKey = validatePem(tlsPrivateKeyPem);
-  const publicEndpoint = validatePublicEndpoint(publicUrl, certificate);
+  const publicEndpoint = validatePublicEndpoint(
+    publicUrl,
+    certificate,
+    allowTestAddresses,
+  );
   const bootstrapBroker = validateClaimRequestorBootstrap(claimRequestorBootstrap);
   if (typeof createHttpsServer !== "function" || typeof nowMs !== "function" || typeof randomBytes !== "function") fail();
 

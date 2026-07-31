@@ -1,12 +1,17 @@
-import { createHash, randomBytes, X509Certificate } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { link, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import https from "node:https";
-import net from "node:net";
 import { join, resolve } from "node:path";
+import { checkServerIdentity as checkTlsServerIdentity } from "node:tls";
 import { isDeepStrictEqual } from "node:util";
 
 import { canonicalBytes } from "../canonical.mjs";
+import {
+  createResolvedLookup,
+  resolvePublicEndpoint,
+  validatePublicEndpoint,
+} from "../network-endpoint.mjs";
 import {
   PAYMENT_INTAKE_TOOL_DESCRIPTOR,
   validateHandshakeRequiredResult,
@@ -115,7 +120,7 @@ function exactObject(value, keys) {
   }
 }
 
-function validateUrl(value) {
+function validateUrl(value, path, allowTestAddresses) {
   if (typeof value !== "string") fail();
   let url;
   try {
@@ -123,58 +128,27 @@ function validateUrl(value) {
   } catch {
     fail();
   }
-  if (
-    url.protocol !== "https:" ||
-    url.pathname !== "/mcp" ||
-    url.search !== "" ||
-    url.hash !== "" ||
-    url.username !== "" ||
-    url.password !== "" ||
-    url.port === "" ||
-    net.isIP(url.hostname) === 0
-  ) {
-    fail();
-  }
-  const port = Number(url.port);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535 || String(port) !== url.port) fail();
-  if (net.isIP(url.hostname) === 4) {
-    const octets = url.hostname.split(".");
-    if (octets.length !== 4 || octets.some((octet) => String(Number(octet)) !== octet || Number(octet) > 255)) fail();
-  }
-  return url;
-}
-
-function validateBootstrapUrl(value) {
-  if (typeof value !== "string") fail();
-  let url;
+  if (url.port === "") fail();
+  let endpoint;
   try {
-    url = new URL(value);
+    endpoint = validatePublicEndpoint(value, {
+      allowedPaths: [path],
+      allowTestAddresses,
+      defaultPort: Number(url.port),
+      protocols: ["https:"],
+    });
   } catch {
     fail();
   }
-  if (
-    url.protocol !== "https:" ||
-    url.pathname !== "/bootstrap" ||
-    url.search !== "" ||
-    url.hash !== "" ||
-    url.username !== "" ||
-    url.password !== "" ||
-    url.port === "" ||
-    net.isIP(url.hostname) === 0
-  ) {
-    fail();
-  }
-  const port = Number(url.port);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535 || String(port) !== url.port) fail();
-  if (net.isIP(url.hostname) === 4) {
-    const octets = url.hostname.split(".");
-    if (octets.length !== 4 || octets.some((octet) => String(Number(octet)) !== octet || Number(octet) > 255)) fail();
-  }
-  return url;
+  return Object.freeze({
+    ...endpoint,
+    href: endpoint.url,
+    pathname: endpoint.path,
+  });
 }
 
 function hostHeader(url) {
-  return net.isIP(url.hostname) === 6 ? `[${url.hostname}]:${url.port}` : `${url.hostname}:${url.port}`;
+  return url.hostname.includes(":") ? `[${url.hostname}]:${url.port}` : `${url.hostname}:${url.port}`;
 }
 
 function validateInput({
@@ -185,7 +159,7 @@ function validateInput({
   stateRoot,
   tlsCertificatePem,
   tlsFingerprint,
-}) {
+}, allowTestAddresses) {
   if (typeof capability !== "string" || !CAPABILITY_PATTERN.test(capability)) fail();
   if (typeof intakeRequestId !== "string" || !UUID_V4_PATTERN.test(intakeRequestId)) fail();
   if (typeof repositorySha !== "string" || !REPOSITORY_SHA_PATTERN.test(repositorySha)) fail();
@@ -197,7 +171,7 @@ function validateInput({
   return Object.freeze({
     capability,
     intakeRequestId,
-    mcpUrl: validateUrl(mcpUrl),
+    mcpUrl: validateUrl(mcpUrl, "/mcp", allowTestAddresses),
     repositorySha,
     stateRoot,
     tlsCertificatePem,
@@ -250,19 +224,80 @@ function exactBase64(value, decodedLength) {
   if (decoded.length !== decodedLength || decoded.toString("base64") !== value) fail();
 }
 
-function validateBootstrapInput({ bootstrapUrl, claim, repositorySha, tlsCertificatePem, tlsFingerprint }) {
+function validateBootstrapInput({
+  bootstrapUrl,
+  claim,
+  repositorySha,
+  tlsCertificatePem,
+  tlsFingerprint,
+}, allowTestAddresses) {
   if (typeof repositorySha !== "string" || !REPOSITORY_SHA_PATTERN.test(repositorySha)) fail();
   if (typeof tlsCertificatePem !== "string" || !tlsCertificatePem.includes("-----BEGIN CERTIFICATE-----") || !tlsCertificatePem.includes("-----END CERTIFICATE-----")) fail();
   if (typeof tlsFingerprint !== "string" || !FINGERPRINT_PATTERN.test(tlsFingerprint)) fail();
   const certificateFingerprint = createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex");
   if (certificateFingerprint !== tlsFingerprint) fail();
   return Object.freeze({
-    bootstrapUrl: validateBootstrapUrl(bootstrapUrl),
+    bootstrapUrl: validateUrl(
+      bootstrapUrl,
+      "/bootstrap",
+      allowTestAddresses,
+    ),
     claim: validateBootstrapClaim(claim, repositorySha),
     repositorySha,
     tlsCertificatePem,
     tlsFingerprint,
   });
+}
+
+function networkDependencies(value) {
+  try {
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      Object.getPrototypeOf(value) !== Object.prototype
+    ) {
+      fail();
+    }
+    const ownKeys = Reflect.ownKeys(value);
+    if (
+      ownKeys.some(
+        (key) =>
+          typeof key !== "string" ||
+          !["allowTestAddresses", "lookup"].includes(key),
+      )
+    ) {
+      fail();
+    }
+    const result = Object.create(null);
+    for (const key of ownKeys) {
+      const descriptor =
+        Object.getOwnPropertyDescriptor(value, key);
+      if (
+        descriptor?.enumerable !== true ||
+        !Object.hasOwn(descriptor, "value")
+      ) {
+        fail();
+      }
+      result[key] = descriptor.value;
+    }
+    const allowTestAddresses =
+      result.allowTestAddresses ?? false;
+    if (
+      typeof allowTestAddresses !== "boolean" ||
+      (result.lookup !== undefined &&
+        typeof result.lookup !== "function")
+    ) {
+      fail();
+    }
+    return Object.freeze({
+      allowTestAddresses,
+      lookup: result.lookup,
+    });
+  } catch (error) {
+    sanitize(error);
+  }
+  fail();
 }
 
 function paymentInput(intakeRequestId) {
@@ -409,17 +444,57 @@ function parseJson(text) {
   }
 }
 
-async function defaultRequestJsonRpc({ body, headers, method, tlsCertificatePem, tlsFingerprint, url }) {
+async function defaultRequestJsonRpc({
+  allowTestAddresses,
+  body,
+  headers,
+  lookup,
+  method,
+  tlsCertificatePem,
+  tlsFingerprint,
+  url,
+}) {
+  const resolvedEndpoint = await resolvePublicEndpoint(
+    {
+      hostname: url.hostname,
+      path: url.path,
+      port: url.port,
+      protocol: url.protocol,
+      url: url.url,
+    },
+    {
+      allowTestAddresses,
+      ...(lookup === undefined ? {} : { lookup }),
+    },
+  );
+  const pinnedLookup = createResolvedLookup(resolvedEndpoint, {
+    allowTestAddresses,
+  });
+  const expectedFingerprint = Buffer.from(tlsFingerprint, "hex");
   return new Promise((resolvePromise, rejectPromise) => {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), "utf8");
     const request = https.request({
       agent: false,
       ca: tlsCertificatePem,
+      checkServerIdentity(hostname, certificate) {
+        const standardError = checkTlsServerIdentity(hostname, certificate);
+        if (standardError !== undefined) return standardError;
+        if (!Buffer.isBuffer(certificate?.raw)) return new Error("pinned TLS identity failed");
+        const actual = createHash("sha256").update(certificate.raw).digest();
+        if (
+          actual.length !== expectedFingerprint.length ||
+          !timingSafeEqual(actual, expectedFingerprint)
+        ) {
+          return new Error("pinned TLS identity failed");
+        }
+        return undefined;
+      },
       headers: {
         ...headers,
         ...(payload === undefined ? {} : { "Content-Length": String(payload.length) }),
       },
       host: url.hostname,
+      lookup: pinnedLookup,
       method,
       path: url.pathname,
       port: Number(url.port),
@@ -666,18 +741,28 @@ export async function readRequestorMcpIntake({ repositorySha, stateRoot } = {}) 
   fail();
 }
 
-export async function requestPaymentThroughPayerMcp(input) {
+export async function requestPaymentThroughPayerMcp(
+  input,
+  dependencies = {},
+) {
   let sessionId;
   let validated;
   let requestJsonRpc;
   let toolInput;
+  let network;
   try {
-    validated = validateInput(input);
+    network = networkDependencies(dependencies);
+    validated = validateInput(
+      input,
+      network.allowTestAddresses,
+    );
     requestJsonRpc = input.requestJsonRpc ?? defaultRequestJsonRpc;
     if (typeof requestJsonRpc !== "function") fail();
     toolInput = paymentInput(validated.intakeRequestId);
     const request = (payload) => requestJsonRpc({
       ...payload,
+      allowTestAddresses: network.allowTestAddresses,
+      lookup: network.lookup,
       tlsCertificatePem: validated.tlsCertificatePem,
       tlsFingerprint: validated.tlsFingerprint,
       url: validated.mcpUrl,
@@ -728,6 +813,8 @@ export async function requestPaymentThroughPayerMcp(input) {
         await requestJsonRpc({
           body: undefined,
           headers: commonHeaders({ capability: validated.capability, sessionId, url: validated.mcpUrl }),
+          allowTestAddresses: network.allowTestAddresses,
+          lookup: network.lookup,
           method: "DELETE",
           tlsCertificatePem: validated.tlsCertificatePem,
           tlsFingerprint: validated.tlsFingerprint,
@@ -742,14 +829,23 @@ export async function requestPaymentThroughPayerMcp(input) {
   fail();
 }
 
-export async function requestBootstrapThroughPayerMcp(input) {
+export async function requestBootstrapThroughPayerMcp(
+  input,
+  dependencies = {},
+) {
   try {
-    const validated = validateBootstrapInput(input);
+    const network = networkDependencies(dependencies);
+    const validated = validateBootstrapInput(
+      input,
+      network.allowTestAddresses,
+    );
     const requestJsonRpc = input.requestJsonRpc ?? defaultRequestJsonRpc;
     if (typeof requestJsonRpc !== "function") fail();
     const response = await requestJsonRpc({
       body: validated.claim,
       headers: bootstrapHeaders({ url: validated.bootstrapUrl }),
+      allowTestAddresses: network.allowTestAddresses,
+      lookup: network.lookup,
       method: "POST",
       tlsCertificatePem: validated.tlsCertificatePem,
       tlsFingerprint: validated.tlsFingerprint,

@@ -92,7 +92,7 @@ import {
   RELAY_REPOSITORY_ROOT,
   RELAY_TOTAL_TIMEOUT_MS,
   createRelayRequestHandler,
-  main as relayMain,
+  main as relayMainProduction,
   relayReadinessLine,
 } from "../bin/handshake-relay.mjs";
 
@@ -107,6 +107,13 @@ const RECEIPT_SCHEMA =
 const OPERATOR_KEY_ID = "relay-test-operator";
 const PAYER_CAPABILITY = Buffer.alloc(32, 0x41);
 const PAYEE_CAPABILITY = Buffer.alloc(32, 0x42);
+
+function relayMain(arguments_, dependencies = {}) {
+  return relayMainProduction(arguments_, {
+    ...dependencies,
+    allowTestAddresses: true,
+  });
+}
 const execFile = promisify(execFileCallback);
 
 async function invokeRelayHandler(handler, { body = Buffer.alloc(0), contentType = "application/json", hostHeader = "127.0.0.1:8443", method = "POST", url }) {
@@ -444,6 +451,7 @@ async function storeFixture(t) {
 async function tlsFixture(
   t,
   algorithm = "ed25519",
+  commonName = "127.0.0.1",
 ) {
   const root = await privateRoot(t);
   const certificatePath = join(root, "tls-cert.pem");
@@ -470,9 +478,9 @@ async function tlsFixture(
     "-days",
     "1",
     "-subj",
-    "/CN=127.0.0.1",
+    `/CN=${commonName}`,
     "-addext",
-    "subjectAltName=IP:127.0.0.1",
+    `subjectAltName=${net.isIP(commonName) === 0 ? "DNS" : "IP"}:${commonName}`,
   ]);
   await chmod(privateKeyPath, 0o600);
   await chmod(certificatePath, 0o644);
@@ -606,6 +614,7 @@ async function httpsRequest({
   method,
   path,
   port,
+  servername,
 }) {
   return new Promise((resolve, reject) => {
     const request = https.request(
@@ -617,6 +626,7 @@ async function httpsRequest({
         path,
         port,
         rejectUnauthorized: true,
+        ...(servername === undefined ? {} : { servername }),
       },
       (response) => {
         const chunks = [];
@@ -3856,6 +3866,10 @@ test("pins fixed HTTPS deadlines and rejects every non-exact CLI flag surface be
     privateKeyPath: "/tmp/private-key.pem",
     state: "/tmp/relay-state",
   });
+  await assert.rejects(
+    relayMainProduction(exact),
+    { code: "COORDINATION_RELAY_STARTUP_INVALID" },
+  );
   for (const arguments_ of [
     [],
     exact.slice(2),
@@ -4036,6 +4050,35 @@ test("binds relay locally while validating client Host against required advertis
     port,
   });
   assert.equal(rejected.statusCode, 400);
+  await running.close();
+});
+
+test("accepts a canonical advertised DNS name only when the TLS certificate covers it", async (t) => {
+  const advertisedHost = "relay.example.test";
+  const tls = await tlsFixture(t, "ed25519", advertisedHost);
+  const state = await privateRoot(t);
+  const port = await availablePort();
+  const running = await relayMainProduction(
+    relayArguments({
+      advertisedHost,
+      certificatePath: tls.certificatePath,
+      host: "127.0.0.1",
+      port,
+      privateKeyPath: tls.privateKeyPath,
+      state,
+    }),
+    { checkoutProbe: cleanCheckoutProbe },
+  );
+  t.after(() => running.close().catch(() => {}));
+  const accepted = await httpsRequest({
+    ca: tls.certificate,
+    headers: { host: `${advertisedHost}:${port}` },
+    method: "GET",
+    path: `/v1/sessions/${SESSION_ID}/events?waitMs=0`,
+    port,
+    servername: advertisedHost,
+  });
+  assert.equal(accepted.statusCode, 200);
   await running.close();
 });
 

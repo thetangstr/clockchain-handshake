@@ -62,6 +62,7 @@ async function makeFixture(t, options = {}) {
   const intakeStore = await createPayerMcpIntakeStore({ repositorySha: REPOSITORY_SHA, stateRoot: root });
   const observed = [];
   const server = createPayerMcpServer({
+    allowTestAddresses: true,
     capabilityDigest: CAPABILITY_DIGEST,
     createHttpsServer: options.createHttpsServer,
     host: options.host ?? "127.0.0.1",
@@ -441,7 +442,7 @@ test("completes pinned request_payment through a raw TCP relay while the MCP rem
     stateRoot: requestorState,
     tlsCertificatePem: fixture.certificate,
     tlsFingerprint: fixture.fingerprint,
-  });
+  }, { allowTestAddresses: true });
   assert.equal(result.status, "HANDSHAKE_REQUIRED");
   assert.equal(result.paymentMoved, false);
   assert.equal(forwardedBytes > 0, true);
@@ -474,6 +475,7 @@ test("rejects unsafe transport boundary, host, path, headers, session, method, a
     }), /Payer MCP server failed safely\./);
   }
   assert.equal(typeof createPayerMcpServer({
+    allowTestAddresses: true,
     capabilityDigest: CAPABILITY_DIGEST,
     host: "::1",
     intakeStore: { writeIntake: async () => undefined },
@@ -523,6 +525,7 @@ test("rejects unsafe transport boundary, host, path, headers, session, method, a
     "subjectAltName=IP:203.0.113.10",
   ], { stdio: "ignore" });
   assert.equal(typeof createPayerMcpServer({
+    allowTestAddresses: true,
     capabilityDigest: CAPABILITY_DIGEST,
     host: "127.0.0.1",
     intakeStore: { writeIntake: async () => undefined },
@@ -531,6 +534,35 @@ test("rejects unsafe transport boundary, host, path, headers, session, method, a
     repositorySha: REPOSITORY_SHA,
     tlsCertificatePem: await readFile(publicCertificatePath, "utf8"),
     tlsPrivateKeyPem: await readFile(publicPrivateKeyPath, "utf8"),
+  }).start, "function");
+  const dnsCertificatePath = join(fixture.root, "dns-cert.pem");
+  const dnsPrivateKeyPath = join(fixture.root, "dns-key.pem");
+  execFileSync("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "ed25519",
+    "-keyout",
+    dnsPrivateKeyPath,
+    "-out",
+    dnsCertificatePath,
+    "-nodes",
+    "-days",
+    "1",
+    "-subj",
+    "/CN=payer.example.net",
+    "-addext",
+    "subjectAltName=DNS:payer.example.net",
+  ], { stdio: "ignore" });
+  assert.equal(typeof createPayerMcpServer({
+    capabilityDigest: CAPABILITY_DIGEST,
+    host: "127.0.0.1",
+    intakeStore: { writeIntake: async () => undefined },
+    port: 0,
+    publicUrl: "https://payer.example.net:19443/mcp",
+    repositorySha: REPOSITORY_SHA,
+    tlsCertificatePem: await readFile(dnsCertificatePath, "utf8"),
+    tlsPrivateKeyPem: await readFile(dnsPrivateKeyPath, "utf8"),
   }).start, "function");
   for (const host of ["2001:0db8::1", "2001:db8:0:0:0:0:0:1", "::0001"]) {
     assert.throws(() => createPayerMcpServer({

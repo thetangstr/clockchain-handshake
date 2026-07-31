@@ -36,6 +36,9 @@ import {
   operatorPublicKeyPath,
 } from "../src/bilateral/descriptor.mjs";
 import {
+  validatePublicEndpoint,
+} from "../src/bilateral/network-endpoint.mjs";
+import {
   ARTIFACT_POLICIES,
 } from "../src/bilateral/coordination/artifact.mjs";
 import {
@@ -98,6 +101,7 @@ const FLAGS = Object.freeze([
   "--tls-private-key",
 ]);
 const MAIN_DEPENDENCY_KEYS = Object.freeze([
+  "allowTestAddresses",
   "checkoutProbe",
 ]);
 const CHECKOUT_RESULT_KEYS = Object.freeze([
@@ -284,7 +288,21 @@ function isCanonicalIpText(value) {
   }
 }
 
-function parseArguments(arguments_) {
+function validateAdvertisedHost(value, allowTestAddresses) {
+  try {
+    const authority = isIP(value) === 6 ? `[${value}]` : value;
+    return validatePublicEndpoint(`https://${authority}:8443/`, {
+      allowedPaths: ["/"],
+      allowTestAddresses,
+      defaultPort: 8443,
+      protocols: ["https:"],
+    }).hostname;
+  } catch {
+    invalid();
+  }
+}
+
+function parseArguments(arguments_, { allowTestAddresses = false } = {}) {
   if (
     !Array.isArray(arguments_) ||
     arguments_.length !== FLAGS.length * 2
@@ -318,9 +336,7 @@ function parseArguments(arguments_) {
   const portText = values["--port"];
   const repositorySha = values["--repository-sha"];
   if (
-    !isCanonicalIpText(advertisedHost) ||
-    advertisedHost === "0.0.0.0" ||
-    advertisedHost === "::" ||
+    typeof allowTestAddresses !== "boolean" ||
     !isCanonicalIpText(host) ||
     !PORT_PATTERN.test(portText) ||
     Number(portText) > 65_535 ||
@@ -329,7 +345,11 @@ function parseArguments(arguments_) {
     invalid();
   }
   return Object.freeze({
-    advertisedHost,
+    advertisedHost:
+      validateAdvertisedHost(
+        advertisedHost,
+        allowTestAddresses,
+      ),
     certificatePath: resolve(
       values["--tls-certificate"],
     ),
@@ -1103,19 +1123,33 @@ export async function main(arguments_, dependencies = {}) {
   let store;
   let server;
   try {
+    let dependencyKeys;
+    try {
+      const ownKeys = Reflect.ownKeys(dependencies);
+      dependencyKeys = MAIN_DEPENDENCY_KEYS.filter((key) =>
+        ownKeys.includes(key),
+      );
+    } catch {
+      invalid();
+    }
     const dependencyData = readExactData(
       dependencies,
-      Object.keys(dependencies).length === 0
-        ? []
-        : MAIN_DEPENDENCY_KEYS,
+      dependencyKeys,
     );
+    const allowTestAddresses =
+      dependencyData.allowTestAddresses ?? false;
     const checkoutProbe =
       dependencyData.checkoutProbe ??
       productionCheckoutProbe;
     if (typeof checkoutProbe !== "function") {
       invalid();
     }
-    const options = parseArguments(arguments_);
+    if (typeof allowTestAddresses !== "boolean") {
+      invalid();
+    }
+    const options = parseArguments(arguments_, {
+      allowTestAddresses,
+    });
     readCheckoutResult(
       await checkoutProbe(),
       options.repositorySha,
@@ -1141,6 +1175,20 @@ export async function main(arguments_, dependencies = {}) {
       );
       privateKey = createPrivateKey(privateKeyBytes);
       if (!certificate.checkPrivateKey(privateKey)) {
+        invalid();
+      }
+      const certificateIdentity =
+        isIP(options.advertisedHost) === 0
+          ? certificate.checkHost(
+              options.advertisedHost,
+            )
+          : certificate.checkIP(
+              options.advertisedHost,
+            );
+      if (
+        certificateIdentity !==
+        options.advertisedHost
+      ) {
         invalid();
       }
     } catch (error) {

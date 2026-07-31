@@ -76,7 +76,7 @@ import {
   MAX_CLIENT_JSON_RESPONSE_BYTES,
   CoordinationClientError,
   createCoordinationClient,
-  createPinnedHttpsTransport,
+  createPinnedHttpsTransport as createPinnedHttpsTransportProduction,
   createResumedCoordinationClient,
 } from "../src/bilateral/coordination/client.mjs";
 import {
@@ -114,6 +114,13 @@ const PEER_INVITATION_KEYS = Object.freeze({
   rehearsal: `0x${"3".repeat(64)}`,
   stakeholder: `0x${"4".repeat(64)}`,
 });
+
+function createPinnedHttpsTransport(input, dependencies = {}) {
+  return createPinnedHttpsTransportProduction(input, {
+    ...dependencies,
+    allowTestAddresses: true,
+  });
+}
 const INTENT_SESSION_ID = SESSION_ID;
 const INTENT_INTAKE_DIGEST = "b".repeat(64);
 const INTENT_INTAKE_REQUEST_ID =
@@ -266,8 +273,8 @@ async function tlsFixture(
   const certificatePath = join(root, "tls-cert.pem");
   const privateKeyPath = join(root, "tls-key.pem");
   const subjectAlternativeName =
-    commonName === "localhost"
-      ? "DNS:localhost"
+    net.isIP(commonName) === 0
+      ? `DNS:${commonName}`
       : `IP:${commonName}`;
   const keyArguments = {
     "ecdsa-sha256": [
@@ -379,7 +386,7 @@ function manifestInput(tls, overrides = {}) {
           ),
         }),
     randomBytes: () => Buffer.from(FIXED_CAPABILITY),
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://8.8.8.8:8443",
     releaseId: RELEASE_ID,
     repositorySha: REPOSITORY_SHA,
     role,
@@ -543,24 +550,20 @@ test("launch manifest creation rejects every non-exact or noncanonical field wit
     { ...exact, relayUrl: "http://relay.example.test:8443" },
     {
       ...exact,
-      relayUrl: "https://relay.example.test:8443",
-    },
-    {
-      ...exact,
       relayUrl: "https://127.0.0.1",
     },
     {
       ...exact,
       relayUrl:
-        "https://127.0.0.1:8443/path",
+        "https://8.8.8.8:8443/path",
     },
     {
       ...exact,
-      relayUrl: "https://127.0.0.1:08443",
+      relayUrl: "https://8.8.8.8:08443",
     },
     {
       ...exact,
-      relayUrl: "https://127.000.000.001:8443",
+      relayUrl: "https://008.008.008.008:8443",
     },
     {
       ...exact,
@@ -572,7 +575,7 @@ test("launch manifest creation rejects every non-exact or noncanonical field wit
     },
     {
       ...exact,
-      relayUrl: "https://127.0.0.1:443",
+      relayUrl: "https://8.8.8.8:443",
     },
     {
       ...exact,
@@ -1161,6 +1164,16 @@ test("pins immutable HTTPS deadlines beyond the relay long-poll bound and reject
     ).sort(),
     ["request", "verifyReceipt"],
   );
+  assert.throws(
+    () => createPinnedHttpsTransportProduction(exact),
+    { code: "COORDINATION_CLIENT_INVALID" },
+  );
+  assert.doesNotThrow(() =>
+    createPinnedHttpsTransportProduction({
+      ...exact,
+      relayUrl: "https://relay.example.test:8443",
+    }),
+  );
   for (const candidate of [
     {
       ...exact,
@@ -1172,10 +1185,6 @@ test("pins immutable HTTPS deadlines beyond the relay long-poll bound and reject
     {
       ...exact,
       relayUrl: `${exact.relayUrl}/path`,
-    },
-    {
-      ...exact,
-      relayUrl: "https://relay.example.test:8443",
     },
     {
       ...exact,
@@ -1301,6 +1310,43 @@ test("uses normal TLS validation plus the canonical leaf fingerprint without pro
     ).length,
     1,
   );
+});
+
+test("pins a signed DNS hostname, its public resolution, and the exact TLS fingerprint", async (t) => {
+  const hostname = "relay.example.test";
+  const tls = await tlsFixture(t, hostname);
+  let observedHost;
+  const { port } = await startHttpsServer(
+    t,
+    tls,
+    (request, response) => {
+      observedHost = request.headers.host;
+      sendExact(
+        response,
+        Buffer.from(
+          '{"paymentMoved":false,"status":"ok"}',
+          "utf8",
+        ),
+      );
+    },
+  );
+  const transport = createPinnedHttpsTransport({
+    expectedFingerprint: tls.expectedFingerprint,
+    relayUrl: `https://${hostname}:${port}`,
+    tlsCertificatePem: tls.certificate.toString("utf8"),
+  }, {
+    async lookup(requestedHostname) {
+      assert.equal(requestedHostname, hostname);
+      return [{ address: "127.0.0.1", family: 4 }];
+    },
+  });
+  const result = await transport.request({
+    body: null,
+    method: "GET",
+    path: `/v1/sessions/${SESSION_ID}/view`,
+  });
+  assert.equal(result.statusCode, 200);
+  assert.equal(observedHost, `${hostname}:${port}`);
 });
 
 test("rejects wrong fingerprints, alternate certificates, hostname mismatch, and redirects", async (t) => {

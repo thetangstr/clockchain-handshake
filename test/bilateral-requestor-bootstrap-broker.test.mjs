@@ -84,7 +84,7 @@ async function manifestFixture(t, root, overrides = {}) {
     nowMs: Date.now(),
     operatorKeyId: OPERATOR_KEY_ID,
     randomBytes: () => Buffer.from(PRIVATE_CANARY.padEnd(32, "x").slice(0, 32)),
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://8.8.8.8:8443",
     releaseId: RELEASE_ID,
     repositorySha: REPOSITORY_SHA,
     role,
@@ -92,7 +92,7 @@ async function manifestFixture(t, root, overrides = {}) {
     tlsCertificatePem: tls.tlsCertificatePem,
     ...roleCapability,
     ...overrides,
-  }).manifest;
+  }, { allowTestAddresses: true }).manifest;
   const manifestPath = join(root, "payee.launch.json");
   await writeLaunchManifest(manifestPath, manifest);
   return { manifest, manifestPath };

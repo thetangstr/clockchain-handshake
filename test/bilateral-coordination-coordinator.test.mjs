@@ -188,7 +188,7 @@ async function pendingRestartInput(t, root) {
         ...value,
         randomBytes: () =>
           Buffer.alloc(32, value.role === "payee" ? 0x31 : 0x32),
-      }),
+      }, { allowTestAddresses: true }),
     writeLaunchManifest: async () => {
       throw new Error("interrupt");
     },
@@ -257,7 +257,7 @@ function stateWriterInput(root, overrides = {}) {
       ...overrides,
     },
     operatorKeyId: "clockchain-demo-2026",
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://8.8.8.8:8443",
     releaseRoot: root,
     repositorySha: REPOSITORY_SHA,
     tlsCertificatePem: "test certificate",
@@ -774,7 +774,7 @@ test("persists two private manifests only after one atomic two-role capability r
       writeState: async (value) => states.push(value),
     },
     operatorKeyId: "clockchain-demo-2026",
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://8.8.8.8:8443",
     releaseRoot: root,
     repositorySha: "2".repeat(40),
     tlsCertificatePem: "test certificate",
@@ -811,7 +811,7 @@ test("generates one release-bound MCP intake capability pair outside public coor
       },
     },
     operatorKeyId: "clockchain-demo-2026",
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://8.8.8.8:8443",
     releaseRoot: root,
     repositorySha: REPOSITORY_SHA,
     tlsCertificatePem: tls.certificate,
@@ -909,7 +909,7 @@ test("reuses one durable private capability registration after a lost post respo
         ...value,
         randomBytes: () =>
           Buffer.alloc(32, value.role === "payee" ? 0x41 : 0x42),
-      });
+      }, { allowTestAddresses: true });
     },
     registerCapabilitySet: async (value) => {
       registrations.push(value.registration);
@@ -1016,7 +1016,7 @@ test("writes canonical secret-free coordinator state in a preexisting private ro
       },
     },
     operatorKeyId: "clockchain-demo-2026",
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://8.8.8.8:8443",
     releaseRoot: root,
     repositorySha: REPOSITORY_SHA,
     tlsCertificatePem: tls.certificate,
@@ -1066,7 +1066,7 @@ test("recovers after durable BOOTSTRAPPING state before pending-journal retireme
     randomUUID: () => SESSION_ID,
     registerCapabilitySet: async (value) => { registrations += 1; return capabilityReceipt(value); },
   };
-  const args = { operatorKeyId: "clockchain-demo-2026", relayUrl: "https://127.0.0.1:8443", releaseRoot: root, repositorySha: REPOSITORY_SHA, tlsCertificatePem: tls.certificate, tlsFingerprint: tls.fingerprint };
+  const args = { operatorKeyId: "clockchain-demo-2026", relayUrl: "https://8.8.8.8:8443", releaseRoot: root, repositorySha: REPOSITORY_SHA, tlsCertificatePem: tls.certificate, tlsFingerprint: tls.fingerprint };
   await assert.rejects(createCoordinatorRelease({ ...args, dependencies: { ...common, fileSystem: first } }), /crash after public state/);
   assert.equal(registrations, 1);
   const state = await readFile(join(root, "coordinator-state.json"));
