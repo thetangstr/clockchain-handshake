@@ -373,6 +373,40 @@ async function gitInspector(repositoryRoot = ROOT) {
   return Object.freeze({ head: head.trim(), async operatorKey(sha, id) { if (!SHA40.test(sha) || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) fail(); const { stdout } = await run(["show", `${sha}:docs/operator-keys/${id}.pub`]); if (!/^[A-Za-z0-9+/]{43}=\n$/.test(stdout)) fail(); return stdout.slice(0, -1); } });
 }
 
+async function verifyTaskProvenance(dependencies, operatorKeyId, repositorySha) {
+  const provider = dependencies.provenanceProvider;
+  if (provider === undefined) {
+    const inspector = dependencies.gitInspector ?? await gitInspector(dependencies.repositoryRoot ?? ROOT);
+    if (inspector.head !== repositorySha) fail();
+    const operatorPublicKey = await inspector.operatorKey(repositorySha, operatorKeyId);
+    return Object.freeze({ operatorPublicKey, repositorySha });
+  }
+  if (!provider || typeof provider !== "object" || typeof provider.verify !== "function") fail();
+  let result;
+  try {
+    result = await provider.verify({ operatorKeyId, repositorySha });
+  } catch {
+    fail();
+  }
+  const keys = ["imageDigest", "operatorPublicKey", "repositorySha", "sourceTreeSha256"];
+  if (
+    !result ||
+    typeof result !== "object" ||
+    Array.isArray(result) ||
+    Object.getPrototypeOf(result) !== Object.prototype ||
+    Object.keys(result).length !== keys.length ||
+    keys.some((key) => !Object.hasOwn(result, key)) ||
+    result.repositorySha !== repositorySha ||
+    !/^[A-Za-z0-9+/]{43}=$/.test(result.operatorPublicKey) ||
+    Buffer.from(result.operatorPublicKey, "base64").length !== 32 ||
+    !SHA64.test(result.sourceTreeSha256) ||
+    !(result.imageDigest === null || /^sha256:[0-9a-f]{64}$/.test(result.imageDigest))
+  ) {
+    fail();
+  }
+  return Object.freeze({ ...result });
+}
+
 export async function readCoordinatorRuntimeConfig(values, dependencies = {}) {
   const input = parseCoordinatorArguments(COORDINATOR_CLI_FLAGS.flatMap((flag) => [flag, values[flag]]));
   if (!SHA40.test(input["--repository-sha"]) || !SHA64.test(input["--tls-fingerprint"])) fail();
@@ -385,7 +419,9 @@ export async function readCoordinatorRuntimeConfig(values, dependencies = {}) {
     const relay = relayUrl(input["--relay-url"]); const endpoint = rpcEndpoint(rpcUrl.toString("utf8").trim());
     const pem = certificate.toString("utf8"); const fingerprint = createHash("sha256").update(new X509Certificate(pem).raw).digest("hex"); if (fingerprint !== input["--tls-fingerprint"]) fail();
     let actualKey; try { actualKey = rawPublicKeyBase64FromPem(createPublicKey(createPrivateKey(privateKeyPem)).export({ format: "pem", type: "spki" })); } catch { fail(); }
-    const inspector = dependencies.gitInspector ?? await gitInspector(dependencies.repositoryRoot ?? ROOT); if (inspector.head !== input["--repository-sha"]) fail(); const pinned = await inspector.operatorKey(input["--repository-sha"], input["--operator-key-id"]); if (pinned !== actualKey) fail();
+    const provenance = await verifyTaskProvenance(dependencies, input["--operator-key-id"], input["--repository-sha"]);
+    const pinned = provenance.operatorPublicKey;
+    if (pinned !== actualKey) fail();
     return Object.freeze({ clockchainToken: tokenText(token), clockchainTokenPath: input["--clockchain-token-file"], operatorIdentity: Object.freeze({ keyId: input["--operator-key-id"], privateKeyPem: privateKeyPem.toString("utf8"), publicKey: actualKey }), operatorPrivateKeyPath: input["--operator-private-key"], releaseRoot: root, relayUrl: relay, repositorySha: input["--repository-sha"], rpcUrl: endpoint, rpcUrlPath: input["--rpc-url-file"], tlsCertificatePem: pem, tlsCertificatePath: input["--tls-certificate"], tlsFingerprint: fingerprint, operatorPublicKey: pinned });
   } catch (error) { await root.handle.close(); throw error; }
 }
@@ -426,8 +462,8 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
     }
   };
   const immutable = async () => {
-    const inspector = dependencies.gitInspector ?? await gitInspector(dependencies.repositoryRoot ?? ROOT);
-    if (inspector.head !== config.repositorySha || await inspector.operatorKey(config.repositorySha, config.operatorIdentity.keyId) !== config.operatorIdentity.publicKey) fail();
+    const provenance = await verifyTaskProvenance(dependencies, config.operatorIdentity.keyId, config.repositorySha);
+    if (provenance.operatorPublicKey !== config.operatorIdentity.publicKey) fail();
     const token = await readStable(config.clockchainTokenPath, MAX_PRIVATE_BYTES, privateFile);
     const key = await readStable(config.operatorPrivateKeyPath, MAX_PRIVATE_BYTES, privateFile);
     if (tokenText(token) !== config.clockchainToken || key.toString("utf8") !== config.operatorIdentity.privateKeyPem) fail();

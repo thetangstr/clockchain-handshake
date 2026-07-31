@@ -2796,6 +2796,44 @@ test("recovers only an exact pinned owner record whose PID is definitively dead"
   await unlink(ownerPath);
 });
 
+test("uses an injected ECS task lease without creating or consulting PID owner files", async (t) => {
+  const root = await privateRoot(t);
+  const calls = [];
+  const ownerLease = {
+    async acquire() {
+      calls.push("acquire");
+      return {
+        async assertCurrent() {
+          calls.push("assert");
+        },
+        async release() {
+          calls.push("release");
+        },
+      };
+    },
+  };
+  const store = await openCoordinationStore({
+    now: () => NOW_MS,
+    ownerLease,
+    repositorySha: REPOSITORY_SHA,
+    root,
+  });
+  assert.equal(
+    (await readdir(root)).some((name) =>
+      name.startsWith(".store-owner")),
+    false,
+  );
+  await register(store);
+  await store.close();
+  assert.equal(calls[0], "acquire");
+  assert.equal(
+    calls.filter((entry) => entry === "assert").length >
+      0,
+    true,
+  );
+  assert.equal(calls.at(-1), "release");
+});
+
 test("consumes a scoped capability once and returns an identical retry", async (t) => {
   const { store } = await storeFixture(t);
   await register(store);

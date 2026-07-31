@@ -4436,6 +4436,91 @@ test("rejects dirty and wrong immutable checkouts before opening relay state", a
   }
 });
 
+test("uses immutable task provenance instead of a Git checkout in AWS mode", async (t) => {
+  const tls = await tlsFixture(t);
+  const state = await privateRoot(t);
+  const calls = [];
+  const leaseCalls = [];
+  const ownerLease = {
+    async acquire(input) {
+      leaseCalls.push(["acquire", input]);
+      return {
+        async assertCurrent() {
+          leaseCalls.push(["assert"]);
+        },
+        async release() {
+          leaseCalls.push(["release"]);
+        },
+      };
+    },
+  };
+  const verified = Object.freeze({
+    imageDigest: `sha256:${"b".repeat(64)}`,
+    operatorPublicKey: rawPublicKey(operator),
+    repositorySha: REPOSITORY_SHA,
+    sourceTreeSha256: "c".repeat(64),
+  });
+  const provenanceProvider = {
+    async assertRepository(input) {
+      calls.push(["repository", input]);
+      return verified;
+    },
+    async verify(input) {
+      calls.push(["operator", input]);
+      return verified;
+    },
+  };
+  const running = await relayMain(
+    relayArguments({
+      certificatePath: tls.certificatePath,
+      port: await availablePort(),
+      privateKeyPath: tls.privateKeyPath,
+      state,
+    }),
+    { ownerLease, provenanceProvider },
+  );
+  t.after(() => running.close().catch(() => {}));
+  const registration = capabilityRegistration({
+    capabilities: {
+      payee: {
+        capabilityDigest: sha256(PAYEE_CAPABILITY),
+        expiresAtMs: String(Date.now() + 60_000),
+      },
+      payer: {
+        capabilityDigest: sha256(PAYER_CAPABILITY),
+        expiresAtMs: String(Date.now() + 120_000),
+      },
+    },
+  });
+  const response = await httpsRequest({
+    body: canonicalBytes(registration),
+    ca: tls.certificate,
+    headers: { "content-type": "application/json" },
+    method: "POST",
+    path: "/v1/capabilities",
+    port: running.address.port,
+  });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(calls, [
+    ["repository", { repositorySha: REPOSITORY_SHA }],
+    ["operator", {
+      operatorKeyId: OPERATOR_KEY_ID,
+      repositorySha: REPOSITORY_SHA,
+    }],
+  ]);
+  await running.close();
+  assert.deepEqual(leaseCalls[0], [
+    "acquire",
+    { root: state },
+  ]);
+  assert.equal(
+    leaseCalls.some(([operation]) =>
+      operation === "assert"),
+    true,
+  );
+  assert.deepEqual(leaseCalls.at(-1), ["release"]);
+});
+
 for (const signatureAlgorithm of [
   "ed25519",
   "ecdsa-sha256",

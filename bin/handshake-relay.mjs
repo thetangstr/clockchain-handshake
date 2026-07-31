@@ -103,10 +103,18 @@ const FLAGS = Object.freeze([
 const MAIN_DEPENDENCY_KEYS = Object.freeze([
   "allowTestAddresses",
   "checkoutProbe",
+  "ownerLease",
+  "provenanceProvider",
 ]);
 const CHECKOUT_RESULT_KEYS = Object.freeze([
   "clean",
   "repositorySha",
+]);
+const PROVENANCE_RESULT_KEYS = Object.freeze([
+  "imageDigest",
+  "operatorPublicKey",
+  "repositorySha",
+  "sourceTreeSha256",
 ]);
 const ENROLLMENT_READINESS_KEYS = Object.freeze([
   "paymentMoved",
@@ -512,6 +520,41 @@ function readCheckoutResult(value, expectedSha) {
   ) {
     invalid();
   }
+}
+
+function readTaskProvenance(value, expectedSha) {
+  const data = readExactData(
+    value,
+    PROVENANCE_RESULT_KEYS,
+  );
+  let decoded;
+  try {
+    decoded = Buffer.from(
+      data.operatorPublicKey,
+      "base64",
+    );
+  } catch {
+    invalid();
+  }
+  if (
+    data.repositorySha !== expectedSha ||
+    !REPOSITORY_SHA_PATTERN.test(data.repositorySha) ||
+    !SHA256_PATTERN.test(data.sourceTreeSha256) ||
+    !(
+      data.imageDigest === null ||
+      /^sha256:[0-9a-f]{64}$/.test(data.imageDigest)
+    ) ||
+    typeof data.operatorPublicKey !== "string" ||
+    !/^[A-Za-z0-9+/]{43}=$/.test(
+      data.operatorPublicKey,
+    ) ||
+    decoded.length !== 32 ||
+    decoded.toString("base64") !==
+      data.operatorPublicKey
+  ) {
+    invalid();
+  }
+  return data;
 }
 
 function createReceiptSigner(
@@ -1141,7 +1184,24 @@ export async function main(arguments_, dependencies = {}) {
     const checkoutProbe =
       dependencyData.checkoutProbe ??
       productionCheckoutProbe;
-    if (typeof checkoutProbe !== "function") {
+    const ownerLease = dependencyData.ownerLease;
+    const provenanceProvider =
+      dependencyData.provenanceProvider;
+    if (
+      provenanceProvider === undefined &&
+      typeof checkoutProbe !== "function"
+    ) {
+      invalid();
+    }
+    if (
+      provenanceProvider !== undefined &&
+      (
+        !isPlainObject(provenanceProvider) ||
+        typeof provenanceProvider.assertRepository !==
+          "function" ||
+        typeof provenanceProvider.verify !== "function"
+      )
+    ) {
       invalid();
     }
     if (typeof allowTestAddresses !== "boolean") {
@@ -1150,10 +1210,19 @@ export async function main(arguments_, dependencies = {}) {
     const options = parseArguments(arguments_, {
       allowTestAddresses,
     });
-    readCheckoutResult(
-      await checkoutProbe(),
-      options.repositorySha,
-    );
+    if (provenanceProvider === undefined) {
+      readCheckoutResult(
+        await checkoutProbe(),
+        options.repositorySha,
+      );
+    } else {
+      readTaskProvenance(
+        await provenanceProvider.assertRepository({
+          repositorySha: options.repositorySha,
+        }),
+        options.repositorySha,
+      );
+    }
     await assertPrivateStateRoot(options.statePath);
     const [certificateBytes, privateKeyBytes] =
       await Promise.all([
@@ -1202,13 +1271,40 @@ export async function main(arguments_, dependencies = {}) {
       privateKey,
     );
     store = await openCoordinationStore({
+      ...(ownerLease === undefined
+        ? {}
+        : { ownerLease }),
       repositorySha: options.repositorySha,
       root: options.statePath,
     });
+    const repositoryPublicKeyResolver =
+      provenanceProvider === undefined
+        ? gitShowPublicKey
+        : async (context) => {
+            const expectedPath =
+              operatorPublicKeyPath(context.keyId);
+            if (
+              context.repositoryPath !==
+                expectedPath ||
+              context.repositorySha !==
+                options.repositorySha
+            ) {
+              invalid();
+            }
+            const provenance = readTaskProvenance(
+              await provenanceProvider.verify({
+                operatorKeyId: context.keyId,
+                repositorySha:
+                  context.repositorySha,
+              }),
+              options.repositorySha,
+            );
+            return `${provenance.operatorPublicKey}\n`;
+          };
     const service = createRelayService({
       frozenRepositorySha: options.repositorySha,
       receiptSigner,
-      repositoryPublicKeyResolver: gitShowPublicKey,
+      repositoryPublicKeyResolver,
       store,
     });
     server = https.createServer({

@@ -452,7 +452,7 @@ test("runtime release dependencies satisfy the coordinator release contract", as
     operatorPublicKey: rawPublicKeyBase64FromPem(keyPair.publicKey.export({ format: "pem", type: "spki" })),
     releaseRoot: Object.freeze({ before, handle, path: rootPath }),
     repositorySha: "a".repeat(40),
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://32.186.198.119:8443",
     rpcUrl: "https://127.0.0.1/",
     tlsCertificatePem,
     tlsFingerprint: createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex"),
@@ -497,7 +497,7 @@ test("runtime run dependencies cross the coordinator's exact validation boundary
     operatorPublicKey: publicKey,
     releaseRoot: Object.freeze({ before, handle, path: rootPath }),
     repositorySha: "a".repeat(40),
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://32.186.198.119:8443",
     rpcUrl: "https://127.0.0.1/",
     tlsCertificatePem,
     tlsFingerprint: createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex"),
@@ -563,7 +563,19 @@ test("runtime re-normalizes an accepted RPC endpoint before immutable preflight 
   await Promise.all([chmod(keyPath, 0o600), chmod(tokenPath, 0o600), chmod(rpcPath, 0o600)]);
   const fingerprint = createHash("sha256").update(new X509Certificate(await readFile(certificatePath, "utf8")).raw).digest("hex");
   const publicKey = rawPublicKeyBase64FromPem(pair.publicKey.export({ format: "pem", type: "spki" }));
-  const config = await readCoordinatorRuntimeConfig({ ...VALUES, "--clockchain-token-file": tokenPath, "--operator-private-key": keyPath, "--release-root": releaseRoot, "--rpc-url-file": rpcPath, "--tls-certificate": certificatePath, "--tls-fingerprint": fingerprint }, { gitInspector: { head: "a".repeat(40), operatorKey: async () => publicKey } });
+  const provenanceCalls = [];
+  const provenanceProvider = {
+    async verify(input) {
+      provenanceCalls.push(input);
+      return {
+        imageDigest: `sha256:${"b".repeat(64)}`,
+        operatorPublicKey: publicKey,
+        repositorySha: "a".repeat(40),
+        sourceTreeSha256: "c".repeat(64),
+      };
+    },
+  };
+  const config = await readCoordinatorRuntimeConfig({ ...VALUES, "--clockchain-token-file": tokenPath, "--operator-private-key": keyPath, "--release-root": releaseRoot, "--rpc-url-file": rpcPath, "--tls-certificate": certificatePath, "--tls-fingerprint": fingerprint }, { provenanceProvider });
   t.after(() => config.releaseRoot.handle.close());
   assert.equal(config.rpcUrl, "http://127.0.0.1:8545/");
   const runtime = createCoordinatorRuntimeDependencies(config, {
@@ -576,7 +588,7 @@ test("runtime re-normalizes an accepted RPC endpoint before immutable preflight 
       ],
     }),
     createTransport: () => ({}),
-    gitInspector: { head: "a".repeat(40), operatorKey: async () => publicKey },
+    provenanceProvider,
     preflightMain: async (argv) => {
       const output = argv[argv.indexOf("--output") + 1];
       await writeFile(join(output, "probe-plan.json"), "{}", { mode: 0o600 });
@@ -588,6 +600,11 @@ test("runtime re-normalizes an accepted RPC endpoint before immutable preflight 
   const args = { enrollments: { payer: {}, payee: {} }, repositorySha: "a".repeat(40) };
 
   assert.deepEqual(await bridges.createPreflightPlan(args), Buffer.from("{}"));
+  assert.equal(provenanceCalls.length >= 2, true);
+  assert.deepEqual(provenanceCalls[0], {
+    operatorKeyId: VALUES["--operator-key-id"],
+    repositorySha: "a".repeat(40),
+  });
   await writeFile(rpcPath, "http://127.0.0.1:8546\n");
   await assert.rejects(bridges.createPreflightPlan(args));
 });
