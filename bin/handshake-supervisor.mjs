@@ -3,6 +3,7 @@ import { runSupervisor } from "../src/bilateral/coordination/supervisor.mjs";
 import { createProductionSupervisorDependencies as defaultCreateProductionSupervisorDependencies, createSupervisorStatusLine } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 
 const BASE_OPTIONS = Object.freeze(["--launch-manifest", "--state"]);
+const RUN_MODE_OPTION = "--run-mode";
 const PAYER_MCP_OPTIONS = Object.freeze(["--payer-mcp-host", "--payer-mcp-port", "--payer-mcp-tls-certificate", "--payer-mcp-tls-private-key"]);
 const PAYER_MCP_PUBLIC_OPTION = "--payer-mcp-public-url";
 const PAYER_MCP_BOOTSTRAP_BROKER_OPTIONS = Object.freeze(["--payer-mcp-bootstrap-broker-url", "--payer-mcp-bootstrap-broker-capability-file"]);
@@ -19,9 +20,9 @@ function parsePort(value) {
 }
 
 function parseArguments(arguments_) {
-  if (!Array.isArray(arguments_) || ![4, 12, 14, 16, 18].includes(arguments_.length)) fail();
+  if (!Array.isArray(arguments_) || ![4, 6, 12, 14, 16, 18, 20].includes(arguments_.length)) fail();
   const values = Object.create(null);
-  const allowed = [...BASE_OPTIONS, ...PAYER_MCP_OPTIONS, PAYER_MCP_PUBLIC_OPTION, ...PAYER_MCP_BOOTSTRAP_BROKER_OPTIONS];
+  const allowed = [...BASE_OPTIONS, RUN_MODE_OPTION, ...PAYER_MCP_OPTIONS, PAYER_MCP_PUBLIC_OPTION, ...PAYER_MCP_BOOTSTRAP_BROKER_OPTIONS];
   for (let index = 0; index < arguments_.length; index += 2) {
     const key = arguments_[index];
     const value = arguments_[index + 1];
@@ -35,6 +36,8 @@ function parseArguments(arguments_) {
   const suppliedBroker = PAYER_MCP_BOOTSTRAP_BROKER_OPTIONS.filter((key) => Object.hasOwn(values, key));
   if (suppliedBroker.length !== 0 && suppliedBroker.length !== PAYER_MCP_BOOTSTRAP_BROKER_OPTIONS.length) fail();
   if (suppliedBroker.length !== 0 && suppliedMcp.length !== PAYER_MCP_OPTIONS.length) fail();
+  const explicitRunMode = Object.hasOwn(values, RUN_MODE_OPTION);
+  if (explicitRunMode && values[RUN_MODE_OPTION] !== "aws-stakeholder-only") fail();
   return Object.freeze({
     launchManifestPath: values["--launch-manifest"],
     payerMcpServerOptions: suppliedMcp.length === 0 ? undefined : Object.freeze({
@@ -46,6 +49,7 @@ function parseArguments(arguments_) {
       tlsCertificatePath: values["--payer-mcp-tls-certificate"],
       tlsPrivateKeyPath: values["--payer-mcp-tls-private-key"],
     }),
+    ...(explicitRunMode ? { runMode: values[RUN_MODE_OPTION] } : {}),
     stateRoot: values["--state"],
   });
 }
@@ -57,7 +61,12 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
     ? await productionFactory(parsed)
     : dependencies;
   const supervisor = active.runSupervisor ?? runSupervisor;
-  return supervisor({ launchManifestPath: parsed.launchManifestPath, stateRoot: parsed.stateRoot, dependencies: active });
+  return supervisor({
+    launchManifestPath: parsed.launchManifestPath,
+    ...(Object.hasOwn(parsed, "runMode") ? { runMode: parsed.runMode } : {}),
+    stateRoot: parsed.stateRoot,
+    dependencies: active,
+  });
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) main().catch(() => {

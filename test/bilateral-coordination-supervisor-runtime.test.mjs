@@ -261,6 +261,78 @@ test("supervisor CLI emits only the generic coordination failure line", () => {
   );
 });
 
+test("supervisor CLI keeps legacy default run mode unless exact explicit mode is supplied", async () => {
+  const baseArguments = [
+    "--launch-manifest",
+    "/private/launch.json",
+    "--state",
+    "/private/state",
+  ];
+  const calls = [];
+  await supervisorMain(baseArguments, {
+    async runSupervisor(input) {
+      calls.push(input);
+      return { paymentMoved: false };
+    },
+  });
+  assert.equal(Object.hasOwn(calls[0], "runMode"), false);
+
+  await supervisorMain([
+    ...baseArguments,
+    "--run-mode",
+    "aws-stakeholder-only",
+  ], {
+    async runSupervisor(input) {
+      calls.push(input);
+      return { paymentMoved: false };
+    },
+  });
+  assert.equal(calls[1].runMode, "aws-stakeholder-only");
+});
+
+test("supervisor CLI rejects unsupported or duplicate run mode before production setup", async () => {
+  for (const arguments_ of [
+    [
+      "--launch-manifest",
+      "/private/launch.json",
+      "--state",
+      "/private/state",
+      "--run-mode",
+      "local-two-run",
+    ],
+    [
+      "--launch-manifest",
+      "/private/launch.json",
+      "--state",
+      "/private/state",
+      "--run-mode",
+      "aws",
+    ],
+    [
+      "--launch-manifest",
+      "/private/launch.json",
+      "--state",
+      "/private/state",
+      "--run-mode",
+      "aws-stakeholder-only",
+      "--run-mode",
+      "aws-stakeholder-only",
+    ],
+  ]) {
+    await assert.rejects(
+      supervisorMain(arguments_, {
+        async createProductionSupervisorDependencies() {
+          assert.fail("invalid run mode reached production setup");
+        },
+        async runSupervisor() {
+          assert.fail("invalid run mode reached supervisor launch");
+        },
+      }),
+      /Supervisor startup failed safely/,
+    );
+  }
+});
+
 test("production supervisor verifies valid enrollment receipts and binds each descriptor to its derived run session", async (t) => {
   const stateRoot = await mkdtemp(join(tmpdir(), "supervisor-session-state-"));
   const manifestRoot = await mkdtemp(join(tmpdir(), "supervisor-session-manifest-"));

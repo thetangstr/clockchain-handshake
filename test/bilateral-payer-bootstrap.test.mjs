@@ -550,6 +550,9 @@ test("production commands pin one reverse listener and pass private material onl
     stateRoot: STATE_ROOT,
     tlsIdentity,
   });
+  const modeIndex = supervisor.indexOf("--run-mode");
+  assert.notEqual(modeIndex, -1);
+  assert.equal(supervisor[modeIndex + 1], "aws-stakeholder-only");
   const commandText = JSON.stringify(supervisor);
   assert.equal(
     commandText.includes(

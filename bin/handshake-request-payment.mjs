@@ -500,6 +500,7 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
     writeStatus(intakeResult);
     const supervisor = dependencies.runSupervisor ?? (async (input) => runSupervisor({
       launchManifestPath: input.launchManifestPath,
+      runMode: input.runMode,
       stateRoot: input.stateRoot,
       dependencies: await (dependencies.createSupervisorDependencies ?? createProductionSupervisorDependencies)({
         launchManifestPath: input.launchManifestPath,
@@ -508,6 +509,7 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
     }));
     return await supervisor({
       launchManifestPath: manifestPath,
+      runMode: "aws-stakeholder-only",
       stateRoot: parsed.stateRoot,
     });
   } catch (error) {

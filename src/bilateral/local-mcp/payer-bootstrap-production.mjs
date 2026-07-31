@@ -532,6 +532,8 @@ export function buildPayerSupervisorArguments({
     paths.launchManifestPath,
     "--state",
     stateRoot,
+    "--run-mode",
+    "aws-stakeholder-only",
     "--payer-mcp-host",
     "127.0.0.1",
     "--payer-mcp-port",

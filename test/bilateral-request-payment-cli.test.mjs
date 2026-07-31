@@ -209,6 +209,7 @@ test("Requestor CLI exposes only one-shot discovery flags and completes bootstra
       calls.push(["runSupervisor", input.launchManifestPath, input.stateRoot]);
       assert.equal(input.stateRoot, fx.stateRoot);
       assert.equal(input.launchManifestPath.endsWith("requestor-state.bootstrap/payee.launch.json"), true);
+      assert.equal(input.runMode, "aws-stakeholder-only");
       const manifestStats = await lstat(input.launchManifestPath);
       assert.equal(manifestStats.mode & 0o777, 0o600);
       assert.equal((await readFile(input.launchManifestPath)).equals(fx.manifestBytes), true);
@@ -395,6 +396,7 @@ test("Requestor CLI fails closed on malformed args, stale discovery, wrong SHA, 
       "--state", fx.stateRoot,
     ],
     fx.args.map((value) => value === fx.stateRoot ? "relative" : value),
+    [...fx.args, "--run-mode", "aws-stakeholder-only"],
   ]) {
     await assert.rejects(main(args, {}), /Request payment startup failed safely/);
   }
