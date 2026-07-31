@@ -23,13 +23,20 @@ import {
   sshEd25519Fingerprint,
   validatePayerBootstrapClaim,
 } from "../src/bilateral/local-mcp/payer-bootstrap-envelope.mjs";
+import {
+  createLaunchManifest,
+  validateLaunchManifest,
+} from "../src/bilateral/coordination/manifest.mjs";
+import {
+  canonicalizeReceiptEventValue,
+} from "../src/canonical.mjs";
 
 const REPOSITORY_SHA = "abcdef0123456789abcdef0123456789abcdef01";
 const RELEASE_ID = "release-payer-bootstrap";
 const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const CLAIM_NONCE = "11111111-1111-4111-8111-111111111111";
 
-function certificatePem() {
+function certificatePem(host = "payer.clockchain.network") {
   const root = mkdtempSync(
     join(tmpdir(), "payer-bootstrap-envelope-"),
   );
@@ -49,9 +56,9 @@ function certificatePem() {
       "-days",
       "1",
       "-subj",
-      "/CN=payer.clockchain.network",
+      `/CN=${host}`,
       "-addext",
-      "subjectAltName=DNS:payer.clockchain.network",
+      `subjectAltName=DNS:${host}`,
     ], { stdio: "ignore" });
     return readFileSync(certificatePath, "utf8");
   } finally {
@@ -105,19 +112,51 @@ function claimFixture(overrides = {}) {
 }
 
 function canonicalBytes(value) {
-  return Buffer.from(JSON.stringify(value), "utf8");
+  return Buffer.from(
+    JSON.stringify(canonicalizeReceiptEventValue(value)),
+    "utf8",
+  );
+}
+
+function launchManifestFixture({
+  claim,
+  expiresAtMs = String(Date.now() + 60_000),
+  overrides = {},
+} = {}) {
+  const relayCertificatePem = certificatePem(
+    "relay.clockchain.network",
+  );
+  const manifest = createLaunchManifest({
+    expectedTlsFingerprint: createHash("sha256")
+      .update(new X509Certificate(relayCertificatePem).raw)
+      .digest("hex"),
+    nowMs:
+      Number(expiresAtMs) -
+      3_600_000,
+    operatorKeyId: "operator",
+    payerMcpIntakeCapabilityDigest: "e".repeat(64),
+    randomBytes: () => Buffer.alloc(32, 7),
+    relayUrl: "https://relay.clockchain.network:8443",
+    releaseId: claim.releaseId,
+    repositorySha: claim.repositorySha,
+    role: "payer",
+    sessionId: claim.sessionId,
+    tlsCertificatePem: relayCertificatePem,
+    ...overrides,
+  }).manifest;
+  return canonicalBytes(manifest);
 }
 
 function packageFixture(claim, operator) {
+  const expiresAtMs = String(Date.now() + 60_000);
   return sealSignedPayerBootstrapPackage({
     bootstrapBrokerCapability: "c".repeat(64),
     bootstrapBrokerUrl: "https://bootstrap.internal.example/v1/requestor-claims",
     claim,
-    expiresAtMs: String(Date.now() + 60_000),
-    launchManifestBytes: canonicalBytes({
-      paymentMoved: false,
-      role: "payer",
-      schema: "clockchain.bilateral-launch-manifest/v1",
+    expiresAtMs,
+    launchManifestBytes: launchManifestFixture({
+      claim,
+      expiresAtMs,
     }),
     operatorKeyId: "operator",
     signer: (bytes) =>
@@ -197,13 +236,19 @@ test("seals and verifies private Payer material without exposing it in the signe
     "https://bootstrap.internal.example/v1/requestor-claims",
   );
   assert.equal(opened.paymentMoved, false);
-  assert.deepEqual(
+  const openedManifest = validateLaunchManifest(
     JSON.parse(opened.launchManifestBytes.toString("utf8")),
-    {
-      paymentMoved: false,
-      role: "payer",
-      schema: "clockchain.bilateral-launch-manifest/v1",
-    },
+  );
+  assert.equal(openedManifest.role, "payer");
+  assert.equal(openedManifest.releaseId, RELEASE_ID);
+  assert.equal(openedManifest.repositorySha, REPOSITORY_SHA);
+  assert.equal(openedManifest.sessionId, SESSION_ID);
+  assert.equal(
+    Object.hasOwn(
+      JSON.parse(opened.launchManifestBytes.toString("utf8")),
+      "paymentMoved",
+    ),
+    false,
   );
   assert.equal(
     JSON.parse(opened.tunnelGrantBytes.toString("utf8")).schema,
@@ -306,9 +351,58 @@ test("fails closed on changed claim authority, expiry, replay, and moved-payment
         claim,
         expiresAtMs: String(Date.now() + 60_000),
         launchManifestBytes: canonicalBytes({
-          paymentMoved: true,
-          role: "payer",
-          schema: "clockchain.bilateral-launch-manifest/v1",
+          ...JSON.parse(
+            launchManifestFixture({
+              claim,
+              expiresAtMs: String(Date.now() + 60_000),
+            }).toString("utf8"),
+          ),
+          paymentMoved: false,
+        }),
+        operatorKeyId: "operator",
+        signer: (bytes) =>
+          sign(null, bytes, operator.privateKey).toString("base64"),
+        tunnelGrantBytes: canonicalBytes({
+          paymentMoved: false,
+          schema: "clockchain.payer-tunnel-grant/v1",
+        }),
+      }),
+    /Payer bootstrap envelope validation failed/,
+  );
+  assert.throws(
+    () =>
+      sealSignedPayerBootstrapPackage({
+        bootstrapBrokerCapability: "c".repeat(64),
+        bootstrapBrokerUrl: "https://bootstrap.internal.example/v1/requestor-claims",
+        claim,
+        expiresAtMs: String(Date.now() + 120_000),
+        launchManifestBytes: launchManifestFixture({
+          claim,
+          expiresAtMs: String(Date.now() + 60_000),
+        }),
+        operatorKeyId: "operator",
+        signer: (bytes) =>
+          sign(null, bytes, operator.privateKey).toString("base64"),
+        tunnelGrantBytes: canonicalBytes({
+          paymentMoved: false,
+          schema: "clockchain.payer-tunnel-grant/v1",
+        }),
+      }),
+    /Payer bootstrap envelope validation failed/,
+  );
+  assert.throws(
+    () =>
+      sealSignedPayerBootstrapPackage({
+        bootstrapBrokerCapability: "c".repeat(64),
+        bootstrapBrokerUrl: "https://bootstrap.internal.example/v1/requestor-claims",
+        claim,
+        expiresAtMs: String(Date.now() + 60_000),
+        launchManifestBytes: launchManifestFixture({
+          claim,
+          expiresAtMs: String(Date.now() + 60_000),
+          overrides: {
+            repositorySha: "b".repeat(40),
+          },
         }),
         operatorKeyId: "operator",
         signer: (bytes) =>

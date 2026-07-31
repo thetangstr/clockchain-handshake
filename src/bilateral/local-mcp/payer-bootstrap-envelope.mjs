@@ -10,6 +10,9 @@ import {
   canonicalizeReceiptEventValue,
 } from "../../canonical.mjs";
 import {
+  validateLaunchManifest,
+} from "../coordination/manifest.mjs";
+import {
   createSealedEnvelopeKeyPair,
   openEnvelope,
   sealEnvelope,
@@ -362,7 +365,32 @@ function httpsUrl(value) {
   return value;
 }
 
-function packageSnapshot(value, nowMs) {
+function manifestSnapshot(value, claim) {
+  const manifest = canonicalJsonBytes(
+    value,
+    MAX_MANIFEST_BYTES,
+  );
+  let checked;
+  try {
+    checked = validateLaunchManifest(manifest.value);
+  } catch {
+    invalid();
+  }
+  if (
+    checked.role !== "payer" ||
+    checked.releaseId !== claim.releaseId ||
+    checked.repositorySha !== claim.repositorySha ||
+    checked.sessionId !== claim.sessionId
+  ) {
+    invalid();
+  }
+  return Object.freeze({
+    bytes: manifest.bytes,
+    value: checked,
+  });
+}
+
+function packageSnapshot(value, nowMs, claim) {
   const data = exactObject(value, PACKAGE_KEYS);
   if (
     !/^[0-9a-f]{64}$/.test(
@@ -394,16 +422,17 @@ function packageSnapshot(value, nowMs) {
   ) {
     invalid();
   }
-  const manifest = canonicalJsonBytes(
+  const manifest = manifestSnapshot(
     launchManifestBytes,
-    MAX_MANIFEST_BYTES,
+    claim,
   );
   const tunnel = canonicalJsonBytes(
     Buffer.from(JSON.stringify(data.tunnelGrant), "utf8"),
     MAX_GRANT_BYTES,
   );
   if (
-    manifest.value?.paymentMoved !== false ||
+    Number(data.expiresAtMs) >
+      Number(manifest.value.expiresAtMs) ||
     tunnel.value?.paymentMoved !== false
   ) {
     invalid();
@@ -464,9 +493,9 @@ export function sealSignedPayerBootstrapPackage({
 } = {}) {
   try {
     const boundClaim = claimSnapshot(claim);
-    const manifest = canonicalJsonBytes(
+    const manifest = manifestSnapshot(
       launchManifestBytes,
-      MAX_MANIFEST_BYTES,
+      boundClaim,
     );
     const tunnel = canonicalJsonBytes(
       tunnelGrantBytes,
@@ -491,7 +520,7 @@ export function sealSignedPayerBootstrapPackage({
       schema: PAYER_BOOTSTRAP_PACKAGE_SCHEMA,
       tunnelGrant: tunnel.value,
     };
-    packageSnapshot(packageValue, 0);
+    packageSnapshot(packageValue, 0, boundClaim);
     const plaintextBytes = Buffer.from(
       JSON.stringify(packageValue),
       "utf8",
@@ -610,7 +639,11 @@ export function openSignedPayerBootstrapPackage({
     ) {
       invalid();
     }
-    const opened = packageSnapshot(packageValue, nowMs);
+    const opened = packageSnapshot(
+      packageValue,
+      nowMs,
+      boundClaim,
+    );
     if (opened.expiresAtMs !== data.expiresAtMs) invalid();
     if (consumeClaimNonce(boundClaim.claimNonce) !== true) {
       invalid();
