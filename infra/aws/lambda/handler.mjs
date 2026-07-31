@@ -136,7 +136,7 @@ export async function handler(event) {
     event?.requestContext?.authorizer?.jwt
       ?.claims;
   const verifyJwt = async () => ({
-    aud: jwt?.aud,
+    aud: jwt?.aud ?? jwt?.client_id,
     exp:
       typeof jwt?.exp === "string"
         ? Number(jwt.exp)

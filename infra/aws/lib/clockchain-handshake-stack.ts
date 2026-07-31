@@ -24,6 +24,7 @@ import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as lambdaNode from "aws-cdk-lib/aws-lambda-nodejs";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as sqs from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
@@ -32,6 +33,7 @@ import { fileURLToPath } from "node:url";
 
 const IMAGE =
   /^[0-9]{12}\.dkr\.ecr\.[a-z]{2}-[a-z]+-[1-9]\.amazonaws\.com\/[a-z0-9][a-z0-9._/-]{0,254}@sha256:[0-9a-f]{64}$/;
+const SHA40 = /^[0-9a-f]{40}$/;
 
 type AccessPointName =
   | "bootstrap"
@@ -68,6 +70,7 @@ interface Workload {
 export interface ClockchainHandshakeStackProps
   extends StackProps {
   readonly controlPlaneImage: string;
+  readonly repositorySha: string;
   readonly tunnelImage: string;
 }
 
@@ -80,10 +83,11 @@ export class ClockchainHandshakeStack extends Stack {
     super(scope, id, props);
     if (
       !IMAGE.test(props.controlPlaneImage) ||
-      !IMAGE.test(props.tunnelImage)
+      !IMAGE.test(props.tunnelImage) ||
+      !SHA40.test(props.repositorySha)
     ) {
       throw new Error(
-        "Container images must be immutable ECR digests.",
+        "Container images and repository release must be immutable.",
       );
     }
 
@@ -700,35 +704,6 @@ export class ClockchainHandshakeStack extends Stack {
         },
       },
     );
-    const userPoolClient =
-      userPool.addClient("OperatorClient", {
-        authFlows: {
-          userSrp: true,
-        },
-        generateSecret: false,
-      });
-    new cognito.CfnUserPoolGroup(
-      this,
-      "OperatorUserGroup",
-      {
-        groupName: "clockchain-operators",
-        userPoolId: userPool.userPoolId,
-      },
-    );
-    userPool.addDomain("OperatorDomain", {
-      cognitoDomain: {
-        domainPrefix: `clockchain-${this.account}`,
-      },
-    });
-    const controlApiLog = new logs.LogGroup(
-      this,
-      "ControlApiLog",
-      {
-        encryptionKey: dataKey,
-        retention: logs.RetentionDays.ONE_MONTH,
-        removalPolicy: RemovalPolicy.RETAIN,
-      },
-    );
     const operatorConsoleBucket =
       this.privateBucket(
         "OperatorConsoleBucket",
@@ -743,6 +718,51 @@ export class ClockchainHandshakeStack extends Stack {
         "PublicMonitorDistribution",
         publicMonitorBucket,
       );
+    const operatorUrl =
+      `https://${operatorDistribution.distributionDomainName}`;
+    const userPoolClient =
+      userPool.addClient("OperatorClient", {
+        authFlows: {
+          userSrp: true,
+        },
+        generateSecret: false,
+        oAuth: {
+          callbackUrls: [`${operatorUrl}/`],
+          flows: {
+            authorizationCodeGrant: true,
+            implicitCodeGrant: false,
+          },
+          logoutUrls: [`${operatorUrl}/`],
+          scopes: [
+            cognito.OAuthScope.OPENID,
+            cognito.OAuthScope.EMAIL,
+          ],
+        },
+        preventUserExistenceErrors: true,
+      });
+    new cognito.CfnUserPoolGroup(
+      this,
+      "OperatorUserGroup",
+      {
+        groupName: "clockchain-operators",
+        userPoolId: userPool.userPoolId,
+      },
+    );
+    const operatorDomain =
+      userPool.addDomain("OperatorDomain", {
+        cognitoDomain: {
+          domainPrefix: `clockchain-${this.account}`,
+        },
+      });
+    const controlApiLog = new logs.LogGroup(
+      this,
+      "ControlApiLog",
+      {
+        encryptionKey: dataKey,
+        retention: logs.RetentionDays.ONE_MONTH,
+        removalPolicy: RemovalPolicy.RETAIN,
+      },
+    );
     const controlFunction =
       new lambdaNode.NodejsFunction(
       this,
@@ -791,6 +811,17 @@ export class ClockchainHandshakeStack extends Stack {
       this,
       "ControlApi",
       {
+        corsPreflight: {
+          allowHeaders: [
+            "authorization",
+            "content-type",
+          ],
+          allowMethods: [
+            apigwv2.CorsHttpMethod.POST,
+            apigwv2.CorsHttpMethod.OPTIONS,
+          ],
+          allowOrigins: [operatorUrl],
+        },
         createDefaultStage: true,
       },
     );
@@ -814,6 +845,46 @@ export class ClockchainHandshakeStack extends Stack {
       methods: [apigwv2.HttpMethod.POST],
       path: "/v1/actions",
     });
+    new s3deploy.BucketDeployment(
+      this,
+      "OperatorConsoleDeployment",
+      {
+        destinationBucket:
+          operatorConsoleBucket,
+        distribution: operatorDistribution,
+        distributionPaths: ["/*"],
+        prune: true,
+        sources: [
+          s3deploy.Source.asset(
+            join(
+              dirname(
+                fileURLToPath(import.meta.url),
+              ),
+              "../operator-console",
+            ),
+          ),
+          s3deploy.Source.jsonData(
+            "config.json",
+            {
+              cognitoClientId:
+                userPoolClient.userPoolClientId,
+              cognitoHostedUiUrl:
+                operatorDomain.baseUrl(),
+              cognitoIssuer:
+                `https://cognito-idp.${this.region}.amazonaws.com/${userPool.userPoolId}`,
+              controlApiUrl:
+                controlApi.url!,
+              monitorUrl:
+                `https://${publicDistribution.distributionDomainName}`,
+              repositorySha:
+                props.repositorySha,
+              schema:
+                "clockchain.operator-console-config/v1",
+            },
+          ),
+        ],
+      },
+    );
     actionQueue.grantConsumeMessages(
       operator.role,
     );

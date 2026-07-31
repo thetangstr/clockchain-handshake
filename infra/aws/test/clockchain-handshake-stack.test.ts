@@ -26,6 +26,8 @@ function template(): Template {
           account: "123456789012",
           region: "us-west-2",
         },
+        repositorySha:
+          "abcdef0123456789abcdef0123456789abcdef01",
         tunnelImage: IMAGE.replace(
           /a+$/,
           "b".repeat(64),
@@ -134,6 +136,17 @@ test("creates the exact bootstrap routes and a separate Cognito-authorized opera
     "AWS::Cognito::UserPool",
     1,
   );
+  output.hasResourceProperties(
+    "AWS::Cognito::UserPoolClient",
+    {
+      AllowedOAuthFlows: [
+        "code",
+      ],
+      AllowedOAuthFlowsUserPoolClient:
+        true,
+      GenerateSecret: false,
+    },
+  );
   output.resourceCountIs(
     "AWS::SQS::Queue",
     1,
@@ -150,6 +163,10 @@ test("creates private console and monitor distributions, immutable images, logs,
   output.resourceCountIs(
     "AWS::CloudFront::Distribution",
     2,
+  );
+  output.resourceCountIs(
+    "Custom::CDKBucketDeployment",
+    1,
   );
   const json = output.toJSON();
   const resources = (json.Resources ??

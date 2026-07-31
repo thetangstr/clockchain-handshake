@@ -37,6 +37,12 @@ new ClockchainHandshakeStack(
       account: process.env.CDK_DEFAULT_ACCOUNT,
       region: process.env.CDK_DEFAULT_REGION,
     },
+    repositorySha: required(
+      app.node.tryGetContext(
+        "repositorySha",
+      ),
+      "repositorySha",
+    ),
     tunnelImage: required(
       app.node.tryGetContext("tunnelImage"),
       "tunnelImage",

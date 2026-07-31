@@ -26,6 +26,8 @@ function json(): Record<string, unknown> {
           account: "123456789012",
           region: "us-west-2",
         },
+        repositorySha:
+          "abcdef0123456789abcdef0123456789abcdef01",
         tunnelImage: IMAGE.replace(
           /a+$/,
           "b".repeat(64),

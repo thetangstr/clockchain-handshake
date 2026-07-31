@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Clockchain handshake operator</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">CLOCKCHAIN HANDSHAKE</p>
+          <h1>Hosted operator console</h1>
+          <p class="lede">
+            Guide one Payer and one Requestor through a test payment handshake.
+            This console can initiate approved steps; the fresh verifier decides
+            the result.
+          </p>
+        </div>
+        <div class="session">
+          <span id="auth-state">Signed out</span>
+          <button id="sign-in" class="quiet" type="button">Sign in</button>
+          <button id="sign-out" class="quiet" type="button" hidden>Sign out</button>
+        </div>
+      </header>
+
+      <section class="status-card" aria-labelledby="status-title">
+        <div class="status-heading">
+          <div>
+            <p class="eyebrow">LIVE RUN</p>
+            <h2 id="status-title">Waiting for a fresh update</h2>
+          </div>
+          <span id="status-pill" class="pill pending">PENDING</span>
+        </div>
+        <p id="current-step" class="current-step">
+          The hosted control plane has not published a current step yet.
+        </p>
+        <div class="facts">
+          <div>
+            <span>Run</span>
+            <strong id="run-id">Not started</strong>
+          </div>
+          <div>
+            <span>Current revision</span>
+            <strong id="revision">—</strong>
+          </div>
+          <div>
+            <span>Demo payment</span>
+            <span>paymentMoved:<strong>false</strong></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="claims" aria-label="Stakeholder claim comparison">
+        <article class="claim payer">
+          <p class="eyebrow">PAYER</p>
+          <h2>Payer claim</h2>
+          <p id="payer-claim-status">Waiting for the Payer to join.</p>
+          <code id="payer-fingerprint">No fingerprint yet</code>
+        </article>
+        <article class="claim requestor">
+          <p class="eyebrow">REQUESTOR</p>
+          <h2>Requestor claim</h2>
+          <p id="requestor-claim-status">Waiting for the Requestor to join.</p>
+          <code id="requestor-fingerprint">No fingerprint yet</code>
+        </article>
+      </section>
+
+      <section class="actions" aria-labelledby="actions-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">CONTROL ORDER</p>
+            <h2 id="actions-title">Take the next available action</h2>
+          </div>
+          <p>Unavailable actions stay disabled until their prerequisites pass.</p>
+        </div>
+        <div class="action-list">
+          <button type="button" data-action="START_RUN">Start run</button>
+          <button type="button" data-action="APPROVE_PAYER">Approve Payer</button>
+          <button type="button" data-action="APPROVE_REQUESTOR">Approve Requestor</button>
+          <button type="button" data-action="FUND">Fund</button>
+          <button type="button" data-action="VERIFY">Verify</button>
+          <button type="button" data-action="ABORT" class="danger">Abort</button>
+        </div>
+        <p id="action-message" class="message" role="status" aria-live="polite">
+          Sign in to operate the hosted run.
+        </p>
+      </section>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
