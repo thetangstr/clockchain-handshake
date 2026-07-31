@@ -139,6 +139,30 @@ test("runs coordinator detached and gates funding/verifier commits on durable re
     ),
     false,
   );
+  assert.deepEqual(
+    fx.calls
+      .filter(([name]) =>
+        [
+          "launch",
+          "wait",
+          "result",
+        ].includes(name))
+      .map(([name, kindOrInput]) =>
+        name === "launch" ||
+        name === "wait" ||
+        name === "result"
+          ? `${name}:${kindOrInput}`
+          : `${name}:${kindOrInput.identity.kind}`),
+    [
+      "launch:coordinator",
+      "launch:funding",
+      "wait:funding",
+      "result:funding",
+      "launch:verifier",
+      "wait:verifier",
+      "result:verifier",
+    ],
+  );
 });
 
 test("activates the tunnel only after the exact Payer claim is sealed", async () => {

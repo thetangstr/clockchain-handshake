@@ -5,7 +5,6 @@ import {
   isIP,
 } from "node:net";
 import {
-  basename,
   isAbsolute,
   resolve,
 } from "node:path";
@@ -433,36 +432,36 @@ export function buildVerifierRuntimeInput(value) {
       fail();
     }
     const evidenceRoot =
-      `/var/lib/clockchain/evidence/releases/${scope.releaseId}`;
+      `/var/lib/clockchain/evidence/releases/${scope.releaseId}/stakeholder`;
     const verifierOutputRoot =
       `/var/lib/clockchain/verifier-output/releases/${scope.releaseId}`;
-    const attemptRoot = pathUnder(
+    const attemptRoot = exactPath(
       input.attemptRoot,
-      verifierOutputRoot,
+      `${verifierOutputRoot}/attempts/${attemptId}`,
     );
-    const descriptorPath = pathUnder(
+    const descriptorPath = exactPath(
       input.descriptorPath,
-      evidenceRoot,
+      `${evidenceRoot}/descriptor.json`,
     );
-    const payerMandatePath = pathUnder(
+    const payerMandatePath = exactPath(
       input.payerMandatePath,
-      evidenceRoot,
+      `${evidenceRoot}/payer-mandate.json`,
     );
-    const payeeResultsPath = pathUnder(
+    const payeeResultsPath = exactPath(
       input.payeeResultsPath,
-      evidenceRoot,
+      `${evidenceRoot}/payee-results`,
     );
-    const payerResultsPath = pathUnder(
+    const payerResultsPath = exactPath(
       input.payerResultsPath,
-      evidenceRoot,
+      `${evidenceRoot}/payer-results`,
     );
-    const paymentRequestPath = pathUnder(
+    const paymentRequestPath = exactPath(
       input.paymentRequestPath,
-      evidenceRoot,
+      `${evidenceRoot}/payment-request.json`,
     );
-    const publicationPath = pathUnder(
+    const publicationPath = exactPath(
       input.publicationPath,
-      verifierOutputRoot,
+      `${verifierOutputRoot}/stakeholder-publication.json`,
     );
     const digests = [
       sha64(input.evidenceDigest),
@@ -471,11 +470,6 @@ export function buildVerifierRuntimeInput(value) {
       sha64(input.sessionDigest),
     ];
     if (
-      basename(attemptRoot) !==
-        attemptId ||
-      publicationPath.startsWith(
-        `${attemptRoot}/`,
-      ) ||
       new Set([
         descriptorPath,
         payerMandatePath,

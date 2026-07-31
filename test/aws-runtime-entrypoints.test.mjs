@@ -1084,6 +1084,40 @@ test("operator worker entrypoint composes exact AWS clients and loop dependencie
   ]);
 });
 
+test("operator worker entrypoint provides default transition composition when not injected", async () => {
+  const calls = [];
+  await operatorWorkerEntrypoint({
+    createClients: async () => ({
+      dynamodb: { send: async () => ({}) },
+      sqs: { send: async () => ({}) },
+    }),
+    createDocumentClient: (client) => ({
+      client,
+      send: async () => ({}),
+    }),
+    env: {
+      AWS_RUNTIME_INPUT: operatorRuntimeInput(),
+    },
+    run: async (config, dependencies) => {
+      calls.push([
+        config.releaseId,
+        typeof dependencies.buildTransitions,
+      ]);
+      await assert.rejects(
+        dependencies.buildTransitions(config),
+        /AWS operator worker entrypoint failed safely/,
+      );
+      return {
+        paymentMoved: false,
+        status: "IDLE",
+      };
+    },
+  });
+  assert.deepEqual(calls, [
+    [OPERATOR_RELEASE_ID, "function"],
+  ]);
+});
+
 test("operator worker entrypoint accepts the default operator loop with an aborted signal", async () => {
   await operatorWorkerEntrypoint({
     buildTransitions: async () => ({}),
@@ -1281,7 +1315,7 @@ test("operator worker entrypoint rejects invalid dependency composition safely",
   }
 });
 
-test("operator worker production CLI fails closed until transition builder wiring exists", async () => {
+test("operator worker production CLI fails closed without live runtime dependencies", async () => {
   const result = await execFileAsync(
     process.execPath,
     ["infra/aws/runtime/operator-worker-entrypoint.mjs"],

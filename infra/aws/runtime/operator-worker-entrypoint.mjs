@@ -193,7 +193,11 @@ export async function main({
       typeof createClients !== "function" ||
       typeof createDocumentClient !==
         "function" ||
-      typeof buildTransitions !== "function" ||
+      !(
+        buildTransitions === undefined ||
+        typeof buildTransitions ===
+          "function"
+      ) ||
       typeof run !== "function"
     ) {
       fail();
@@ -205,8 +209,14 @@ export async function main({
       validateDocumentClient(
         createDocumentClient(clients.dynamodb),
       );
+    const activeBuildTransitions =
+      buildTransitions ??
+      (async () => {
+        fail();
+      });
     return await run(operator, {
-      buildTransitions,
+      buildTransitions:
+        activeBuildTransitions,
       documentClient,
       signal,
       sqs: clients.sqs,

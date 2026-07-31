@@ -84,21 +84,21 @@ function verifierInput(overrides = {}) {
     clockchainTokenSecretArn:
       "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-token",
     descriptorPath:
-      `${EVIDENCE_ROOT}/rehearsal/descriptor.json`,
+      `${EVIDENCE_ROOT}/stakeholder/descriptor.json`,
     evidenceDigest: "d".repeat(64),
     expectedRevision: 5,
     mandateDigest: "e".repeat(64),
     payerMandatePath:
-      `${EVIDENCE_ROOT}/rehearsal/payer-mandate.json`,
+      `${EVIDENCE_ROOT}/stakeholder/payer-mandate.json`,
     payeeResultsPath:
-      `${EVIDENCE_ROOT}/payee/results`,
+      `${EVIDENCE_ROOT}/stakeholder/payee-results`,
     payerResultsPath:
-      `${EVIDENCE_ROOT}/payer/results`,
+      `${EVIDENCE_ROOT}/stakeholder/payer-results`,
     paymentMoved: false,
     paymentRequestPath:
-      `${EVIDENCE_ROOT}/rehearsal/payment-request.json`,
+      `${EVIDENCE_ROOT}/stakeholder/payment-request.json`,
     publicationPath:
-      `${VERIFIER_OUTPUT_ROOT}/public/verifier-publication.json`,
+      `${VERIFIER_OUTPUT_ROOT}/stakeholder-publication.json`,
     releaseId: RELEASE_ID,
     repositorySha: REPOSITORY_SHA,
     requestDigest: "f".repeat(64),
@@ -252,20 +252,20 @@ test("builds exact canonical coordinator, funding, and verifier runtime inputs a
       clockchainTokenSecretArn:
         "arn:aws:secretsmanager:us-west-2:123456789012:secret:token-canary-secret",
       descriptorPath:
-        `${EVIDENCE_ROOT}/rehearsal/descriptor.json`,
+        `${EVIDENCE_ROOT}/stakeholder/descriptor.json`,
       evidenceDigest: "d".repeat(64),
       expectedRevision: 5,
       mandateDigest: "e".repeat(64),
       payerMandatePath:
-        `${EVIDENCE_ROOT}/rehearsal/payer-mandate.json`,
+        `${EVIDENCE_ROOT}/stakeholder/payer-mandate.json`,
       payeeResultsPath:
-        `${EVIDENCE_ROOT}/payee/results`,
+        `${EVIDENCE_ROOT}/stakeholder/payee-results`,
       payerResultsPath:
-        `${EVIDENCE_ROOT}/payer/results`,
+        `${EVIDENCE_ROOT}/stakeholder/payer-results`,
       paymentRequestPath:
-        `${EVIDENCE_ROOT}/rehearsal/payment-request.json`,
+        `${EVIDENCE_ROOT}/stakeholder/payment-request.json`,
       publicationPath:
-        `${VERIFIER_OUTPUT_ROOT}/public/verifier-publication.json`,
+        `${VERIFIER_OUTPUT_ROOT}/stakeholder-publication.json`,
       repositorySha: REPOSITORY_SHA,
       requestDigest: "f".repeat(64),
       rpcSecretArn:
@@ -621,6 +621,16 @@ test("verifier builder rejects raw runtime-only fields and missing, reordered, o
       ...verifierInput(),
       attemptRoot:
         `${VERIFIER_OUTPUT_ROOT}/attempts/not-the-attempt`,
+    },
+    {
+      ...verifierInput(),
+      descriptorPath:
+        `${EVIDENCE_ROOT}/stakeholder/nested/descriptor.json`,
+    },
+    {
+      ...verifierInput(),
+      payerResultsPath:
+        `${EVIDENCE_ROOT}/stakeholder/payer-results/file.json`,
     },
     {
       ...verifierInput(),
