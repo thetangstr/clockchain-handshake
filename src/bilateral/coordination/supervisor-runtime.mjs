@@ -436,6 +436,19 @@ export function createSupervisorStatusLine(value) {
     return `${canonicalJson({ code: "COORDINATION_SUPERVISOR_FAILED", paymentMoved: false })}\n`;
   }
   const status = ownSelectorValue(value, "status");
+  if (status === "PARTY_PROGRESS") {
+    const progressStatus =
+      exactPartyCompleteStatus(value);
+    if (
+      progressStatus.paymentMoved !== false ||
+      progressStatus.role !== "payer" ||
+      progressStatus.state !== "PROPOSED" ||
+      progressStatus.status !== "PARTY_PROGRESS"
+    ) {
+      fail();
+    }
+    return `${canonicalJson({ paymentMoved: false, role: "payer", state: "PROPOSED", status: "PARTY_PROGRESS" })}\n`;
+  }
   if (status === "PARTY_COMPLETE") {
     const terminalStatus = exactPartyCompleteStatus(value);
     if (terminalStatus.paymentMoved !== false || !["payer", "payee"].includes(terminalStatus.role) || terminalStatus.status !== "PARTY_COMPLETE") fail();

@@ -46,6 +46,15 @@ function partyCompletionStatus(role) {
     status: "PARTY_COMPLETE",
   });
 }
+function payerProgressStatus(state) {
+  if (state !== "PROPOSED") invalid();
+  return Object.freeze({
+    paymentMoved: false,
+    role: "payer",
+    state,
+    status: "PARTY_PROGRESS",
+  });
+}
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const same = (left, right) => isDeepStrictEqual(left, right);
 function exact(value, keys) { return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key)); }
@@ -854,6 +863,7 @@ export async function runSupervisor(input) {
     if (!localState || typeof client.readEnrollmentReadiness !== "function" || typeof client.readEnrollmentSet !== "function" || typeof client.readEvents !== "function" || typeof localState.operatorPublicKey !== "string" || typeof localState.releaseId !== "string" || typeof localState.repositorySha !== "string" || typeof localState.sessionId !== "string" || !["payer", "payee"].includes(localState.role)) invalid();
     let waitingReported = false;
     let readyReported = false;
+    let proposedReported = false;
     let stopPayerMcpServer = null;
     try {
     if (localState.role === "payer" && typeof dependencies.startPayerMcpServer === "function") {
@@ -884,6 +894,22 @@ export async function runSupervisor(input) {
       const events = await client.readEvents({ after: null, waitMs: 30000 });
       if (!Array.isArray(events) || previous && (events.length < previous.length || previous.some((event, index) => events[index]?.eventDigest !== event.eventDigest))) invalid();
       replay = await authenticateSupervisorReplay({ events, enrollmentSet, operatorPublicKey: localState.operatorPublicKey, releaseId: localState.releaseId, repositorySha: localState.repositorySha, sessionId: localState.sessionId, localRole: localState.role, verifyEnrollmentSet: dependencies.verifyEnrollmentSet, verifyVerifierPublication: typeof dependencies.verifyVerifierPublication === "function" ? (input) => dependencies.verifyVerifierPublication(input, client) : undefined });
+      if (
+        !proposedReported &&
+        localState.role === "payer" &&
+        eventFor(
+          replay.events,
+          "payer",
+          "PAYER_MANDATE_READY",
+          "stakeholder",
+        ) &&
+        typeof dependencies.writeStatus === "function"
+      ) {
+        dependencies.writeStatus(
+          payerProgressStatus("PROPOSED"),
+        );
+        proposedReported = true;
+      }
       enrollmentSet = replay.enrollmentSet;
       previous = replay.events;
       const checkpoint = (phase) => Object.freeze({

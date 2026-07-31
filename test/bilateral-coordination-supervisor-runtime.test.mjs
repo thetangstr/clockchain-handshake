@@ -194,6 +194,10 @@ test("projects supervisor status lines through an exact secret-free allowlist", 
     '{"paymentMoved":false,"role":"payer","state":"ACKNOWLEDGED","status":"PARTY_COMPLETE"}\n',
   );
   assert.equal(
+    createSupervisorStatusLine({ paymentMoved: false, role: "payer", state: "PROPOSED", status: "PARTY_PROGRESS" }),
+    '{"paymentMoved":false,"role":"payer","state":"PROPOSED","status":"PARTY_PROGRESS"}\n',
+  );
+  assert.equal(
     createSupervisorStatusLine({ paymentMoved: false, role: "payee", state: "ACCEPTED", status: "PARTY_COMPLETE" }),
     '{"paymentMoved":false,"role":"payee","state":"ACCEPTED","status":"PARTY_COMPLETE"}\n',
   );
@@ -213,6 +217,8 @@ test("projects supervisor status lines through an exact secret-free allowlist", 
   );
   assert.equal(proxyGetCount, 0);
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: true, role: "payer", status: "WAITING_FOR_PEER" }));
+  assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payee", state: "PROPOSED", status: "PARTY_PROGRESS" }));
+  assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payer", state: "ACKNOWLEDGED", status: "PARTY_PROGRESS" }));
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payer", state: "ACCEPTED", status: "PARTY_COMPLETE" }));
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payee", state: "ACKNOWLEDGED", status: "PARTY_COMPLETE" }));
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payer", state: "AUTHORIZED", status: "PARTY_COMPLETE" }));
