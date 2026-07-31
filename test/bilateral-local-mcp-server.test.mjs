@@ -99,6 +99,38 @@ function bootstrapClaim(overrides = {}) {
   };
 }
 
+function sealedBootstrapResponse(claim, overrides = {}) {
+  return {
+    claimFingerprint: bootstrapClaimFingerprint(claim),
+    context: {
+      claimNonce: claim.claimNonce,
+      paymentMoved: false,
+      releaseId: "release-validator",
+      repositorySha: REPOSITORY_SHA,
+      sessionId: "22222222-2222-4222-8222-222222222222",
+    },
+    envelope: {
+      algorithm: "X25519-HKDF-SHA256-AES-256-GCM",
+      ciphertextBase64url: Buffer.from("sealed-manifest").toString("base64url"),
+      ephemeralPublicKey: Buffer.alloc(32, 1).toString("base64url"),
+      ivBase64url: Buffer.alloc(12, 2).toString("base64url"),
+      paymentMoved: false,
+      schema: "clockchain.requestor-bootstrap-envelope/v1",
+      tagBase64url: Buffer.alloc(16, 3).toString("base64url"),
+    },
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    schema: BOOTSTRAP_SCHEMA,
+    signature: {
+      algorithm: "ed25519",
+      keyId: "operator",
+      value: Buffer.alloc(64, 4).toString("base64"),
+    },
+    status: "SEALED",
+    ...overrides,
+  };
+}
+
 test("serves separately armed public bootstrap claims without weakening authenticated MCP", async (t) => {
   const claims = [];
   const fixture = await makeFixture(t, {
@@ -176,6 +208,30 @@ test("fails closed for unarmed, malformed, duplicate, and mismatched bootstrap c
     headers: { Authorization: undefined, Accept: "application/json" },
     path: "/bootstrap",
   })).statusCode, 400);
+
+  const sealedClaim = bootstrapClaim();
+  const sealed = sealedBootstrapResponse(sealedClaim);
+  for (const response of [
+    sealedBootstrapResponse(sealedClaim, { envelope: { ...sealed.envelope, algorithm: "AES-GCM" } }),
+    sealedBootstrapResponse(sealedClaim, { envelope: { ...sealed.envelope, schema: "other" } }),
+    sealedBootstrapResponse(sealedClaim, { envelope: { ...sealed.envelope, ephemeralPublicKey: Buffer.alloc(31).toString("base64url") } }),
+    sealedBootstrapResponse(sealedClaim, { envelope: { ...sealed.envelope, ivBase64url: Buffer.alloc(11).toString("base64url") } }),
+    sealedBootstrapResponse(sealedClaim, { envelope: { ...sealed.envelope, tagBase64url: Buffer.alloc(15).toString("base64url") } }),
+    sealedBootstrapResponse(sealedClaim, { envelope: { ...sealed.envelope, ciphertextBase64url: `${Buffer.from("x").toString("base64url")}=` } }),
+    sealedBootstrapResponse(sealedClaim, { signature: { algorithm: "ed25519", keyId: "operator", value: Buffer.alloc(63).toString("base64") } }),
+    sealedBootstrapResponse(sealedClaim, { signature: { algorithm: "rsa", keyId: "operator", value: Buffer.alloc(64).toString("base64") } }),
+    sealedBootstrapResponse(sealedClaim, { signature: { algorithm: "ed25519", keyId: "Operator", value: Buffer.alloc(64).toString("base64") } }),
+  ]) {
+    const malformedSealed = await makeFixture(t, {
+      claimRequestorBootstrap: async () => response,
+    });
+    assert.equal((await request({
+      body: sealedClaim,
+      fixture: malformedSealed,
+      headers: { Authorization: undefined, Accept: "application/json" },
+      path: "/bootstrap",
+    })).statusCode, 400);
+  }
 
   for (const body of [
     bootstrapClaim({ extra: true }),

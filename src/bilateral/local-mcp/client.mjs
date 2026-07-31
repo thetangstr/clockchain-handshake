@@ -29,6 +29,12 @@ const expectedUid = process.getuid?.();
 const TEMPORARY_INTAKE_FILE = /^\.requestor-mcp-intake-[0-9a-f]{32}\.tmp$/;
 const BOOTSTRAP_CLAIM_KEYS = Object.freeze(["claimNonce", "paymentMoved", "repositorySha", "requestorPublicKey"]);
 const BASE64URL_32_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const BOOTSTRAP_ENVELOPE_ALGORITHM = "X25519-HKDF-SHA256-AES-256-GCM";
+const BOOTSTRAP_ENVELOPE_SCHEMA = "clockchain.requestor-bootstrap-envelope/v1";
+const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const MAX_BOOTSTRAP_CIPHERTEXT_BYTES = 65_536;
 
 function fail() {
   throw new Error("Requestor MCP client failed safely.");
@@ -222,6 +228,26 @@ function validateBootstrapClaim(value, repositorySha) {
 
 function requestorBootstrapClaimFingerprint(claim) {
   return createHash("sha256").update(canonicalBytes(claim)).digest("hex");
+}
+
+function exactBase64url(value, decodedLength = null, maxDecodedLength = null) {
+  if (typeof value !== "string" || value.length === 0 || value.includes("=") || !BASE64URL_PATTERN.test(value)) fail();
+  const decoded = Buffer.from(value, "base64url");
+  if (
+    decoded.length === 0 ||
+    (decodedLength !== null && decoded.length !== decodedLength) ||
+    (maxDecodedLength !== null && decoded.length > maxDecodedLength) ||
+    decoded.toString("base64url") !== value
+  ) {
+    fail();
+  }
+  return decoded;
+}
+
+function exactBase64(value, decodedLength) {
+  if (typeof value !== "string" || !BASE64_PATTERN.test(value)) fail();
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.length !== decodedLength || decoded.toString("base64") !== value) fail();
 }
 
 function validateBootstrapInput({ bootstrapUrl, claim, repositorySha, tlsCertificatePem, tlsFingerprint }) {
@@ -490,13 +516,21 @@ function validateBootstrapResponse(response, { claim, repositorySha }) {
     context.repositorySha !== repositorySha ||
     !UUID_V4_PATTERN.test(context.sessionId) ||
     typeof context.releaseId !== "string" ||
+    envelope.algorithm !== BOOTSTRAP_ENVELOPE_ALGORITHM ||
     envelope.paymentMoved !== false ||
+    envelope.schema !== BOOTSTRAP_ENVELOPE_SCHEMA ||
     signature.algorithm !== "ed25519" ||
     typeof signature.keyId !== "string" ||
+    !KEY_ID_PATTERN.test(signature.keyId) ||
     typeof signature.value !== "string"
   ) {
     fail();
   }
+  exactBase64url(envelope.ciphertextBase64url, null, MAX_BOOTSTRAP_CIPHERTEXT_BYTES);
+  exactBase64url(envelope.ephemeralPublicKey, 32);
+  exactBase64url(envelope.ivBase64url, 12);
+  exactBase64url(envelope.tagBase64url, 16);
+  exactBase64(signature.value, 64);
   return deepFreeze({
     ...value,
     context: { ...context },

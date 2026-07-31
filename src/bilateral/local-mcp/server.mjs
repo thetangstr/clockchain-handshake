@@ -40,6 +40,12 @@ const SINGLETON_HEADERS = new Set([
 const BOOTSTRAP_CLAIM_KEYS = Object.freeze(["claimNonce", "paymentMoved", "repositorySha", "requestorPublicKey"]);
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const BASE64URL_32_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const BOOTSTRAP_ENVELOPE_ALGORITHM = "X25519-HKDF-SHA256-AES-256-GCM";
+const BOOTSTRAP_ENVELOPE_SCHEMA = "clockchain.requestor-bootstrap-envelope/v1";
+const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const MAX_BOOTSTRAP_CIPHERTEXT_BYTES = 65_536;
 
 function fail() {
   throw new Error("Payer MCP server failed safely.");
@@ -447,6 +453,26 @@ function requestorBootstrapClaimFingerprint(claim) {
   return createHash("sha256").update(canonicalBytes(claim)).digest("hex");
 }
 
+function exactBase64url(value, decodedLength = null, maxDecodedLength = null) {
+  if (typeof value !== "string" || value.length === 0 || value.includes("=") || !BASE64URL_PATTERN.test(value)) fail();
+  const decoded = Buffer.from(value, "base64url");
+  if (
+    decoded.length === 0 ||
+    (decodedLength !== null && decoded.length !== decodedLength) ||
+    (maxDecodedLength !== null && decoded.length > maxDecodedLength) ||
+    decoded.toString("base64url") !== value
+  ) {
+    fail();
+  }
+  return decoded;
+}
+
+function exactBase64(value, decodedLength) {
+  if (typeof value !== "string" || !BASE64_PATTERN.test(value)) fail();
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.length !== decodedLength || decoded.toString("base64") !== value) fail();
+}
+
 function validateBootstrapHeaders(req, expectedHost) {
   if (req.rawHeaders.length / 2 > MAX_HEADERS) return 431;
   const seenHeaders = new Map();
@@ -488,13 +514,21 @@ function validateBootstrapBrokerResponse(value, { claim, repositorySha }) {
       value.context.repositorySha !== repositorySha ||
       typeof value.context.releaseId !== "string" ||
       !UUID_V4_PATTERN.test(value.context.sessionId) ||
+      value.envelope.algorithm !== BOOTSTRAP_ENVELOPE_ALGORITHM ||
       value.envelope.paymentMoved !== false ||
+      value.envelope.schema !== BOOTSTRAP_ENVELOPE_SCHEMA ||
       value.signature.algorithm !== "ed25519" ||
       typeof value.signature.keyId !== "string" ||
+      !KEY_ID_PATTERN.test(value.signature.keyId) ||
       typeof value.signature.value !== "string"
     ) {
       fail();
     }
+    exactBase64url(value.envelope.ciphertextBase64url, null, MAX_BOOTSTRAP_CIPHERTEXT_BYTES);
+    exactBase64url(value.envelope.ephemeralPublicKey, 32);
+    exactBase64url(value.envelope.ivBase64url, 12);
+    exactBase64url(value.envelope.tagBase64url, 16);
+    exactBase64(value.signature.value, 64);
   } else {
     fail();
   }

@@ -54,6 +54,38 @@ function bootstrapClaim(overrides = {}) {
   };
 }
 
+function sealedBootstrapResponse(claim, overrides = {}) {
+  return {
+    claimFingerprint: bootstrapClaimFingerprint(claim),
+    context: {
+      claimNonce: claim.claimNonce,
+      paymentMoved: false,
+      releaseId: "release-validator",
+      repositorySha: REPOSITORY_SHA,
+      sessionId: "22222222-2222-4222-8222-222222222222",
+    },
+    envelope: {
+      algorithm: "X25519-HKDF-SHA256-AES-256-GCM",
+      ciphertextBase64url: Buffer.from("sealed-manifest").toString("base64url"),
+      ephemeralPublicKey: Buffer.alloc(32, 1).toString("base64url"),
+      ivBase64url: Buffer.alloc(12, 2).toString("base64url"),
+      paymentMoved: false,
+      schema: "clockchain.requestor-bootstrap-envelope/v1",
+      tagBase64url: Buffer.alloc(16, 3).toString("base64url"),
+    },
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    schema: BOOTSTRAP_SCHEMA,
+    signature: {
+      algorithm: "ed25519",
+      keyId: "operator",
+      value: Buffer.alloc(64, 4).toString("base64"),
+    },
+    status: "SEALED",
+    ...overrides,
+  };
+}
+
 test("public Requestor bootstrap client posts exact claims without bearer over pinned TLS", async (t) => {
   const pinned = await makeServer(t);
   const claim = bootstrapClaim();
@@ -113,6 +145,15 @@ test("public Requestor bootstrap client fails closed on malformed claims and bro
     { response: { ...valid, status: "APPROVED" } },
     { response: { ...valid, extra: true } },
     { httpStatus: 200, response: valid },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { envelope: { ...sealedBootstrapResponse(claim).envelope, algorithm: "AES-GCM" } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { envelope: { ...sealedBootstrapResponse(claim).envelope, schema: "other" } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { envelope: { ...sealedBootstrapResponse(claim).envelope, ephemeralPublicKey: Buffer.alloc(31).toString("base64url") } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { envelope: { ...sealedBootstrapResponse(claim).envelope, ivBase64url: Buffer.alloc(11).toString("base64url") } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { envelope: { ...sealedBootstrapResponse(claim).envelope, tagBase64url: Buffer.alloc(15).toString("base64url") } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { envelope: { ...sealedBootstrapResponse(claim).envelope, ciphertextBase64url: `${Buffer.from("x").toString("base64url")}=` } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { signature: { algorithm: "ed25519", keyId: "operator", value: Buffer.alloc(63).toString("base64") } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { signature: { algorithm: "rsa", keyId: "operator", value: Buffer.alloc(64).toString("base64") } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { signature: { algorithm: "ed25519", keyId: "Operator", value: Buffer.alloc(64).toString("base64") } }) },
   ]) {
     await assert.rejects(
       requestBootstrapThroughPayerMcp({
