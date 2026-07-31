@@ -21,6 +21,7 @@ import {
   disconnectTunnelConnection,
   renderRestrictedAuthorizedKey,
   tombstoneTunnelGrant,
+  validateTunnelGrantRecord,
 } from "../src/bilateral/aws/tunnel-grant.mjs";
 import {
   createPayerBootstrapKey,
@@ -324,4 +325,37 @@ test("renders exactly one restricted Ed25519 authorization line", () => {
       }),
     /Tunnel grant validation failed safely/,
   );
+});
+
+test("validates only exact active grants and permanent tombstones for the tunnel service", () => {
+  const claim = payerClaim();
+  const grant = createTunnelGrant({
+    approved: approve(claim),
+    expiresAtMs: String(NOW + 60_000),
+  });
+  assert.deepEqual(
+    validateTunnelGrantRecord(grant),
+    grant,
+  );
+  const tombstone = tombstoneTunnelGrant({
+    activeGrant: grant,
+    nowMs: NOW + 1,
+    reason: "ABORT",
+  });
+  assert.deepEqual(
+    validateTunnelGrantRecord(tombstone),
+    tombstone,
+  );
+  for (const candidate of [
+    { ...grant, publicMcpPort: 443 },
+    { ...grant, unexpected: true },
+    { ...tombstone, terminalReason: "EXPIRED" },
+    { ...tombstone, claim: claim },
+    null,
+  ]) {
+    assert.throws(
+      () => validateTunnelGrantRecord(candidate),
+      /Tunnel grant validation failed safely/,
+    );
+  }
 });

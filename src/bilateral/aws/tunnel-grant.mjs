@@ -262,6 +262,46 @@ function activeSnapshot(value) {
   });
 }
 
+function tombstoneSnapshot(value) {
+  const tombstone = exactObject(
+    value,
+    TOMBSTONE_KEYS,
+  );
+  timestamp(tombstone.expiresAtMs);
+  timestamp(tombstone.terminalAtMs);
+  hostname(tombstone.publicMcpHostname);
+  if (
+    !SHA256_PATTERN.test(
+      tombstone.claimFingerprint,
+    ) ||
+    tombstone.paymentMoved !== false ||
+    tombstone.publicMcpPort !== 9443 ||
+    typeof tombstone.releaseId !== "string" ||
+    tombstone.releaseId.length === 0 ||
+    !/^[0-9a-f]{40}$/.test(
+      tombstone.repositorySha,
+    ) ||
+    tombstone.schema !==
+      PAYER_TUNNEL_TOMBSTONE_SCHEMA ||
+    typeof tombstone.sessionId !== "string" ||
+    tombstone.sessionId.length === 0 ||
+    tombstone.status !== "TOMBSTONED" ||
+    !TERMINAL_REASONS.has(
+      tombstone.terminalReason,
+    ) ||
+    tombstone.tunnelPort !== 443 ||
+    Number(tombstone.terminalAtMs) <
+      Number(tombstone.expiresAtMs) &&
+      tombstone.terminalReason === "EXPIRED" ||
+    Number(tombstone.terminalAtMs) >=
+      Number(tombstone.expiresAtMs) &&
+      tombstone.terminalReason !== "EXPIRED"
+  ) {
+    invalid();
+  }
+  return Object.freeze({ ...tombstone });
+}
+
 function connectionFingerprint(value) {
   if (
     typeof value !== "string" ||
@@ -475,6 +515,26 @@ export function renderRestrictedAuthorizedKey(input) {
       "permitlisten=\"0.0.0.0:9443\" " +
       `ssh-ed25519 ${parts[1]} clockchain-payer`
     );
+  } catch (error) {
+    sanitize(error);
+  }
+}
+
+export function validateTunnelGrantRecord(value) {
+  try {
+    if (
+      value?.schema ===
+      PAYER_TUNNEL_GRANT_SCHEMA
+    ) {
+      return activeSnapshot(value);
+    }
+    if (
+      value?.schema ===
+      PAYER_TUNNEL_TOMBSTONE_SCHEMA
+    ) {
+      return tombstoneSnapshot(value);
+    }
+    invalid();
   } catch (error) {
     sanitize(error);
   }

@@ -7,6 +7,14 @@
     "node": ">=22"
   },
   "scripts": {
+    "aws:bootstrap": "node scripts/run-aws-bootstrap-service.mjs",
+    "aws:coordinator": "node scripts/run-aws-coordinator.mjs",
+    "aws:fund": "node scripts/run-aws-funding-task.mjs",
+    "aws:operator-worker": "node scripts/run-aws-operator-worker.mjs",
+    "aws:public-monitor": "node scripts/publish-aws-public-monitor.mjs",
+    "aws:relay": "node scripts/run-aws-relay.mjs",
+    "aws:tunnel": "node scripts/run-aws-tunnel-service.mjs",
+    "aws:verify": "node scripts/run-aws-verifier-task.mjs",
     "bilateral:console": "node bin/handshake-console.mjs",
     "bilateral:coordinator": "node bin/handshake-coordinator.mjs",
     "bilateral:bootstrap-broker": "node bin/handshake-bootstrap-broker.mjs",
