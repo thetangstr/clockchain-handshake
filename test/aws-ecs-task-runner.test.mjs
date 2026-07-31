@@ -19,17 +19,24 @@ const CONFIG = Object.freeze({
   taskDefinitionArn:
     "arn:aws:ecs:us-west-2:123456789012:task-definition/coordinator:7",
 });
+const CLIENT_TOKEN = Object.freeze({
+  childTask: "coordinator",
+  action: "request-payment",
+  fingerprint: "0123456789abcdef",
+});
+const RUNTIME_INPUT = Object.freeze({
+  paymentMoved: false,
+  schema:
+    "clockchain.aws-runtime-input/v1",
+});
 
 test("launches one immutable Fargate task with canonical runtime input and no command-line secret", async () => {
   const calls = [];
   const result = await launchPinnedTask(
     {
+      clientToken: CLIENT_TOKEN,
       config: CONFIG,
-      runtimeInput: {
-        paymentMoved: false,
-        schema:
-          "clockchain.aws-runtime-input/v1",
-      },
+      runtimeInput: RUNTIME_INPUT,
     },
     {
       ecs: {
@@ -55,6 +62,8 @@ test("launches one immutable Fargate task with canonical runtime input and no co
     true,
   );
   assert.deepEqual(calls[0], {
+    clientToken:
+      "cc-coordinator-request-payment-0123456789abcdef",
     cluster: CONFIG.clusterArn,
     count: 1,
     enableExecuteCommand: false,
@@ -86,6 +95,61 @@ test("launches one immutable Fargate task with canonical runtime input and no co
     taskDefinition:
       CONFIG.taskDefinitionArn,
   });
+});
+
+test("derives stable noncolliding ECS client tokens from child task and action identity", async () => {
+  const calls = [];
+  const ecs = {
+    async send(command) {
+      calls.push(command.input);
+      return {
+        failures: [],
+        tasks: [
+          {
+            taskArn:
+              "arn:aws:ecs:us-west-2:123456789012:task/clockchain/11111111111111111111111111111111",
+          },
+        ],
+      };
+    },
+  };
+  await launchPinnedTask(
+    {
+      clientToken: CLIENT_TOKEN,
+      config: CONFIG,
+      runtimeInput: RUNTIME_INPUT,
+    },
+    { ecs },
+  );
+  await launchPinnedTask(
+    {
+      clientToken: CLIENT_TOKEN,
+      config: CONFIG,
+      runtimeInput: RUNTIME_INPUT,
+    },
+    { ecs },
+  );
+  await launchPinnedTask(
+    {
+      clientToken: {
+        childTask: "operator",
+        action: "accept-payment",
+        fingerprint:
+          CLIENT_TOKEN.fingerprint,
+      },
+      config: CONFIG,
+      runtimeInput: RUNTIME_INPUT,
+    },
+    { ecs },
+  );
+  assert.equal(
+    calls[0].clientToken,
+    calls[1].clientToken,
+  );
+  assert.notEqual(
+    calls[0].clientToken,
+    calls[2].clientToken,
+  );
 });
 
 test("accepts only one stopped zero-exit task matching the launched ARN", async () => {
@@ -130,6 +194,7 @@ test("fails closed on multiple tasks, launch failures, nonzero exits, and mutabl
   await assert.rejects(
     launchPinnedTask(
       {
+        clientToken: CLIENT_TOKEN,
         config: CONFIG,
         runtimeInput: {
           paymentMoved: false,
@@ -184,4 +249,51 @@ test("fails closed on multiple tasks, launch failures, nonzero exits, and mutabl
     ),
     /AWS ECS task runner failed safely/,
   );
+});
+
+test("fails closed before ECS launch when client token input is missing or malformed", async () => {
+  let sendCount = 0;
+  const dependencies = {
+    ecs: {
+      async send() {
+        sendCount += 1;
+        return {
+          failures: [],
+          tasks: [
+            {
+              taskArn:
+                "arn:aws:ecs:us-west-2:123456789012:task/clockchain/11111111111111111111111111111111",
+            },
+          ],
+        };
+      },
+    },
+  };
+  await assert.rejects(
+    launchPinnedTask(
+      {
+        config: CONFIG,
+        runtimeInput: RUNTIME_INPUT,
+      },
+      dependencies,
+    ),
+    /AWS ECS task runner failed safely/,
+  );
+  await assert.rejects(
+    launchPinnedTask(
+      {
+        clientToken: {
+          childTask: "coordinator",
+          action: "request-payment",
+          fingerprint:
+            "contains-secret-token",
+        },
+        config: CONFIG,
+        runtimeInput: RUNTIME_INPUT,
+      },
+      dependencies,
+    ),
+    /AWS ECS task runner failed safely/,
+  );
+  assert.equal(sendCount, 0);
 });

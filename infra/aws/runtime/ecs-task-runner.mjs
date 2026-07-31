@@ -11,6 +11,17 @@ const CONFIG_KEYS = Object.freeze([
   "subnetIds",
   "taskDefinitionArn",
 ]);
+const LAUNCH_KEYS = Object.freeze([
+  "clientToken",
+  "config",
+  "runtimeInput",
+]);
+const CLIENT_TOKEN_KEYS =
+  Object.freeze([
+    "childTask",
+    "action",
+    "fingerprint",
+  ]);
 const WAIT_KEYS = Object.freeze([
   "clusterArn",
   "containerName",
@@ -27,6 +38,10 @@ const NETWORK_ID =
   /^(?:sg|subnet)-[0-9a-f]{17}$/;
 const NAME =
   /^[a-z][a-z0-9-]{0,63}$/;
+const CLIENT_TOKEN_NAME =
+  /^[a-z][a-z0-9-]{0,15}$/;
+const CLIENT_TOKEN_FINGERPRINT =
+  /^[0-9a-f]{16}$/;
 const SENSITIVE_KEY =
   /^(?:capability|invitation|privateKey|secret|token)$/i;
 
@@ -89,6 +104,34 @@ function config(value) {
   return input;
 }
 
+function clientToken(value) {
+  const input = exact(
+    value,
+    CLIENT_TOKEN_KEYS,
+  );
+  if (
+    !CLIENT_TOKEN_NAME.test(
+      input.childTask,
+    ) ||
+    !CLIENT_TOKEN_NAME.test(
+      input.action,
+    ) ||
+    !CLIENT_TOKEN_FINGERPRINT.test(
+      input.fingerprint,
+    )
+  ) {
+    fail();
+  }
+  const token = `cc-${input.childTask}-${input.action}-${input.fingerprint}`;
+  if (
+    Buffer.byteLength(token, "utf8") >
+    64
+  ) {
+    fail();
+  }
+  return token;
+}
+
 function canonicalRuntimeInput(value) {
   if (
     value === null ||
@@ -135,14 +178,20 @@ function canonicalRuntimeInput(value) {
 }
 
 export async function launchPinnedTask(
-  {
-    config: configValue,
-    runtimeInput,
-  } = {},
+  value = {},
   dependencies = {},
 ) {
   try {
-    const input = config(configValue);
+    const launchInput = exact(
+      value,
+      LAUNCH_KEYS,
+    );
+    const input = config(
+      launchInput.config,
+    );
+    const token = clientToken(
+      launchInput.clientToken,
+    );
     const ecs = dependencies.ecs;
     if (
       ecs === null ||
@@ -153,6 +202,7 @@ export async function launchPinnedTask(
     }
     const result = await ecs.send(
       new RunTaskCommand({
+        clientToken: token,
         cluster: input.clusterArn,
         count: 1,
         enableExecuteCommand: false,
@@ -175,7 +225,7 @@ export async function launchPinnedTask(
                     "AWS_RUNTIME_INPUT",
                   value:
                     canonicalRuntimeInput(
-                      runtimeInput,
+                      launchInput.runtimeInput,
                     ),
                 },
               ],
