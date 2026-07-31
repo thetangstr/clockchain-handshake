@@ -978,6 +978,67 @@ test("supervisor CLI accepts four Payer MCP path options plus an optional public
     },
   });
   assert.equal(externalSeen[0].payerMcpServerOptions.publicUrl, "https://203.0.113.10:19443/mcp");
+  const brokerCapabilityPath = join(root, "bootstrap-broker.capability");
+  await writeFile(brokerCapabilityPath, `${"12".repeat(32)}\n`, { mode: 0o600 });
+  await chmod(brokerCapabilityPath, 0o600);
+  const bootstrapSeen = [];
+  await supervisorMain([
+    "--launch-manifest", payerManifestPath,
+    "--state", root,
+    "--payer-mcp-host", "127.0.0.1",
+    "--payer-mcp-port", "9443",
+    "--payer-mcp-public-url", "https://203.0.113.10:19443/mcp",
+    "--payer-mcp-tls-certificate", certificatePath,
+    "--payer-mcp-tls-private-key", privateKeyPath,
+    "--payer-mcp-bootstrap-broker-url", "http://127.0.0.1:9555",
+    "--payer-mcp-bootstrap-broker-capability-file", brokerCapabilityPath,
+  ], {
+    async createProductionSupervisorDependencies(input) {
+      bootstrapSeen.push(input);
+      return {
+        runSupervisor: async () => ({ paymentMoved: false }),
+      };
+    },
+  });
+  assert.equal(bootstrapSeen[0].payerMcpServerOptions.bootstrapBrokerUrl, "http://127.0.0.1:9555");
+  assert.equal(bootstrapSeen[0].payerMcpServerOptions.bootstrapBrokerCapabilityFile, brokerCapabilityPath);
+  const constructedWithBroker = [];
+  await createProductionSupervisorDependencies({
+    createPayerMcpServer(input) {
+      constructedWithBroker.push(input);
+      return { start: async () => ({ host: input.host, port: input.port, url: `https://${input.host}:${input.port}/mcp` }), stop: async () => undefined };
+    },
+    launchManifestPath: payerManifestPath,
+    payerMcpServerOptions: {
+      bootstrapBrokerCapabilityFile: brokerCapabilityPath,
+      bootstrapBrokerUrl: "http://127.0.0.1:9555",
+      host: "127.0.0.1",
+      port: 9443,
+      tlsCertificatePath: certificatePath,
+      tlsPrivateKeyPath: privateKeyPath,
+    },
+    probe: async () => ({ clean: true, head: repositorySha }),
+    stateRoot: join(root, "broker-runtime"),
+  });
+  assert.equal(typeof constructedWithBroker[0].claimRequestorBootstrap, "function");
+  assert.equal(Object.hasOwn(constructedWithBroker[0], "bootstrapBrokerCapability"), false);
+  assert.equal(Object.hasOwn(constructedWithBroker[0], "bootstrapBrokerCapabilityFile"), false);
+  let brokerHalfFactoryCalled = false;
+  await assert.rejects(supervisorMain([
+    "--launch-manifest", payerManifestPath,
+    "--state", root,
+    "--payer-mcp-host", "127.0.0.1",
+    "--payer-mcp-port", "9443",
+    "--payer-mcp-tls-certificate", certificatePath,
+    "--payer-mcp-tls-private-key", privateKeyPath,
+    "--payer-mcp-bootstrap-broker-url", "http://127.0.0.1:9555",
+  ], {
+    async createProductionSupervisorDependencies() {
+      brokerHalfFactoryCalled = true;
+      return {};
+    },
+  }));
+  assert.equal(brokerHalfFactoryCalled, false);
   let publicOnlyFactoryCalled = false;
   await assert.rejects(supervisorMain([
     "--launch-manifest", payerManifestPath,

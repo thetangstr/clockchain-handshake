@@ -10,6 +10,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { createPayerMcpServer } from "../src/bilateral/local-mcp/server.mjs";
+import { bootstrapClaimFingerprint } from "../src/bilateral/local-mcp/bootstrap-broker.mjs";
+import { createRequestorBootstrapKey } from "../src/bilateral/local-mcp/bootstrap-envelope.mjs";
 import { buildPaymentIntakeToolResult, PAYMENT_INTAKE_TOOL_DESCRIPTOR } from "../src/bilateral/local-mcp/payment-intake.mjs";
 import { createPayerMcpIntakeStore } from "../src/bilateral/local-mcp/intake-store.mjs";
 import { requestPaymentThroughPayerMcp } from "../src/bilateral/local-mcp/client.mjs";
@@ -20,6 +22,7 @@ const CAPABILITY = "ab".repeat(32);
 const CAPABILITY_DIGEST = createHash("sha256").update(Buffer.from(CAPABILITY, "hex")).digest("hex");
 const INTAKE_REQUEST_ID = "00000000-0000-4000-8000-000000000000";
 const GENERIC_UNAUTHORIZED = { error: "PAYER_MCP_PROTOCOL_FAILED", paymentMoved: false };
+const BOOTSTRAP_SCHEMA = "clockchain.requestor-bootstrap-broker-response/v1";
 
 function paymentInput(overrides = {}) {
   return {
@@ -68,6 +71,7 @@ async function makeFixture(t, options = {}) {
     publicUrl: options.publicUrl,
     randomBytes: options.randomBytes ?? (() => Buffer.alloc(16, 1)),
     repositorySha: REPOSITORY_SHA,
+    ...(options.claimRequestorBootstrap === undefined ? {} : { claimRequestorBootstrap: options.claimRequestorBootstrap }),
     sideEffects: {
       appendRelayEvent: () => observed.push("relay"),
       createVerdict: () => observed.push("verdict"),
@@ -84,6 +88,116 @@ async function makeFixture(t, options = {}) {
   });
   return { ...listening, certificate: tlsCertificatePem, fingerprint: createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex"), observed, root, server };
 }
+
+function bootstrapClaim(overrides = {}) {
+  return {
+    claimNonce: "11111111-1111-4111-8111-111111111111",
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    requestorPublicKey: createRequestorBootstrapKey().publicKey,
+    ...overrides,
+  };
+}
+
+test("serves separately armed public bootstrap claims without weakening authenticated MCP", async (t) => {
+  const claims = [];
+  const fixture = await makeFixture(t, {
+    claimRequestorBootstrap: async (claim) => {
+      claims.push(claim);
+      return {
+        claimFingerprint: bootstrapClaimFingerprint(claim),
+        paymentMoved: false,
+        repositorySha: REPOSITORY_SHA,
+        schema: BOOTSTRAP_SCHEMA,
+        status: "PENDING_APPROVAL",
+      };
+    },
+  });
+  const claim = bootstrapClaim();
+
+  const pending = await request({
+    body: claim,
+    fixture,
+    headers: { Authorization: undefined, Accept: "application/json" },
+    path: "/bootstrap",
+  });
+  assert.equal(pending.statusCode, 202);
+  assert.deepEqual(pending.body, {
+    claimFingerprint: bootstrapClaimFingerprint(claim),
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    schema: BOOTSTRAP_SCHEMA,
+    status: "PENDING_APPROVAL",
+  });
+  assert.deepEqual(claims, [claim]);
+
+  assert.equal((await request({
+    body: rpc(1, "initialize", { protocolVersion: PROTOCOL_VERSION }),
+    fixture,
+    headers: { Authorization: undefined },
+  })).statusCode, 401);
+  assert.equal((await request({
+    body: claim,
+    fixture,
+    path: "/bootstrap",
+  })).statusCode, 400);
+});
+
+test("fails closed for unarmed, malformed, duplicate, and mismatched bootstrap claims", async (t) => {
+  const unarmed = await makeFixture(t);
+  assert.equal((await request({
+    body: bootstrapClaim(),
+    fixture: unarmed,
+    headers: { Authorization: undefined, Accept: "application/json" },
+    path: "/bootstrap",
+  })).statusCode, 404);
+
+  const fixture = await makeFixture(t, {
+    claimRequestorBootstrap: async (claim) => ({
+      claimFingerprint: bootstrapClaimFingerprint(claim),
+      paymentMoved: false,
+      repositorySha: REPOSITORY_SHA,
+      schema: BOOTSTRAP_SCHEMA,
+      status: "PENDING_APPROVAL",
+    }),
+  });
+  const mismatchedBroker = await makeFixture(t, {
+    claimRequestorBootstrap: async () => ({
+      claimFingerprint: "0".repeat(64),
+      paymentMoved: false,
+      repositorySha: REPOSITORY_SHA,
+      schema: BOOTSTRAP_SCHEMA,
+      status: "PENDING_APPROVAL",
+    }),
+  });
+  assert.equal((await request({
+    body: bootstrapClaim(),
+    fixture: mismatchedBroker,
+    headers: { Authorization: undefined, Accept: "application/json" },
+    path: "/bootstrap",
+  })).statusCode, 400);
+
+  for (const body of [
+    bootstrapClaim({ extra: true }),
+    bootstrapClaim({ paymentMoved: true }),
+    bootstrapClaim({ repositorySha: "b".repeat(40) }),
+    bootstrapClaim({ claimNonce: "not-a-uuid" }),
+    bootstrapClaim({ requestorPublicKey: "bad" }),
+  ]) {
+    assert.equal((await request({
+      body,
+      fixture,
+      headers: { Authorization: undefined, Accept: "application/json" },
+      path: "/bootstrap",
+    })).statusCode, 400);
+  }
+  assert.equal((await request({
+    fixture,
+    headers: { Authorization: undefined, Accept: "application/json" },
+    path: "/bootstrap",
+    rawBody: `{"claimNonce":"11111111-1111-4111-8111-111111111111","claimNonce":"11111111-1111-4111-8111-111111111111","paymentMoved":false,"repositorySha":"${REPOSITORY_SHA}","requestorPublicKey":"${createRequestorBootstrapKey().publicKey}"}`,
+  })).statusCode, 400);
+});
 
 async function request({ body, fixture, headers = {}, method = "POST", path = "/mcp", rawBody }) {
   const payload = rawBody === undefined

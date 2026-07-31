@@ -12,7 +12,7 @@ import { validateActiveLaunchState } from "./manifest.mjs";
 import { readLaunchManifest } from "./manifest.mjs";
 import { PAYER_MCP_INTAKE_DIRECTORY_NAME, createPayerMcpIntakeStore, scanPayerMcpIntakeDirectory } from "../local-mcp/intake-store.mjs";
 import { readRequestorMcpIntake as readDefaultRequestorMcpIntake } from "../local-mcp/client.mjs";
-import { createPayerMcpServer as createDefaultPayerMcpServer } from "../local-mcp/server.mjs";
+import { createPayerMcpServer as createDefaultPayerMcpServer, createRequestorBootstrapBrokerClient } from "../local-mcp/server.mjs";
 import { createLocalPreflightEnrollment, readAndSignTokenCommitment } from "./preflight.mjs";
 import { validateRelayArtifact, validateRelayArtifactWithFacts } from "./artifact.mjs";
 import { verifyDescriptorEnvelope } from "../descriptor.mjs";
@@ -181,6 +181,10 @@ async function readPinnedPrivateText(path, maximum = MAX_STATE_BYTES, afterFirst
   } finally {
     if (handle) await handle.close();
   }
+}
+function exactPrivateLine(value) {
+  if (typeof value !== "string" || !value.endsWith("\n") || value.trimEnd() !== value.slice(0, -1)) fail();
+  return value.slice(0, -1);
 }
 async function readPrivateJson(root, path) {
   const bytes = await readPrivateBytes(root, path); const text = bytes.toString("utf8");
@@ -648,10 +652,23 @@ export async function createProductionSupervisorDependencies({ createPayerMcpSer
     : null;
   if (payerMcpServerOptions !== undefined && scope.role !== "payer") fail();
   if (payerMcpServerOptions !== undefined && typeof createPayerMcpServer !== "function") fail();
+  const hasBootstrapBrokerUrl = payerMcpServerOptions !== undefined && Object.hasOwn(payerMcpServerOptions, "bootstrapBrokerUrl");
+  const hasBootstrapBrokerCapabilityFile = payerMcpServerOptions !== undefined && Object.hasOwn(payerMcpServerOptions, "bootstrapBrokerCapabilityFile");
+  if (hasBootstrapBrokerUrl !== hasBootstrapBrokerCapabilityFile) fail();
+  const bootstrapBrokerCapability = hasBootstrapBrokerCapabilityFile
+    ? await readPinnedPrivateText(payerMcpServerOptions.bootstrapBrokerCapabilityFile, 1_024, payerMcpServerOptions.afterPinnedTextFirstRead)
+    : null;
+  const bootstrapBrokerClient = hasBootstrapBrokerUrl
+    ? createRequestorBootstrapBrokerClient({
+      brokerCapability: exactPrivateLine(bootstrapBrokerCapability),
+      brokerUrl: payerMcpServerOptions.bootstrapBrokerUrl,
+    })
+    : null;
   const normalizedPayerMcpServerOptions = payerMcpServerOptions === undefined ? null : Object.freeze({
     host: payerMcpServerOptions.host,
     port: payerMcpServerOptions.port,
     ...(payerMcpServerOptions.publicUrl === undefined ? {} : { publicUrl: payerMcpServerOptions.publicUrl }),
+    ...(bootstrapBrokerClient === null ? {} : { claimRequestorBootstrap: bootstrapBrokerClient.claimRequestorBootstrap }),
     tlsCertificatePem: payerMcpServerOptions.tlsCertificatePem ?? await readPinnedPrivateText(payerMcpServerOptions.tlsCertificatePath, MAX_STATE_BYTES, payerMcpServerOptions.afterPinnedTextFirstRead),
     tlsPrivateKeyPem: payerMcpServerOptions.tlsPrivateKeyPem ?? await readPinnedPrivateText(payerMcpServerOptions.tlsPrivateKeyPath, MAX_STATE_BYTES, payerMcpServerOptions.afterPinnedTextFirstRead),
   });

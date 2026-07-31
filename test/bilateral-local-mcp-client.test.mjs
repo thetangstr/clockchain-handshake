@@ -9,9 +9,12 @@ import { test } from "node:test";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import {
   REQUESTOR_MCP_INTAKE_FILE_NAME,
+  requestBootstrapThroughPayerMcp,
   readRequestorMcpIntake,
   requestPaymentThroughPayerMcp,
 } from "../src/bilateral/local-mcp/client.mjs";
+import { bootstrapClaimFingerprint } from "../src/bilateral/local-mcp/bootstrap-broker.mjs";
+import { createRequestorBootstrapKey } from "../src/bilateral/local-mcp/bootstrap-envelope.mjs";
 import { createPayerMcpIntakeStore } from "../src/bilateral/local-mcp/intake-store.mjs";
 import {
   PAYMENT_INTAKE_TOOL_DESCRIPTOR,
@@ -27,6 +30,7 @@ const CAPABILITY_DIGEST = createHash("sha256")
   .digest("hex");
 const INTAKE_REQUEST_ID = "00000000-0000-4000-8000-000000000000";
 const SESSION_ID = "BwcHBwcHBwcHBwcHBwcHBw";
+const BOOTSTRAP_SCHEMA = "clockchain.requestor-bootstrap-broker-response/v1";
 
 function paymentInput(overrides = {}) {
   return {
@@ -39,6 +43,96 @@ function paymentInput(overrides = {}) {
     ...overrides,
   };
 }
+
+function bootstrapClaim(overrides = {}) {
+  return {
+    claimNonce: "11111111-1111-4111-8111-111111111111",
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    requestorPublicKey: createRequestorBootstrapKey().publicKey,
+    ...overrides,
+  };
+}
+
+test("public Requestor bootstrap client posts exact claims without bearer over pinned TLS", async (t) => {
+  const pinned = await makeServer(t);
+  const claim = bootstrapClaim();
+  const response = {
+    claimFingerprint: bootstrapClaimFingerprint(claim),
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    schema: BOOTSTRAP_SCHEMA,
+    status: "PENDING_APPROVAL",
+  };
+  const requests = [];
+  const result = await requestBootstrapThroughPayerMcp({
+    bootstrapUrl: "https://127.0.0.1:4443/bootstrap",
+    claim,
+    requestJsonRpc: async ({ body, headers, method, url }) => {
+      requests.push({ body, headers, method, url: url.href });
+      return {
+        body: response,
+        headers: { "content-type": "application/json" },
+        statusCode: 202,
+        text: JSON.stringify(response),
+      };
+    },
+    repositorySha: REPOSITORY_SHA,
+    tlsCertificatePem: pinned.tlsCertificatePem,
+    tlsFingerprint: pinned.fingerprint,
+  });
+  assert.deepEqual(result, response);
+  assert.deepEqual(requests, [{
+    body: claim,
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Host: "127.0.0.1:4443",
+    },
+    method: "POST",
+    url: "https://127.0.0.1:4443/bootstrap",
+  }]);
+});
+
+test("public Requestor bootstrap client fails closed on malformed claims and broker responses", async (t) => {
+  const pinned = await makeServer(t);
+  const claim = bootstrapClaim();
+  const valid = {
+    claimFingerprint: bootstrapClaimFingerprint(claim),
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    schema: BOOTSTRAP_SCHEMA,
+    status: "PENDING_APPROVAL",
+  };
+  for (const candidate of [
+    { input: { claim: bootstrapClaim({ extra: true }) } },
+    { input: { claim: bootstrapClaim({ repositorySha: "b".repeat(40) }) } },
+    { response: { ...valid, paymentMoved: true } },
+    { response: { ...valid, claimFingerprint: "0".repeat(64) } },
+    { response: { ...valid, repositorySha: "b".repeat(40) } },
+    { response: { ...valid, status: "APPROVED" } },
+    { response: { ...valid, extra: true } },
+    { httpStatus: 200, response: valid },
+  ]) {
+    await assert.rejects(
+      requestBootstrapThroughPayerMcp({
+        bootstrapUrl: "https://127.0.0.1:4443/bootstrap",
+        claim,
+        requestJsonRpc: async () => ({
+          body: candidate.response ?? valid,
+          headers: { "content-type": "application/json" },
+          statusCode: candidate.httpStatus ?? 202,
+          text: JSON.stringify(candidate.response ?? valid),
+        }),
+        repositorySha: REPOSITORY_SHA,
+        tlsCertificatePem: pinned.tlsCertificatePem,
+        tlsFingerprint: pinned.fingerprint,
+        ...(candidate.input ?? {}),
+      }),
+      /Requestor MCP client failed safely/,
+    );
+  }
+});
 
 async function makeServer(t) {
   const root = await mkdtemp(join(tmpdir(), "requestor-mcp-client-server-"));

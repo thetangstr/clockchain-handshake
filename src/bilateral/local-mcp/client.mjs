@@ -24,8 +24,11 @@ const MAX_RESPONSE_BYTES = 65_536;
 const REQUEST_TIMEOUT_MS = 10_000;
 const ACCEPT = "application/json, text/event-stream";
 const JSON_CONTENT_TYPE = "application/json";
+const BOOTSTRAP_BROKER_RESPONSE_SCHEMA = "clockchain.requestor-bootstrap-broker-response/v1";
 const expectedUid = process.getuid?.();
 const TEMPORARY_INTAKE_FILE = /^\.requestor-mcp-intake-[0-9a-f]{32}\.tmp$/;
+const BOOTSTRAP_CLAIM_KEYS = Object.freeze(["claimNonce", "paymentMoved", "repositorySha", "requestorPublicKey"]);
+const BASE64URL_32_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 function fail() {
   throw new Error("Requestor MCP client failed safely.");
@@ -135,6 +138,35 @@ function validateUrl(value) {
   return url;
 }
 
+function validateBootstrapUrl(value) {
+  if (typeof value !== "string") fail();
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    fail();
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.pathname !== "/bootstrap" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.port === "" ||
+    net.isIP(url.hostname) === 0
+  ) {
+    fail();
+  }
+  const port = Number(url.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535 || String(port) !== url.port) fail();
+  if (net.isIP(url.hostname) === 4) {
+    const octets = url.hostname.split(".");
+    if (octets.length !== 4 || octets.some((octet) => String(Number(octet)) !== octet || Number(octet) > 255)) fail();
+  }
+  return url;
+}
+
 function hostHeader(url) {
   return net.isIP(url.hostname) === 6 ? `[${url.hostname}]:${url.port}` : `${url.hostname}:${url.port}`;
 }
@@ -162,6 +194,46 @@ function validateInput({
     mcpUrl: validateUrl(mcpUrl),
     repositorySha,
     stateRoot,
+    tlsCertificatePem,
+    tlsFingerprint,
+  });
+}
+
+function validateBootstrapClaim(value, repositorySha) {
+  const claim = exactObject(value, BOOTSTRAP_CLAIM_KEYS);
+  if (
+    !UUID_V4_PATTERN.test(claim.claimNonce) ||
+    claim.paymentMoved !== false ||
+    claim.repositorySha !== repositorySha ||
+    typeof claim.requestorPublicKey !== "string" ||
+    !BASE64URL_32_PATTERN.test(claim.requestorPublicKey)
+  ) {
+    fail();
+  }
+  const keyBytes = Buffer.from(claim.requestorPublicKey, "base64url");
+  if (keyBytes.length !== 32 || keyBytes.toString("base64url") !== claim.requestorPublicKey) fail();
+  return Object.freeze({
+    claimNonce: claim.claimNonce,
+    paymentMoved: false,
+    repositorySha: claim.repositorySha,
+    requestorPublicKey: claim.requestorPublicKey,
+  });
+}
+
+function requestorBootstrapClaimFingerprint(claim) {
+  return createHash("sha256").update(canonicalBytes(claim)).digest("hex");
+}
+
+function validateBootstrapInput({ bootstrapUrl, claim, repositorySha, tlsCertificatePem, tlsFingerprint }) {
+  if (typeof repositorySha !== "string" || !REPOSITORY_SHA_PATTERN.test(repositorySha)) fail();
+  if (typeof tlsCertificatePem !== "string" || !tlsCertificatePem.includes("-----BEGIN CERTIFICATE-----") || !tlsCertificatePem.includes("-----END CERTIFICATE-----")) fail();
+  if (typeof tlsFingerprint !== "string" || !FINGERPRINT_PATTERN.test(tlsFingerprint)) fail();
+  const certificateFingerprint = createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex");
+  if (certificateFingerprint !== tlsFingerprint) fail();
+  return Object.freeze({
+    bootstrapUrl: validateBootstrapUrl(bootstrapUrl),
+    claim: validateBootstrapClaim(claim, repositorySha),
+    repositorySha,
     tlsCertificatePem,
     tlsFingerprint,
   });
@@ -369,6 +441,14 @@ function commonHeaders({ capability, sessionId, url }) {
   };
 }
 
+function bootstrapHeaders({ url }) {
+  return {
+    Accept: "application/json",
+    "Content-Type": JSON_CONTENT_TYPE,
+    Host: hostHeader(url),
+  };
+}
+
 function validateJsonResponse(response, statusCode) {
   if (response?.statusCode !== statusCode) fail();
   if (response.headers?.["content-type"] !== JSON_CONTENT_TYPE) fail();
@@ -384,6 +464,45 @@ function validateRpcResponse(response, id) {
   const rpc = exactObject(validateJsonResponse(response, 200), ["id", "jsonrpc", "result"]);
   if (rpc.id !== id || rpc.jsonrpc !== "2.0") fail();
   return rpc.result;
+}
+
+function validateBootstrapResponse(response, { claim, repositorySha }) {
+  const expectedStatus = response?.body?.status === "PENDING_APPROVAL" ? 202 : response?.body?.status === "SEALED" ? 200 : -1;
+  const value = exactObject(validateJsonResponse(response, expectedStatus), response?.body?.status === "PENDING_APPROVAL"
+    ? ["claimFingerprint", "paymentMoved", "repositorySha", "schema", "status"]
+    : ["claimFingerprint", "context", "envelope", "paymentMoved", "repositorySha", "schema", "signature", "status"]);
+  if (
+    value.claimFingerprint !== requestorBootstrapClaimFingerprint(claim) ||
+    value.paymentMoved !== false ||
+    value.repositorySha !== repositorySha ||
+    value.schema !== BOOTSTRAP_BROKER_RESPONSE_SCHEMA
+  ) {
+    fail();
+  }
+  if (value.status === "PENDING_APPROVAL") return deepFreeze({ ...value });
+  if (value.status !== "SEALED") fail();
+  const context = exactObject(value.context, ["claimNonce", "paymentMoved", "releaseId", "repositorySha", "sessionId"]);
+  const envelope = exactObject(value.envelope, ["algorithm", "ciphertextBase64url", "ephemeralPublicKey", "ivBase64url", "paymentMoved", "schema", "tagBase64url"]);
+  const signature = exactObject(value.signature, ["algorithm", "keyId", "value"]);
+  if (
+    context.claimNonce !== claim.claimNonce ||
+    context.paymentMoved !== false ||
+    context.repositorySha !== repositorySha ||
+    !UUID_V4_PATTERN.test(context.sessionId) ||
+    typeof context.releaseId !== "string" ||
+    envelope.paymentMoved !== false ||
+    signature.algorithm !== "ed25519" ||
+    typeof signature.keyId !== "string" ||
+    typeof signature.value !== "string"
+  ) {
+    fail();
+  }
+  return deepFreeze({
+    ...value,
+    context: { ...context },
+    envelope: { ...envelope },
+    signature: { ...signature },
+  });
 }
 
 function validateInitialize(response) {
@@ -584,6 +703,29 @@ export async function requestPaymentThroughPayerMcp(input) {
         // Cleanup is best-effort on the failure path; the original safe failure wins.
       }
     }
+    sanitize(error);
+  }
+  fail();
+}
+
+export async function requestBootstrapThroughPayerMcp(input) {
+  try {
+    const validated = validateBootstrapInput(input);
+    const requestJsonRpc = input.requestJsonRpc ?? defaultRequestJsonRpc;
+    if (typeof requestJsonRpc !== "function") fail();
+    const response = await requestJsonRpc({
+      body: validated.claim,
+      headers: bootstrapHeaders({ url: validated.bootstrapUrl }),
+      method: "POST",
+      tlsCertificatePem: validated.tlsCertificatePem,
+      tlsFingerprint: validated.tlsFingerprint,
+      url: validated.bootstrapUrl,
+    });
+    return validateBootstrapResponse(response, {
+      claim: validated.claim,
+      repositorySha: validated.repositorySha,
+    });
+  } catch (error) {
     sanitize(error);
   }
   fail();
