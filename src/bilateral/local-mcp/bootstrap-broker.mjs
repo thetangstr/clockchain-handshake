@@ -11,7 +11,9 @@ import {
 } from "node:fs/promises";
 import http from "node:http";
 import {
+  createPrivateKey,
   createHash,
+  sign,
   timingSafeEqual,
 } from "node:crypto";
 import {
@@ -24,6 +26,7 @@ import { canonicalBytes } from "../canonical.mjs";
 import { readLaunchManifest } from "../coordination/manifest.mjs";
 import { sealRequestorBootstrapManifest } from "./bootstrap-envelope.mjs";
 import { canonicalizeReceiptEventValue } from "../../canonical.mjs";
+import { KEY_ID_PATTERN } from "../descriptor.mjs";
 
 export const BOOTSTRAP_BROKER_JOURNAL_FILE =
   "bootstrap-broker-journal.json";
@@ -40,6 +43,8 @@ const CREATE_KEYS = Object.freeze([
   "capabilityFile",
   "host",
   "manifestPath",
+  "operatorKeyId",
+  "operatorPrivateKeyPath",
   "port",
   "repositorySha",
   "stateRoot",
@@ -55,6 +60,8 @@ const SHA40_PATTERN = /^[0-9a-f]{40}$/;
 const BASE64URL_32_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const HEX64_PATTERN = /^[0-9a-f]{64}$/;
 const CAPABILITY_PATTERN = /^[0-9a-f]{64}$/;
+const BASE64_PATTERN =
+  /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const MAX_BODY_BYTES = 16_384;
 
 export class BootstrapBrokerError extends Error {
@@ -232,6 +239,46 @@ async function readCapability(path) {
   }
 }
 
+async function readOperatorPrivateKey(path) {
+  const normalized = absolutePath(path);
+  const before = await lstat(normalized);
+  if (!privateRegular(before, 8_192)) invalid();
+  const handle = await open(
+    normalized,
+    fsConstants.O_RDONLY |
+      (fsConstants.O_NOFOLLOW ?? 0) |
+      fsConstants.O_NONBLOCK,
+  );
+  try {
+    const after = await handle.stat();
+    if (!sameIdentity(before, after)) invalid();
+    const pem = await readFile(handle, "utf8");
+    if (
+      pem.length === 0 ||
+      Buffer.byteLength(pem, "utf8") !== before.size ||
+      pem.trimEnd() !== pem.slice(0, -1) ||
+      !pem.endsWith("\n")
+    ) {
+      invalid();
+    }
+    let key;
+    try {
+      key = createPrivateKey(pem);
+    } catch {
+      invalid();
+    }
+    if (
+      key.asymmetricKeyType !== "ed25519" ||
+      key.export({ format: "pem", type: "pkcs8" }) !== pem
+    ) {
+      invalid();
+    }
+    return key;
+  } finally {
+    await handle.close();
+  }
+}
+
 async function readJsonFile(path, fallback) {
   try {
     const bytes = await readFile(path);
@@ -373,19 +420,6 @@ function manifestContext({ claim, manifest }) {
   });
 }
 
-function manifestPayloadBytes(rawManifestBytes) {
-  const encoded = rawManifestBytes.toString("base64");
-  const chunks = [];
-  for (let offset = 0; offset < encoded.length; offset += 128) {
-    chunks.push(encoded.slice(offset, offset + 128));
-  }
-  return stable({
-    launchManifestBase64Chunks: chunks,
-    paymentMoved: false,
-    schema: "clockchain.requestor-bootstrap-launch-manifest-bytes/v1",
-  });
-}
-
 function safeHttpError(response, status) {
   response.writeHead(status, {
     "cache-control": "no-store",
@@ -421,25 +455,84 @@ async function assertManifestPinned({ expected, manifestPath }) {
   if (!sameIdentity(expected, current)) invalid();
 }
 
-async function sealApprovedClaim({ claim, claimFingerprint, manifestPath, manifestStats, repositorySha, stateRoot }) {
+function assertManifestUnexpired(manifest) {
+  const expiresAtMs = Number(manifest.expiresAtMs);
+  if (
+    !Number.isSafeInteger(expiresAtMs) ||
+    expiresAtMs <= Date.now()
+  ) {
+    invalid();
+  }
+}
+
+function signatureValue({ operatorPrivateKey, response }) {
+  return sign(null, durableBytes(response), operatorPrivateKey).toString("base64");
+}
+
+function assertSignatureValue(value) {
+  if (
+    typeof value !== "string" ||
+    !BASE64_PATTERN.test(value) ||
+    Buffer.from(value, "base64").length !== 64 ||
+    Buffer.from(value, "base64").toString("base64") !== value
+  ) {
+    invalid();
+  }
+  return value;
+}
+
+function signSealedResponse({ operatorKeyId, operatorPrivateKey, response }) {
+  const signature = assertSignatureValue(signatureValue({
+    operatorPrivateKey,
+    response,
+  }));
+  return Object.freeze({
+    ...response,
+    signature: Object.freeze({
+      algorithm: "ed25519",
+      keyId: operatorKeyId,
+      value: signature,
+    }),
+  });
+}
+
+async function sealApprovedClaim({
+  claim,
+  claimFingerprint,
+  manifestPath,
+  manifestStats,
+  operatorKeyId,
+  operatorPrivateKey,
+  repositorySha,
+  stateRoot,
+}) {
   await assertManifestPinned({ expected: manifestStats, manifestPath });
   const manifest = await readLaunchManifest(manifestPath);
   const rawManifestBytes = await readFile(manifestPath);
   await assertManifestPinned({ expected: manifestStats, manifestPath });
-  if (manifest.role !== "payee" || manifest.repositorySha !== repositorySha) {
+  if (
+    manifest.role !== "payee" ||
+    manifest.repositorySha !== repositorySha ||
+    manifest.operatorKeyId !== operatorKeyId
+  ) {
     invalid();
   }
+  assertManifestUnexpired(manifest);
   const context = manifestContext({ claim, manifest });
   const envelope = sealRequestorBootstrapManifest({
     context,
-    manifestBytes: manifestPayloadBytes(rawManifestBytes),
+    manifestBytes: rawManifestBytes,
     requestorPublicKey: claim.requestorPublicKey,
   });
-  const response = sealedResponse({
-    claimFingerprint,
-    context,
-    envelope,
-    repositorySha,
+  const response = signSealedResponse({
+    operatorKeyId,
+    operatorPrivateKey,
+    response: sealedResponse({
+      claimFingerprint,
+      context,
+      envelope,
+      repositorySha,
+    }),
   });
   const journal = await readJournal(stateRoot, repositorySha);
   const existing = journal.claims[claimFingerprint];
@@ -460,6 +553,11 @@ export function createBootstrapBroker(input) {
   const config = exactDataObject(input, CREATE_KEYS);
   const host = loopbackHost(config.host);
   const manifestPath = absolutePath(config.manifestPath);
+  const operatorKeyId = config.operatorKeyId;
+  if (typeof operatorKeyId !== "string" || !KEY_ID_PATTERN.test(operatorKeyId)) {
+    invalid();
+  }
+  const operatorPrivateKeyPath = absolutePath(config.operatorPrivateKeyPath);
   const stateRoot = absolutePath(config.stateRoot);
   const repositoryShaValue = repositorySha(config.repositorySha);
   const port = portNumber(config.port);
@@ -467,18 +565,25 @@ export function createBootstrapBroker(input) {
   let server;
   let capability;
   let manifestStats;
+  let operatorPrivateKey;
 
   return Object.freeze({
     async start() {
       if (server !== undefined) invalid();
       await ensurePrivateRoot(stateRoot);
       capability = await readCapability(capabilityFile);
+      operatorPrivateKey = await readOperatorPrivateKey(operatorPrivateKeyPath);
       manifestStats = await lstat(manifestPath);
       if (!privateRegular(manifestStats)) invalid();
       const manifest = await readLaunchManifest(manifestPath);
-      if (manifest.role !== "payee" || manifest.repositorySha !== repositoryShaValue) {
+      if (
+        manifest.role !== "payee" ||
+        manifest.repositorySha !== repositoryShaValue ||
+        manifest.operatorKeyId !== operatorKeyId
+      ) {
         invalid();
       }
+      assertManifestUnexpired(manifest);
       await writeJournal(
         stateRoot,
         await readJournal(stateRoot, repositoryShaValue),
@@ -547,6 +652,8 @@ export function createBootstrapBroker(input) {
             claimFingerprint,
             manifestPath,
             manifestStats,
+            operatorKeyId,
+            operatorPrivateKey,
             repositorySha: repositoryShaValue,
             stateRoot,
           });

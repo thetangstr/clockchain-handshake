@@ -8,6 +8,8 @@ const SERVE_FLAGS = Object.freeze([
   "--capability-file",
   "--host",
   "--manifest",
+  "--operator-key-id",
+  "--operator-private-key",
   "--port",
   "--repository-sha",
   "--state",
@@ -20,7 +22,7 @@ const APPROVE_FLAGS = Object.freeze([
 function usage() {
   return [
     "Usage:",
-    "  npm run bilateral:bootstrap-broker -- serve --capability-file <path> --host <127.0.0.1> --manifest <path> --port <port> --repository-sha <sha> --state <path>",
+    "  npm run bilateral:bootstrap-broker -- serve --capability-file <path> --host <127.0.0.1> --manifest <path> --operator-key-id <key-id> --operator-private-key <path> --port <port> --repository-sha <sha> --state <path>",
     "  npm run bilateral:bootstrap-broker -- approve --state <path> --claim-fingerprint <sha256>",
   ].join("\n");
 }
@@ -59,6 +61,8 @@ async function main() {
       capabilityFile: values["--capability-file"],
       host: values["--host"],
       manifestPath: values["--manifest"],
+      operatorKeyId: values["--operator-key-id"],
+      operatorPrivateKeyPath: values["--operator-private-key"],
       port,
       repositorySha: values["--repository-sha"],
       stateRoot: values["--state"],
