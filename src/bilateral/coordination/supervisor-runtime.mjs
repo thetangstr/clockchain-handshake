@@ -12,7 +12,11 @@ import { validateActiveLaunchState } from "./manifest.mjs";
 import { readLaunchManifest } from "./manifest.mjs";
 import { PAYER_MCP_INTAKE_DIRECTORY_NAME, createPayerMcpIntakeStore, scanPayerMcpIntakeDirectory } from "../local-mcp/intake-store.mjs";
 import { readRequestorMcpIntake as readDefaultRequestorMcpIntake } from "../local-mcp/client.mjs";
-import { createPayerMcpServer as createDefaultPayerMcpServer, createRequestorBootstrapBrokerClient } from "../local-mcp/server.mjs";
+import {
+  createAwsRequestorBootstrapBrokerClient as createDefaultAwsRequestorBootstrapBrokerClient,
+  createPayerMcpServer as createDefaultPayerMcpServer,
+  createRequestorBootstrapBrokerClient as createDefaultRequestorBootstrapBrokerClient,
+} from "../local-mcp/server.mjs";
 import { createLocalPreflightEnrollment, readAndSignTokenCommitment } from "./preflight.mjs";
 import { validateRelayArtifact, validateRelayArtifactWithFacts } from "./artifact.mjs";
 import { verifyDescriptorEnvelope } from "../descriptor.mjs";
@@ -649,7 +653,24 @@ export async function ensureInvitations({ capabilityDigest, releaseId, repositor
   if (proofs[0].address === proofs[1].address || proofs[0].secretPath === proofs[1].secretPath || proofs[0].signature === proofs[1].signature) fail();
   return Object.freeze(proofs);
 }
-export async function createProductionSupervisorDependencies({ createPayerMcpServer = createDefaultPayerMcpServer, launchManifestPath, now = Date.now, payerMcpServerOptions, sleeper = (milliseconds) => new Promise((resolve_) => setTimeout(resolve_, milliseconds)), stateRoot, probe, repositoryRoot = SUPERVISOR_REPOSITORY_ROOT, sepoliaRpc, createSepoliaClient } = {}) {
+export async function createProductionSupervisorDependencies({
+  createAwsRequestorBootstrapBrokerClient =
+    createDefaultAwsRequestorBootstrapBrokerClient,
+  createPayerMcpServer = createDefaultPayerMcpServer,
+  createRequestorBootstrapBrokerClient =
+    createDefaultRequestorBootstrapBrokerClient,
+  launchManifestPath,
+  now = Date.now,
+  payerMcpServerOptions,
+  sleeper = (milliseconds) =>
+    new Promise((resolve_) =>
+      setTimeout(resolve_, milliseconds)),
+  stateRoot,
+  probe,
+  repositoryRoot = SUPERVISOR_REPOSITORY_ROOT,
+  sepoliaRpc,
+  createSepoliaClient,
+} = {}) {
   const store = await createPrivateSupervisorStateStore({ stateRoot });
   await createFixedRunDirectories(stateRoot);
   const repositoryInspector = createGitInspector(repositoryRoot);
@@ -671,12 +692,31 @@ export async function createProductionSupervisorDependencies({ createPayerMcpSer
   const bootstrapBrokerCapability = hasBootstrapBrokerCapabilityFile
     ? await readPinnedPrivateText(payerMcpServerOptions.bootstrapBrokerCapabilityFile, 1_024, payerMcpServerOptions.afterPinnedTextFirstRead)
     : null;
-  const bootstrapBrokerClient = hasBootstrapBrokerUrl
-    ? createRequestorBootstrapBrokerClient({
-      brokerCapability: exactPrivateLine(bootstrapBrokerCapability),
-      brokerUrl: payerMcpServerOptions.bootstrapBrokerUrl,
-    })
-    : null;
+  let bootstrapBrokerClient = null;
+  if (hasBootstrapBrokerUrl) {
+    let protocol;
+    try {
+      protocol = new URL(
+        payerMcpServerOptions.bootstrapBrokerUrl,
+      ).protocol;
+    } catch {
+      fail();
+    }
+    const createBootstrapBrokerClient =
+      protocol === "http:"
+        ? createRequestorBootstrapBrokerClient
+        : protocol === "https:"
+          ? createAwsRequestorBootstrapBrokerClient
+          : fail();
+    bootstrapBrokerClient =
+      createBootstrapBrokerClient({
+        brokerCapability: exactPrivateLine(
+          bootstrapBrokerCapability,
+        ),
+        brokerUrl:
+          payerMcpServerOptions.bootstrapBrokerUrl,
+      });
+  }
   const normalizedPayerMcpServerOptions = payerMcpServerOptions === undefined ? null : Object.freeze({
     host: payerMcpServerOptions.host,
     port: payerMcpServerOptions.port,

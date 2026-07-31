@@ -1029,6 +1029,61 @@ test("supervisor CLI accepts four Payer MCP path options plus an optional public
   assert.equal(typeof constructedWithBroker[0].claimRequestorBootstrap, "function");
   assert.equal(Object.hasOwn(constructedWithBroker[0], "bootstrapBrokerCapability"), false);
   assert.equal(Object.hasOwn(constructedWithBroker[0], "bootstrapBrokerCapabilityFile"), false);
+  const publicBrokerClients = [];
+  const loopbackBrokerClients = [];
+  const constructedWithPublicBroker = [];
+  await createProductionSupervisorDependencies({
+    createAwsRequestorBootstrapBrokerClient(input) {
+      publicBrokerClients.push(input);
+      return {
+        claimRequestorBootstrap: async () => ({
+          paymentMoved: false,
+        }),
+      };
+    },
+    createPayerMcpServer(input) {
+      constructedWithPublicBroker.push(input);
+      return {
+        start: async () => ({
+          host: input.host,
+          port: input.port,
+          url: `https://${input.host}:${input.port}/mcp`,
+        }),
+        stop: async () => undefined,
+      };
+    },
+    createRequestorBootstrapBrokerClient(input) {
+      loopbackBrokerClients.push(input);
+      return {
+        claimRequestorBootstrap: async () => ({
+          paymentMoved: false,
+        }),
+      };
+    },
+    launchManifestPath: payerManifestPath,
+    payerMcpServerOptions: {
+      bootstrapBrokerCapabilityFile: brokerCapabilityPath,
+      bootstrapBrokerUrl:
+        "https://bootstrap.example.net/v1/requestor-claims",
+      host: "127.0.0.1",
+      port: 9443,
+      tlsCertificatePath: certificatePath,
+      tlsPrivateKeyPath: privateKeyPath,
+    },
+    probe: async () => ({ clean: true, head: repositorySha }),
+    stateRoot: join(root, "public-broker-runtime"),
+  });
+  assert.equal(publicBrokerClients.length, 1);
+  assert.equal(loopbackBrokerClients.length, 0);
+  assert.equal(
+    publicBrokerClients[0].brokerUrl,
+    "https://bootstrap.example.net/v1/requestor-claims",
+  );
+  assert.equal(
+    typeof constructedWithPublicBroker[0]
+      .claimRequestorBootstrap,
+    "function",
+  );
   let brokerHalfFactoryCalled = false;
   await assert.rejects(supervisorMain([
     "--launch-manifest", payerManifestPath,

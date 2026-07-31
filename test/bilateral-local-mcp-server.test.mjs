@@ -9,7 +9,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createPayerMcpServer } from "../src/bilateral/local-mcp/server.mjs";
+import {
+  createAwsRequestorBootstrapBrokerClient,
+  createPayerMcpServer,
+} from "../src/bilateral/local-mcp/server.mjs";
 import { bootstrapClaimFingerprint } from "../src/bilateral/local-mcp/bootstrap-broker.mjs";
 import { createRequestorBootstrapKey } from "../src/bilateral/local-mcp/bootstrap-envelope.mjs";
 import { buildPaymentIntakeToolResult, PAYMENT_INTAKE_TOOL_DESCRIPTOR } from "../src/bilateral/local-mcp/payment-intake.mjs";
@@ -131,6 +134,76 @@ function sealedBootstrapResponse(claim, overrides = {}) {
     ...overrides,
   };
 }
+
+test("uses a distinct authenticated HTTPS client for the AWS Requestor bootstrap broker", async () => {
+  const claim = bootstrapClaim();
+  const observed = [];
+  const client = createAwsRequestorBootstrapBrokerClient({
+    allowTestAddresses: true,
+    brokerCapability: CAPABILITY,
+    brokerUrl:
+      "https://bootstrap.example.net/v1/requestor-claims",
+    lookup: async (hostname) => {
+      assert.equal(hostname, "bootstrap.example.net");
+      return [{
+        address: "203.0.113.10",
+        family: 4,
+      }];
+    },
+    requestHttps: async (input) => {
+      observed.push(input);
+      return {
+        body: {
+          claimFingerprint:
+            bootstrapClaimFingerprint(claim),
+          paymentMoved: false,
+          repositorySha: REPOSITORY_SHA,
+          schema: BOOTSTRAP_SCHEMA,
+          status: "PENDING_APPROVAL",
+        },
+        headers: {
+          "content-type": "application/json",
+        },
+        statusCode: 202,
+      };
+    },
+  });
+  const result =
+    await client.claimRequestorBootstrap(claim);
+  assert.equal(result.status, "PENDING_APPROVAL");
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0].method, "POST");
+  assert.equal(
+    observed[0].url.href,
+    "https://bootstrap.example.net/v1/requestor-claims",
+  );
+  assert.deepEqual(observed[0].headers, {
+    Accept: "application/json",
+    Authorization: `Bearer ${CAPABILITY}`,
+    "Content-Type": "application/json",
+    Host: "bootstrap.example.net",
+  });
+  assert.deepEqual(observed[0].body, claim);
+  assert.equal(
+    observed[0].resolved.addresses[0].address,
+    "203.0.113.10",
+  );
+
+  for (const brokerUrl of [
+    "http://bootstrap.example.net/v1/requestor-claims",
+    "https://127.0.0.1/v1/requestor-claims",
+    "https://bootstrap.example.net/claim",
+    "https://bootstrap.example.net/v1/requestor-claims?x=1",
+  ]) {
+    assert.throws(
+      () => createAwsRequestorBootstrapBrokerClient({
+        brokerCapability: CAPABILITY,
+        brokerUrl,
+      }),
+      /Payer MCP server failed safely/,
+    );
+  }
+});
 
 test("serves separately armed public bootstrap claims without weakening authenticated MCP", async (t) => {
   const claims = [];

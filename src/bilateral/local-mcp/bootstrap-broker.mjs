@@ -31,6 +31,10 @@ import { validateLaunchManifest } from "../coordination/manifest.mjs";
 import { sealRequestorBootstrapManifest } from "./bootstrap-envelope.mjs";
 import { canonicalizeReceiptEventValue } from "../../canonical.mjs";
 import { KEY_ID_PATTERN } from "../descriptor.mjs";
+import {
+  requestorBootstrapClaimFingerprint,
+  validateRequestorBootstrapClaim,
+} from "../aws/bootstrap-state.mjs";
 
 export const BOOTSTRAP_BROKER_JOURNAL_FILE =
   "bootstrap-broker-journal.json";
@@ -39,12 +43,6 @@ const BOOTSTRAP_BROKER_LOCK_FILE =
 export const BOOTSTRAP_BROKER_RESPONSE_SCHEMA =
   "clockchain.requestor-bootstrap-broker-response/v1";
 
-const CLAIM_KEYS = Object.freeze([
-  "claimNonce",
-  "paymentMoved",
-  "repositorySha",
-  "requestorPublicKey",
-]);
 const CREATE_KEYS = Object.freeze([
   "capabilityFile",
   "host",
@@ -61,9 +59,7 @@ const APPROVE_KEYS = Object.freeze([
 ]);
 const JOURNAL_SCHEMA =
   "clockchain.requestor-bootstrap-broker-journal/v1";
-const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA40_PATTERN = /^[0-9a-f]{40}$/;
-const BASE64URL_32_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const HEX64_PATTERN = /^[0-9a-f]{64}$/;
 const CAPABILITY_PATTERN = /^[0-9a-f]{64}$/;
 const BASE64_PATTERN =
@@ -202,32 +198,21 @@ function repositorySha(value) {
 }
 
 function canonicalClaim(value) {
-  const claim = exactDataObject(value, CLAIM_KEYS);
-  if (
-    !UUID_V4_PATTERN.test(claim.claimNonce) ||
-    claim.paymentMoved !== false ||
-    !SHA40_PATTERN.test(claim.repositorySha) ||
-    !BASE64URL_32_PATTERN.test(claim.requestorPublicKey)
-  ) {
+  try {
+    return validateRequestorBootstrapClaim(value);
+  } catch {
     invalid();
   }
-  const publicKeyBytes = Buffer.from(claim.requestorPublicKey, "base64url");
-  if (
-    publicKeyBytes.length !== 32 ||
-    publicKeyBytes.toString("base64url") !== claim.requestorPublicKey
-  ) {
-    invalid();
-  }
-  return Object.freeze({
-    claimNonce: claim.claimNonce,
-    paymentMoved: false,
-    repositorySha: claim.repositorySha,
-    requestorPublicKey: claim.requestorPublicKey,
-  });
 }
 
 export function bootstrapClaimFingerprint(value) {
-  return sha256(stable(canonicalClaim(value)));
+  try {
+    return requestorBootstrapClaimFingerprint(
+      canonicalClaim(value),
+    );
+  } catch {
+    invalid();
+  }
 }
 
 async function ensurePrivateRoot(path) {

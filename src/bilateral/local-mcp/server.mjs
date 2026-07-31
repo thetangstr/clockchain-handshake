@@ -9,7 +9,11 @@ import {
   buildPaymentIntakeToolResult,
 } from "./payment-intake.mjs";
 import { canonicalBytes } from "../canonical.mjs";
-import { validatePublicEndpoint as validateNetworkEndpoint } from "../network-endpoint.mjs";
+import {
+  createResolvedLookup,
+  resolvePublicEndpoint as resolveNetworkEndpoint,
+  validatePublicEndpoint as validateNetworkEndpoint,
+} from "../network-endpoint.mjs";
 
 export const PAYER_MCP_PROTOCOL_VERSION = "2025-11-25";
 
@@ -634,6 +638,156 @@ export function createRequestorBootstrapBrokerClient({ brokerCapability, brokerU
       });
       if (!((result.statusCode === 202 && result.body?.status === "PENDING_APPROVAL") || (result.statusCode === 200 && result.body?.status === "SEALED"))) fail();
       return result.body;
+    },
+  });
+}
+
+export function createAwsRequestorBootstrapBrokerClient({
+  allowTestAddresses = false,
+  brokerCapability,
+  brokerUrl,
+  lookup,
+  requestHttps,
+} = {}) {
+  if (typeof allowTestAddresses !== "boolean") fail();
+  const capability = validateBrokerCapability(
+    brokerCapability,
+  );
+  let endpoint;
+  try {
+    endpoint = validateNetworkEndpoint(brokerUrl, {
+      allowedPaths: ["/v1/requestor-claims"],
+      allowTestAddresses,
+      defaultPort: 443,
+      protocols: ["https:"],
+    });
+  } catch {
+    fail();
+  }
+  if (
+    lookup !== undefined &&
+    typeof lookup !== "function"
+  ) {
+    fail();
+  }
+  const request = requestHttps ?? (({
+    body,
+    headers,
+    method,
+    resolved,
+  }) => new Promise(
+    (resolvePromise, rejectPromise) => {
+      const payload = Buffer.from(
+        JSON.stringify(body),
+        "utf8",
+      );
+      const request_ = https.request({
+        agent: false,
+        headers: {
+          ...headers,
+          "Content-Length": String(payload.length),
+        },
+        host: resolved.hostname,
+        lookup: createResolvedLookup(resolved, {
+          allowTestAddresses,
+        }),
+        method,
+        path: resolved.path,
+        port: resolved.port,
+        rejectUnauthorized: true,
+        servername: resolved.hostname,
+        timeout: REQUEST_TIMEOUT_MS,
+      }, (response_) => {
+        const chunks = [];
+        let size = 0;
+        response_.on("data", (chunk) => {
+          size += chunk.length;
+          if (size > MAX_BODY_BYTES) {
+            response_.destroy(
+              new Error("response too large"),
+            );
+          } else {
+            chunks.push(chunk);
+          }
+        });
+        response_.on("end", () => {
+          const text = Buffer.concat(chunks)
+            .toString("utf8");
+          resolvePromise({
+            body:
+              text === "" ? null : parseJson(text),
+            headers: response_.headers,
+            statusCode: response_.statusCode,
+            text,
+          });
+        });
+      });
+      request_.once(
+        "timeout",
+        () => request_.destroy(
+          new Error("request timeout"),
+        ),
+      );
+      request_.once("error", rejectPromise);
+      request_.end(payload);
+    },
+  ));
+  if (typeof request !== "function") fail();
+  return Object.freeze({
+    async claimRequestorBootstrap(claim) {
+      let resolved;
+      try {
+        resolved = await resolveNetworkEndpoint(
+          endpoint,
+          {
+            allowTestAddresses,
+            ...(lookup === undefined ? {} : { lookup }),
+          },
+        );
+      } catch {
+        fail();
+      }
+      const url = new URL(endpoint.url);
+      const result = await request({
+        body: claim,
+        headers: {
+          Accept: BOOTSTRAP_ACCEPT,
+          Authorization: `Bearer ${capability}`,
+          "Content-Type": JSON_CONTENT_TYPE,
+          Host: url.host,
+        },
+        method: "POST",
+        resolved,
+        url,
+      });
+      const contentType = String(
+        result?.headers?.["content-type"] ?? "",
+      ).split(";")[0].trim().toLowerCase();
+      if (
+        result?.headers?.location !== undefined ||
+        contentType !== JSON_CONTENT_TYPE ||
+        !(
+          (
+            result.statusCode === 202 &&
+            result.body?.status ===
+              "PENDING_APPROVAL"
+          ) ||
+          (
+            result.statusCode === 200 &&
+            result.body?.status === "SEALED"
+          )
+        )
+      ) {
+        fail();
+      }
+      return validateBootstrapBrokerResponse(
+        result.body,
+        {
+          claim,
+          repositorySha:
+            claim?.repositorySha,
+        },
+      );
     },
   });
 }
