@@ -186,6 +186,37 @@ export function createDeploymentPlan({
   };
 }
 
+export function createDeploymentContexts(plan) {
+  const certificateBase64 = Buffer.from(
+    plan.relayTlsCertificatePem,
+    "utf8",
+  ).toString("base64");
+  return [
+    "-c",
+    `repositorySha=${plan.repositorySha}`,
+    "-c",
+    `controlPlaneImage=${plan.controlPlaneImage}`,
+    "-c",
+    `tunnelImage=${plan.tunnelImage}`,
+    "-c",
+    `sessionId=${plan.sessionId}`,
+    "-c",
+    `bootstrapBrokerCapabilityDigest=${plan.bootstrapBrokerCapabilityDigest}`,
+    "-c",
+    `relayTlsCertificatePemBase64=${certificateBase64}`,
+    "-c",
+    `relayPublicHostname=${plan.relayPublicHostname}`,
+    "-c",
+    `relayTlsFingerprint=${plan.relayTlsFingerprint}`,
+    "-c",
+    `relayTlsSecretArn=${plan.relayTlsSecretArn}`,
+    "-c",
+    `operatorPublicKey=${plan.operatorPublicKey}`,
+    "-c",
+    `sourceTreeSha256=${plan.sourceTreeSha256}`,
+  ];
+}
+
 function isInside(parent, candidate) {
   const path = relative(parent, candidate);
   return (
@@ -300,30 +331,7 @@ async function main() {
     sourceTreeSha256,
     tunnelImage,
   });
-  const contexts = [
-    "-c",
-    `repositorySha=${repositorySha}`,
-    "-c",
-    `controlPlaneImage=${controlPlaneImage}`,
-    "-c",
-    `tunnelImage=${tunnelImage}`,
-    "-c",
-    `sessionId=${sessionId}`,
-    "-c",
-    `bootstrapBrokerCapabilityDigest=${bootstrapBrokerCapabilityDigest}`,
-    "-c",
-    `relayTlsCertificatePem=${relayTlsCertificatePem}`,
-    "-c",
-    `relayPublicHostname=${relayPublicHostname}`,
-    "-c",
-    `relayTlsFingerprint=${relayTlsFingerprint}`,
-    "-c",
-    `relayTlsSecretArn=${relayTlsSecretArn}`,
-    "-c",
-    `operatorPublicKey=${operatorPublicKey}`,
-    "-c",
-    `sourceTreeSha256=${sourceTreeSha256}`,
-  ];
+  const contexts = createDeploymentContexts(plan);
   if (process.argv.includes("--plan")) {
     const diff = await runCdk([
       "diff",

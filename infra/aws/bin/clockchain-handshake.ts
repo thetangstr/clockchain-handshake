@@ -37,6 +37,35 @@ function optionalBoolean(
   );
 }
 
+function requiredBase64(
+  value: unknown,
+  label: string,
+): string {
+  const encoded = required(value, label);
+  if (
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+      encoded,
+    )
+  ) {
+    throw new Error(
+      `Invalid CDK context: ${label}.`,
+    );
+  }
+  const decoded = Buffer.from(
+    encoded,
+    "base64",
+  );
+  if (
+    decoded.length === 0 ||
+    decoded.toString("base64") !== encoded
+  ) {
+    throw new Error(
+      `Invalid CDK context: ${label}.`,
+    );
+  }
+  return decoded.toString("utf8");
+}
+
 const app = new App();
 
 new ClockchainHandshakeImagesStack(
@@ -62,9 +91,9 @@ const bootstrapBrokerCapabilityDigest =
   app.node.tryGetContext(
     "bootstrapBrokerCapabilityDigest",
   );
-const relayTlsCertificatePem =
+const relayTlsCertificatePemBase64 =
   app.node.tryGetContext(
-    "relayTlsCertificatePem",
+    "relayTlsCertificatePemBase64",
   );
 const relayPublicHostname =
   app.node.tryGetContext(
@@ -122,7 +151,10 @@ if (
         "operatorPublicKey",
       ),
       relayTlsCertificatePem: required(
-        relayTlsCertificatePem,
+        requiredBase64(
+          relayTlsCertificatePemBase64,
+          "relayTlsCertificatePemBase64",
+        ),
         "relayTlsCertificatePem",
       ),
       relayPublicHostname: required(

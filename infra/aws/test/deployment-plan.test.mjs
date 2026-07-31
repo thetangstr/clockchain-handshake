@@ -10,6 +10,7 @@ import {
   createDockerBuildInvocation,
 } from "../scripts/build-and-push.mjs";
 import {
+  createDeploymentContexts,
   createDeploymentPlan,
   writePrivateDeploymentEvidence,
 } from "../scripts/deploy.mjs";
@@ -197,6 +198,54 @@ test("deployment plan rejects a relay certificate hostname mismatch", () => {
           `570035913370.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake-tunnel@${DIGEST}`,
       }),
     /hostname/i,
+  );
+});
+
+test("deployment contexts encode the public TLS certificate without multiline argv", () => {
+  const plan = createDeploymentPlan({
+    account: "570035913370",
+    bootstrapBrokerCapabilityDigest:
+      "c".repeat(64),
+    controlPlaneImage:
+      `570035913370.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake-control-plane@${DIGEST}`,
+    operatorPublicKey:
+      "oIcoZqI/cqzG4UbXcaV+k1fxwt8EBb+9S+XNcb9pq3k=",
+    region: "us-west-2",
+    relayPublicHostname:
+      "relay.clockchain.net",
+    relayTlsCertificatePem:
+      RELAY_TLS_CERTIFICATE_PEM,
+    relayTlsFingerprint:
+      "3dbe9d0ea7491d9d6e4586f978ddf2b67c4ac173780b3b8d5b86def84a0d73d9",
+    relayTlsSecretArn:
+      "arn:aws:secretsmanager:us-west-2:570035913370:secret:clockchain-relay-tls-AbCdEf",
+    repositorySha: SHA,
+    sessionId:
+      "11111111-1111-4111-8111-111111111111",
+    sourceTreeSha256: "e".repeat(64),
+    tunnelImage:
+      `570035913370.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake-tunnel@${DIGEST}`,
+  });
+  const contexts = createDeploymentContexts(plan);
+  const certificate = contexts.find((value) =>
+    value.startsWith(
+      "relayTlsCertificatePemBase64=",
+    ));
+  assert.equal(typeof certificate, "string");
+  assert.equal(certificate.includes("\n"), false);
+  assert.equal(
+    Buffer.from(
+      certificate.slice(
+        certificate.indexOf("=") + 1,
+      ),
+      "base64",
+    ).toString("utf8"),
+    RELAY_TLS_CERTIFICATE_PEM,
+  );
+  assert.equal(
+    contexts.some((value) =>
+      value.includes("BEGIN CERTIFICATE")),
+    false,
   );
 });
 
