@@ -4,6 +4,7 @@ import {
   createHash,
   generateKeyPairSync,
   sign,
+  verify,
   X509Certificate,
 } from "node:crypto";
 import {
@@ -23,6 +24,9 @@ import {
   sshEd25519Fingerprint,
   validatePayerBootstrapClaim,
 } from "../src/bilateral/local-mcp/payer-bootstrap-envelope.mjs";
+import {
+  sealEnvelope,
+} from "../src/bilateral/local-mcp/sealed-envelope.mjs";
 import {
   createLaunchManifest,
   validateLaunchManifest,
@@ -415,3 +419,116 @@ test("fails closed on changed claim authority, expiry, replay, and moved-payment
     /Payer bootstrap envelope validation failed/,
   );
 });
+
+test("rejects a signed response whose launch manifest names a different operator key", () => {
+  const operator = generateKeyPairSync("ed25519");
+  const { bootstrap, claim } = claimFixture();
+  const expiresAtMs = String(Date.now() + 60_000);
+  const mismatchedManifest = launchManifestFixture({
+    claim,
+    expiresAtMs,
+    overrides: {
+      operatorKeyId: "operator-b",
+    },
+  });
+
+  assert.throws(
+    () =>
+      sealSignedPayerBootstrapPackage({
+        bootstrapBrokerCapability: "c".repeat(64),
+        bootstrapBrokerUrl: "https://bootstrap.internal.example/v1/requestor-claims",
+        claim,
+        expiresAtMs,
+        launchManifestBytes: mismatchedManifest,
+        operatorKeyId: "operator-a",
+        signer: (bytes) =>
+          sign(null, bytes, operator.privateKey).toString("base64"),
+        tunnelGrantBytes: canonicalBytes({
+          expiresAtMs,
+          paymentMoved: false,
+          schema: "clockchain.payer-tunnel-grant/v1",
+          sessionId: SESSION_ID,
+        }),
+      }),
+    /Payer bootstrap envelope validation failed/,
+  );
+
+  const packageValue = {
+    bootstrapBrokerCapability: "c".repeat(64),
+    bootstrapBrokerUrl: "https://bootstrap.internal.example/v1/requestor-claims",
+    expiresAtMs,
+    launchManifestBase64url:
+      mismatchedManifest.toString("base64url"),
+    paymentMoved: false,
+    schema: "clockchain.payer-bootstrap-package/v1",
+    tunnelGrant: {
+      expiresAtMs,
+      paymentMoved: false,
+      schema: "clockchain.payer-tunnel-grant/v1",
+      sessionId: SESSION_ID,
+    },
+  };
+  const envelope = sealEnvelope({
+    aadBytes: createHash("sha256")
+      .update(Buffer.from(JSON.stringify(claim), "utf8"))
+      .digest(),
+    plaintextBytes: Buffer.from(
+      JSON.stringify(packageValue),
+      "utf8",
+    ),
+    recipientPublicKey: claim.x25519PublicKey,
+    schema: "clockchain.payer-bootstrap-package/v1",
+  });
+  const unsigned = {
+    claimFingerprint: payerBootstrapClaimFingerprint(claim),
+    envelope,
+    expiresAtMs,
+    operatorKeyId: "operator-a",
+    paymentMoved: false,
+    schema: "clockchain.payer-bootstrap-response/v1",
+  };
+  const response = {
+    ...unsigned,
+    signature: {
+      algorithm: "ed25519",
+      keyId: "operator-a",
+      value: sign(
+        null,
+        Buffer.from(JSON.stringify(unsigned), "utf8"),
+        operator.privateKey,
+      ).toString("base64"),
+    },
+  };
+  assert.equal(
+    verifySignedResponse(response, operator.publicKey),
+    true,
+  );
+
+  assert.throws(
+    () =>
+      openSignedPayerBootstrapPackage({
+        claim,
+        consumeClaimNonce: () => true,
+        expectedReleaseId: RELEASE_ID,
+        expectedRepositorySha: REPOSITORY_SHA,
+        expectedSessionId: SESSION_ID,
+        nowMs: Date.now(),
+        operatorPublicKey: operator.publicKey,
+        payerPrivateKey: bootstrap.privateKey,
+        response,
+      }),
+    /Payer bootstrap envelope validation failed/,
+  );
+});
+
+function verifySignedResponse(response, publicKey) {
+  const { signature, ...unsigned } = response;
+  assert.equal(signature.algorithm, "ed25519");
+  assert.equal(signature.keyId, unsigned.operatorKeyId);
+  return verify(
+    null,
+    Buffer.from(JSON.stringify(unsigned), "utf8"),
+    publicKey,
+    Buffer.from(signature.value, "base64"),
+  );
+}
