@@ -63,6 +63,7 @@ const SHA64 = /^[0-9a-f]{64}$/;
 const RELEASE = /^release-[0-9a-f]{16}$/;
 const SESSION =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const TIMESTAMP = /^(?:0|[1-9][0-9]*)$/;
 const HOST =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const MAX_BYTES = 262_144;
@@ -220,13 +221,19 @@ function expected(value, active) {
   return Object.freeze({ ...input });
 }
 
-function responseConfig(active) {
+function responseConfig(active, responseNowMs) {
+  if (
+    !Number.isSafeInteger(responseNowMs) ||
+    responseNowMs < 0
+  ) {
+    fail();
+  }
   return Object.freeze({
     bootstrapBrokerCapability:
       active.bootstrapBrokerCapability,
     bootstrapBrokerUrl:
       active.bootstrapBrokerUrl,
-    nowMs: nowMs(active),
+    nowMs: responseNowMs,
     operatorKeyId: active.operatorKeyId,
     operatorPrivateKeyPem:
       active.operatorPrivateKeyPem,
@@ -236,6 +243,61 @@ function responseConfig(active) {
     repositorySha: active.repositorySha,
     sessionId: active.sessionId,
   });
+}
+
+function durableRole(role) {
+  return role === "payee" ? "requestor" : role;
+}
+
+async function readApprovalNowMs({
+  active,
+  claimFingerprint,
+  expiresAtMs,
+  role,
+}) {
+  if (
+    !SHA64.test(claimFingerprint) ||
+    !TIMESTAMP.test(expiresAtMs)
+  ) {
+    fail();
+  }
+  const wallNowMs = nowMs(active);
+  if (wallNowMs >= Number(expiresAtMs)) fail();
+  const createStore =
+    active.dependencies
+      .createAwsBootstrapStateFileStore ??
+    createAwsBootstrapStateFileStore;
+  if (typeof createStore !== "function") fail();
+  const store = await createStore({
+    initialState: stateConfig(active),
+    statePath: active.bootstrapStatePath,
+  });
+  const state = validateBootstrapState(
+    await store.readState(),
+  );
+  const entry = state.claims[claimFingerprint];
+  if (
+    entry === undefined ||
+    entry.claimFingerprint !== claimFingerprint ||
+    entry.paymentMoved !== false ||
+    entry.releaseId !== active.releaseId ||
+    entry.sessionId !== active.sessionId ||
+    entry.role !== durableRole(role) ||
+    entry.status !== "APPROVED" ||
+    entry.expiresAtMs !== expiresAtMs ||
+    !TIMESTAMP.test(entry.updatedAtMs)
+  ) {
+    fail();
+  }
+  const approvalNowMs = Number(entry.updatedAtMs);
+  if (
+    !Number.isSafeInteger(approvalNowMs) ||
+    approvalNowMs < 0 ||
+    approvalNowMs >= Number(expiresAtMs)
+  ) {
+    fail();
+  }
+  return approvalNowMs;
 }
 
 function projectState(state, role) {
@@ -580,10 +642,20 @@ export function createAwsOperatorBootstrapAdapter(
                   : active.payeeLaunchManifestPath;
               const manifestBytes =
                 await readManifest(manifestPath);
+              const responseNowMs =
+                await readApprovalNowMs({
+                  active,
+                  claimFingerprint,
+                  expiresAtMs,
+                  role,
+                });
               return buildSealed({
                 claim,
                 claimFingerprint,
-                config: responseConfig(active),
+                config: responseConfig(
+                  active,
+                  responseNowMs,
+                ),
                 expiresAtMs,
                 payeeLaunchManifestBytes:
                   role === "payee"

@@ -23,6 +23,9 @@ import {
   createAwsOperatorBootstrapAdapter,
 } from "../infra/aws/runtime/operator-bootstrap-adapter.mjs";
 import {
+  createAwsBootstrapStateFileStore,
+} from "../src/bilateral/aws/bootstrap-service.mjs";
+import {
   createBootstrapState,
   requestorBootstrapClaimFingerprint,
   submitPayerBootstrapClaim,
@@ -501,6 +504,92 @@ test("adopts a sealed Payer grant on restart and rejects missing, malformed, sym
       symlink.config,
     ).approveAndSeal(input),
     /AWS operator bootstrap adapter failed safely/,
+  );
+});
+
+test("reuses an existing Payer grant when retrying after grant persistence succeeded but state sealing crashed", async () => {
+  const claim = payerClaim();
+  const claimFingerprint =
+    payerBootstrapClaimFingerprint(claim);
+  const fx = await fixture({
+    claims: [{ claim, role: "payer" }],
+  });
+  const input = {
+    claimFingerprint,
+    paymentMoved: false,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    role: "payer",
+    sessionId: SESSION_ID,
+  };
+  let currentNow = NOW + 1;
+  let writes = 0;
+  const crashAfterGrant =
+    createAwsOperatorBootstrapAdapter(
+      {
+        ...fx.config,
+        nowMs: () => currentNow,
+      },
+      {
+        createAwsBootstrapStateFileStore:
+          async (options) => {
+            const store =
+              await createAwsBootstrapStateFileStore(
+                options,
+              );
+            return {
+              async readState() {
+                return store.readState();
+              },
+              async writeState(input) {
+                writes += 1;
+                if (writes === 2) {
+                  throw new Error(
+                    "simulated crash after grant persistence",
+                  );
+                }
+                return store.writeState(input);
+              },
+            };
+          },
+      },
+    );
+
+  await assert.rejects(
+    crashAfterGrant.approveAndSeal(input),
+    /AWS operator bootstrap adapter failed safely/,
+  );
+  const grantBytes = readFileSync(
+    fx.config.tunnelGrantPath,
+  );
+  let state = validateBootstrapState(
+    JSON.parse(readFileSync(fx.statePath, "utf8")),
+  );
+  assert.equal(
+    state.claims[claimFingerprint].status,
+    "APPROVED",
+  );
+
+  currentNow = NOW + 10_000;
+  assert.deepEqual(
+    await createAwsOperatorBootstrapAdapter({
+      ...fx.config,
+      nowMs: () => currentNow,
+    }).approveAndSeal(input),
+    { paymentMoved: false, status: "APPROVED" },
+  );
+  assert.equal(
+    readFileSync(fx.config.tunnelGrantPath).equals(
+      grantBytes,
+    ),
+    true,
+  );
+  state = validateBootstrapState(
+    JSON.parse(readFileSync(fx.statePath, "utf8")),
+  );
+  assert.equal(
+    state.claims[claimFingerprint].status,
+    "SEALED",
   );
 });
 
