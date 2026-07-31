@@ -11,6 +11,7 @@ import {
   COORDINATION_EVENT_KINDS,
   CoordinationLifecycleError,
   RELEASE_STATES,
+  RUN_MODES,
   initialReleaseView,
   reduceReleaseEvent,
 } from "../src/bilateral/coordination/lifecycle.mjs";
@@ -134,6 +135,13 @@ function apply(view, kind, role, subjectRun, options) {
   );
   assert.equal(next.paymentMoved, false);
   return next;
+}
+
+function applyStakeholderOnly(view, kind, role, subjectRun, options = {}) {
+  return apply(view, kind, role, subjectRun, {
+    ...options,
+    runMode: "aws-stakeholder-only",
+  });
 }
 
 function toAddressesReady() {
@@ -365,6 +373,11 @@ function assertDeepFrozen(value, seen = new Set()) {
 }
 
 test("pins the closed release states and event authorities", () => {
+  assert.deepEqual(RUN_MODES, [
+    "local-two-run",
+    "aws-stakeholder-only",
+  ]);
+  assert.equal(Object.isFrozen(RUN_MODES), true);
   assert.deepEqual(RELEASE_STATES, [
     "BOOTSTRAPPING",
     "ADDRESSES_READY",
@@ -420,6 +433,89 @@ test("pins the closed release states and event authorities", () => {
   assert.equal(
     Object.isFrozen(COORDINATION_EVENT_AUTHORITIES),
     true,
+  );
+});
+
+test("default local-two-run still requires rehearsal before stakeholder progression", () => {
+  const view = toPreflightPassed();
+
+  assertLifecycleError(() =>
+    apply(
+      view,
+      "REGISTER_STAKEHOLDER",
+      "operator",
+      "stakeholder",
+    ),
+  );
+
+  const registered = apply(
+    view,
+    "REGISTER_REHEARSAL",
+    "operator",
+    "rehearsal",
+  );
+  assert.equal(registered.state, "PREFLIGHT_PASSED");
+  assert.equal(registered.facts.registered.rehearsal, true);
+});
+
+test("aws-stakeholder-only mode moves directly from preflight into stakeholder identities", () => {
+  let view = toPreflightPassed();
+
+  view = applyStakeholderOnly(
+    view,
+    "REGISTER_STAKEHOLDER",
+    "operator",
+    "stakeholder",
+  );
+  assert.equal(view.state, "PREFLIGHT_PASSED");
+  assert.equal(view.facts.registered.stakeholder, true);
+  assert.equal(view.facts.registered.rehearsal, false);
+  assert.equal(view.facts.verificationPassed.rehearsal, false);
+  assert.equal(view.facts.verifierPublicationVerified.rehearsal, false);
+
+  view = applyStakeholderOnly(
+    view,
+    "IDENTITY_PACKAGE_READY",
+    "payer",
+    "stakeholder",
+  );
+  assert.equal(view.state, "PREFLIGHT_PASSED");
+  assert.notEqual(view.state, "REHEARSAL_VERIFIED");
+  assert.equal(view.facts.identityPackageReady.rehearsal.payer, false);
+  assert.equal(view.facts.identityPackageReady.rehearsal.payee, false);
+  assert.equal(view.facts.verificationPassed.rehearsal, false);
+  assert.equal(view.facts.verifierPublicationVerified.rehearsal, false);
+
+  view = applyStakeholderOnly(
+    view,
+    "IDENTITY_PACKAGE_READY",
+    "payee",
+    "stakeholder",
+  );
+  assert.equal(view.state, "STAKEHOLDER_IDENTITIES_READY");
+});
+
+test("aws-stakeholder-only mode rejects rehearsal-scoped events and malformed run modes", () => {
+  const preflight = toPreflightPassed();
+
+  assertLifecycleError(() =>
+    applyStakeholderOnly(
+      preflight,
+      "REGISTER_REHEARSAL",
+      "operator",
+      "rehearsal",
+    ),
+  );
+  assertLifecycleError(() =>
+    apply(preflight, "REGISTER_STAKEHOLDER", "operator", "stakeholder", {
+      runMode: "aws",
+    }),
+  );
+  assertLifecycleError(() =>
+    apply(preflight, "REGISTER_STAKEHOLDER", "operator", "stakeholder", {
+      runMode: "aws-stakeholder-only",
+      extra: true,
+    }),
   );
 });
 

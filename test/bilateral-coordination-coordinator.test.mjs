@@ -1532,6 +1532,57 @@ test("polls fresh signed identity packages after persisting a new registration",
   assert.equal(states.at(-1).checkpoints.filter((item) => item.action === "IDENTITY_PACKAGE").length, 2);
 });
 
+test("explicit aws-stakeholder-only coordinator mode starts stakeholder identities after preflight", async () => {
+  const fixture = signedReplayFixture();
+  const payee = await enrollment("payee", 1, fixture.keys.payee);
+  const payer = await enrollment("payer", 3, fixture.keys.payer);
+  const set = await enrollmentSetBytes({ payee, payer });
+  const append = (role, kind, artifactDigest = null, subjectRun = "release") => fixture.append({ artifactDigest, kind, role, subjectRun });
+  append("payer", "ENROLLMENT_CONFIRMED"); append("payee", "ENROLLMENT_CONFIRMED"); append("operator", "ENROLLMENT_RECEIPT"); append("operator", "WAIT_FOR_FUNDING"); append("payer", "FUNDING_INPUTS_READY"); append("payee", "FUNDING_INPUTS_READY"); append("payer", "TOKEN_READY", "a".repeat(64)); append("payee", "TOKEN_READY", "b".repeat(64));
+  const plan = append("operator", "PREFLIGHT_PLAN_READY", "1".repeat(64)); append("payer", "PREFLIGHT_PARTICIPANT_READY", "2".repeat(64)); append("payee", "PREFLIGHT_PARTICIPANT_READY", "3".repeat(64));
+  const release = { capabilityDigests: ["a".repeat(64), "b".repeat(64)], paymentMoved: false, releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, schema: COORDINATOR_STATE_SCHEMA, sessionId: SESSION_ID };
+  const aggregate = "4".repeat(64);
+  let registeredSubjectRun = null;
+  let waitedSubjectRun = null;
+  const states = [];
+  const result = await runCoordinatorCore({ dependencies: {
+    ...rawReplayDependencies({ fixture, set }),
+    appendOperatorEvent: async ({ kind, subjectRun, artifactDigest }) => {
+      registeredSubjectRun = subjectRun;
+      return append("operator", kind, artifactDigest, subjectRun);
+    },
+    getArtifact: async ({ digest }) => Buffer.from(digest),
+    validateArtifact: async ({ expectedDigest }) => ({ digest: expectedDigest, facts: { identity: { address: expectedDigest === "5".repeat(64) ? payer.invitations.stakeholder.address : payee.invitations.stakeholder.address, repositorySha: REPOSITORY_SHA } } }),
+    readState: async () => ({ ...release, checkpoints: [
+      { action: "ENROLLMENT_RECEIPT", artifactDigest: null, eventDigest: fixture.events.find((event) => event.kind === "ENROLLMENT_RECEIPT").eventDigest, role: "operator", status: "EVENT_APPENDED", subjectRun: "release" },
+      { action: "WAIT_FOR_FUNDING", artifactDigest: null, eventDigest: fixture.events.find((event) => event.kind === "WAIT_FOR_FUNDING").eventDigest, role: "operator", status: "EVENT_APPENDED", subjectRun: "release" },
+      { action: "PREFLIGHT_PLAN", artifactDigest: plan.artifactDigest, eventDigest: plan.eventDigest, role: "operator", status: "EVENT_APPENDED", subjectRun: "release" },
+      { action: "PREFLIGHT_AGGREGATE", artifactDigest: aggregate, eventDigest: null, role: "operator", status: "ARTIFACT_STORED", subjectRun: "release" },
+    ], state: "PREFLIGHT_PASSED" }),
+    waitForIdentityPackage: async ({ subjectRun }) => { waitedSubjectRun = subjectRun; append("payer", "IDENTITY_PACKAGE_READY", "5".repeat(64), subjectRun); append("payee", "IDENTITY_PACKAGE_READY", "6".repeat(64), subjectRun); },
+    writeState: async ({ state }) => states.push(state),
+  }, release, releaseRoot: "/private/release", runMode: "aws-stakeholder-only" });
+  assert.equal(registeredSubjectRun, "stakeholder");
+  assert.equal(waitedSubjectRun, "stakeholder");
+  assert.equal(states.length, 2);
+  assert.equal(states[0].state, "PREFLIGHT_PASSED");
+  assert.notEqual(states[0].state, "REHEARSAL_VERIFIED");
+  assert.equal(states[0].checkpoints.at(-1).action, "REGISTER_STAKEHOLDER");
+  assert.equal(states[0].checkpoints.at(-1).subjectRun, "stakeholder");
+  assert.equal(states[0].checkpoints.some((entry) => entry.action === "REHEARSAL_VERDICT"), false);
+  assert.equal(states[0].checkpoints.some((entry) => entry.subjectRun === "rehearsal"), false);
+  assert.equal(result.state, "STAKEHOLDER_IDENTITIES_READY");
+});
+
+test("coordinator rejects unknown run modes", async () => {
+  const replay = await signedFundingReplay();
+  const release = { capabilityDigests: ["a".repeat(64), "b".repeat(64)], paymentMoved: false, releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, schema: COORDINATOR_STATE_SCHEMA, sessionId: SESSION_ID };
+  await assert.rejects(
+    runCoordinatorCore({ dependencies: rawReplayDependencies(replay), release, releaseRoot: "/private/release", runMode: "aws" }),
+    { code: "COORDINATION_COORDINATOR_INVALID" },
+  );
+});
+
 test("recreates a completed descriptor locally before its first relay upload", async () => {
   const fixture = signedReplayFixture();
   const set = await enrollmentSetBytes({

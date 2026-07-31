@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { verifyCoordinationEnvelope } from "./envelope.mjs";
 import { coordinationEnrollmentSignaturePreimage, parseCoordinationEnrollment, parseCoordinationEnrollmentSet, verifyCoordinationEnrollment } from "./enrollment.mjs";
-import { initialReleaseView, reduceReleaseEvent } from "./lifecycle.mjs";
+import { initialReleaseView, reduceReleaseEvent, RUN_MODES } from "./lifecycle.mjs";
 import { canonicalBytes } from "../canonical.mjs";
 import { canonicalizeReceiptEventValue } from "../../canonical.mjs";
 import { validateRelayArtifact as defaultValidateRelayArtifact } from "./artifact.mjs";
@@ -28,7 +28,7 @@ export const SUPERVISOR_COMMAND_POLICY = Object.freeze({
   TERMINAL_ABORT: "abort",
 });
 const FULL_CHECKPOINT_PHASES = new Set(["BOOTSTRAPPED_ACTIVE", "ENROLLMENT_CONFIRMING", "VERIFYING_FUNDING_INPUTS", "TOKEN_COMMITMENT_PREPARING", "TOKEN_READY", "DESCRIPTOR_WRITING", "DESCRIPTOR_ACCEPTED", "BEFORE_CHILD", "CHILD_COMPLETE", "ARTIFACT_STORED", "EVENT_APPENDED", "RECOVERY_REQUIRED", "TERMINAL_FAILURE", "EVENT_PROCESSED", "TRANSITION_COMPLETE", "ABORTED"]);
-const DURABLE_CHECKPOINT_KEYS = new Set(["activeLaunchState", "authenticatedEvents", "childJournal", "coordinationIdentity", "descriptorJournal", "enrollmentBase64", "enrollmentSet", "events", "eventDigest", "failureSummaryDigest", "intakeBinding", "intentJournal", "invitations", "operatorPublicKey", "paymentMoved", "phase", "preflight", "processedEventDigests", "receipt", "recovery", "rehearsal", "releaseId", "repositorySha", "role", "schema", "senderState", "sessionId", "stateRoot", "stakeholder", "tokenCommitment", "tokenPath", "view"]);
+const DURABLE_CHECKPOINT_KEYS = new Set(["activeLaunchState", "authenticatedEvents", "childJournal", "coordinationIdentity", "descriptorJournal", "enrollmentBase64", "enrollmentSet", "events", "eventDigest", "failureSummaryDigest", "intakeBinding", "intentJournal", "invitations", "operatorPublicKey", "paymentMoved", "phase", "preflight", "processedEventDigests", "receipt", "recovery", "rehearsal", "releaseId", "repositorySha", "role", "runMode", "schema", "senderState", "sessionId", "stateRoot", "stakeholder", "tokenCommitment", "tokenPath", "view"]);
 const CHILD_JOURNAL_PHASES = new Set(["BEFORE_CHILD", "CHILD_COMPLETE", "ARTIFACT_STORED", "EVENT_APPENDED", "TRANSITION_COMPLETE"]);
 const TOKEN_BOUND_PHASES = new Set(["TOKEN_READY", "DESCRIPTOR_WRITING", "DESCRIPTOR_ACCEPTED", "BEFORE_CHILD", "CHILD_COMPLETE", "ARTIFACT_STORED", "EVENT_APPENDED", "RECOVERY_REQUIRED", "TRANSITION_COMPLETE"]);
 const ENROLLMENT_READINESS_SCHEMA = "clockchain.bilateral-enrollment-readiness/v1";
@@ -37,6 +37,23 @@ const INTAKE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f
 const PAYER_MCP_INTAKE_RECORD_KEYS = ["digest", "intakeDigest", "intakeRequestId", "paymentMoved", "policy", "repositorySha", "request", "requestDigest", "response", "responseDigest", "schema"];
 
 function invalid() { throw new Error("Coordination supervisor operation failed safely."); }
+function normalizeRunMode(value) {
+  if (value === undefined) return "local-two-run";
+  if (!RUN_MODES.includes(value)) invalid();
+  return value;
+}
+function checkpointRunMode(checkpoint) {
+  if (!Object.hasOwn(checkpoint, "runMode")) return "local-two-run";
+  return normalizeRunMode(checkpoint.runMode);
+}
+function assertCheckpointRunMode(checkpoint, runMode, explicitRunMode) {
+  const storedRunMode = checkpointRunMode(checkpoint);
+  if (storedRunMode !== runMode) invalid();
+  if (Object.hasOwn(checkpoint, "runMode") && explicitRunMode !== true) invalid();
+}
+function assertRunModeCommandAllowed(event, runMode) {
+  if (runMode === "aws-stakeholder-only" && event?.subjectRun === "rehearsal") invalid();
+}
 function partyCompletionStatus(role) {
   if (!["payer", "payee"].includes(role)) invalid();
   return Object.freeze({
@@ -57,6 +74,7 @@ function payerProgressStatus(state) {
 }
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const same = (left, right) => isDeepStrictEqual(left, right);
+function isPlainObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value)); }
 function exact(value, keys) { return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key)); }
 function dataExact(value, keys) { return exact(value, keys) && keys.every((key) => { const descriptor = Object.getOwnPropertyDescriptor(value, key); return descriptor?.enumerable === true && Object.hasOwn(descriptor, "value"); }); }
 function assertEnrollmentReadiness(value, localState) {
@@ -615,8 +633,9 @@ async function finalizeBootstrap({ bootstrapResult, checkpoint, dependencies, la
   return publicState(persisted);
 }
 
-export async function authenticateSupervisorReplay({ events, enrollmentSet, operatorPublicKey, releaseId, repositorySha, sessionId, localRole, verifyEnrollmentSet, verifyVerifierPublication }) {
+export async function authenticateSupervisorReplay({ events, enrollmentSet, operatorPublicKey, releaseId, repositorySha, sessionId, localRole, runMode = "local-two-run", verifyEnrollmentSet, verifyVerifierPublication }) {
   try {
+    runMode = normalizeRunMode(runMode);
     if (!Array.isArray(events) || !["payer", "payee"].includes(localRole) || typeof operatorPublicKey !== "string" || typeof verifyEnrollmentSet !== "function") invalid();
     const suppliedBytes = Buffer.isBuffer(enrollmentSet) ? Buffer.from(enrollmentSet) : canonicalEnrollmentSetBytes(enrollmentSet);
     const set = parseCoordinationEnrollmentSet(suppliedBytes);
@@ -638,8 +657,8 @@ export async function authenticateSupervisorReplay({ events, enrollmentSet, oper
       verifyCoordinationEnvelope(event, { expectedPublicKey: keys[role], expectedReleaseId: releaseId, expectedRepositorySha: repositorySha, expectedRole: role, expectedSessionId: sessionId });
       if (event.sequence !== String(state.sequence) || event.previousEventDigest !== state.previousEventDigest) invalid();
       const options = event.kind === "VERIFICATION_PASSED"
-        ? { expectedPublicKey: keys[role], verifierPublicationVerified: typeof verifyVerifierPublication === "function" && await verifyVerifierPublication(Object.freeze({ event: structuredClone(event), enrollmentSet: structuredClone(set), releaseId, repositorySha, sessionId })) === true }
-        : { expectedPublicKey: keys[role] };
+        ? { expectedPublicKey: keys[role], runMode, verifierPublicationVerified: typeof verifyVerifierPublication === "function" && await verifyVerifierPublication(Object.freeze({ event: structuredClone(event), enrollmentSet: structuredClone(set), releaseId, repositorySha, sessionId })) === true }
+        : { expectedPublicKey: keys[role], runMode };
       view = reduceReleaseEvent(view, event, options);
       digests.add(event.eventDigest); state.previousEventDigest = event.eventDigest; state.sequence += 1;
     }
@@ -649,6 +668,8 @@ export async function authenticateSupervisorReplay({ events, enrollmentSet, oper
 
 export function buildSupervisorCommand({ event, localState }) {
   if (!event || !localState || event.repositorySha !== localState.repositorySha || event.role !== "operator") invalid();
+  const runMode = normalizeRunMode(localState.runMode);
+  assertRunModeCommandAllowed(event, runMode);
   if (event.kind === "PREFLIGHT_PLAN_READY" && event.subjectRun === "release" && localState.preflight?.outputPath) return Object.freeze({ command: "scripts/probe-bilateral-rendezvous.mjs", args: Object.freeze(["participant", "--role", localState.role, "--plan", localState.preflight.planPath, "--token-file", localState.tokenPath, "--participant-private-key", localState.preflight.privateKeyPath, "--output", dirname(localState.preflight.outputPath)]) });
   if (["REGISTER_REHEARSAL", "REGISTER_STAKEHOLDER"].includes(event.kind)) {
     const run = event.kind === "REGISTER_REHEARSAL" ? "rehearsal" : "stakeholder";
@@ -784,15 +805,23 @@ export async function executeSupervisorTransition({ client, event, localState, d
   return Object.freeze({ artifactDigest: digest, kind, state: completed });
 }
 
-export async function createRoleSupervisor({ launchManifestPath, stateRoot, dependencies = {} }) {
+export async function createRoleSupervisor(input) {
+  if (!isPlainObject(input)) invalid();
+  const { launchManifestPath, stateRoot, dependencies = {}, runMode: requestedRunMode } = input;
+  const explicitRunMode = Object.hasOwn(input, "runMode");
+  const runMode = normalizeRunMode(requestedRunMode);
   if (typeof launchManifestPath !== "string" || typeof stateRoot !== "string") invalid();
   if (dependencies.readState) {
     const checkpoint = await dependencies.readState(stateRoot);
     if (checkpoint !== null && checkpoint !== undefined) {
       if (checkpoint.phase === "LOCAL_SECRETS_READY") {
+        assertCheckpointRunMode(checkpoint, runMode, explicitRunMode);
         const reader = dependencies.readLaunchManifest ?? readLaunchManifest;
         const manifest = await reader(launchManifestPath, dependencies.fileSystem);
-        if (!dataExact(checkpoint, ["coordinationIdentity", "enrollmentBase64", "invitations", "paymentMoved", "phase", "preflight", "rehearsal", "releaseId", "repositorySha", "role", "schema", "sessionId", "stateRoot", "stakeholder"]) || checkpoint.schema !== SUPERVISOR_STATE_SCHEMA || checkpoint.paymentMoved !== false || checkpoint.releaseId !== manifest.releaseId || checkpoint.role !== manifest.role || checkpoint.repositorySha !== manifest.repositorySha || checkpoint.sessionId !== manifest.sessionId || checkpoint.stateRoot !== stateRoot || !/^[0-9a-f]{64}$/.test(manifest.bootstrapCapability)) invalid();
+        const localSecretsKeys = Object.hasOwn(checkpoint, "runMode")
+          ? ["coordinationIdentity", "enrollmentBase64", "invitations", "paymentMoved", "phase", "preflight", "rehearsal", "releaseId", "repositorySha", "role", "runMode", "schema", "sessionId", "stateRoot", "stakeholder"]
+          : ["coordinationIdentity", "enrollmentBase64", "invitations", "paymentMoved", "phase", "preflight", "rehearsal", "releaseId", "repositorySha", "role", "schema", "sessionId", "stateRoot", "stakeholder"];
+        if (!dataExact(checkpoint, localSecretsKeys) || checkpoint.schema !== SUPERVISOR_STATE_SCHEMA || checkpoint.paymentMoved !== false || checkpoint.releaseId !== manifest.releaseId || checkpoint.role !== manifest.role || checkpoint.repositorySha !== manifest.repositorySha || checkpoint.sessionId !== manifest.sessionId || checkpoint.stateRoot !== stateRoot || !/^[0-9a-f]{64}$/.test(manifest.bootstrapCapability)) invalid();
         const enrollment = validateLocalCheckpoint(checkpoint, { capabilityDigest: sha256(Buffer.from(manifest.bootstrapCapability, "hex")), releaseId: manifest.releaseId, repositorySha: manifest.repositorySha, role: manifest.role, sessionId: manifest.sessionId });
         if (!dependencies.createTransport || !dependencies.createCoordinationClient) invalid();
         const client = dependencies.createCoordinationClient({ coordinationIdentity: checkpoint.coordinationIdentity, manifest, transport: await dependencies.createTransport(manifest) });
@@ -801,6 +830,7 @@ export async function createRoleSupervisor({ launchManifestPath, stateRoot, depe
         const localState = Object.freeze({ ...checkpoint, activeLaunchState: result.activeLaunchState, receipt: result.receipt, operatorPublicKey: await dependencies.resolveOperatorPublicKey?.(result.activeLaunchState) });
         return Object.freeze({ async bootstrap() { return state; }, async run() { if (typeof client.readEnrollmentSet !== "function" || typeof client.readEvents !== "function" || typeof localState.operatorPublicKey !== "string") invalid(); return runSupervisor({ client, dependencies, localState }); }, state });
       }
+      assertCheckpointRunMode(checkpoint, runMode, explicitRunMode);
       if (checkpoint.schema !== SUPERVISOR_STATE_SCHEMA || !FULL_CHECKPOINT_PHASES.has(checkpoint.phase) || checkpoint.paymentMoved !== false || checkpoint.role !== "payer" && checkpoint.role !== "payee") invalid();
       if (!dependencies.validateActiveLaunchState || !dependencies.createTransport || !dependencies.resolveOperatorPublicKey || !dependencies.createResumedCoordinationClient) invalid();
       const activeLaunchState = await dependencies.validateActiveLaunchState(checkpoint.activeLaunchState);
@@ -812,7 +842,7 @@ export async function createRoleSupervisor({ launchManifestPath, stateRoot, depe
       if (typeof dependencies.retireLaunchManifest === "function") await dependencies.retireLaunchManifest(launchManifestPath);
       const earlyCheckpoint = checkpoint.events === undefined && checkpoint.enrollmentSet === undefined;
       if (!earlyCheckpoint && ((checkpoint.events === undefined) !== (checkpoint.enrollmentSet === undefined))) invalid();
-      const replay = earlyCheckpoint ? Object.freeze({ senderState: Object.freeze({ previousEventDigest: null, sequence: "0" }) }) : await authenticateSupervisorReplay({ events: checkpoint.events, enrollmentSet: checkpoint.enrollmentSet, operatorPublicKey: await dependencies.resolveOperatorPublicKey(activeLaunchState), releaseId: activeLaunchState.releaseId, repositorySha: checkpoint.repositorySha, sessionId: checkpoint.sessionId, localRole: checkpoint.role, verifyEnrollmentSet: dependencies.verifyEnrollmentSet, verifyVerifierPublication: dependencies.verifyVerifierPublication });
+      const replay = earlyCheckpoint ? Object.freeze({ senderState: Object.freeze({ previousEventDigest: null, sequence: "0" }) }) : await authenticateSupervisorReplay({ events: checkpoint.events, enrollmentSet: checkpoint.enrollmentSet, operatorPublicKey: await dependencies.resolveOperatorPublicKey(activeLaunchState), releaseId: activeLaunchState.releaseId, repositorySha: checkpoint.repositorySha, sessionId: checkpoint.sessionId, localRole: checkpoint.role, runMode: checkpoint.runMode, verifyEnrollmentSet: dependencies.verifyEnrollmentSet, verifyVerifierPublication: dependencies.verifyVerifierPublication });
       const transport = await dependencies.createTransport(activeLaunchState);
       const client = await dependencies.createResumedCoordinationClient({ activeLaunchState, coordinationIdentity: checkpoint.coordinationIdentity, senderState: replay.senderState, transport });
       const state = Object.freeze({ ...checkpoint, ...(earlyCheckpoint ? {} : { enrollmentSet: replay.enrollmentSet, events: replay.events, view: replay.view }), senderState: replay.senderState });
@@ -824,7 +854,7 @@ export async function createRoleSupervisor({ launchManifestPath, stateRoot, depe
   const reader = dependencies.readLaunchManifest ?? readLaunchManifest;
   const manifest = await reader(launchManifestPath, dependencies.fileSystem);
   safePrivateRoot(stateRoot);
-  const base = { paymentMoved: false, releaseId: manifest.releaseId, repositorySha: manifest.repositorySha, role: manifest.role, schema: SUPERVISOR_STATE_SCHEMA, sessionId: manifest.sessionId, stateRoot };
+  const base = { paymentMoved: false, releaseId: manifest.releaseId, repositorySha: manifest.repositorySha, role: manifest.role, ...(explicitRunMode ? { runMode } : {}), schema: SUPERVISOR_STATE_SCHEMA, sessionId: manifest.sessionId, stateRoot };
   let activeClient, activeState;
   async function bootstrap() {
     if (!dependencies.verifyRepositoryState || !dependencies.createCoordinationIdentity || !dependencies.createLocalPreflightEnrollment || !dependencies.createInvitations || !dependencies.createTransport || !dependencies.createCoordinationClient || !dependencies.writeState) invalid();
@@ -893,7 +923,7 @@ export async function runSupervisor(input) {
     do {
       const events = await client.readEvents({ after: null, waitMs: 30000 });
       if (!Array.isArray(events) || previous && (events.length < previous.length || previous.some((event, index) => events[index]?.eventDigest !== event.eventDigest))) invalid();
-      replay = await authenticateSupervisorReplay({ events, enrollmentSet, operatorPublicKey: localState.operatorPublicKey, releaseId: localState.releaseId, repositorySha: localState.repositorySha, sessionId: localState.sessionId, localRole: localState.role, verifyEnrollmentSet: dependencies.verifyEnrollmentSet, verifyVerifierPublication: typeof dependencies.verifyVerifierPublication === "function" ? (input) => dependencies.verifyVerifierPublication(input, client) : undefined });
+      replay = await authenticateSupervisorReplay({ events, enrollmentSet, operatorPublicKey: localState.operatorPublicKey, releaseId: localState.releaseId, repositorySha: localState.repositorySha, sessionId: localState.sessionId, localRole: localState.role, runMode: localState.runMode, verifyEnrollmentSet: dependencies.verifyEnrollmentSet, verifyVerifierPublication: typeof dependencies.verifyVerifierPublication === "function" ? (input) => dependencies.verifyVerifierPublication(input, client) : undefined });
       if (
         !proposedReported &&
         localState.role === "payer" &&

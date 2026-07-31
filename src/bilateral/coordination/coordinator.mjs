@@ -31,6 +31,7 @@ import {
 import {
   initialReleaseView,
   reduceReleaseEvent,
+  RUN_MODES,
 } from "./lifecycle.mjs";
 
 export const COORDINATOR_STATE_SCHEMA =
@@ -100,6 +101,12 @@ const RUN_INPUT_KEYS = Object.freeze([
   "dependencies",
   "release",
   "releaseRoot",
+]);
+const RUN_INPUT_WITH_MODE_KEYS = Object.freeze([
+  "dependencies",
+  "release",
+  "releaseRoot",
+  "runMode",
 ]);
 const RUN_DEPENDENCY_KEYS = Object.freeze([
   "appendOperatorEvent", "createTransport", "displayAddresses", "launcher",
@@ -190,6 +197,12 @@ export class CoordinationCoordinatorError extends Error {
 
 function invalid() {
   throw new CoordinationCoordinatorError();
+}
+
+function normalizeRunMode(value) {
+  if (value === undefined) return "local-two-run";
+  if (!RUN_MODES.includes(value)) invalid();
+  return value;
 }
 
 export function validateCoordinatorIntentReadiness(events, subjectRun) {
@@ -892,7 +905,7 @@ async function runIdentities({ dependencies, enrollments, persisted, release, re
     const returned = await adoptOrAppendOperatorEvent({ dependencies, input: { artifactDigest: registrationArtifactDigest, kind: action, releaseId: release.releaseId, repositorySha: release.repositorySha, sessionId: release.sessionId, subjectRun }, release });
     if (returned.kind !== action || returned.role !== "operator" || returned.subjectRun !== subjectRun || returned.artifactDigest !== registrationArtifactDigest || returned.releaseId !== release.releaseId || returned.repositorySha !== release.repositorySha || returned.sessionId !== release.sessionId || returned.paymentMoved !== false || !SHA256_PATTERN.test(returned.eventDigest)) invalid();
     registrationEventDigest = returned.eventDigest;
-    const registeredState = descriptorState({ checkpoints: [...persisted.checkpoints, Object.freeze({ action, artifactDigest: registrationArtifactDigest, eventDigest: registrationEventDigest, role: "operator", status: "EVENT_APPENDED", subjectRun })], release, state: subjectRun === "rehearsal" ? "PREFLIGHT_PASSED" : "REHEARSAL_VERIFIED" });
+    const registeredState = descriptorState({ checkpoints: [...persisted.checkpoints, Object.freeze({ action, artifactDigest: registrationArtifactDigest, eventDigest: registrationEventDigest, role: "operator", status: "EVENT_APPENDED", subjectRun })], release, state: subjectRun === "rehearsal" ? "PREFLIGHT_PASSED" : persisted.state });
     await dependencies.writeState({ releaseRoot, state: registeredState });
     persisted = registeredState;
     await dependencies.waitForIdentityPackage({ releaseId: release.releaseId, repositorySha: release.repositorySha, sessionId: release.sessionId, subjectRun });
@@ -1139,8 +1152,9 @@ async function adoptOrAppendOperatorEvent({ dependencies, input, release }) {
   return adopted[0];
 }
 
-async function authenticateCoordinatorReplay({ dependencies, enrollments, events, release }) {
+async function authenticateCoordinatorReplay({ dependencies, enrollments, events, release, runMode = "local-two-run" }) {
   if (!Array.isArray(events)) invalid();
+  runMode = normalizeRunMode(runMode);
   let view;
   try {
     view = initialReleaseView({ releaseId: release.releaseId, repositorySha: release.repositorySha, sessionId: release.sessionId });
@@ -1180,7 +1194,7 @@ async function authenticateCoordinatorReplay({ dependencies, enrollments, events
     const sender = senders.get(event.role) ?? { previousEventDigest: null, sequence: 0n };
     if (event.sequence !== sender.sequence.toString() || event.previousEventDigest !== sender.previousEventDigest) invalid();
     senders.set(event.role, { previousEventDigest: event.eventDigest, sequence: sender.sequence + 1n });
-    const options = { expectedPublicKey };
+    const options = { expectedPublicKey, runMode };
     if (event.kind === "VERIFICATION_PASSED") {
       const publication = await dependencies.readVerifierPublication({ subjectRun: event.subjectRun });
       if (publication === null || !verifierPublicationMatchesEvent(publication, event)) invalid();
@@ -1742,7 +1756,13 @@ export async function createCoordinatorRelease(input) {
 }
 
 export async function runCoordinator(input) {
-  const value = exact(input, RUN_INPUT_KEYS);
+  const value = exact(
+    input,
+    isPlainObject(input) && Object.hasOwn(input, "runMode")
+      ? RUN_INPUT_WITH_MODE_KEYS
+      : RUN_INPUT_KEYS,
+  );
+  const runMode = normalizeRunMode(value.runMode);
   const release = value.release;
   const dependencies = exactSubset(value.dependencies, [
     ...RUN_DEPENDENCY_KEYS,
@@ -1797,6 +1817,7 @@ export async function runCoordinator(input) {
     enrollments: Object.freeze({ payer, payee }),
     events,
     release,
+    runMode,
   });
   if (replay.view.paymentMoved !== false) invalid();
   const authenticatedDependencies = Object.freeze({
@@ -1808,6 +1829,7 @@ export async function runCoordinator(input) {
         enrollments: Object.freeze({ payer, payee }),
         events: raw,
         release,
+        runMode,
       })).events;
     },
   });
@@ -1823,7 +1845,7 @@ export async function runCoordinator(input) {
     addresses.some((address) => typeof address !== "string" || !/^0x[0-9a-f]{40}$/.test(address)) ||
     new Set(addresses).size !== 4
   ) invalid();
-  if (["REHEARSAL_VERIFIED", "STAKEHOLDER_IDENTITIES_READY", "STAKEHOLDER_DESCRIPTOR_READY", "STAKEHOLDER_PACKAGES_READY", "STAKEHOLDER_VERIFIED", "COMPLETE"].includes(persisted?.state)) {
+  if (runMode === "local-two-run" && ["REHEARSAL_VERIFIED", "STAKEHOLDER_IDENTITIES_READY", "STAKEHOLDER_DESCRIPTOR_READY", "STAKEHOLDER_PACKAGES_READY", "STAKEHOLDER_VERIFIED", "COMPLETE"].includes(persisted?.state)) {
     await assertDurableVerifierCheckpoint({ dependencies: authenticatedDependencies, persisted, release, subjectRun: "rehearsal" });
   }
   if (["STAKEHOLDER_VERIFIED", "COMPLETE"].includes(persisted?.state)) {
@@ -1838,7 +1860,7 @@ export async function runCoordinator(input) {
       releaseRoot: value.releaseRoot,
     });
   }
-  if (persisted?.state === "PREFLIGHT_PASSED") return runIdentities({ dependencies: authenticatedDependencies, enrollments: { payer, payee }, persisted, release, releaseRoot: value.releaseRoot, subjectRun: "rehearsal" });
+  if (persisted?.state === "PREFLIGHT_PASSED") return runIdentities({ dependencies: authenticatedDependencies, enrollments: { payer, payee }, persisted, release, releaseRoot: value.releaseRoot, subjectRun: runMode === "aws-stakeholder-only" ? "stakeholder" : "rehearsal" });
   if (persisted?.state === "REHEARSAL_IDENTITIES_READY") {
     if (authenticatedDependencies.createDescriptor !== undefined) return beginDescriptor({ dependencies: authenticatedDependencies, persisted, release, releaseRoot: value.releaseRoot, subjectRun: "rehearsal" });
     return deepFreeze({ capabilityDigests: release.capabilityDigests, checkpoints: persisted.checkpoints, events: events.length, paymentMoved: false, releaseId: release.releaseId, repositorySha: release.repositorySha, schema: COORDINATOR_STATE_SCHEMA, sessionId: release.sessionId, state: "REHEARSAL_IDENTITIES_READY" });
@@ -1867,7 +1889,7 @@ export async function runCoordinator(input) {
     fundingRecord(funding[index], addresses[index]);
   }
   await assertRoleFundingReadiness({ dependencies: authenticatedDependencies, release });
-  const fundingReplay = await authenticateCoordinatorReplay({ dependencies, enrollments: Object.freeze({ payer, payee }), events: await dependencies.readEvents({ after: null, waitMs: 0 }), release });
+  const fundingReplay = await authenticateCoordinatorReplay({ dependencies, enrollments: Object.freeze({ payer, payee }), events: await dependencies.readEvents({ after: null, waitMs: 0 }), release, runMode });
   if (fundingReplay.view.state !== "FUNDING_READY") invalid();
   const readyState = descriptorState({ checkpoints: fundingState.checkpoints, release, state: "FUNDING_READY" });
   await dependencies.writeState({ releaseRoot: value.releaseRoot, state: readyState });

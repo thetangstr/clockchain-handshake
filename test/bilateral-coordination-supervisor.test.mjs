@@ -311,6 +311,23 @@ test("builds only exact preflight and registration commands", () => {
   assert.deepEqual(buildSupervisorCommand({ event: { kind: "REGISTER_REHEARSAL", repositorySha: "a".repeat(40), role: "operator", subjectRun: "rehearsal" }, localState: state }), { command: "scripts/register-bilateral-identity.mjs", args: ["--invitation", "/state/rehearsal/invitation", "--output", "/state/rehearsal/identity", "--repository-sha", "a".repeat(40), "--i-understand-this-writes-to-sepolia"] });
 });
 
+test("stakeholder-only supervisor command building rejects rehearsal commands and allows stakeholder commands", () => {
+  const state = {
+    repositorySha: "a".repeat(40),
+    role: "payer",
+    runMode: "aws-stakeholder-only",
+    tokenPath: "/state/token",
+    rehearsal: { invitationPath: "/state/rehearsal/invitation", identityDirectory: "/state/rehearsal/identity" },
+    stakeholder: { descriptorPath: "/state/stakeholder/descriptor", invitationPath: "/state/stakeholder/invitation", identityDirectory: "/state/stakeholder/identity", resultDirectory: "/state/stakeholder/result" },
+  };
+  assert.throws(() => buildSupervisorCommand({ event: { kind: "REGISTER_REHEARSAL", repositorySha: "a".repeat(40), role: "operator", subjectRun: "rehearsal" }, localState: state }));
+  assert.deepEqual(
+    buildSupervisorCommand({ event: { kind: "REGISTER_STAKEHOLDER", repositorySha: "a".repeat(40), role: "operator", subjectRun: "stakeholder" }, localState: state }),
+    { command: "scripts/register-bilateral-identity.mjs", args: ["--invitation", "/state/stakeholder/invitation", "--output", "/state/stakeholder/identity", "--repository-sha", "a".repeat(40), "--i-understand-this-writes-to-sepolia"] },
+  );
+  assert.throws(() => buildSupervisorCommand({ event: { kind: "START_REHEARSAL", repositorySha: "a".repeat(40), role: "operator", subjectRun: "rehearsal" }, localState: state }));
+});
+
 test("authenticates a two-pass signed replay and derives local sender state", async () => {
   const fixture = replayFixture();
   const replay = await authenticateSupervisorReplay({ events: fixture.events, enrollmentSet: fixture.set, operatorPublicKey: raw(fixture.operator), releaseId: fixture.release, repositorySha: fixture.repo, sessionId: fixture.session, localRole: "payer", verifyEnrollmentSet: independentlyVerifiedEnrollmentSet });
@@ -318,6 +335,23 @@ test("authenticates a two-pass signed replay and derives local sender state", as
   assert.equal(replay.senderState.previousEventDigest, fixture.events[0].eventDigest);
   assert.equal(replay.view.state, "ADDRESSES_READY");
   assert.equal(Object.isFrozen(replay), true);
+});
+
+test("stakeholder-only supervisor replay rejects rehearsal-scoped authenticated events", async () => {
+  const fixture = replayFixture();
+  await assert.rejects(
+    authenticateSupervisorReplay({
+      events: replayThroughDescriptor(fixture),
+      enrollmentSet: fixture.set,
+      localRole: "payer",
+      operatorPublicKey: raw(fixture.operator),
+      releaseId: fixture.release,
+      repositorySha: fixture.repo,
+      runMode: "aws-stakeholder-only",
+      sessionId: fixture.session,
+      verifyEnrollmentSet: independentlyVerifiedEnrollmentSet,
+    }),
+  );
 });
 
 test("returns detached frozen replay events", async () => {
@@ -2308,6 +2342,88 @@ test("passes a durable enrollment to fresh client bootstrap", async () => {
   } });
   await supervisor.bootstrap();
   assert.equal(verifyCoordinationEnrollment(enrollment).role, "payer");
+});
+
+test("persists aws-stakeholder-only mode through fresh supervisor bootstrap and matching restart", async () => {
+  const writes = [];
+  const coordination = generateKeyPairSync("ed25519");
+  const preflight = generateKeyPairSync("ed25519");
+  const manifest = { bootstrapCapability: "11".repeat(32), releaseId: "release-a", repositorySha: "a".repeat(40), role: "payer", sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" };
+  const activeLaunchState = Object.freeze({ paymentMoved: false, releaseId: manifest.releaseId, repositorySha: manifest.repositorySha, role: manifest.role, sessionId: manifest.sessionId });
+  let persisted;
+  const dependencies = {
+    async readLaunchManifest() { return manifest; },
+    async readState() { return persisted ?? null; },
+    async verifyRepositoryState() { return true; },
+    async createCoordinationIdentity() { return { keyId: "payer-coordination", privateKeyPem: pem(coordination), publicKey: raw(coordination) }; },
+    async createLocalPreflightEnrollment() { return { privateKeyPath: "/state/preflight/preflight.ed25519.pem", publicArtifact: signedPreflightArtifact(preflight, manifest.repositorySha, manifest.role), publicArtifactPath: "/state/preflight/preflight-key-enrollment.json" }; },
+    async createInvitations() { return [{ subjectRun: "rehearsal", address: `0x${"1".repeat(40)}`, algorithm: "eip191", signature: `0x${"0".repeat(130)}`, secretPath: "/secret/rehearsal" }, { subjectRun: "stakeholder", address: `0x${"2".repeat(40)}`, algorithm: "eip191", signature: `0x${"0".repeat(130)}`, secretPath: "/secret/stakeholder" }]; },
+    async writeState(value) { persisted = value; writes.push(value); },
+    async createTransport() { return {}; },
+    createCoordinationClient() { return { async bootstrap() { return { activeLaunchState, receipt: { id: "receipt" } }; } }; },
+    async validateActiveLaunchState(value) { return value; },
+    async retireLaunchManifest() {},
+  };
+  const first = await createRoleSupervisor({ launchManifestPath: "/launch", runMode: "aws-stakeholder-only", stateRoot: "/state", dependencies });
+  await first.bootstrap();
+  assert.equal(writes[0].phase, "LOCAL_SECRETS_READY");
+  assert.equal(writes[0].runMode, "aws-stakeholder-only");
+  assert.equal(writes[1].phase, "BOOTSTRAPPED_ACTIVE");
+  assert.equal(writes[1].runMode, "aws-stakeholder-only");
+
+  let resumed = 0;
+  const restarted = await createRoleSupervisor({ launchManifestPath: "/retired", runMode: "aws-stakeholder-only", stateRoot: "/state", dependencies: {
+    ...dependencies,
+    async readState() { return persisted; },
+    async resolveOperatorPublicKey() { return raw(generateKeyPairSync("ed25519")); },
+    createCoordinationClient() { throw new Error("fresh client forbidden"); },
+    createResumedCoordinationClient(input) { resumed += 1; assert.equal(input.senderState.sequence, "0"); return {}; },
+    async scanCheckpointDirectories({ checkpoint }) { assert.equal(checkpoint.runMode, "aws-stakeholder-only"); },
+  } });
+  const state = await restarted.bootstrap();
+  assert.equal(state.runMode, "aws-stakeholder-only");
+  assert.equal(resumed, 1);
+});
+
+test("supervisor runMode rejects unknown values and mismatched restart mode before transport", async () => {
+  const fixture = replayFixture();
+  const payerEnrollment = parseCoordinationEnrollmentSet(fixture.set).enrollments.payer;
+  const payer = verifyCoordinationEnrollment(JSON.parse(Buffer.from(payerEnrollment.enrollmentBase64, "base64").toString("utf8")));
+  const checkpoint = { activeLaunchState: { capabilityDigest: payer.capabilityDigest, paymentMoved: false, releaseId: fixture.release, repositorySha: fixture.repo, role: "payer", sessionId: fixture.session }, coordinationIdentity: { keyId: "payer-coordination", privateKeyPem: pem(fixture.payer), publicKey: raw(fixture.payer) }, enrollmentBase64: payerEnrollment.enrollmentBase64, invitations: [{ address: payer.invitations.rehearsal.address, algorithm: "eip191", secretPath: "/secret/rehearsal", signature: payer.invitations.rehearsal.signature, subjectRun: "rehearsal" }, { address: payer.invitations.stakeholder.address, algorithm: "eip191", secretPath: "/secret/stakeholder", signature: payer.invitations.stakeholder.signature, subjectRun: "stakeholder" }], paymentMoved: false, phase: "BOOTSTRAPPED_ACTIVE", preflight: { outputPath: "/state/preflight/report.json", planPath: "/state/preflight/plan.json", privateKeyPath: "/state/preflight/preflight.ed25519.pem", publicArtifact: signedPreflightArtifact(fixture.payerPreflight, fixture.repo, "payer"), publicArtifactPath: "/state/preflight/preflight-key-enrollment.json" }, receipt: {}, rehearsal: { descriptorPath: "/state/rehearsal/descriptor.json", identityDirectory: "/state/rehearsal/identity", invitationPath: "/secret/rehearsal", resultDirectory: "/state/rehearsal/result" }, repositorySha: fixture.repo, role: "payer", runMode: "aws-stakeholder-only", schema: SUPERVISOR_STATE_SCHEMA, sessionId: fixture.session, stateRoot: "/state", stakeholder: { descriptorPath: "/state/stakeholder/descriptor.json", identityDirectory: "/state/stakeholder/identity", invitationPath: "/secret/stakeholder", resultDirectory: "/state/stakeholder/result" } };
+  for (const runMode of ["local-two-run", undefined]) {
+    let transport = 0;
+    await assert.rejects(createRoleSupervisor({ launchManifestPath: "/retired", ...(runMode === undefined ? {} : { runMode }), stateRoot: "/state", dependencies: {
+      async readState() { return checkpoint; },
+      async validateActiveLaunchState(value) { return value; },
+      async createTransport() { transport += 1; return {}; },
+      async resolveOperatorPublicKey() { return raw(fixture.operator); },
+      createResumedCoordinationClient() { return {}; },
+      async readStoredPayerMcpIntake() { return payerIntakeRecord(fixture.repo); },
+    } }));
+    assert.equal(transport, 0);
+  }
+  await assert.rejects(createRoleSupervisor({ launchManifestPath: "/launch", runMode: "aws", stateRoot: "/state", dependencies: { async readState() { return null; } } }));
+});
+
+test("legacy supervisor checkpoints keep local-two-run default without a runMode field", async () => {
+  const writes = [];
+  const key = generateKeyPairSync("ed25519"), preflight = generateKeyPairSync("ed25519");
+  const supervisor = await createRoleSupervisor({ launchManifestPath: "/launch", stateRoot: "/state", dependencies: {
+    async readLaunchManifest() { return { bootstrapCapability: "11".repeat(32), releaseId: "release-a", repositorySha: "a".repeat(40), role: "payer", sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }; },
+    async verifyRepositoryState() { return true; },
+    async createCoordinationIdentity() { return { keyId: "payer-coordination", privateKeyPem: pem(key), publicKey: raw(key) }; },
+    async createLocalPreflightEnrollment() { return { privateKeyPath: "/state/preflight/preflight.ed25519.pem", publicArtifact: signedPreflightArtifact(preflight, "a".repeat(40), "payer"), publicArtifactPath: "/state/preflight/preflight-key-enrollment.json" }; },
+    async createInvitations() { return [{ subjectRun: "rehearsal", address: `0x${"1".repeat(40)}`, algorithm: "eip191", signature: `0x${"0".repeat(130)}`, secretPath: "/a" }, { subjectRun: "stakeholder", address: `0x${"2".repeat(40)}`, algorithm: "eip191", signature: `0x${"0".repeat(130)}`, secretPath: "/b" }]; },
+    async createTransport() { return {}; },
+    createCoordinationClient() { return { async bootstrap() { return { activeLaunchState: { paymentMoved: false, releaseId: "release-a", repositorySha: "a".repeat(40), role: "payer", sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }, receipt: {} }; } }; },
+    async writeState(value) { writes.push(value); },
+    async readState() { return writes.at(-1); },
+    async validateActiveLaunchState(value) { return value; },
+    async retireLaunchManifest() {},
+  } });
+  await supervisor.bootstrap();
+  assert.equal(Object.hasOwn(writes[0], "runMode"), false);
+  assert.equal(Object.hasOwn(writes[1], "runMode"), false);
 });
 
 test("rejects hostile enrollment factories before bootstrap transport", async () => {
