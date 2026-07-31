@@ -25,76 +25,46 @@ the exit it produces, and the next action for the operator.
 
 ## Bilateral payment-authorization demo
 
-The operator-led bilateral flow uses separate role computers. Payer is the
-payer. Requestor is the payment requestor. Start with the
-[three-computer quick-start](docs/runbooks/bilateral-demo-quick-start.md), then
-use the [bilateral demo-day runbook](docs/runbooks/bilateral-demo-day.md) and
-deliver the machine-specific [Payer prompt](prompts/run-payer-bilateral-demo.md)
-and [Requestor prompt](prompts/run-requestor-bilateral-demo.md) from one reviewed
-immutable repository SHA. The public
-[live-demo helper](https://clockchain-research.vercel.app/handshake/run)
-explains the same workflow but never receives live evidence.
+The bilateral demo is hosted on AWS. Payer is the payer and Requestor is the
+payment requestor. Each stakeholder runs one locally installed ChatGPT Codex,
+Claude Code, or Hermes agent on macOS, Windows, or Linux. Web-only agents are
+unsupported. Start with the
+[quick start](docs/runbooks/bilateral-demo-quick-start.md), use the
+[operator runbook](docs/runbooks/bilateral-demo-day.md), and give stakeholders
+only the public [Payer prompt](prompts/run-payer-bilateral-demo.md) or
+[Requestor prompt](prompts/run-requestor-bilateral-demo.md) plus the applicable
+signed public discovery URL. The
+[public run page](https://clockchain-research.vercel.app/handshake/run) shows
+secret-free live progress.
 
-Demo-day role mapping is fixed. Stakeholder 1 is Payer, the payer. Stakeholder 2 is Requestor, the payment requestor. The human operator runs the relay, coordinator, watcher,
-read-only console, reusable Sepolia treasury, and fresh aggregate verifier from this Mac. The
-reusable Sepolia treasury is funding authority only for deterministic testnet
-gas top-ups through `npm run bilateral:fund`; it never signs participant
-registration, role, watcher, or verifier actions.
+The AWS operator console presents five normal actions in order: **Start run**,
+**Approve Payer**, **Approve Requestor**, **Fund**, and **Verify**. **Abort** is
+the only exceptional action. Stakeholders never receive a launch manifest,
+certificate attachment, invitation, token, capability, private key, private
+path, or live evidence file.
 
-The long-lived supervisors automatically create the Payer-signed mandate and
-the matching Requestor-signed request without operator-authored commercial terms
-or manual artifact copying. Payer anchors an exact USD 100 proposal, Requestor
-anchors an acceptance bound to that proposal, and Payer anchors the final
-acknowledgment. For a session that
-the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence
-establishes that Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and
-`ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`. The protocol does not download message
-bytes from Clockchain. Every transition and verdict preserves
+Payer's one-shot wrapper starts the Payer-owned TLS MCP payment-intake service
+and restricted outbound AWS tunnel. After `PAYER_MCP_READY`, Requestor's
+one-shot wrapper calls Payer MCP, receives `HANDSHAKE_REQUIRED`, obtains its
+sealed bootstrap after operator approval, and follows the signed mandate
+without a second prompt.
+
+The authority sequence is `PROPOSED` → `ACCEPTED` → `ACKNOWLEDGED` → fresh
+aggregate verification. Exactly three independently verifiable Clockchain
+anchors must exist in that order. The console, relay, coordinator, MCP,
+publisher, public monitor, and role-local output cannot issue the final
+authorization verdict. Missing, duplicate, reordered, expired, malformed, or
+mismatched evidence fails closed. Every transition preserves
 `paymentMoved: false`.
 
-The payment-intake path uses a Payer-owned TLS MCP `/mcp` endpoint that binds
-only to Payer loopback and is exposed through an AWS raw-TCP relay. The hosted
-Clockchain MCP service is not used for `request_payment`; AWS never terminates
-Payer MCP TLS. Requestor asks Payer's MCP for payment, receives
-`HANDSHAKE_REQUIRED`, and only then the Requestor wrapper starts the long-lived
-supervisor that follows the signed mandate through the relay-backed handshake.
+Funding is replay-safe testnet gas preparation: the reusable Sepolia treasury
+sends exactly four `0.01 Sepolia ETH` allocations only after the signed
+four-address record is ready. It never moves the represented payment and never
+signs participant or verifier actions.
 
-Runner local state is not operator authorization. Neither role runner nor the
-read-only watcher may emit `AUTHORIZED`; only the operator's fresh aggregate
-verifier may do so after independently refetching and validating all three
-Clockchain anchors. Missing, duplicate, reordered, expired, malformed, or
-mismatched evidence fails closed.
-
-The automated demo-day surface is CLI-first:
-
-```sh
-npm run bilateral:relay -- <operator relay paths and pinned release SHA>
-npm run bilateral:coordinator -- <operator-local paths and pinned release SHA>
-npm run bilateral:console -- --state-root <operator release root>
-npm run bilateral:supervisor -- --launch-manifest <payer manifest> --state <payer private state> --payer-mcp-host 127.0.0.1 --payer-mcp-port <port> --payer-mcp-public-url <public relay URL> --payer-mcp-tls-certificate <public cert> --payer-mcp-tls-private-key <private key>
-npm run bilateral:request-payment -- --discovery-url <stable signed discovery URL> --intake-request-id <uuidv4> --state <requestor private state>
-```
-
-The startup control order is:
-`relay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
-Here, funding means validating and arming the reusable Sepolia treasury lane
-before either role starts. The actual funding batch waits for the coordinator's
-signed address record. After enrollment reveals the four fresh addresses, the
-operator executes exactly four `0.01 Sepolia ETH` allocations.
-
-Run the Payer supervisor command once, publish one stable signed discovery URL
-after `PAYER_MCP_READY`, then give Requestor only that URL. The Requestor
-request-payment wrapper uses no attachment, launch manifest, certificate file,
-or fingerprint handoff; it starts the Requestor supervisor after the operator
-approves exactly one pending bootstrap claim. Those two role processes span the
-rehearsal and stakeholder runs. After they enroll, the coordinator displays
-four signed public addresses; funding those four addresses is the user's only
-other action. Low-level preparation and exact-input recovery commands are
-confined to the runbook's operator-authorized recovery appendix.
-
-Passing deterministic checks makes this release rehearsal-ready, not
-live-validated. Only a funded physical rehearsal whose fresh aggregate
-verifier publishes independently re-verifiable evidence is live-validated.
+A2A is intentionally absent. Payer MCP is the payment-intake/guidance surface.
+Signed relay events and Clockchain receipts are the authority surfaces. A
+second advisory messaging protocol would not replace either authority boundary.
 
 ## Operator-only clean-client acceptance
 

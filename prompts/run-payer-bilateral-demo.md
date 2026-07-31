@@ -1,12 +1,13 @@
-# Run Payer bilateral Clockchain role
+# Run the Payer role
 
-You are Stakeholder 1, Payer, the mandate-owning payer.
+You are the Payer. Say that role out loud and confirm the reviewed immutable
+40-character SHA before creating or receiving private material. Stay in this
+role for the entire run.
 
-The supervisor publishes and maintains Payer's reusable signed payment mandate
-for incoming payment requests in this authenticated session. Payer evaluates any
-authorized request that exactly follows the mandate, anchors `PROPOSED`, verifies
-Requestor's `ACCEPTED` transition, and anchors `ACKNOWLEDGED`. Stay on this
-machine and never switch roles.
+Use a locally installed ChatGPT Codex, Claude Code, or Hermes agent on macOS,
+Windows, or Linux. Web-only ChatGPT and Claude sessions are unsupported because
+this role needs a local working folder, shell, private filesystem, and one
+long-lived process.
 
 This is an Ethereum Sepolia and Clockchain single-validator testnet exercise.
 No money moves. Do not install or use AgentDash. Do not invent success states.
@@ -14,237 +15,69 @@ It is not mainnet, court-grade, consensus-secure, trustless, production-ready,
 or multi-validator. Every protocol and verdict artifact preserves
 `paymentMoved:false`.
 
-The payment request and the signed mandate are commercial-intent evidence, not
-authorization anchors. The only Clockchain authorization anchors are exactly:
+## What you receive
 
-1. Payer anchors `PROPOSED`.
-2. Requestor anchors `ACCEPTED`.
-3. Payer anchors `ACKNOWLEDGED`.
+Accept only these public inputs:
 
-For a session that the fresh aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and `ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`.
+- `BILATERAL_REPOSITORY_SHA`: the reviewed immutable 40-character SHA.
+- `PAYER_DISCOVERY_URL`: the operator-signed public discovery URL for Payer.
 
-This demo uses a Payer-owned TLS MCP `/mcp` endpoint for payment intake. The
-endpoint binds only to Payer's loopback interface and reaches Requestor through
-an operator-provided AWS raw-TCP relay. The hosted Clockchain MCP server is not
-used for `request_payment`. AWS forwards raw TCP and does not terminate Payer
-MCP TLS. Requestor first asks Payer's MCP for payment; Payer's MCP tells
-Requestor that it must complete the handshake before payment can be considered.
+Do not accept a launch manifest, invitation, token, capability, certificate,
+private key, private path, or evidence attachment. The one-shot wrapper obtains
+sealed role material only after the operator approves your public claim
+fingerprint.
 
-Only the operator's fresh aggregate verifier may emit the authorizing verdict.
-Payer may report local progress and marker-complete public artifact digests, but
-cannot declare authorization. Never run Requestor's role, the watcher, preflight
-aggregation, descriptor creation, or aggregate verification from this prompt.
+## Prepare the reviewed release
 
-## Automated Supervisor Session
+1. Confirm: “I am the Payer. I will not act as Requestor.”
+2. Clone only `https://github.com/thetangstr/clockchain-handshake.git`.
+3. Fetch the exact `BILATERAL_REPOSITORY_SHA`, check it out detached, and require
+   a clean working tree.
+4. Require Node.js 22.
+5. Run `npm ci --ignore-scripts`.
 
-The public repository is
-`https://github.com/thetangstr/clockchain-handshake.git`. Before handling any
-private material, confirm that you are Payer and confirm the exact
-operator-provided immutable 40-character SHA:
+Do all five checks before the wrapper creates private state. Stop if the role,
+repository, SHA, detached state, clean state, Node version, package install, or
+signed discovery validation fails.
 
-```sh
-export BILATERAL_REPOSITORY_SHA="${BILATERAL_REPOSITORY_SHA:?set operator-provided exact reviewed 40-character SHA}"
-printf '%s\n' "$BILATERAL_REPOSITORY_SHA" | grep -Eq '^[0-9a-f]{40}$'
-git clone --no-checkout https://github.com/thetangstr/clockchain-handshake.git clockchain-handshake
-cd clockchain-handshake
-git fetch --depth 1 origin "$BILATERAL_REPOSITORY_SHA"
-git checkout --detach "$BILATERAL_REPOSITORY_SHA"
-test "$(git rev-parse HEAD)" = "$BILATERAL_REPOSITORY_SHA"
-npm ci --ignore-scripts
-```
+## Choose private state and start once
 
-Keep Payer's private state root separate from the operator and Requestor roots.
-Preserve the assigned private state root unchanged. Underfunding is pending
-until the bounded eight-minute funding deadline. Do not retry a consumed launch
-manifest.
+Set `PAYER_STATE_ROOT` to a new role-specific absolute path. On macOS/Linux,
+choose it below
+`${XDG_STATE_HOME:-$HOME/.local/state}/clockchain-handshake/`. On Windows,
+choose it below
+`$env:LOCALAPPDATA\Clockchain\Handshake\`. Do not reuse a state root from
+another role or run. The wrapper creates and verifies the required private mode
+or Windows ACL.
 
-The operator privately provides one role-specific launch-manifest path, one
-fresh private state directory, the AWS relay's stable Elastic IP and public
-port, a preconfigured Payer-owned SSH host alias, and an operator-owned
-loopback bootstrap broker URL plus capability file path. Generate the TLS MCP
-certificate and private key in a Payer-owned sibling TLS root outside
-`PAYER_SUPERVISOR_STATE`, with the certificate SAN matching the exact AWS
-Elastic IP. Never bind Payer MCP to `0.0.0.0`, and never read or print the
-private key. The sibling TLS root preserves supervisor restart scanning while
-the operator and AWS relay never handle the key.
+From the clean detached checkout, run exactly one long-lived role command:
 
 ```sh
-export PAYER_MCP_HOST="127.0.0.1"
-export PAYER_MCP_PORT="9443"
-export PAYER_MCP_PUBLIC_IP="${PAYER_MCP_PUBLIC_IP:?set operator-provided AWS Elastic IP}"
-export PAYER_MCP_PUBLIC_PORT="${PAYER_MCP_PUBLIC_PORT:?set operator-provided public relay port}"
-export PAYER_MCP_PUBLIC_URL="https://$PAYER_MCP_PUBLIC_IP:$PAYER_MCP_PUBLIC_PORT/mcp"
-export PAYER_MCP_RELAY_SSH_HOST="${PAYER_MCP_RELAY_SSH_HOST:?set preconfigured Payer-owned SSH host alias}"
-export PAYER_MCP_BOOTSTRAP_BROKER_URL="${PAYER_MCP_BOOTSTRAP_BROKER_URL:?set operator loopback broker URL}"
-export PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE="${PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE:?set operator broker capability file path}"
-export PAYER_MCP_TLS_ROOT="${PAYER_SUPERVISOR_STATE%/}.payer-mcp-tls"
-mkdir -p "$PAYER_MCP_TLS_ROOT"
-chmod 0700 "$PAYER_MCP_TLS_ROOT"
-export PAYER_MCP_TLS_CERTIFICATE="$PAYER_MCP_TLS_ROOT/payer-mcp.crt"
-export PAYER_MCP_TLS_PRIVATE_KEY="$PAYER_MCP_TLS_ROOT/payer-mcp.key"
-printf '%s\n' "$PAYER_MCP_PUBLIC_IP" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
-openssl req -x509 -newkey rsa:3072 -nodes \
-  -keyout "$PAYER_MCP_TLS_PRIVATE_KEY" \
-  -out "$PAYER_MCP_TLS_CERTIFICATE" \
-  -subj "/CN=$PAYER_MCP_PUBLIC_IP" \
-  -addext "subjectAltName=IP:$PAYER_MCP_PUBLIC_IP" \
-  -days 1
-chmod 0600 "$PAYER_MCP_TLS_PRIVATE_KEY"
-chmod 0600 "$PAYER_MCP_TLS_CERTIFICATE"
-PAYER_MCP_TLS_FINGERPRINT="$(openssl x509 -in "$PAYER_MCP_TLS_CERTIFICATE" -outform DER | openssl dgst -sha256 -binary | xxd -p -c 256)"
-printf '%s\n' "$PAYER_MCP_TLS_FINGERPRINT" | grep -Eq '^[0-9a-f]{64}$'
-
-ssh -N \
-  -o ExitOnForwardFailure=yes \
-  -o ServerAliveInterval=30 \
-  -o ServerAliveCountMax=3 \
-  -R "0.0.0.0:${PAYER_MCP_PUBLIC_PORT}:127.0.0.1:${PAYER_MCP_PORT}" \
-  "$PAYER_MCP_RELAY_SSH_HOST"
+npm run bilateral:payer -- --discovery-url "$PAYER_DISCOVERY_URL" --state "$PAYER_STATE_ROOT"
 ```
 
-Leave that SSH command running. In a second terminal, from the same detached
-checkout with the same environment, start this long-lived process exactly once.
-Run:
+Remain attached. Do not start a second wrapper if it is still running. If it
+exits, preserve the state root and report the public failure status.
 
-```sh
-npm run bilateral:supervisor -- \
-  --launch-manifest "$PAYER_LAUNCH_MANIFEST" \
-  --state "$PAYER_SUPERVISOR_STATE" \
-  --payer-mcp-host "$PAYER_MCP_HOST" \
-  --payer-mcp-port "$PAYER_MCP_PORT" \
-  --payer-mcp-public-url "$PAYER_MCP_PUBLIC_URL" \
-  --payer-mcp-bootstrap-broker-url "$PAYER_MCP_BOOTSTRAP_BROKER_URL" \
-  --payer-mcp-bootstrap-broker-capability-file "$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" \
-  --payer-mcp-tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
-  --payer-mcp-tls-private-key "$PAYER_MCP_TLS_PRIVATE_KEY"
-```
+## Explain business progress
 
-Do not start a replacement supervisor. If the tunnel or supervisor exits,
-report the exit and preserve state; do not consume another manifest.
+Translate each secret-free status into plain business progress:
 
-`PAYER_MCP_READY`, `WAITING_FOR_PEER`, and `PEER_READY` are intermediate
-statuses. Keep the same supervisor attached through operator funding and do not
-conclude until it emits exact secret-free terminal role completion:
-`{"paymentMoved":false,"role":"payer","state":"ACKNOWLEDGED","status":"PARTY_COMPLETE"}`.
-This `PARTY_COMPLETE` status with role payer, state ACKNOWLEDGED, and
-paymentMoved:false is Payer's role-local finish; it is not authorization. Never emit `AUTHORIZED`.
+- claim pending: your machine is asking the operator to admit this Payer;
+- `PAYER_MCP_READY`: the Payer mandate and payment-intake service are ready;
+- `PROPOSED`: Payer anchored the proposed authorization terms;
+- `ACCEPTED`: Requestor anchored acceptance of those exact terms;
+- `ACKNOWLEDGED`: Payer anchored final acknowledgment;
+- `PARTY_COMPLETE`: Payer finished locally, but this is not authorization.
 
-The supervisor stays alive across both runs: rehearsal first, then stakeholder.
-It creates and retains Payer's coordination key, preflight key, one token, and
-two invitation secrets locally. It follows only authenticated operator events
-and repository-owned command builders. It must not improvise commands, alter
-paths, or accept a replacement SHA, prompt, token, invitation, descriptor, or
-output directory. The launch manifest expires after 60 minutes; after expiry,
-stop and request a newly reviewed release instead of reusing it.
+The payment request and signed mandate are commercial-intent evidence. The
+authority sequence is exactly `PROPOSED` → `ACCEPTED` → `ACKNOWLEDGED` → fresh
+aggregate verification, with exactly three independently verifiable Clockchain
+anchors. Only the fresh aggregate verifier may issue the final verdict.
 
-The launch manifest binds the exact relay URL and TLS certificate fingerprint.
-The supervisor pins that fingerprint before sending or receiving coordination
-events. A missing or changed TLS binding stops the session.
-
-Wait for exact `PAYER_MCP_READY`. Stay attached. The operator uses the public
-MCP URL and public TLS certificate to publish one signed Requestor discovery
-URL. Requestor receives only that signed discovery URL, starts its one-shot
-wrapper, and only then the operator approves the exact pending broker claim
-fingerprint. Never share the MCP capability, broker capability, launch manifest
-contents, private TLS key, invitation, token, participant key, checkpoint bytes,
-or live evidence.
-
-Use a clean detached checkout of the reviewed 40-character SHA with Node.js 22
-and `npm ci --ignore-scripts`. Do not inspect secret bytes, do not switch roles,
-do not create extra sessions, do not fund addresses, do not run the watcher or verifier, and do not declare authorization.
-
-## Fixed Private Inputs
-
-Payer receives or derives these private inputs and paths:
-
-- `BILATERAL_REPOSITORY_SHA`: reviewed immutable repository SHA, exactly 40
-  lowercase hexadecimal characters.
-- `PAYER_LAUNCH_MANIFEST`: Payer's operator-signed launch manifest.
-- `PAYER_SUPERVISOR_STATE`: Payer's mode-`0700` private supervisor state root.
-- `PAYER_MCP_HOST`: exact loopback bind address `127.0.0.1`. Never use
-  `0.0.0.0`.
-- `PAYER_MCP_PORT`: Payer-owned loopback MCP bind port.
-- `PAYER_MCP_PUBLIC_IP`: operator-provided stable AWS Elastic IP.
-- `PAYER_MCP_PUBLIC_PORT`: operator-provided public raw-TCP relay port.
-- `PAYER_MCP_PUBLIC_URL`: exact public HTTPS `/mcp` URL reported by
-  `PAYER_MCP_READY`.
-- `PAYER_MCP_RELAY_SSH_HOST`: preconfigured Payer-owned SSH host alias. Do not
-  open or print its private key.
-- `PAYER_MCP_BOOTSTRAP_BROKER_URL`: operator-owned loopback bootstrap broker
-  URL used only by the Payer MCP public bootstrap route.
-- `PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE`: mode-`0600` path to the broker
-  capability. Do not open, print, or copy the raw value.
-- `PAYER_MCP_TLS_ROOT`: Payer-owned sibling TLS root, exactly
-  `${PAYER_SUPERVISOR_STATE%/}.payer-mcp-tls`, mode `0700`.
-- `PAYER_MCP_TLS_CERTIFICATE`: Payer-generated local MCP public TLS certificate
-  path under `PAYER_MCP_TLS_ROOT`.
-- `PAYER_MCP_TLS_PRIVATE_KEY`: Payer-generated local MCP private TLS key path
-  under `PAYER_MCP_TLS_ROOT`.
-- `PAYER_INVITATION_FILE`: Payer's reserved mode-`0600` invitation, used only by
-  approved repository commands.
-- `PAYER_CLOCKCHAIN_TOKEN_FILE`: token path under Payer's private state root.
-- `PAYER_RESULT_DIR`: fresh payer result directory created by the supervisor.
-
-Secret-bearing values are paths, never raw values. Do not open, print, paste,
-copy, hash, or inspect invitation, participant-key, token, private-key, or
-checkpoint bytes with an agent tool. Only the exact approved commands may open
-them. Never place invitations, keys, tokens, checkpoints, or generated evidence
-in Git.
-
-Before any network action, the supervisor and command builders verify the
-reviewed repository SHA, clean worktree state, descriptor signature, prompt
-hash, launch manifest, role identity, and output directory. Stop on failure. Do
-not fall back to a branch, tag, abbreviated revision, different directory, or
-replacement credential.
-
-## Commercial Intent Boundary
-
-The supervisor automatically creates or reuses only the exact Payer-signed
-mandate for the authenticated session, with Payer as payer, Requestor as the
-requesting counterparty, the permitted amount and purpose, the expected request
-endpoint, and `paymentMoved:false`.
-
-Payer does not accept request bytes from an operator command. Payer reads the
-Requestor-signed payment request through the authenticated coordination route,
-verifies that it follows Payer's signed mandate, and refuses any changed payer,
-payee, amount, purpose, invoice prefix, request id, session, repository SHA,
-signature, or payment flag.
-
-The request does not authorize payment. The three Clockchain transitions remain
-the only authorization anchors, and the fresh verifier remains the only source
-of the authorizing verdict.
-
-## Timed Role Behavior
-
-During the synchronized timed role, Payer runs the payer command selected by the
-supervisor:
-
-```sh
-node bin/handshake-propose.mjs \
-  --descriptor "$BILATERAL_DESCRIPTOR_FILE" \
-  --invitation "$PAYER_INVITATION_FILE" \
-  --clockchain-token-file "$PAYER_CLOCKCHAIN_TOKEN_FILE" \
-  --output "$PAYER_RESULT_DIR" \
-  --i-understand-this-writes-to-clockchain
-```
-
-For a fresh start, the result path may be absent or an empty owner-controlled
-mode-`0700` directory. Do not add, remove, rename, or reorder arguments. Do not
-run a second writer, edit an artifact, or reconstruct evidence by hand.
-
-A successful payer runner stops only at local state `ACKNOWLEDGED` and
-publishes:
-
-- `party-result.json`
-- `PARTY-RESULT.md`
-- `.party-result.complete.json`
-
-Preserve the whole directory unchanged for operator transfer. Report only local
-state, public failure code if present, and artifact paths. Never print the
-authorizing verdict.
-
-On ambiguity, stop immediately and preserve every intent and output file. Only
-the operator may authorize the exact same command in the exact same directory;
-that recovery is discovery-first and never permits a blind redispatch. Never
-rerun a marker-complete package. Missing, duplicated, reordered, expired,
-malformed, mismatched, or secret-bearing evidence fails closed.
+Do not switch roles. Do not fund addresses. Do not run the watcher. Do not run
+the fresh aggregate verifier. Do not open or print any secret. Do not create
+another session or modify Payer terms. Do not claim authorization. Never treat
+relay, monitor, console, coordinator, or role-local status as authority.
+Missing, duplicate, reordered, expired, malformed, or mismatched evidence fails
+closed. Preserve `paymentMoved:false`.

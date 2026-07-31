@@ -1678,6 +1678,147 @@ function readmeRoleplayFailures(contents) {
   return failures;
 }
 
+function awsBilateralContractFailures(
+  relativePath,
+  contents,
+) {
+  const failures = [];
+  const require = (label, pattern) => {
+    if (!pattern.test(contents)) {
+      failures.push(
+        `${relativePath}: missing hosted bilateral ${label}.`,
+      );
+    }
+  };
+  for (const [label, pattern] of [
+    ["reviewed immutable SHA", /reviewed immutable\s+(?:40-character\s+)?(?:repository\s+)?SHA/i],
+    ["exact three-anchor sequence", /PROPOSED[\s\S]*ACCEPTED[\s\S]*ACKNOWLEDGED[\s\S]*fresh (?:aggregate )?verifi/i],
+    ["three independently verifiable anchors", /exactly\s+three\s+independently\s+verifiable\s+Clockchain\s+anchors/i],
+    ["fresh-verifier authority boundary", /only\s+the\s+fresh\s+aggregate\s+verifier/i],
+    ["false payment movement", /paymentMoved:\s?false|paymentMoved:false/],
+  ]) {
+    require(label, pattern);
+  }
+
+  if (relativePath.startsWith("prompts/")) {
+    const payer =
+      relativePath ===
+      "prompts/run-payer-bilateral-demo.md";
+    const role = payer ? "Payer" : "Requestor";
+    const discovery = payer
+      ? "PAYER_DISCOVERY_URL"
+      : "REQUESTOR_DISCOVERY_URL";
+    const state = payer
+      ? "PAYER_STATE_ROOT"
+      : "REQUESTOR_STATE_ROOT";
+    const command = payer
+      ? 'npm run bilateral:payer -- --discovery-url "$PAYER_DISCOVERY_URL" --state "$PAYER_STATE_ROOT"'
+      : 'npm run bilateral:request-payment -- --discovery-url "$REQUESTOR_DISCOVERY_URL" --state "$REQUESTOR_STATE_ROOT"';
+    for (const [label, pattern] of [
+      ["role identity", new RegExp(`You are the ${role}\\b`, "i")],
+      ["pre-private role and SHA check", /before creating or receiving private material/i],
+      ["signed public discovery", new RegExp(`signed public[\\s\\S]*${discovery}`, "i")],
+      ["clean detached checkout", /clean detached checkout/i],
+      ["Node.js 22", /Node\.js 22/i],
+      ["safe install", /npm ci --ignore-scripts/],
+      ["private state root", new RegExp(`${state}[\\s\\S]*(?:XDG_STATE_HOME|LOCALAPPDATA)`, "i")],
+      ["locally installed agents", /locally installed (?:ChatGPT )?Codex[\s\S]*Claude Code[\s\S]*Hermes/i],
+      ["desktop operating systems", /macOS,\s+Windows,\s+or\s+Linux/i],
+      ["web-only exclusion", /web-only (?:ChatGPT|Claude)[^.]*unsupported/i],
+      ["remain attached", /remain attached/i],
+      ["business progress", /business progress/i],
+      ["no role switching", /do not switch roles/i],
+      ["no funding", /do not fund/i],
+      ["no verifier", /do not run\s+(?:the\s+)?(?:fresh\s+)?(?:aggregate\s+)?verifier/i],
+      ["no secret display", /do not (?:open|print|display|paste|share)[^.]*secret/i],
+      ["no authorization claim", /do not claim authorization/i],
+    ]) {
+      require(label, pattern);
+    }
+    if (
+      tokenOccurrences(contents, command).length !== 1
+    ) {
+      failures.push(
+        `${relativePath}: must contain exactly one hosted ${role} command.`,
+      );
+    }
+    for (const [label, pattern] of [
+      ["manual launch manifest", /--launch-manifest\b|_LAUNCH_MANIFEST\b/],
+      ["manual supervisor", /npm run bilateral:supervisor\b/],
+      ["manual SSH", /\bssh\s+-N\b|\bSSH alias\b/i],
+      ["local endpoint", /\blocalhost\b|\b127\.0\.0\.1\b/],
+      ["private attachment", /\battach(?:ment|ed)?\b[^.\n]*(?:manifest|certificate|private|secret)/i],
+    ]) {
+      if (pattern.test(contents)) {
+        failures.push(
+          `${relativePath}: contains obsolete hosted bilateral ${label}.`,
+        );
+      }
+    }
+  } else {
+    for (const [label, pattern] of [
+      ["AWS operator console", /AWS operator console/i],
+      ["Start run action", /\bStart run\b/i],
+      ["Approve Payer action", /\bApprove Payer\b/i],
+      ["Approve Requestor action", /\bApprove Requestor\b/i],
+      ["Fund action", /\bFund\b/i],
+      ["Verify action", /\bVerify\b/i],
+      ["Abort action", /\bAbort\b/i],
+      ["A2A boundary", /A2A is intentionally absent/i],
+      ["Payer MCP guidance", /Payer MCP is the payment-intake\/guidance surface/i],
+      ["authority surfaces", /signed relay events and Clockchain receipts are the authority surfaces/i],
+    ]) {
+      require(label, pattern);
+    }
+    for (const [label, pattern] of [
+      ["Mac terminal", /\bMac terminal\b/i],
+      ["manual manifest", /\bmanual(?:ly)?\b[^.\n]*\bmanifest\b/i],
+      ["certificate attachment", /\bcertificate attachment\b/i],
+      ["SSH alias", /\bSSH alias\b/i],
+      ["localhost monitor", /\blocalhost monitor\b/i],
+    ]) {
+      if (pattern.test(contents)) {
+        failures.push(
+          `${relativePath}: contains obsolete hosted operator ${label}.`,
+        );
+      }
+    }
+  }
+  return failures;
+}
+
+function awsReadmeRoleplayFailures(contents) {
+  const failures = [];
+  const requirements = [
+    ["hosted AWS boundary", /bilateral demo is hosted on AWS/i],
+    ["local agent support", /locally installed ChatGPT Codex[\s\S]*Claude Code[\s\S]*Hermes/i],
+    ["web-only exclusion", /web-only agents\s+are\s+unsupported/i],
+    ["Start run action", /\bStart run\b/i],
+    ["Approve Payer action", /\bApprove Payer\b/i],
+    ["Approve Requestor action", /\bApprove Requestor\b/i],
+    ["Fund action", /\bFund\b/i],
+    ["Verify action", /\bVerify\b/i],
+    ["Abort action", /\bAbort\b/i],
+    ["exact three anchors", /exactly\s+three\s+independently\s+verifiable\s+Clockchain\s+anchors/i],
+    ["A2A boundary", /A2A is intentionally absent/i],
+    ["public helper URL", /https:\/\/clockchain-research\.vercel\.app\/handshake\/run/],
+  ];
+  for (const [label, pattern] of requirements) {
+    if (!pattern.test(contents)) {
+      failures.push(
+        `README.md: missing hosted bilateral ${label}.`,
+      );
+    }
+  }
+  failures.push(
+    ...bilateralNamingAndMovementFailures(
+      "README.md",
+      contents,
+    ),
+  );
+  return failures;
+}
+
 function isPlainRoot(rootDirectory) {
   return (
     typeof rootDirectory === "string" &&
@@ -2501,7 +2642,7 @@ export async function checkDocumentation({
     }
     if (BILATERAL_PUBLIC_DOCUMENTS.includes(relativePath)) {
       failures.push(
-        ...bilateralContractFailures(relativePath, contents),
+        ...awsBilateralContractFailures(relativePath, contents),
         ...bilateralNamingAndMovementFailures(
           relativePath,
           contents,
@@ -2571,7 +2712,7 @@ export async function checkDocumentation({
     failures.push(...promptContractFailures(prompt));
   }
   if (readme !== undefined) {
-    failures.push(...readmeRoleplayFailures(readme));
+    failures.push(...awsReadmeRoleplayFailures(readme));
     const embeddedPrompt = extractReadmePrompt(readme);
     if (embeddedPrompt === null) {
       failures.push(
