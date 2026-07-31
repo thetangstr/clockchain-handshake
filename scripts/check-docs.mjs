@@ -405,8 +405,10 @@ const VERIFIER_COMMAND = `node scripts/verify-bilateral-results.mjs \\
   --clockchain-token-file "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \\
   --descriptor "$BILATERAL_DESCRIPTOR_FILE" \\
   --output "$VERDICT_OUTPUT_DIR" \\
+  --payer-mandate "$PAYER_MANDATE_FILE" \\
   --payer-results "$PAYER_TRANSFERRED_RESULT_DIR" \\
   --payee-results "$REQUESTOR_TRANSFERRED_RESULT_DIR" \\
+  --payment-request "$PAYMENT_REQUEST_FILE" \\
   --rpc-url "$SEPOLIA_RPC_URL"`;
 const FUNDING_COMMAND = `npm run bilateral:fund -- \\
   --funding-record "$FUNDING_RECORD_FILE" \\

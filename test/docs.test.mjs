@@ -388,6 +388,10 @@ test("automated bilateral happy path limits the user to four fundings and two su
   );
   assert.match(requestor, /\bHANDSHAKE_REQUIRED\b[\s\S]*\bwrapper\b[\s\S]*\bstarts the Requestor\s+supervisor/i);
   assert.doesNotMatch(requestor, /Start Requestor's one long-lived supervisor exactly\s+once[\s\S]*npm run bilateral:supervisor/i);
+  assert.match(
+    runbook,
+    /node scripts\/verify-bilateral-results\.mjs[\s\S]*--payer-mandate "\$PAYER_MANDATE_FILE"[\s\S]*--payment-request "\$PAYMENT_REQUEST_FILE"/,
+  );
   assert.match(primaryRunbook, /fund (?:the )?four displayed addresses/i);
   assert.match(
     primaryRunbook,
@@ -775,6 +779,10 @@ test("live bilateral handoff pins the public operator checklist without secrets"
   assert.match(handoff, /any authority claim from relay\/watcher\/console\/coordinator\/role/i);
   assert.ok(
     handoff.includes("node scripts/verify-bilateral-results.mjs \\"),
+  );
+  assert.match(
+    handoff,
+    /node scripts\/verify-bilateral-results\.mjs[\s\S]*--payer-mandate "\$PAYER_MANDATE_FILE"[\s\S]*--payment-request "\$PAYMENT_REQUEST_FILE"/,
   );
   assert.match(handoff, /SEPOLIA_RPC_URL="\$\(node --input-type=module/);
   assert.match(handoff, /process\.stdout\.write\(\(await readFile\(process\.env\.SEPOLIA_RPC_URL_FILE/);

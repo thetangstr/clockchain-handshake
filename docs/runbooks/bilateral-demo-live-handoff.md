@@ -434,6 +434,11 @@ aggregate verifier output, and every verdict preserves `paymentMoved:false`.
 
 Independent evidence recheck command:
 
+Point `PAYER_MANDATE_FILE` and `PAYMENT_REQUEST_FILE` at the
+coordinator-staged, immutable `payer-mandate.json` and
+`payment-request.json` for this same subject run. Never substitute the
+role-local intent files.
+
 ```sh
 SEPOLIA_RPC_URL="$(node --input-type=module <<'NODE'
 import { readFile } from "node:fs/promises";
@@ -445,8 +450,10 @@ node scripts/verify-bilateral-results.mjs \
   --clockchain-token-file "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \
   --descriptor "$BILATERAL_DESCRIPTOR_FILE" \
   --output "$VERDICT_OUTPUT_DIR" \
+  --payer-mandate "$PAYER_MANDATE_FILE" \
   --payer-results "$PAYER_TRANSFERRED_RESULT_DIR" \
   --payee-results "$REQUESTOR_TRANSFERRED_RESULT_DIR" \
+  --payment-request "$PAYMENT_REQUEST_FILE" \
   --rpc-url "$SEPOLIA_RPC_URL"
 ```
 
