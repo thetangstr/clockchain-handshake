@@ -118,7 +118,6 @@ export async function writePrivateDeploymentEvidence({
     mode: 0o700,
     recursive: true,
   });
-  await chmod(dirname(destination), 0o700);
   const temporary = `${destination}.next`;
   let handle;
   try {

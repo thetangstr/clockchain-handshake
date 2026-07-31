@@ -165,3 +165,31 @@ test("private deployment evidence is written outside the repository with strict 
     /outside/i,
   );
 });
+
+test("private evidence never changes permissions on an existing shared parent", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "clockchain-shared-evidence-"),
+  );
+  await chmod(directory, 0o755);
+  const before =
+    (await stat(directory)).mode & 0o777;
+  const output = join(directory, "deployment.json");
+
+  await writePrivateDeploymentEvidence({
+    evidence: {
+      repositorySha: SHA,
+      schema: "clockchain.aws-deployment-evidence/v1",
+    },
+    output,
+    repositoryRoot: process.cwd(),
+  });
+
+  assert.equal(
+    (await stat(directory)).mode & 0o777,
+    before,
+  );
+  assert.equal(
+    (await stat(output)).mode & 0o777,
+    0o600,
+  );
+});
