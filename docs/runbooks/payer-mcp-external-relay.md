@@ -104,11 +104,11 @@ that public URL in exact `PAYER_MCP_READY`.
 
 ## Requestor handoff and validation
 
-After exact `PAYER_MCP_READY`, the operator approves the pending bootstrap
-claim fingerprint in the loopback broker and publishes one signed Requestor
-discovery URL. Transfer only that signed discovery URL. Requestor supplies that
-URL to `npm run bilateral:request-payment -- --discovery-url ...`. Success at
-this layer is exact `HANDSHAKE_REQUIRED`; it is not authorization.
+After exact `PAYER_MCP_READY`, the operator publishes one signed Requestor
+discovery URL from the Payer public certificate and public MCP URL. Transfer
+only that signed discovery URL. Requestor supplies that URL to
+`npm run bilateral:request-payment -- --discovery-url ...`. Success at this
+layer is exact `HANDSHAKE_REQUIRED`; it is not authorization.
 
 The operator broker uses the production CLI:
 
@@ -124,8 +124,27 @@ npm run bilateral:bootstrap-broker -- serve \
   --state "$PAYER_MCP_BOOTSTRAP_BROKER_STATE"
 ```
 
-After Requestor starts the one-shot wrapper, inspect the journal read-only and
-approve exactly one public pending fingerprint:
+After `PAYER_MCP_READY`, publish the signed discovery:
+
+```sh
+npm --silent run bilateral:publish-requestor-discovery -- \
+  --bucket "$REQUESTOR_DISCOVERY_BUCKET" \
+  --region "$REQUESTOR_DISCOVERY_REGION" \
+  --certificate-key "$REQUESTOR_DISCOVERY_CERTIFICATE_KEY" \
+  --discovery-key "$REQUESTOR_DISCOVERY_KEY" \
+  --certificate-path "$PAYER_MCP_TLS_CERTIFICATE" \
+  --operator-key-id "$OPERATOR_KEY_ID" \
+  --operator-private-key "$OPERATOR_PRIVATE_KEY_FILE" \
+  --public-url "$PAYER_MCP_PUBLIC_URL" \
+  --release-id "$BILATERAL_RELEASE_ID" \
+  --repository-sha "$BILATERAL_REPOSITORY_SHA" \
+  --session-id "$BILATERAL_SESSION_ID" \
+  --expires-at-ms "$(node -e 'console.log(Date.now() + 300000)')"
+```
+
+After Requestor starts the one-shot wrapper and creates the broker claim,
+inspect the journal read-only and approve exactly one public pending
+fingerprint:
 
 ```sh
 BOOTSTRAP_CLAIM_FINGERPRINT="$(node -e '

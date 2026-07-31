@@ -63,9 +63,11 @@ No additional Hermes message is required after operator funding. Payer remains a
   operator console. Keep all three terminals attached.
 - Wait until both role computers are ready because launch manifests expire after 60 minutes.
 - Deliver `payer.launch.json` only Payer through Payer's private channel.
-- Wait for Payer to report exact `PAYER_MCP_READY`, approve the exact pending
-  bootstrap claim fingerprint through the operator broker, then transfer only
-  the signed discovery URL to Requestor.
+- Start the production bootstrap broker before Payer starts its MCP/supervisor.
+- Wait for Payer to report exact `PAYER_MCP_READY`, publish the signed
+  discovery URL with `npm --silent run bilateral:publish-requestor-discovery --`,
+  transfer only that signed discovery URL to Requestor, then approve the exact
+  pending bootstrap claim only after Requestor starts its one-shot wrapper.
 - Keep `funding-addresses.json` coordinator-owned and use that file directly for funding.
 
 ## Payer checklist
@@ -93,7 +95,7 @@ No additional Hermes message is required after operator funding. Payer remains a
 ## Funding and execution order
 
 The startup control order is exactly:
-`relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
+`relay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
 Funding readiness means validating and arming the reusable Sepolia treasury
 lane; the funding batch transfers only after the coordinator's signed address
 record is ready.
@@ -102,23 +104,26 @@ record is ready.
 2. Human operator starts coordinator after relay readiness.
 3. Human operator starts the loopback-default read-only advisory console.
 4. Human operator validates and arms the reusable Sepolia treasury funding lane.
-5. Human operator delivers `payer.launch.json` only to Payer. Payer starts its
+5. Human operator starts the production bootstrap broker.
+6. Human operator delivers `payer.launch.json` only to Payer. Payer starts its
    non-terminating reverse SSH tunnel, then its loopback TLS MCP/supervisor.
-6. Payer waits for exact `PAYER_MCP_READY`; the operator approves the exact
-   pending bootstrap fingerprint and publishes one signed discovery URL.
-7. Requestor starts `npm run bilateral:request-payment` with only that
+7. Payer waits for exact `PAYER_MCP_READY`; the operator publishes one signed
+   discovery URL from the Payer public certificate and public MCP URL.
+8. Requestor starts `npm run bilateral:request-payment` with only that
    discovery URL and a blank private state root, receives exact
-   `HANDSHAKE_REQUIRED`, and the wrapper starts the Requestor supervisor.
-8. The supervisors automatically create the Payer-signed mandate and matching
+   `HANDSHAKE_REQUIRED`, and creates one pending broker claim.
+9. Human operator approves exactly that pending bootstrap claim fingerprint;
+   the same Requestor wrapper continues into the Requestor supervisor.
+10. The supervisors automatically create the Payer-signed mandate and matching
    Requestor-signed request; no operator-authored terms or manual artifact copy is allowed.
-9. Coordinator writes coordinator-owned `funding-addresses.json`.
-10. Human operator creates the funding journal directory once before the batch
+11. Coordinator writes coordinator-owned `funding-addresses.json`.
+12. Human operator creates the funding journal directory once before the batch
    with `install -d -m 0700 "$FUNDING_JOURNAL_DIR"`, preserves the funding journal
    for replay/recovery, and never deletes or recreates the funding journal after
    any funding attempt.
-11. Human operator runs `npm run bilateral:fund` once to make exactly four
+13. Human operator runs `npm run bilateral:fund` once to make exactly four
    `0.01 Sepolia ETH` allocations from the reusable treasury.
-12. The protocol order is `PROPOSED` -> `ACCEPTED` -> `ACKNOWLEDGED` -> operator verification -> `AUTHORIZED`.
+14. The protocol order is `PROPOSED` -> `ACCEPTED` -> `ACKNOWLEDGED` -> operator verification -> `AUTHORIZED`.
 
 ## What counts as success
 

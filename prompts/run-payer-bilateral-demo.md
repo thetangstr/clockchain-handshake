@@ -142,11 +142,12 @@ The supervisor pins that fingerprint before sending or receiving coordination
 events. A missing or changed TLS binding stops the session.
 
 Wait for exact `PAYER_MCP_READY`. Stay attached. The operator uses the public
-MCP URL, public TLS certificate, and exact broker claim fingerprint to publish
-one signed Requestor discovery URL. Share only that signed discovery URL through
-the operator-approved public channel. Never share the MCP capability, broker
-capability, launch manifest contents, private TLS key, invitation, token,
-participant key, checkpoint bytes, or live evidence.
+MCP URL and public TLS certificate to publish one signed Requestor discovery
+URL. Requestor receives only that signed discovery URL, starts its one-shot
+wrapper, and only then the operator approves the exact pending broker claim
+fingerprint. Never share the MCP capability, broker capability, launch manifest
+contents, private TLS key, invitation, token, participant key, checkpoint bytes,
+or live evidence.
 
 Use a clean detached checkout of the reviewed 40-character SHA with Node.js 22
 and `npm ci --ignore-scripts`. Do not inspect secret bytes, do not switch roles,

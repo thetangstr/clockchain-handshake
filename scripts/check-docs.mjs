@@ -671,7 +671,7 @@ function bilateralContractFailures(relativePath, contents) {
       ["PAYER_MCP_READY gate", /\bPAYER_MCP_READY\b/],
       [
         "safe public MCP handoff",
-        /\bshare only\b[\s\S]{0,160}\bsigned discovery URL\b/i,
+        /\bRequestor receives only\b[\s\S]{0,160}\bsigned discovery URL\b/i,
       ],
       ["two-run supervisor lifetime", /\bstays alive\b[^.]*\bboth runs\b/i],
       ["closed command policy", /\bmust not improvise commands\b/i],
@@ -739,7 +739,11 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact startup order",
-        /\brelay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+        /\brelay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+      ],
+      [
+        "requestor discovery publisher command",
+        /\bnpm --silent run bilateral:publish-requestor-discovery --/,
       ],
       [
         "Payer-owned MCP only",
@@ -1019,7 +1023,11 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact startup order",
-        /\brelay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+        /\brelay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+      ],
+      [
+        "requestor discovery publisher command",
+        /\bnpm --silent run bilateral:publish-requestor-discovery --/,
       ],
       [
         "Payer-owned MCP only",
@@ -1183,7 +1191,11 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact startup order",
-        /\brelay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+        /\brelay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+      ],
+      [
+        "requestor discovery publisher command",
+        /\bnpm --silent run bilateral:publish-requestor-discovery --/,
       ],
       [
         "Payer-owned MCP only",
@@ -1593,7 +1605,7 @@ function readmeRoleplayFailures(contents) {
   }
   if (
     !contents.includes(
-      "relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED",
+      "relay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED",
     )
   ) {
     failures.push(

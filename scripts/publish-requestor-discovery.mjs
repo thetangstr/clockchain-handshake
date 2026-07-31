@@ -1,8 +1,10 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
 import { createHash, createPrivateKey, createPublicKey, sign, verify, X509Certificate } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 
@@ -30,6 +32,20 @@ const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const MAX_DISCOVERY_BYTES = 65_536;
 const MAX_CERTIFICATE_BYTES = 65_536;
 const MAX_OPERATOR_KEY_BYTES = 8192;
+const CLI_FLAGS = Object.freeze([
+  "--bucket",
+  "--certificate-key",
+  "--certificate-path",
+  "--discovery-key",
+  "--expires-at-ms",
+  "--operator-key-id",
+  "--operator-private-key",
+  "--public-url",
+  "--region",
+  "--release-id",
+  "--repository-sha",
+  "--session-id",
+]);
 
 class RequestorDiscoveryError extends Error {
   constructor() {
@@ -284,6 +300,31 @@ function safeObjectKey(value) {
   return value;
 }
 
+function safeBucket(value) {
+  if (
+    typeof value !== "string" ||
+    !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(value) ||
+    value.includes("..") ||
+    /^\d+\.\d+\.\d+\.\d+$/.test(value)
+  ) {
+    fail();
+  }
+  return value;
+}
+
+function safeRegion(value) {
+  if (typeof value !== "string" || !/^[a-z]{2}-[a-z]+-[1-9]$/.test(value)) fail();
+  return value;
+}
+
+function publicS3Url({ bucket, key, region }) {
+  const safeKey = safeObjectKey(key)
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  return `https://${safeBucket(bucket)}.s3.${safeRegion(region)}.amazonaws.com/${safeKey}`;
+}
+
 function sameFileIdentity(left, right) {
   return left.dev === right.dev && left.ino === right.ino;
 }
@@ -336,7 +377,8 @@ export async function publishRequestorDiscovery({
   repositorySha,
   sessionId,
 } = {}) {
-  if (typeof bucket !== "string" || bucket.length === 0 || typeof putObject !== "function") fail();
+  if (typeof putObject !== "function") fail();
+  const safeBucketName = safeBucket(bucket);
   const safeCertificateKey = safeObjectKey(certificateKey);
   const safeDiscoveryKey = safeObjectKey(discoveryKey);
   if (safeCertificateKey === safeDiscoveryKey || certificatePath === operatorPrivateKeyPath) fail();
@@ -364,7 +406,125 @@ export async function publishRequestorDiscovery({
     repositorySha,
     sessionId,
   });
-  await putObject({ body: certificatePem, bucket, contentType: "application/x-pem-file", key: safeCertificateKey });
-  await putObject({ body: `${JSON.stringify(discovery)}\n`, bucket, contentType: "application/json", key: safeDiscoveryKey });
-  return Object.freeze({ discovery, paymentMoved: false });
+  await putObject({ body: certificatePem, bucket: safeBucketName, cacheControl: "no-store,max-age=0", contentType: "application/x-pem-file", key: safeCertificateKey });
+  await putObject({ body: `${JSON.stringify(discovery)}\n`, bucket: safeBucketName, cacheControl: "no-store,max-age=0", contentType: "application/json", key: safeDiscoveryKey });
+  return Object.freeze({ certificateFingerprint, discovery, paymentMoved: false });
+}
+
+function parseCliArguments(argv) {
+  if (!Array.isArray(argv) || argv.length !== CLI_FLAGS.length * 2) fail();
+  const values = Object.create(null);
+  const allowed = new Set(CLI_FLAGS);
+  for (let index = 0; index < argv.length; index += 2) {
+    const flag = argv[index];
+    const value = argv[index + 1];
+    if (
+      !allowed.has(flag) ||
+      Object.hasOwn(values, flag) ||
+      typeof value !== "string" ||
+      value.length === 0 ||
+      value.includes("\0")
+    ) {
+      fail();
+    }
+    values[flag] = value;
+  }
+  for (const flag of CLI_FLAGS) if (!Object.hasOwn(values, flag)) fail();
+  const bucket = safeBucket(values["--bucket"]);
+  const region = safeRegion(values["--region"]);
+  const certificateKey = safeObjectKey(values["--certificate-key"]);
+  const discoveryKey = safeObjectKey(values["--discovery-key"]);
+  if (certificateKey === discoveryKey) fail();
+  const certificatePath = values["--certificate-path"];
+  const operatorPrivateKeyPath = values["--operator-private-key"];
+  return Object.freeze({
+    bucket,
+    certificateKey,
+    certificatePath,
+    certificateUrl: publicS3Url({ bucket, key: certificateKey, region }),
+    discoveryKey,
+    discoveryUrl: publicS3Url({ bucket, key: discoveryKey, region }),
+    expiresAtMs: values["--expires-at-ms"],
+    operatorKeyId: values["--operator-key-id"],
+    operatorPrivateKeyPath,
+    publicUrl: values["--public-url"],
+    region,
+    releaseId: values["--release-id"],
+    repositorySha: values["--repository-sha"],
+    sessionId: values["--session-id"],
+  });
+}
+
+function awsPutObject({ region }) {
+  const safeAwsRegion = safeRegion(region);
+  return ({ body, bucket, cacheControl, contentType, key }) => new Promise((resolvePromise, reject) => {
+    try {
+      const safeBucketName = safeBucket(bucket);
+      const safeKey = safeObjectKey(key);
+      if (
+        typeof body !== "string" ||
+        !["application/json", "application/x-pem-file"].includes(contentType) ||
+        cacheControl !== "no-store,max-age=0"
+      ) {
+        fail();
+      }
+      const child = spawn(
+        "aws",
+        [
+          "s3",
+          "cp",
+          "-",
+          `s3://${safeBucketName}/${safeKey}`,
+          "--region",
+          safeAwsRegion,
+          "--content-type",
+          contentType,
+          "--cache-control",
+          cacheControl,
+          "--only-show-errors",
+        ],
+        { stdio: ["pipe", "ignore", "pipe"] },
+      );
+      let stderrLength = 0;
+      child.stderr.on("data", (chunk) => {
+        stderrLength += chunk.length;
+      });
+      child.once("error", reject);
+      child.once("exit", (code) => {
+        if (code === 0 && stderrLength <= 4096) resolvePromise();
+        else reject(new RequestorDiscoveryError());
+      });
+      child.stdin.end(body);
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+export async function main(argv = process.argv.slice(2), dependencies = {}) {
+  const options = parseCliArguments(argv);
+  const result = await publishRequestorDiscovery({
+    ...options,
+    putObject: dependencies.putObject ?? awsPutObject({ region: options.region }),
+  });
+  const output = Object.freeze({
+    certificateFingerprint: result.certificateFingerprint,
+    discoveryUrl: options.discoveryUrl,
+    expiresAtMs: options.expiresAtMs,
+    operatorKeyId: options.operatorKeyId,
+    paymentMoved: false,
+    releaseId: options.releaseId,
+    repositorySha: options.repositorySha,
+    sessionId: options.sessionId,
+    status: "REQUESTOR_DISCOVERY_PUBLISHED",
+  });
+  process.stdout.write(`${JSON.stringify(output)}\n`);
+  return output;
+}
+
+if (import.meta.url === pathToFileURL(resolve(process.argv[1] ?? "")).href) {
+  main().catch(() => {
+    process.stderr.write("REQUESTOR_DISCOVERY_FAILED\n");
+    process.exitCode = 1;
+  });
 }

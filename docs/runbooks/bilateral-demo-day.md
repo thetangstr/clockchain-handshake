@@ -53,7 +53,7 @@ live-validated. Only a funded physical run whose fresh aggregate verifier
 publishes independently re-verifiable evidence is live-validated.
 
 The startup control order is exactly:
-`relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
+`relay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
 The funding readiness stage validates and arms the reusable Sepolia treasury
 lane before either role starts; the actual funding batch waits for the
 coordinator's signed four-address record.
@@ -235,6 +235,8 @@ export PAYER_LAUNCH_MANIFEST="$BILATERAL_RELEASE_ROOT/payer.launch.json"
 export REQUESTOR_LAUNCH_MANIFEST="$BILATERAL_RELEASE_ROOT/payee.launch.json"
 test -f "$PAYER_LAUNCH_MANIFEST"
 test -f "$REQUESTOR_LAUNCH_MANIFEST"
+export BILATERAL_RELEASE_ID="$(node -e 'const fs = require("node:fs"); console.log(JSON.parse(fs.readFileSync(process.env.PAYER_LAUNCH_MANIFEST, "utf8")).releaseId)')"
+export BILATERAL_SESSION_ID="$(node -e 'const fs = require("node:fs"); console.log(JSON.parse(fs.readFileSync(process.env.PAYER_LAUNCH_MANIFEST, "utf8")).sessionId)')"
 mkdir -p "$PAYER_MCP_BOOTSTRAP_BROKER_STATE"
 chmod 0700 "$PAYER_MCP_BOOTSTRAP_BROKER_STATE"
 test -f "$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" || openssl rand -hex 32 > "$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE"
@@ -310,11 +312,49 @@ printed. The sibling TLS root preserves supervisor restart scanning because it
 is outside `PAYER_SUPERVISOR_STATE`, while operator and AWS never handle the
 key. Do not start a replacement supervisor.
 
-After exact `PAYER_MCP_READY`, the operator approves the exact pending
-bootstrap claim fingerprint and publishes one signed Requestor discovery URL.
+After exact `PAYER_MCP_READY`, publish the signed discovery using only the Payer
+public certificate and public MCP URL:
+
+```sh
+export REQUESTOR_DISCOVERY_BUCKET="${REQUESTOR_DISCOVERY_BUCKET:?set public discovery S3 bucket}"
+export REQUESTOR_DISCOVERY_REGION="${REQUESTOR_DISCOVERY_REGION:?set public discovery S3 region}"
+export REQUESTOR_DISCOVERY_CERTIFICATE_KEY="${REQUESTOR_DISCOVERY_CERTIFICATE_KEY:-sessions/$BILATERAL_REPOSITORY_SHA/payer-mcp.crt}"
+export REQUESTOR_DISCOVERY_KEY="${REQUESTOR_DISCOVERY_KEY:-sessions/$BILATERAL_REPOSITORY_SHA/requestor-discovery.json}"
+REQUESTOR_DISCOVERY_PUBLISHED="$(npm --silent run bilateral:publish-requestor-discovery -- \
+  --bucket "$REQUESTOR_DISCOVERY_BUCKET" \
+  --region "$REQUESTOR_DISCOVERY_REGION" \
+  --certificate-key "$REQUESTOR_DISCOVERY_CERTIFICATE_KEY" \
+  --discovery-key "$REQUESTOR_DISCOVERY_KEY" \
+  --certificate-path "$PAYER_MCP_TLS_CERTIFICATE" \
+  --operator-key-id "$OPERATOR_KEY_ID" \
+  --operator-private-key "$OPERATOR_PRIVATE_KEY_FILE" \
+  --public-url "$PAYER_MCP_PUBLIC_URL" \
+  --release-id "$BILATERAL_RELEASE_ID" \
+  --repository-sha "$BILATERAL_REPOSITORY_SHA" \
+  --session-id "$BILATERAL_SESSION_ID" \
+  --expires-at-ms "$(node -e 'console.log(Date.now() + 300000)')")"
+printf '%s\n' "$REQUESTOR_DISCOVERY_PUBLISHED"
+export REQUESTOR_DISCOVERY_URL="$(node -e 'const line = JSON.parse(process.argv[1]); if (line.status !== "REQUESTOR_DISCOVERY_PUBLISHED" || line.paymentMoved !== false) process.exit(1); console.log(line.discoveryUrl);' "$REQUESTOR_DISCOVERY_PUBLISHED")"
+```
+
 Transfer only that signed discovery URL to Requestor. Never transfer the MCP
 capability, broker capability, private bootstrap material, TLS private key,
 invitation, token, participant key, checkpoint bytes, or live evidence.
+
+Requestor machine:
+
+```sh
+REQUESTOR_INTAKE_REQUEST_ID="$(node -e 'console.log(require("node:crypto").randomUUID())')"
+npm run bilateral:request-payment -- \
+  --discovery-url "$REQUESTOR_DISCOVERY_URL" \
+  --intake-request-id "$REQUESTOR_INTAKE_REQUEST_ID" \
+  --state "$REQUESTOR_SUPERVISOR_STATE"
+```
+
+Requestor must visibly receive exact `HANDSHAKE_REQUIRED`; the wrapper alone
+then starts the Requestor supervisor and stays attached. Requestor must not run
+`npm run bilateral:supervisor` directly. Start this long-lived request-payment
+wrapper exactly once. Do not start a replacement wrapper or supervisor.
 
 Inspect and approve the production broker journal only after Requestor starts
 the one-shot request-payment wrapper and exactly one pending claim exists:
@@ -332,21 +372,6 @@ npm run bilateral:bootstrap-broker -- approve \
   --state "$PAYER_MCP_BOOTSTRAP_BROKER_STATE" \
   --claim-fingerprint "$BOOTSTRAP_CLAIM_FINGERPRINT"
 ```
-
-Requestor machine:
-
-```sh
-REQUESTOR_INTAKE_REQUEST_ID="$(node -e 'console.log(require("node:crypto").randomUUID())')"
-npm run bilateral:request-payment -- \
-  --discovery-url "$REQUESTOR_DISCOVERY_URL" \
-  --intake-request-id "$REQUESTOR_INTAKE_REQUEST_ID" \
-  --state "$REQUESTOR_SUPERVISOR_STATE"
-```
-
-Requestor must visibly receive exact `HANDSHAKE_REQUIRED`; the wrapper alone
-then starts the Requestor supervisor and stays attached. Requestor must not run
-`npm run bilateral:supervisor` directly. Start this long-lived request-payment
-wrapper exactly once. Do not start a replacement wrapper or supervisor.
 
 The same Payer and Requestor processes remain alive across both runs. Each supervisor
 creates two invitations and one token per role for both runs. After both

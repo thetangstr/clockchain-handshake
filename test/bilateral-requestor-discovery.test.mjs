@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign, X509Certificate } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 
 import {
   createSignedRequestorDiscovery,
@@ -14,6 +15,7 @@ import {
 } from "../scripts/publish-requestor-discovery.mjs";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 
+const execFileAsync = promisify(execFile);
 const REPOSITORY_SHA = "abcdef0123456789abcdef0123456789abcdef01";
 const RELEASE_ID = "release-requestor-bootstrap";
 const SESSION_ID = "22222222-2222-4222-8222-222222222222";
@@ -126,6 +128,148 @@ test("publisher uploads public certificate and signed discovery without opening 
   assert.equal(uploaded[0].body, cert.certificatePem);
   assert.equal(JSON.stringify(uploaded).includes(cert.privateKeyPath), false);
   assert.equal(JSON.stringify(uploaded).includes("PRIVATE KEY"), false);
+});
+
+test("publisher CLI uploads certificate and discovery through aws stdin and prints one secret-free line", async (t) => {
+  const cert = await certificateFixture(t);
+  const operator = generateKeyPairSync("ed25519");
+  const operatorPrivateKeyPath = join(cert.root, "operator.ed25519.pem");
+  await writeFile(operatorPrivateKeyPath, operator.privateKey.export({ format: "pem", type: "pkcs8" }), { mode: 0o600 });
+  const fakeBin = join(cert.root, "bin");
+  const uploadLog = join(cert.root, "aws-uploads.ndjson");
+  await mkdir(fakeBin, { mode: 0o700 });
+  await writeFile(join(fakeBin, "aws"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const chunks = [];
+process.stdin.on("data", (chunk) => chunks.push(chunk));
+process.stdin.on("end", () => {
+  fs.appendFileSync(process.env.AWS_UPLOAD_LOG, JSON.stringify({
+    argv: process.argv.slice(2),
+    body: Buffer.concat(chunks).toString("utf8"),
+  }) + "\\n");
+});
+`, { mode: 0o700 });
+
+  const { stdout, stderr } = await execFileAsync(
+    process.execPath,
+    [
+      "scripts/publish-requestor-discovery.mjs",
+      "--bucket", "clockchain-demo",
+      "--region", "us-west-2",
+      "--certificate-key", "demo/payer-mcp.crt",
+      "--discovery-key", "demo/requestor-discovery.json",
+      "--certificate-path", cert.certificatePath,
+      "--operator-key-id", OPERATOR_KEY_ID,
+      "--operator-private-key", operatorPrivateKeyPath,
+      "--public-url", "https://32.186.198.119:9443/mcp",
+      "--release-id", RELEASE_ID,
+      "--repository-sha", REPOSITORY_SHA,
+      "--session-id", SESSION_ID,
+      "--expires-at-ms", String(Date.now() + 60_000),
+    ],
+    {
+      cwd: new URL("../", import.meta.url).pathname,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        AWS_UPLOAD_LOG: uploadLog,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    },
+  );
+  assert.equal(stderr, "");
+  const lines = stdout.trimEnd().split("\n");
+  assert.equal(lines.length, 1);
+  const published = JSON.parse(lines[0]);
+  assert.equal(published.status, "REQUESTOR_DISCOVERY_PUBLISHED");
+  assert.equal(published.paymentMoved, false);
+  assert.equal(published.repositorySha, REPOSITORY_SHA);
+  assert.equal(published.releaseId, RELEASE_ID);
+  assert.equal(published.sessionId, SESSION_ID);
+  assert.equal(published.operatorKeyId, OPERATOR_KEY_ID);
+  assert.equal(published.certificateFingerprint, cert.certificateFingerprint);
+  assert.equal(published.discoveryUrl, "https://clockchain-demo.s3.us-west-2.amazonaws.com/demo/requestor-discovery.json");
+  assert.equal(lines[0].includes(operatorPrivateKeyPath), false);
+  assert.equal(lines[0].includes(cert.privateKeyPath), false);
+  assert.equal(lines[0].includes("PRIVATE KEY"), false);
+
+  const uploads = (await readFile(uploadLog, "utf8")).trimEnd().split("\n").map((line) => JSON.parse(line));
+  assert.equal(uploads.length, 2);
+  assert.deepEqual(uploads.map((upload) => upload.argv), [
+    [
+      "s3", "cp", "-", "s3://clockchain-demo/demo/payer-mcp.crt",
+      "--region", "us-west-2",
+      "--content-type", "application/x-pem-file",
+      "--cache-control", "no-store,max-age=0",
+      "--only-show-errors",
+    ],
+    [
+      "s3", "cp", "-", "s3://clockchain-demo/demo/requestor-discovery.json",
+      "--region", "us-west-2",
+      "--content-type", "application/json",
+      "--cache-control", "no-store,max-age=0",
+      "--only-show-errors",
+    ],
+  ]);
+  assert.equal(uploads[0].body, cert.certificatePem);
+  const discovery = JSON.parse(uploads[1].body);
+  assert.equal(discovery.certificateUrl, "https://clockchain-demo.s3.us-west-2.amazonaws.com/demo/payer-mcp.crt");
+  assert.equal(discovery.publicUrl, "https://32.186.198.119:9443/mcp");
+});
+
+test("publisher CLI rejects bad bucket region object keys and duplicate flags before upload", async (t) => {
+  const cert = await certificateFixture(t);
+  const operator = generateKeyPairSync("ed25519");
+  const operatorPrivateKeyPath = join(cert.root, "operator.ed25519.pem");
+  await writeFile(operatorPrivateKeyPath, operator.privateKey.export({ format: "pem", type: "pkcs8" }), { mode: 0o600 });
+  const fakeBin = join(cert.root, "bad-bin");
+  const uploadLog = join(cert.root, "bad-aws-uploads.ndjson");
+  await mkdir(fakeBin, { mode: 0o700 });
+  await writeFile(join(fakeBin, "aws"), `#!/usr/bin/env node
+require("node:fs").appendFileSync(process.env.AWS_UPLOAD_LOG, "called\\n");
+`, { mode: 0o700 });
+  const baseArgs = [
+    "--bucket", "clockchain-demo",
+    "--region", "us-west-2",
+    "--certificate-key", "demo/payer-mcp.crt",
+    "--discovery-key", "demo/requestor-discovery.json",
+    "--certificate-path", cert.certificatePath,
+    "--operator-key-id", OPERATOR_KEY_ID,
+    "--operator-private-key", operatorPrivateKeyPath,
+    "--public-url", "https://32.186.198.119:9443/mcp",
+    "--release-id", RELEASE_ID,
+    "--repository-sha", REPOSITORY_SHA,
+    "--session-id", SESSION_ID,
+    "--expires-at-ms", String(Date.now() + 60_000),
+  ];
+  for (const mutate of [
+    (args) => ["--bucket", "bad..bucket", ...args.slice(2)],
+    (args) => ["--bucket", "192.168.0.1", ...args.slice(2)],
+    (args) => [...args.slice(0, 2), "--region", "us-west-2-extra", ...args.slice(4)],
+    (args) => [...args.slice(0, 4), "--certificate-key", "demo/../payer-mcp.crt", ...args.slice(6)],
+    (args) => [...args, "--bucket", "clockchain-demo"],
+  ]) {
+    const { stdout, stderr } = await execFileAsync(
+      process.execPath,
+      ["scripts/publish-requestor-discovery.mjs", ...mutate([...baseArgs])],
+      {
+        cwd: new URL("../", import.meta.url).pathname,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          AWS_UPLOAD_LOG: uploadLog,
+          PATH: `${fakeBin}:${process.env.PATH}`,
+        },
+      },
+    ).then(
+      () => assert.fail("unsafe publisher arguments unexpectedly succeeded"),
+      (error) => error,
+    );
+    assert.equal(stdout, "");
+    assert.equal(stderr, "REQUESTOR_DISCOVERY_FAILED\n");
+    assert.equal(stderr.includes(operatorPrivateKeyPath), false);
+    await assert.rejects(readFile(uploadLog, "utf8"), { code: "ENOENT" });
+  }
 });
 
 test("publisher rejects unsafe object keys and private file substitutions before upload", async (t) => {
