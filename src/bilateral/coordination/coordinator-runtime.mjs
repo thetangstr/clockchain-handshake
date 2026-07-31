@@ -51,6 +51,7 @@ const CONSOLE_STATE_FILE_NAME = "console-state.json";
 const FUNDING_ADDRESSES_SCHEMA = "clockchain.bilateral-funding-addresses/v1";
 const VERIFIER_CONTEXT_SCHEMA = "clockchain.bilateral-coordinator-verifier-context/v1";
 const VERIFIER_PUBLICATION_SCHEMA = "clockchain.bilateral-verifier-publication/v1";
+const AWS_VERIFIER_EVIDENCE_SCHEMA = "clockchain.aws-verifier-evidence/v1";
 const SHA40 = /^[0-9a-f]{40}$/;
 const SHA64 = /^[0-9a-f]{64}$/;
 const ADDRESS = /^0x[0-9a-f]{40}$/;
@@ -223,6 +224,97 @@ export async function stagePackage(root, name, artifactType, bytes, options = {}
 }
 export function validateVerifierPackageBinding({ descriptor, party, repositorySha, role, sessionDigest }) {
   if (!descriptor || !party || !["payer", "payee"].includes(role) || party.role !== role || party.repositorySha !== repositorySha || party.sessionDigest !== sessionDigest || party.signature?.address?.toLowerCase() !== descriptor[role]?.address?.toLowerCase()) fail();
+}
+
+export async function launchExternalVerifier({
+  evidenceDescriptor,
+  expectedRevision,
+  releaseId,
+  repositorySha,
+  sessionId,
+  verifierLauncher,
+}) {
+  if (
+    !evidenceDescriptor ||
+    typeof evidenceDescriptor !== "object" ||
+    Array.isArray(evidenceDescriptor) ||
+    Object.keys(evidenceDescriptor).length !== 5 ||
+    !SHA64.test(evidenceDescriptor.descriptorDigest) ||
+    !SHA64.test(evidenceDescriptor.evidenceDigest) ||
+    evidenceDescriptor.paymentMoved !== false ||
+    evidenceDescriptor.schema !== AWS_VERIFIER_EVIDENCE_SCHEMA ||
+    !["rehearsal", "stakeholder"].includes(evidenceDescriptor.subjectRun) ||
+    !Number.isSafeInteger(expectedRevision) ||
+    expectedRevision < 0 ||
+    !/^release-[0-9a-f]{16}$/.test(releaseId) ||
+    !SHA40.test(repositorySha) ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(sessionId) ||
+    !verifierLauncher ||
+    typeof verifierLauncher.launch !== "function"
+  ) {
+    fail();
+  }
+  let launched;
+  try {
+    launched = await verifierLauncher.launch({
+      evidenceDescriptor,
+      expectedRevision,
+      releaseId,
+      repositorySha,
+      sessionId,
+    });
+  } catch {
+    fail();
+  }
+  if (
+    !launched ||
+    typeof launched !== "object" ||
+    Array.isArray(launched) ||
+    Reflect.ownKeys(launched).length !== 4 ||
+    !Object.hasOwn(launched, "attemptId") ||
+    !Object.hasOwn(launched, "publicationDigest") ||
+    !Object.hasOwn(launched, "status") ||
+    !Object.hasOwn(launched, "taskArn") ||
+    !SHA64.test(launched.publicationDigest) ||
+    launched.status !== "VERIFICATION_PASSED" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(launched.attemptId) ||
+    !/^arn:aws(?:-[a-z]+)?:ecs:[a-z0-9-]+:[0-9]{12}:task\/(?:[A-Za-z0-9_-]{1,255}\/)?[0-9a-f]{32}$/.test(launched.taskArn)
+  ) {
+    fail();
+  }
+  return Object.freeze({
+    exitCode: 0,
+    publicationDigest: launched.publicationDigest,
+    status: launched.status,
+    stderr: "",
+    stdout: "",
+  });
+}
+
+function externalVerifierRevision(
+  action,
+  release,
+  subjectRun,
+) {
+  if (
+    !action ||
+    typeof action !== "object" ||
+    Array.isArray(action) ||
+    Object.keys(action).length !== 6 ||
+    action.action !== "VERIFY" ||
+    !Number.isSafeInteger(
+      action.expectedRevision,
+    ) ||
+    action.expectedRevision < 0 ||
+    action.releaseId !== release.releaseId ||
+    action.repositorySha !==
+      release.repositorySha ||
+    action.sessionId !== release.sessionId ||
+    action.subjectRun !== subjectRun
+  ) {
+    fail();
+  }
+  return action.expectedRevision;
 }
 export function validatePinnedDescriptorEnvelope(envelope, { keyId, publicKey, repositorySha, sessionId }) {
   if (!envelope?.operator || envelope.operator.keyId !== keyId || envelope.operator.publicKey !== publicKey || envelope.descriptor?.repositorySha !== repositorySha || envelope.descriptor.paymentMoved !== false || envelope.descriptor.sessionId !== sessionId) fail();
@@ -616,12 +708,46 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
           const [payerDirectory, payeeDirectory] = await Promise.all([packageFor("payer"), packageFor("payee")]);
           await privateStage(config.releaseRoot, "verifier");
           try { await lstat(outputDirectory); fail(); } catch (error) { if (error?.message === "Coordinator startup failed safely.") throw error; if (error?.code !== "ENOENT") fail(); }
-          const args = [join(ROOT, "scripts/verify-bilateral-results.mjs"), "--clockchain-token-file", config.clockchainTokenPath, "--descriptor", descriptorPath, "--output", outputDirectory, "--payer-mandate", mandatePath, "--payee-results", payeeDirectory, "--payer-results", payerDirectory, "--payment-request", requestPath, "--rpc-url", config.rpcUrl];
-          await assertRoot(config.releaseRoot); const outcome = await runPinnedVerifierChild(config.releaseRoot, args, dependencies.verifierDeadlineMs ?? COORDINATOR_FUNDING_DEADLINE_MS, dependencies.runVerifierChild ?? runChildWithDeadline); if (outcome !== 0) fail();
+          let verifierResult;
+          if (dependencies.verifierLauncher === undefined) {
+            const args = [join(ROOT, "scripts/verify-bilateral-results.mjs"), "--clockchain-token-file", config.clockchainTokenPath, "--descriptor", descriptorPath, "--output", outputDirectory, "--payer-mandate", mandatePath, "--payee-results", payeeDirectory, "--payer-results", payerDirectory, "--payment-request", requestPath, "--rpc-url", config.rpcUrl];
+            await assertRoot(config.releaseRoot); const outcome = await runPinnedVerifierChild(config.releaseRoot, args, dependencies.verifierDeadlineMs ?? COORDINATOR_FUNDING_DEADLINE_MS, dependencies.runVerifierChild ?? runChildWithDeadline); if (outcome !== 0) fail();
+            verifierResult = Object.freeze({ exitCode: 0, publicationDigest: null, status: null, stderr: "", stdout: "" });
+          } else {
+            const evidenceDigest = createHash("sha256").update(canonicalBytes({
+              descriptorDigest,
+              mandateDigest: descriptorEnvelope.descriptor.mandateDigest,
+              packageDigests,
+              paymentMoved: false,
+              releaseId: release.releaseId,
+              repositorySha: config.repositorySha,
+              requestDigest: descriptorEnvelope.descriptor.requestDigest,
+              sessionId: release.sessionId,
+              subjectRun,
+            })).digest("hex");
+            verifierResult = await launchExternalVerifier({
+              evidenceDescriptor: Object.freeze({
+                descriptorDigest,
+                evidenceDigest,
+                paymentMoved: false,
+                schema: AWS_VERIFIER_EVIDENCE_SCHEMA,
+                subjectRun,
+              }),
+              expectedRevision: externalVerifierRevision(dependencies.verifierAction, release, subjectRun),
+              releaseId: release.releaseId,
+              repositorySha: config.repositorySha,
+              sessionId: release.sessionId,
+              verifierLauncher: dependencies.verifierLauncher,
+            });
+          }
           const envelope = (await artifactValidator({ artifactType: "signed-descriptor", bytes: await readStable(descriptorPath, 1_048_576, privateFile), expectedDigest: descriptorDigest, secretCanaries: [] })).facts;
           await immutable(); await assertRoot(config.releaseRoot); validatePinnedDescriptorEnvelope(envelope, { keyId: config.operatorIdentity.keyId, publicKey: config.operatorPublicKey, repositorySha: config.repositorySha, sessionId: expectedSession });
           const publication = await validateVerdictPublication({ mandateDigest: envelope.descriptor.mandateDigest, outputDirectory, repositorySha: config.repositorySha, requestDigest: envelope.descriptor.requestDigest, sessionDigest: dSession(envelope.descriptor) });
           await assertRoot(config.releaseRoot);
+          if (
+            verifierResult.publicationDigest !== null &&
+            verifierResult.publicationDigest !== publication.publicationDigest
+          ) fail();
           const context = Object.freeze({ descriptorDigest, mandateDigest: envelope.descriptor.mandateDigest, outputDirectory, packageDigests: Object.freeze({ ...packageDigests }), paymentMoved: false, publicationDigest: publication.publicationDigest, releaseId: release.releaseId, repositorySha: config.repositorySha, requestDigest: envelope.descriptor.requestDigest, schema: VERIFIER_CONTEXT_SCHEMA, sessionId: release.sessionId, subjectRun });
           await writeVerifierContext(config.releaseRoot, `.verifier-context-${subjectRun}.json`, context); await assertRoot(config.releaseRoot); verifierContexts.set(outputDirectory, context);
           return Object.freeze({ outputDirectory, result: Object.freeze({ exitCode: 0, publicationDigest: publication.publicationDigest, status: "VERIFICATION_PASSED", stderr: "", stdout: "" }) });

@@ -35,6 +35,8 @@ import {
 
 export const WATCHER_REPORT_SCHEMA =
   "clockchain.bilateral-session-watcher/v1";
+export const AWS_WATCHER_PROJECTION_SCHEMA =
+  "clockchain.aws-watcher-projection/v1";
 export const WATCHER_INTERVAL_MS = 20_000;
 export const WATCHER_WINDOW_MS = 480_000;
 
@@ -218,6 +220,126 @@ function deepFreeze(value) {
     deepFreeze(entry);
   }
   return Object.freeze(value);
+}
+
+export function createAwsWatcherProjection(
+  snapshot,
+  context,
+) {
+  try {
+    if (
+      !isPlainObject(snapshot) ||
+      snapshot.paymentMoved !== false ||
+      !STATES.includes(snapshot.state) ||
+      !Array.isArray(snapshot.transitions) ||
+      snapshot.transitions.length !== 3 ||
+      !isPlainObject(context) ||
+      !Number.isSafeInteger(
+        context.observedAtMs,
+      ) ||
+      context.observedAtMs < 0 ||
+      typeof context.releaseId !== "string" ||
+      !/^release-[0-9a-f]{16}$/.test(
+        context.releaseId,
+      ) ||
+      typeof context.repositorySha !==
+        "string" ||
+      !/^[0-9a-f]{40}$/.test(
+        context.repositorySha,
+      ) ||
+      typeof context.sessionId !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        context.sessionId,
+      ) ||
+      !["rehearsal", "stakeholder"].includes(
+        context.subjectRun,
+      ) ||
+      !(
+        snapshot.terminal === null ||
+        (
+          typeof snapshot.terminal === "string" &&
+          /^[A-Z_]{1,32}$/.test(snapshot.terminal)
+        )
+      )
+    ) {
+      fail();
+    }
+    const transitions =
+      snapshot.transitions.map(
+        (transition, index) => {
+          if (
+            !isPlainObject(transition) ||
+            transition.slot !== SLOTS[index] ||
+            !["0", "1", "2"].includes(
+              transition.cardinality,
+            ) ||
+            typeof transition.verified !==
+              "boolean" ||
+            !(
+              transition.blockHeight === null ||
+              (
+                typeof transition.blockHeight ===
+                  "string" &&
+                /^(?:0|[1-9][0-9]*)$/.test(
+                  transition.blockHeight,
+                )
+              )
+            ) ||
+            !(
+              transition.ledgerId === null ||
+              (
+                typeof transition.ledgerId ===
+                  "string" &&
+                /^[A-Za-z0-9._:-]{1,128}$/.test(
+                  transition.ledgerId,
+                )
+              )
+            )
+          ) {
+            fail();
+          }
+          return Object.freeze({
+            blockHeight:
+              transition.blockHeight,
+            cardinality:
+              transition.cardinality,
+            ledgerId: transition.ledgerId,
+            slot: transition.slot,
+            verified: transition.verified,
+          });
+        },
+      );
+    const projection = {
+      observedAtMs: String(
+        context.observedAtMs,
+      ),
+      paymentMoved: false,
+      releaseId: context.releaseId,
+      repositorySha:
+        context.repositorySha,
+      schema: AWS_WATCHER_PROJECTION_SCHEMA,
+      sessionId: context.sessionId,
+      state: snapshot.state,
+      subjectRun: context.subjectRun,
+      terminal: snapshot.terminal,
+      transitions,
+    };
+    const serialized = JSON.stringify(projection);
+    assertSecretFree(serialized);
+    if (
+      serialized
+        .toUpperCase()
+        .includes(FORBIDDEN_OUTCOME)
+    ) {
+      fail();
+    }
+    return deepFreeze(projection);
+  } catch (error) {
+    if (error instanceof BilateralWatcherError) {
+      throw error;
+    }
+    fail();
+  }
 }
 
 function transitionDisplay(slot, referenceId) {

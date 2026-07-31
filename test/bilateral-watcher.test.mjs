@@ -38,6 +38,7 @@ import {
 } from "./helpers/fake-bilateral-clockchain.mjs";
 import {
   WATCHER_REPORT_SCHEMA,
+  createAwsWatcherProjection,
   main,
   observeBilateralSession,
   runCli,
@@ -237,6 +238,55 @@ test("read-only observer reconstructs and verifies the complete derived-key chai
   );
   assert.equal(
     JSON.stringify(snapshot).includes("AUTHOR" + "IZED"),
+    false,
+  );
+});
+
+test("AWS watcher projection exposes only strict business-safe chain facts", async () => {
+  const { fake } = await seedFake(3);
+  const canary = "cc_secret_projection_canary";
+  const snapshot = await observeBilateralSession({
+    advisory: {
+      health: canary,
+      status: `internal path /mnt/private ${canary}`,
+    },
+    canaries: [canary],
+    client: fake,
+    descriptor: DESCRIPTOR,
+    now: () => 1_784_923_300_000,
+  });
+  const projection = createAwsWatcherProjection(
+    snapshot,
+    {
+      observedAtMs: 1_784_923_300_001,
+      releaseId: "release-0123456789abcdef",
+      repositorySha: DESCRIPTOR.repositorySha,
+      sessionId:
+        "11111111-2222-4333-8444-555555555555",
+      subjectRun: "stakeholder",
+    },
+  );
+  assert.deepEqual(Object.keys(projection), [
+    "observedAtMs",
+    "paymentMoved",
+    "releaseId",
+    "repositorySha",
+    "schema",
+    "sessionId",
+    "state",
+    "subjectRun",
+    "terminal",
+    "transitions",
+  ]);
+  assert.equal(projection.paymentMoved, false);
+  assert.equal(projection.state, "ACKNOWLEDGED");
+  assert.equal(projection.transitions.length, 3);
+  assert.equal(
+    JSON.stringify(projection).includes(canary),
+    false,
+  );
+  assert.equal(
+    JSON.stringify(projection).includes("/mnt/"),
     false,
   );
 });

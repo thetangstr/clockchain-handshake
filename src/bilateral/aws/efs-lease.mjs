@@ -59,6 +59,128 @@ export class AwsEfsLeaseError extends Error {
   }
 }
 
+export function createHeartbeatOwnerLease({
+  cancel = clearTimeout,
+  intervalMs,
+  lease,
+  schedule = setTimeout,
+} = {}) {
+  try {
+    if (
+      lease === null ||
+      typeof lease !== "object" ||
+      Array.isArray(lease) ||
+      types.isProxy(lease) ||
+      typeof lease.acquire !== "function" ||
+      typeof schedule !== "function" ||
+      typeof cancel !== "function" ||
+      !Number.isSafeInteger(intervalMs) ||
+      intervalMs < 250 ||
+      intervalMs > 60_000
+    ) {
+      invalid();
+    }
+    return Object.freeze({
+      async acquire(input) {
+        try {
+          const underlying =
+            await lease.acquire(input);
+          if (
+            underlying === null ||
+            typeof underlying !== "object" ||
+            Array.isArray(underlying) ||
+            types.isProxy(underlying) ||
+            typeof underlying.assertCurrent !==
+              "function" ||
+            typeof underlying.heartbeat !==
+              "function" ||
+            typeof underlying.release !== "function"
+          ) {
+            invalid();
+          }
+          let active = true;
+          let failure = null;
+          let timer;
+          let inFlight = Promise.resolve();
+          const arm = (callback) => {
+            try {
+              timer = schedule(
+                callback,
+                intervalMs,
+              );
+              timer?.unref?.();
+            } catch (error) {
+              failure = error;
+            }
+          };
+          const tick = () => {
+            if (!active || failure !== null) return;
+            inFlight = Promise.resolve()
+              .then(() => underlying.heartbeat())
+              .catch((error) => {
+                failure = error;
+              })
+              .finally(() => {
+                if (active && failure === null) {
+                  arm(tick);
+                }
+              });
+            return inFlight;
+          };
+          arm(tick);
+          if (failure !== null) {
+            try {
+              await underlying.release();
+            } catch {
+              // The fixed lease failure below is authoritative.
+            }
+            invalid();
+          }
+          return Object.freeze({
+            async assertCurrent() {
+              try {
+                if (!active || failure !== null) {
+                  invalid();
+                }
+                await underlying.assertCurrent();
+                if (failure !== null) invalid();
+              } catch (error) {
+                sanitize(error);
+              }
+            },
+            async release() {
+              try {
+                if (!active) invalid();
+                active = false;
+                cancel(timer);
+                await inFlight;
+                let releaseFailure;
+                try {
+                  await underlying.release();
+                } catch (error) {
+                  releaseFailure = error;
+                }
+                if (
+                  failure !== null ||
+                  releaseFailure !== undefined
+                ) {
+                  invalid();
+                }
+              } catch (error) {
+                sanitize(error);
+              }
+            },
+          });
+        } catch (error) {
+          sanitize(error);
+        }
+      },
+    });
+  } catch (error) {
+    sanitize(error);
+  }
+}
+
 function invalid() {
   throw new AwsEfsLeaseError();
 }
