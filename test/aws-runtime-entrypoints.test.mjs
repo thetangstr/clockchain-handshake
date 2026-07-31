@@ -219,7 +219,7 @@ test("verifier entrypoint resolves metadata and secrets before running the canon
         return {
           SecretString:
             command.input.SecretId.endsWith("rpc-url")
-              ? "https://sepolia.example.invalid/path?api_key=provider"
+              ? "https://ethereum-rpc.publicnode.com/path?api_key=provider"
               : "clockchain-token-canary",
         };
       },
@@ -315,7 +315,7 @@ test("verifier entrypoint resolves metadata and secrets before running the canon
       "abcdef0123456789abcdef0123456789abcdef01",
     requestDigest: "f".repeat(64),
     rpcUrl:
-      "https://sepolia.example.invalid/path?api_key=provider",
+      "https://ethereum-rpc.publicnode.com/path?api_key=provider",
     sessionDigest: "a".repeat(64),
     taskArn: VERIFIER_TASK_ARN,
   });
@@ -449,32 +449,98 @@ test("verifier entrypoint fails closed before secret reads for unsafe runtime in
   }
 });
 
-test("verifier entrypoint rejects invalid secrets and preexisting token paths without leaking secret output", async () => {
+test("verifier entrypoint rejects invalid Clockchain token secrets before RPC lookup or run", async () => {
   const root = await mkdtemp(
     join(tmpdir(), "clockchain-verifier-entrypoint-"),
   );
-  await writeFile(
-    join(root, "clockchain-token"),
-    "preexisting",
-    { mode: 0o600 },
+  const calls = [];
+  await assert.rejects(
+    verifierEntrypoint({
+      client: {
+        async send(command) {
+          calls.push(command.input.SecretId);
+          return {
+            SecretString: "token\u0000value",
+          };
+        },
+      },
+      env: {
+        AWS_RUNTIME_INPUT:
+          verifierRuntimeInput(),
+        ECS_CONTAINER_METADATA_URI_V4:
+          "http://169.254.170.2/v4/metadata/container",
+      },
+      fetch: async () => ({
+        ok: true,
+        async json() {
+          return {
+            TaskARN: VERIFIER_TASK_ARN,
+          };
+        },
+      }),
+      run: async () => {
+        calls.push("run");
+      },
+      tempDir: root,
+    }),
+    (error) => {
+      assert.match(
+        error.message,
+        /AWS verifier entrypoint failed safely|AWS runtime input failed safely/,
+      );
+      assert.doesNotMatch(
+        String(error),
+        /token\u0000value/,
+      );
+      return true;
+    },
   );
-  for (const secrets of [
-    ["token\u0000value", "https://sepolia.example.invalid"],
-    ["token", "http://sepolia.example.invalid"],
-    ["token", "https://user@sepolia.example.invalid"],
-    ["token", "https://sepolia.example.invalid/#fragment"],
-    ["token", "https://sepolia.example.invalid/"],
-  ]) {
-    const stderr = [];
+  assert.deepEqual(calls, [
+    "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-token",
+  ]);
+});
+
+test("verifier entrypoint rejects noncanonical, reserved, or private RPC URLs before installing the token or running", async () => {
+  const invalidRpcUrls = [
+    "http://ethereum-rpc.publicnode.com",
+    "https://user@ethereum-rpc.publicnode.com",
+    "https://ethereum-rpc.publicnode.com/#fragment",
+    "https://ETHEREUM-RPC.publicnode.com/path",
+    "https://sepolia.invalid/",
+    "https://sepolia.test/",
+    "https://sepolia.example/",
+    "https://sepolia.localhost/",
+    "https://sepolia.local/",
+    "https://localhost/",
+    "https://127.0.0.1/",
+    "https://10.0.0.1/",
+    "https://172.16.0.1/",
+    "https://192.168.0.1/",
+    "https://169.254.1.1/",
+    "https://0.0.0.0/",
+    "https://[::1]/",
+    "https://[fc00::1]/",
+    "https://[fe80::1]/",
+    "https://[::]/",
+  ];
+  for (const rpcUrl of invalidRpcUrls) {
+    const root = await mkdtemp(
+      join(
+        tmpdir(),
+        "clockchain-verifier-entrypoint-",
+      ),
+    );
+    const calls = [];
     await assert.rejects(
       verifierEntrypoint({
         client: {
           async send(command) {
+            calls.push(command.input.SecretId);
             return {
               SecretString:
                 command.input.SecretId.endsWith("rpc-url")
-                  ? secrets[1]
-                  : secrets[0],
+                  ? rpcUrl
+                  : "clockchain-token-canary",
             };
           },
         },
@@ -492,18 +558,92 @@ test("verifier entrypoint rejects invalid secrets and preexisting token paths wi
             };
           },
         }),
-        run: async () => {},
-        stderr: {
-          write(value) {
-            stderr.push(value);
-          },
+        run: async () => {
+          calls.push("run");
         },
         tempDir: root,
       }),
-      /AWS verifier entrypoint failed safely|AWS runtime input failed safely/,
+      (error) => {
+        assert.match(
+          error.message,
+          /AWS verifier entrypoint failed safely|AWS runtime input failed safely/,
+        );
+        assert.doesNotMatch(
+          String(error),
+          /clockchain-token-canary|ethereum-rpc|sepolia|127\.0\.0\.1/,
+        );
+        return true;
+      },
     );
-    assert.equal(stderr.join(""), "");
+    assert.deepEqual(calls, [
+      "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-token",
+      "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
+    ]);
+    await assert.rejects(
+      lstat(join(root, "clockchain-token")),
+      { code: "ENOENT" },
+    );
   }
+});
+
+test("verifier entrypoint rejects a preexisting token path after validated secrets and before run", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "clockchain-verifier-entrypoint-"),
+  );
+  await writeFile(
+    join(root, "clockchain-token"),
+    "preexisting",
+    { mode: 0o600 },
+  );
+  const calls = [];
+  await assert.rejects(
+    verifierEntrypoint({
+      client: {
+        async send(command) {
+          calls.push(command.input.SecretId);
+          return {
+            SecretString:
+              command.input.SecretId.endsWith("rpc-url")
+                ? "https://ethereum-rpc.publicnode.com/path?api_key=provider"
+                : "clockchain-token-canary",
+          };
+        },
+      },
+      env: {
+        AWS_RUNTIME_INPUT:
+          verifierRuntimeInput(),
+        ECS_CONTAINER_METADATA_URI_V4:
+          "http://169.254.170.2/v4/metadata/container",
+      },
+      fetch: async () => ({
+        ok: true,
+        async json() {
+          return {
+            TaskARN: VERIFIER_TASK_ARN,
+          };
+        },
+      }),
+      run: async () => {
+        calls.push("run");
+      },
+      tempDir: root,
+    }),
+    (error) => {
+      assert.match(
+        error.message,
+        /AWS verifier entrypoint failed safely|AWS runtime input failed safely/,
+      );
+      assert.doesNotMatch(
+        String(error),
+        /clockchain-token-canary|ethereum-rpc/,
+      );
+      return true;
+    },
+  );
+  assert.deepEqual(calls, [
+    "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-token",
+    "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
+  ]);
   assert.equal(
     await readFile(
       join(root, "clockchain-token"),

@@ -52,6 +52,13 @@ const SHA40 = /^[0-9a-f]{40}$/;
 const SHA64 = /^[0-9a-f]{64}$/;
 const TASK_ARN =
   /^arn:aws(?:-[a-z]+)?:ecs:[a-z0-9-]+:[0-9]{12}:task\/(?:[A-Za-z0-9_-]{1,255}\/)?[0-9a-f]{32}$/;
+const RESERVED_DNS_SUFFIXES = Object.freeze([
+  "invalid",
+  "test",
+  "example",
+  "localhost",
+  "local",
+]);
 
 class AwsVerifierEntrypointError extends Error {
   constructor() {
@@ -223,6 +230,65 @@ function validClockchainToken(value) {
   );
 }
 
+function privateIpv4(hostname) {
+  const parts = hostname.split(".");
+  if (
+    parts.length !== 4 ||
+    parts.some(
+      (part) =>
+        !/^(?:0|[1-9][0-9]{0,2})$/.test(part),
+    )
+  ) {
+    return false;
+  }
+  const octets = parts.map(Number);
+  if (octets.some((octet) => octet > 255)) {
+    return false;
+  }
+  return (
+    octets[0] === 0 ||
+    octets[0] === 10 ||
+    octets[0] === 127 ||
+    (octets[0] === 169 && octets[1] === 254) ||
+    (octets[0] === 172 &&
+      octets[1] >= 16 &&
+      octets[1] <= 31) ||
+    (octets[0] === 192 && octets[1] === 168)
+  );
+}
+
+function reservedIpv6(hostname) {
+  const host = hostname
+    .toLowerCase()
+    .replace(/^\[/, "")
+    .replace(/\]$/, "");
+  return (
+    host === "::" ||
+    host === "::1" ||
+    /^f[cd][0-9a-f]{0,2}:/u.test(host) ||
+    /^fe[89ab][0-9a-f]?:/u.test(host)
+  );
+}
+
+function reservedHostname(hostname) {
+  const host = hostname.toLowerCase();
+  if (
+    RESERVED_DNS_SUFFIXES.some(
+      (suffix) =>
+        host === suffix ||
+        host.endsWith(`.${suffix}`),
+    )
+  ) {
+    return true;
+  }
+  return (
+    privateIpv4(host) ||
+    (host.startsWith("[") &&
+      host.endsWith("]") &&
+      reservedIpv6(host))
+  );
+}
+
 function validRpcUrl(value) {
   try {
     const url = new URL(value);
@@ -231,7 +297,8 @@ function validRpcUrl(value) {
       url.protocol === "https:" &&
       url.username === "" &&
       url.password === "" &&
-      url.hash === ""
+      url.hash === "" &&
+      !reservedHostname(url.hostname)
     );
   } catch {
     return false;
