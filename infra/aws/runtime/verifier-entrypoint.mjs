@@ -5,7 +5,10 @@ import {
   SecretsManagerClient,
 } from "@aws-sdk/client-secrets-manager";
 import {
+  chmod,
+  mkdtemp,
   rm,
+  rmdir,
 } from "node:fs/promises";
 import {
   tmpdir,
@@ -114,6 +117,29 @@ function absolutePath(value) {
     fail();
   }
   return value;
+}
+
+async function defaultCreateTempDir(prefix) {
+  const path = await mkdtemp(prefix);
+  try {
+    await chmod(path, 0o700);
+  } catch (error) {
+    await rmdir(path).catch(() => {});
+    throw error;
+  }
+  return path;
+}
+
+function validateScratchDir(path) {
+  absolutePath(path);
+  if (
+    !basename(path).startsWith(
+      "clockchain-verifier-",
+    )
+  ) {
+    fail();
+  }
+  return path;
 }
 
 function validateVerifierInput(value) {
@@ -307,12 +333,18 @@ function validRpcUrl(value) {
 
 export async function main({
   client = new SecretsManagerClient({}),
+  createTempDir = defaultCreateTempDir,
   env = process.env,
   fetch = globalThis.fetch,
+  removeDir = rmdir,
+  removeFile = (path) =>
+    rm(path, { force: true }),
   run = runAwsVerifierTask,
-  tempDir = tmpdir(),
 } = {}) {
+  let result;
+  let scratchDir;
   let tokenPath;
+  let failure;
   try {
     const input = exact(parseRuntimeInput(env), [
       "paymentMoved",
@@ -322,8 +354,14 @@ export async function main({
     const verifier = validateVerifierInput(
       input.verifier,
     );
-    if (typeof run !== "function") fail();
-    absolutePath(tempDir);
+    if (
+      typeof createTempDir !== "function" ||
+      typeof removeDir !== "function" ||
+      typeof removeFile !== "function" ||
+      typeof run !== "function"
+    ) {
+      fail();
+    }
     const taskArn = await readTaskArn(env, fetch);
     const clockchainToken =
       await readSecretString({
@@ -341,8 +379,13 @@ export async function main({
       secretArn: verifier.rpcSecretArn,
       validate: validRpcUrl,
     });
+    scratchDir = validateScratchDir(
+      await createTempDir(
+        join(tmpdir(), "clockchain-verifier-"),
+      ),
+    );
     const nextTokenPath = join(
-      tempDir,
+      scratchDir,
       "clockchain-token",
     );
     await installPrivateFile({
@@ -350,7 +393,7 @@ export async function main({
       value: clockchainToken,
     });
     tokenPath = nextTokenPath;
-    return await run({
+    result = await run({
       actionAtMs: verifier.actionAtMs,
       attemptId: verifier.attemptId,
       attemptRoot: verifier.attemptRoot,
@@ -377,19 +420,27 @@ export async function main({
       taskArn,
     });
   } catch (error) {
-    if (
-      error instanceof AwsVerifierEntrypointError
-    ) {
-      throw error;
-    }
-    fail();
+    failure = error;
   } finally {
     if (tokenPath !== undefined) {
-      await rm(tokenPath, {
-        force: true,
-      }).catch(() => {});
+      try {
+        await removeFile(tokenPath);
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    if (scratchDir !== undefined) {
+      try {
+        await removeDir(scratchDir);
+      } catch (error) {
+        failure ??= error;
+      }
     }
   }
+  if (failure !== undefined) {
+    fail();
+  }
+  return result;
 }
 
 if (
