@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign, X509Certificate } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -120,16 +120,68 @@ test("publisher uploads public certificate and signed discovery without opening 
     repositorySha: REPOSITORY_SHA,
     sessionId: SESSION_ID,
     putObject: async (input) => uploaded.push(input),
-    readTextFile: async (path) => {
-      assert.notEqual(path, cert.privateKeyPath);
-      return readFile(path, "utf8");
-    },
   });
   assert.equal(result.paymentMoved, false);
   assert.deepEqual(uploaded.map((entry) => entry.key), ["payer-mcp.crt", "discovery.json"]);
   assert.equal(uploaded[0].body, cert.certificatePem);
   assert.equal(JSON.stringify(uploaded).includes(cert.privateKeyPath), false);
   assert.equal(JSON.stringify(uploaded).includes("PRIVATE KEY"), false);
+});
+
+test("publisher rejects unsafe object keys and private file substitutions before upload", async (t) => {
+  const cert = await certificateFixture(t);
+  const operator = generateKeyPairSync("ed25519");
+  const operatorPrivateKeyPath = join(cert.root, "operator.ed25519.pem");
+  await writeFile(operatorPrivateKeyPath, operator.privateKey.export({ format: "pem", type: "pkcs8" }), { mode: 0o600 });
+  await chmod(operatorPrivateKeyPath, 0o600);
+  const symlinkedCertificatePath = join(cert.root, "payer-mcp-symlink.crt");
+  await symlink(cert.certificatePath, symlinkedCertificatePath);
+  const base = Object.freeze({
+    bucket: "clockchain-demo",
+    certificateKey: "payer-mcp.crt",
+    certificatePath: cert.certificatePath,
+    certificateUrl: "https://payer.example.test/payer-mcp.crt",
+    discoveryKey: "discovery.json",
+    expiresAtMs: String(Date.now() + 60_000),
+    operatorKeyId: OPERATOR_KEY_ID,
+    operatorPrivateKeyPath,
+    publicUrl: "https://127.0.0.1:9443/mcp",
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    sessionId: SESSION_ID,
+  });
+
+  for (const override of [
+    { certificateKey: "" },
+    { certificateKey: "/payer-mcp.crt" },
+    { discoveryKey: "nested/../discovery.json" },
+    { certificateKey: "same", discoveryKey: "same" },
+    { discoveryKey: "bad\u0001key" },
+    { certificatePath: operatorPrivateKeyPath, operatorPrivateKeyPath },
+    { certificatePath: symlinkedCertificatePath },
+  ]) {
+    const uploaded = [];
+    await assert.rejects(
+      publishRequestorDiscovery({
+        ...base,
+        ...override,
+        putObject: async (input) => uploaded.push(input),
+      }),
+      /Requestor discovery failed safely/,
+    );
+    assert.deepEqual(uploaded, []);
+  }
+
+  await chmod(operatorPrivateKeyPath, 0o644);
+  const uploaded = [];
+  await assert.rejects(
+    publishRequestorDiscovery({
+      ...base,
+      putObject: async (input) => uploaded.push(input),
+    }),
+    /Requestor discovery failed safely/,
+  );
+  assert.deepEqual(uploaded, []);
 });
 
 test("discovery verification rejects stale, wrong SHA, HTTP URLs, redirects, and forged signatures", async (t) => {

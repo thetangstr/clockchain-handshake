@@ -228,6 +228,110 @@ test("Requestor CLI exposes only one-shot discovery flags and completes bootstra
   assert.equal(calls[0][1], REPOSITORY_ROOT);
 });
 
+test("Requestor CLI polls pending bootstrap without a second prompt until sealed", async (t) => {
+  const fx = await fixture(t);
+  const sleeps = [];
+  const claims = [];
+  let attempts = 0;
+  let clockMs = Date.now();
+  let supervisorCalls = 0;
+  const result = await main(fx.args, {
+    async inspectRepository() {
+      return { clean: true, detached: true, head: REPOSITORY_SHA };
+    },
+    async fetchJson() {
+      return fx.discovery;
+    },
+    async readOperatorPublicKey() {
+      return fx.operatorPublicKey;
+    },
+    async fetchText() {
+      return fx.tlsCertificatePem;
+    },
+    async requestBootstrap(input) {
+      attempts += 1;
+      claims.push(input.claim);
+      if (attempts < 4) {
+        return {
+          claimFingerprint: bootstrapClaimFingerprint(input.claim),
+          paymentMoved: false,
+          repositorySha: REPOSITORY_SHA,
+          schema: "clockchain.requestor-bootstrap-broker-response/v1",
+          status: "PENDING_APPROVAL",
+        };
+      }
+      return sealedBrokerResponse({ claim: input.claim, manifestBytes: fx.manifestBytes, operator: fx.operator });
+    },
+    async requestPayment() {
+      return { paymentMoved: false, status: "HANDSHAKE_REQUIRED" };
+    },
+    async runSupervisor() {
+      supervisorCalls += 1;
+      return { paymentMoved: false, supervisor: "started" };
+    },
+    async sleep(ms) {
+      sleeps.push(ms);
+      clockMs += ms;
+    },
+    nowMs: () => clockMs,
+    writeStatus() {},
+  });
+  assert.deepEqual(result, { paymentMoved: false, supervisor: "started" });
+  assert.equal(attempts, 4);
+  assert.deepEqual(sleeps, [2_000, 2_000, 2_000]);
+  assert.equal(new Set(claims.map((claim) => JSON.stringify(claim))).size, 1);
+  assert.equal(supervisorCalls, 1);
+});
+
+test("Requestor CLI fails closed when pending bootstrap exceeds approval deadline", async (t) => {
+  const fx = await fixture(t);
+  const sleeps = [];
+  let clockMs = Date.now();
+  let requestPaymentCalls = 0;
+  await assert.rejects(
+    main(fx.args, {
+      async inspectRepository() {
+        return { clean: true, detached: true, head: REPOSITORY_SHA };
+      },
+      async fetchJson() {
+        return signedDiscovery({
+          certificateFingerprint: fx.certificateFingerprint,
+          certificateUrl: fx.discovery.certificateUrl,
+          expiresAtMs: String(clockMs + 4_100),
+          operator: fx.operator,
+          publicUrl: fx.discovery.publicUrl,
+        });
+      },
+      async readOperatorPublicKey() {
+        return fx.operatorPublicKey;
+      },
+      async fetchText() {
+        return fx.tlsCertificatePem;
+      },
+      async requestBootstrap(input) {
+        return {
+          claimFingerprint: bootstrapClaimFingerprint(input.claim),
+          paymentMoved: false,
+          repositorySha: REPOSITORY_SHA,
+          schema: "clockchain.requestor-bootstrap-broker-response/v1",
+          status: "PENDING_APPROVAL",
+        };
+      },
+      async requestPayment() {
+        requestPaymentCalls += 1;
+      },
+      async sleep(ms) {
+        sleeps.push(ms);
+        clockMs += ms;
+      },
+      nowMs: () => clockMs,
+    }),
+    /Request payment startup failed safely/,
+  );
+  assert.deepEqual(sleeps, [2_000, 2_000]);
+  assert.equal(requestPaymentCalls, 0);
+});
+
 test("Requestor CLI rejects dirty repo before discovery, network, private state, or supervisor work", async (t) => {
   const fx = await fixture(t);
   const calls = [];
@@ -285,6 +389,35 @@ test("Requestor CLI fails closed on malformed args, stale discovery, wrong SHA, 
       }),
       /Request payment startup failed safely/,
     );
+  }
+});
+
+test("Requestor CLI validates discovery candidate before operator-key lookup", async (t) => {
+  const fx = await fixture(t);
+  for (const operatorKeyId of ["../outside", "operator/key", "Operator", ""]) {
+    const calls = [];
+    await assert.rejects(
+      main(fx.args, {
+        async inspectRepository() {
+          calls.push("inspectRepository");
+          return { clean: true, detached: true, head: REPOSITORY_SHA };
+        },
+        async fetchJson() {
+          calls.push("fetchJson");
+          return { ...fx.discovery, operatorKeyId };
+        },
+        async readOperatorPublicKey() {
+          calls.push("readOperatorPublicKey");
+          return fx.operatorPublicKey;
+        },
+        async fetchText() {
+          calls.push("fetchText");
+          return fx.tlsCertificatePem;
+        },
+      }),
+      /Request payment startup failed safely/,
+    );
+    assert.deepEqual(calls, ["inspectRepository", "fetchJson"]);
   }
 });
 

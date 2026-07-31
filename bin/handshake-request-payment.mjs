@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { link, lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, unlink } from "node:fs/promises";
 import https from "node:https";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,7 +21,11 @@ import {
   openRequestorBootstrapEnvelope,
 } from "../src/bilateral/local-mcp/bootstrap-envelope.mjs";
 import { bootstrapClaimFingerprint } from "../src/bilateral/local-mcp/bootstrap-broker.mjs";
-import { parseRequestorDiscoveryWire, verifySignedRequestorDiscovery } from "../scripts/publish-requestor-discovery.mjs";
+import {
+  parseRequestorDiscoveryWire,
+  validateRequestorDiscoveryCandidate,
+  verifySignedRequestorDiscovery,
+} from "../scripts/publish-requestor-discovery.mjs";
 import { canonicalizeReceiptEventValue } from "../src/canonical.mjs";
 
 export const REQUEST_PAYMENT_CLI_FLAGS = Object.freeze([
@@ -51,6 +55,8 @@ const GIT_ENV = Object.freeze(Object.assign(Object.create(null), {
 const GIT_PREFIX = Object.freeze(["--no-pager", "--no-replace-objects", "-c", "core.attributesFile=/dev/null", "-c", "core.excludesFile=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false", "-C"]);
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const MAX_FETCH_BYTES = 262_144;
+const BOOTSTRAP_POLL_MS = 2_000;
+const BOOTSTRAP_MAX_WAIT_MS = 300_000;
 
 function fail() {
   throw new Error("Request payment startup failed safely.");
@@ -137,7 +143,7 @@ function ed25519PublicKeyFromRawBase64(value) {
   return createPublicKey({ key: Buffer.concat([ED25519_SPKI_PREFIX, raw]), format: "der", type: "spki" });
 }
 
-async function defaultFetchText(url) {
+async function defaultFetchText(url, expectedContentType) {
   const parsed = new URL(httpsUrl(url));
   return await new Promise((resolvePromise, rejectPromise) => {
     const req = https.request({
@@ -149,7 +155,8 @@ async function defaultFetchText(url) {
       rejectUnauthorized: true,
       timeout: 10_000,
     }, (response) => {
-      if (response.statusCode !== 200 || response.headers.location !== undefined) {
+      const contentType = String(response.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+      if (response.statusCode !== 200 || response.headers.location !== undefined || contentType !== expectedContentType) {
         response.resume();
         rejectPromise(new Error("bad response"));
         return;
@@ -170,14 +177,36 @@ async function defaultFetchText(url) {
 }
 
 async function defaultFetchJson(url) {
-  const text = await defaultFetchText(url);
+  const text = await defaultFetchText(url, "application/json");
   if (text.length === 0 || text.length > MAX_FETCH_BYTES) fail();
   return parseRequestorDiscoveryWire(text);
+}
+
+async function defaultFetchCertificate(url) {
+  return await defaultFetchText(url, "application/x-pem-file");
 }
 
 function discoveryFromFetch(value) {
   if (typeof value === "string") return parseRequestorDiscoveryWire(value);
   return value;
+}
+
+async function readReviewedOperatorPublicKey(repositorySha, keyId, repositoryRoot = REQUEST_PAYMENT_REPOSITORY_ROOT) {
+  if (typeof repositorySha !== "string" || !SHA_PATTERN.test(repositorySha) || typeof keyId !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(keyId)) fail();
+  const cwd = resolve(repositoryRoot);
+  const { stdout } = await execFileAsync(
+    "/usr/bin/git",
+    [...GIT_PREFIX, cwd, "show", `${repositorySha}:docs/operator-keys/${keyId}.pub`],
+    {
+      cwd,
+      encoding: "utf8",
+      env: GIT_ENV,
+      maxBuffer: 8192,
+    },
+  );
+  const text = stdout.trim();
+  ed25519PublicKeyFromRawBase64(text);
+  return text;
 }
 
 async function ensurePrivateDirectory(path) {
@@ -285,21 +314,25 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
     if (typeof inspect !== "function") fail();
     const verifiedHead = validateRepositoryProof(await inspect(REQUEST_PAYMENT_REPOSITORY_ROOT));
     const fetchJson = dependencies.fetchJson ?? defaultFetchJson;
-    const fetchText = dependencies.fetchText ?? defaultFetchText;
+    const fetchCertificate = dependencies.fetchCertificate ?? dependencies.fetchText ?? defaultFetchCertificate;
+    const nowMs = dependencies.nowMs ?? Date.now;
+    const sleep = dependencies.sleep ?? ((ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)));
+    if (typeof nowMs !== "function" || typeof sleep !== "function") fail();
     const discoveryRaw = discoveryFromFetch(await fetchJson(parsed.discoveryUrl));
-    const readOperatorPublicKey = dependencies.readOperatorPublicKey ?? (async (repositorySha, keyId) => {
-      const path = join(REQUEST_PAYMENT_REPOSITORY_ROOT, "docs", "operator-keys", `${keyId}.pub`);
-      if (repositorySha !== verifiedHead) fail();
-      return (await readFile(path, "utf8")).trim();
-    });
-    const operatorPublicKey = ed25519PublicKeyFromRawBase64(await readOperatorPublicKey(verifiedHead, discoveryRaw.operatorKeyId));
-    const discovery = verifySignedRequestorDiscovery({
+    const discoveryCandidate = validateRequestorDiscoveryCandidate({
       discovery: discoveryRaw,
-      nowMs: Date.now(),
+      nowMs: nowMs(),
+      repositorySha: verifiedHead,
+    });
+    const readOperatorPublicKey = dependencies.readOperatorPublicKey ?? readReviewedOperatorPublicKey;
+    const operatorPublicKey = ed25519PublicKeyFromRawBase64(await readOperatorPublicKey(verifiedHead, discoveryCandidate.operatorKeyId));
+    const discovery = verifySignedRequestorDiscovery({
+      discovery: discoveryCandidate,
+      nowMs: nowMs(),
       operatorPublicKey,
       repositorySha: verifiedHead,
     });
-    const tlsCertificatePem = await fetchText(discovery.certificateUrl);
+    const tlsCertificatePem = await fetchCertificate(discovery.certificateUrl);
     const tlsFingerprint = createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex");
     if (tlsFingerprint !== discovery.certificateFingerprint) fail();
     const bootstrapRoot = `${parsed.stateRoot}.bootstrap`;
@@ -308,7 +341,8 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
     const claim = await loadOrCreateClaim({ requestorPublicKey: requestorKey.publicKey, repositorySha: verifiedHead, root: bootstrapRoot });
     const requestBootstrap = dependencies.requestBootstrap ?? requestBootstrapThroughPayerMcp;
     let sealed;
-    for (let attempt = 0; attempt < 8; attempt += 1) {
+    const approvalDeadlineMs = Math.min(Number(discovery.expiresAtMs), nowMs() + BOOTSTRAP_MAX_WAIT_MS);
+    for (;;) {
       const response = await requestBootstrap({
         bootstrapUrl: bootstrapUrl(discovery.publicUrl),
         claim,
@@ -321,6 +355,9 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
         break;
       }
       if (response?.status !== "PENDING_APPROVAL") fail();
+      const nextPollMs = nowMs() + BOOTSTRAP_POLL_MS;
+      if (nextPollMs > approvalDeadlineMs) fail();
+      await sleep(BOOTSTRAP_POLL_MS);
     }
     if (sealed === undefined) fail();
     const verifiedSealed = verifySealedBrokerResponse({ claim, discovery, operatorPublicKey, sealed });
@@ -340,7 +377,7 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
       manifest.releaseId !== discovery.releaseId ||
       manifest.sessionId !== discovery.sessionId ||
       manifest.expectedTlsFingerprint !== discovery.certificateFingerprint ||
-      Number(manifest.expiresAtMs) <= Date.now()
+      Number(manifest.expiresAtMs) <= nowMs()
     ) {
       fail();
     }

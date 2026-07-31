@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { createHash, createPrivateKey, createPublicKey, sign, verify, X509Certificate } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { lstat, open } from "node:fs/promises";
+import { resolve } from "node:path";
 
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 
@@ -26,6 +28,8 @@ const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const MAX_DISCOVERY_BYTES = 65_536;
+const MAX_CERTIFICATE_BYTES = 65_536;
+const MAX_OPERATOR_KEY_BYTES = 8192;
 
 class RequestorDiscoveryError extends Error {
   constructor() {
@@ -241,6 +245,15 @@ function signatureObject(value, keyId) {
   return signature;
 }
 
+export function validateRequestorDiscoveryCandidate({ discovery, nowMs = Date.now(), repositorySha } = {}) {
+  const value = exactObject(discovery, DISCOVERY_KEYS);
+  const { signature, ...unsignedRaw } = value;
+  const unsigned = unsignedDiscovery(unsignedRaw);
+  if (unsigned.repositorySha !== repositorySha || Number(unsigned.expiresAtMs) <= nowMs) fail();
+  const candidateSignature = signatureObject(signature, unsigned.operatorKeyId);
+  return Object.freeze({ ...unsigned, signature: Object.freeze({ ...candidateSignature }) });
+}
+
 export function createSignedRequestorDiscovery(input) {
   const { operatorPrivateKey, ...unsignedInput } = input;
   const unsigned = unsignedDiscovery(unsignedInput);
@@ -256,15 +269,56 @@ export function createSignedRequestorDiscovery(input) {
 }
 
 export function verifySignedRequestorDiscovery({ discovery, nowMs = Date.now(), operatorPublicKey, repositorySha } = {}) {
-  const value = exactObject(discovery, DISCOVERY_KEYS);
-  const { signature, ...unsignedRaw } = value;
-  const unsigned = unsignedDiscovery(unsignedRaw);
-  if (unsigned.repositorySha !== repositorySha || Number(unsigned.expiresAtMs) <= nowMs) fail();
-  const verifiedSignature = signatureObject(signature, unsigned.operatorKeyId);
+  const candidate = validateRequestorDiscoveryCandidate({ discovery, nowMs, repositorySha });
+  const { signature: verifiedSignature, ...unsigned } = candidate;
   const publicKey = typeof operatorPublicKey === "string" ? ed25519PublicKeyFromRawBase64(operatorPublicKey) : operatorPublicKey;
   if (!publicKey || publicKey.asymmetricKeyType !== "ed25519") fail();
   if (!verify(null, canonicalBytes(unsigned), publicKey, Buffer.from(verifiedSignature.value, "base64"))) fail();
   return Object.freeze({ ...unsigned, signature: Object.freeze({ ...verifiedSignature }) });
+}
+
+function safeObjectKey(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 1024 || value.startsWith("/") || /[\x00-\x1f\x7f]/.test(value)) fail();
+  const parts = value.split("/");
+  if (parts.some((part) => part.length === 0 || part === "." || part === "..")) fail();
+  return value;
+}
+
+function sameFileIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function validatePinnedStats(stats, { allowedModes, maxSize, expectedUid = process.getuid?.() }) {
+  if (
+    !stats.isFile() ||
+    stats.isSymbolicLink() ||
+    stats.nlink !== 1 ||
+    stats.size <= 0 ||
+    stats.size > maxSize ||
+    !allowedModes.has(stats.mode & 0o777) ||
+    (expectedUid !== undefined && stats.uid !== expectedUid)
+  ) {
+    fail();
+  }
+}
+
+async function readPinnedTextFile(path, options) {
+  if (typeof path !== "string" || path.length === 0 || resolve(path) !== path) fail();
+  const before = await lstat(path);
+  validatePinnedStats(before, options);
+  const handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = await handle.stat();
+    validatePinnedStats(opened, options);
+    if (!sameFileIdentity(before, opened)) fail();
+    const text = await handle.readFile("utf8");
+    const after = await lstat(path);
+    validatePinnedStats(after, options);
+    if (!sameFileIdentity(before, after) || after.size !== before.size) fail();
+    return { stats: before, text };
+  } finally {
+    await handle.close();
+  }
 }
 
 export async function publishRequestorDiscovery({
@@ -278,15 +332,27 @@ export async function publishRequestorDiscovery({
   operatorPrivateKeyPath,
   publicUrl,
   putObject,
-  readTextFile = (path) => readFile(path, "utf8"),
   releaseId,
   repositorySha,
   sessionId,
 } = {}) {
-  if (typeof bucket !== "string" || bucket.length === 0 || typeof certificateKey !== "string" || typeof discoveryKey !== "string" || typeof putObject !== "function") fail();
-  const certificatePem = await readTextFile(certificatePath);
+  if (typeof bucket !== "string" || bucket.length === 0 || typeof putObject !== "function") fail();
+  const safeCertificateKey = safeObjectKey(certificateKey);
+  const safeDiscoveryKey = safeObjectKey(discoveryKey);
+  if (safeCertificateKey === safeDiscoveryKey || certificatePath === operatorPrivateKeyPath) fail();
+  const certificate = await readPinnedTextFile(certificatePath, {
+    allowedModes: new Set([0o600, 0o644]),
+    maxSize: MAX_CERTIFICATE_BYTES,
+  });
+  const operator = await readPinnedTextFile(operatorPrivateKeyPath, {
+    allowedModes: new Set([0o600]),
+    maxSize: MAX_OPERATOR_KEY_BYTES,
+  });
+  if (sameFileIdentity(certificate.stats, operator.stats)) fail();
+  const certificatePem = certificate.text;
   const certificateFingerprint = createHash("sha256").update(new X509Certificate(certificatePem).raw).digest("hex");
-  const operatorPrivateKey = createPrivateKey(await readTextFile(operatorPrivateKeyPath));
+  const operatorPrivateKey = createPrivateKey(operator.text);
+  if (operatorPrivateKey.asymmetricKeyType !== "ed25519") fail();
   const discovery = createSignedRequestorDiscovery({
     certificateFingerprint,
     certificateUrl,
@@ -298,7 +364,7 @@ export async function publishRequestorDiscovery({
     repositorySha,
     sessionId,
   });
-  await putObject({ body: certificatePem, bucket, contentType: "application/x-pem-file", key: certificateKey });
-  await putObject({ body: `${JSON.stringify(discovery)}\n`, bucket, contentType: "application/json", key: discoveryKey });
+  await putObject({ body: certificatePem, bucket, contentType: "application/x-pem-file", key: safeCertificateKey });
+  await putObject({ body: `${JSON.stringify(discovery)}\n`, bucket, contentType: "application/json", key: safeDiscoveryKey });
   return Object.freeze({ discovery, paymentMoved: false });
 }
