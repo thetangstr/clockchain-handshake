@@ -162,11 +162,22 @@ function activeDependencies(dependencies) {
   const stderr = dependencies.stderr ?? process.stderr;
   if (
     typeof stdout?.write !== "function" ||
-    typeof stderr?.write !== "function"
+    typeof stderr?.write !== "function" ||
+    (
+      Object.hasOwn(
+        dependencies,
+        "beforeAuthorizationOutput",
+      ) &&
+      typeof dependencies.beforeAuthorizationOutput !==
+        "function"
+    )
   ) {
     throw new BilateralVerdictError();
   }
   return Object.freeze({
+    beforeAuthorizationOutput:
+      dependencies.beforeAuthorizationOutput ??
+      null,
     buildVerifierInput:
       dependencies.buildVerifierInput ??
       buildDefaultVerifierInput,
@@ -764,6 +775,16 @@ export async function main(
       active.fileSystem,
     );
     completedOutput = values.output;
+    if (
+      active.beforeAuthorizationOutput !== null
+    ) {
+      await active.beforeAuthorizationOutput(
+        Object.freeze({
+          output: values.output,
+          verdict,
+        }),
+      );
+    }
     active.stdout.write("AUTHORIZED\n");
     return 0;
   } catch (error) {
