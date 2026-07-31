@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   lstat,
   mkdtemp,
@@ -18,6 +19,9 @@ import {
   main as coordinatorEntrypoint,
 } from "../infra/aws/runtime/coordinator-entrypoint.mjs";
 import {
+  main as fundingEntrypoint,
+} from "../infra/aws/runtime/funding-entrypoint.mjs";
+import {
   main as verifierEntrypoint,
 } from "../infra/aws/runtime/verifier-entrypoint.mjs";
 
@@ -25,6 +29,61 @@ const VERIFIER_ATTEMPT_ID =
   "11111111-1111-4111-8111-111111111111";
 const VERIFIER_TASK_ARN =
   "arn:aws:ecs:us-west-2:123456789012:task/clockchain/11111111111111111111111111111111";
+const TREASURY_ADDRESS =
+  "0x157a377e4181f3f87c7f6efed5ddc340ccc00dce";
+
+function fundingKeystore(address = TREASURY_ADDRESS) {
+  return JSON.stringify({
+    version: 3,
+    id: "demo-wallet",
+    address: address.slice(2),
+    crypto: {
+      ciphertext: "a".repeat(64),
+      cipherparams: {
+        iv: "b".repeat(32),
+      },
+      cipher: "aes-128-ctr",
+      kdf: "scrypt",
+      kdfparams: {
+        dklen: 32,
+        salt: "c".repeat(64),
+        n: 262144,
+        r: 8,
+        p: 1,
+      },
+      mac: "d".repeat(64),
+    },
+  });
+}
+
+function mutateFundingKeystore(mutator) {
+  const value = JSON.parse(fundingKeystore());
+  mutator(value);
+  return JSON.stringify(value);
+}
+
+function fundingRuntimeInput(overrides = {}) {
+  const funding = {
+    createdAt: "2026-07-31T00:00:00.000Z",
+    expectedTreasuryAddress: TREASURY_ADDRESS,
+    fundingRecordPath: "/operator/funding-record.json",
+    journalDirectory: "/operator/funding-journal",
+    keystoreSecretArn:
+      "arn:aws:secretsmanager:us-west-2:123456789012:secret:treasury-keystore",
+    passwordSecretArn:
+      "arn:aws:secretsmanager:us-west-2:123456789012:secret:treasury-password",
+    repositorySha:
+      "abcdef0123456789abcdef0123456789abcdef01",
+    rpcSecretArn:
+      "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
+    ...overrides,
+  };
+  return JSON.stringify({
+    funding,
+    paymentMoved: false,
+    schema: "clockchain.aws-runtime-input/v1",
+  });
+}
 
 function verifierRuntimeInput(overrides = {}) {
   const verifier = {
@@ -205,6 +264,442 @@ test("coordinator entrypoint binds the operator-created release and session iden
           "11111111-1111-4111-8111-111111111111",
       },
     ],
+  ]);
+});
+
+test("funding entrypoint materializes keystore metadata and RPC secrets into private scratch paths", async () => {
+  const secretReads = [];
+  const runCalls = [];
+  const keystore = fundingKeystore();
+  const client = {
+    async send(command) {
+      secretReads.push(command.input);
+      if (
+        command.input.SecretId.endsWith(
+          "treasury-keystore",
+        )
+      ) {
+        return { SecretString: keystore };
+      }
+      if (command.input.SecretId.endsWith("rpc-url")) {
+        return {
+          SecretString:
+            "https://ethereum-rpc.publicnode.com/path",
+        };
+      }
+      assert.fail(
+        `unexpected eager secret read: ${command.input.SecretId}`,
+      );
+    },
+  };
+  for (let index = 0; index < 2; index += 1) {
+    await fundingEntrypoint({
+      client,
+      env: {
+        AWS_RUNTIME_INPUT: fundingRuntimeInput(),
+      },
+      run: async (input, dependencies) => {
+        runCalls.push(input);
+        assert.equal(
+          typeof dependencies.readSecret,
+          "function",
+        );
+        const keystoreBytes = await readFile(
+          input.keystorePath,
+        );
+        const metadata = JSON.parse(
+          await readFile(
+            input.keystorePath.replace(
+              /\.json$/,
+              ".public.json",
+            ),
+            "utf8",
+          ),
+        );
+        assert.equal(
+          (await lstat(dirname(input.keystorePath)))
+            .mode & 0o777,
+          0o700,
+        );
+        assert.equal(
+          (await lstat(input.keystorePath)).mode &
+            0o777,
+          0o600,
+        );
+        assert.equal(
+          (await lstat(input.rpcUrlFile)).mode &
+            0o777,
+          0o600,
+        );
+        assert.equal(
+          (
+            await lstat(
+              input.keystorePath.replace(
+                /\.json$/,
+                ".public.json",
+              ),
+            )
+          ).mode & 0o777,
+          0o600,
+        );
+        assert.deepEqual(metadata, {
+          schemaVersion: 1,
+          chainId: 11155111,
+          fundingAddress: TREASURY_ADDRESS,
+          keystoreSha256: createHash("sha256")
+            .update(keystoreBytes)
+            .digest("hex"),
+          createdAt: "2026-07-31T00:00:00.000Z",
+        });
+        assert.equal(
+          await readFile(input.rpcUrlFile, "utf8"),
+          "https://ethereum-rpc.publicnode.com/path\n",
+        );
+        return {
+          paymentMoved: false,
+          status: "FUNDED",
+        };
+      },
+    });
+  }
+
+  assert.deepEqual(secretReads, [
+    {
+      SecretId:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:treasury-keystore",
+    },
+    {
+      SecretId:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
+    },
+    {
+      SecretId:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:treasury-keystore",
+    },
+    {
+      SecretId:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
+    },
+  ]);
+  assert.equal(runCalls.length, 2);
+  assert.notEqual(
+    dirname(runCalls[0].keystorePath),
+    dirname(runCalls[1].keystorePath),
+  );
+  for (const runCall of runCalls) {
+    assert.deepEqual(runCall, {
+      expectedTreasuryAddress: TREASURY_ADDRESS,
+      fundingRecordPath: "/operator/funding-record.json",
+      journalDirectory: "/operator/funding-journal",
+      keystorePath: runCall.keystorePath,
+      repositorySha:
+        "abcdef0123456789abcdef0123456789abcdef01",
+      rpcUrlFile: runCall.rpcUrlFile,
+      secretId:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:treasury-password",
+    });
+    assert.notEqual(
+      runCall.keystorePath,
+      "/secrets/treasury-keystore.json",
+    );
+    assert.notEqual(
+      runCall.rpcUrlFile,
+      "/secrets/sepolia-rpc",
+    );
+    await assert.rejects(
+      lstat(runCall.keystorePath),
+      { code: "ENOENT" },
+    );
+    await assert.rejects(
+      lstat(
+        runCall.keystorePath.replace(
+          /\.json$/,
+          ".public.json",
+        ),
+      ),
+      { code: "ENOENT" },
+    );
+    await assert.rejects(
+      lstat(runCall.rpcUrlFile),
+      { code: "ENOENT" },
+    );
+  }
+});
+
+test("funding entrypoint rejects caller-supplied secret paths before reading secrets", async () => {
+  const cases = [
+    { keystorePath: "/secrets/treasury-keystore.json" },
+    { rpcUrlFile: "/secrets/sepolia-rpc" },
+    {
+      secretId:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:treasury-password",
+    },
+    {
+      keystoreSecretArn: "not-an-arn",
+    },
+    {
+      passwordSecretArn: "not-an-arn",
+    },
+    {
+      rpcSecretArn:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
+      z: "unknown",
+    },
+  ];
+  for (const overrides of cases) {
+    let secretReads = 0;
+    await assert.rejects(
+      fundingEntrypoint({
+        client: {
+          async send() {
+            secretReads += 1;
+            return { SecretString: "secret" };
+          },
+        },
+        env: {
+          AWS_RUNTIME_INPUT:
+            fundingRuntimeInput(overrides),
+        },
+        run: async () => {
+          assert.fail("run must not start");
+        },
+      }),
+      /AWS funding entrypoint failed safely|AWS runtime input failed safely/,
+    );
+    assert.equal(secretReads, 0);
+  }
+});
+
+test("funding entrypoint rejects invalid keystore and RPC secrets before scratch or run", async () => {
+  const cases = [
+    {
+      name: "address mismatch",
+      secrets: {
+        "treasury-keystore": fundingKeystore(
+          "0x257a377e4181f3f87c7f6efed5ddc340ccc00dce",
+        ),
+        "rpc-url":
+          "https://ethereum-rpc.publicnode.com/path",
+      },
+    },
+    {
+      name: "noncanonical keystore",
+      secrets: {
+        "treasury-keystore": `${fundingKeystore()}\n`,
+        "rpc-url":
+          "https://ethereum-rpc.publicnode.com/path",
+      },
+    },
+    {
+      name: "unsafe rpc",
+      secrets: {
+        "treasury-keystore": fundingKeystore(),
+        "rpc-url":
+          "http://ethereum-rpc.publicnode.com/path?api_key=provider",
+      },
+    },
+    {
+      name: "rpc with query",
+      secrets: {
+        "treasury-keystore": fundingKeystore(),
+        "rpc-url":
+          "https://ethereum-rpc.publicnode.com/path?api_key=provider",
+      },
+    },
+    {
+      name: "extra keystore key",
+      secrets: {
+        "treasury-keystore": mutateFundingKeystore(
+          (value) => {
+            value.extra = true;
+          },
+        ),
+        "rpc-url":
+          "https://ethereum-rpc.publicnode.com/path",
+      },
+    },
+    {
+      name: "wrong cipher",
+      secrets: {
+        "treasury-keystore": mutateFundingKeystore(
+          (value) => {
+            value.crypto.cipher = "aes-256-ctr";
+          },
+        ),
+        "rpc-url":
+          "https://ethereum-rpc.publicnode.com/path",
+      },
+    },
+    {
+      name: "wrong kdf",
+      secrets: {
+        "treasury-keystore": mutateFundingKeystore(
+          (value) => {
+            value.crypto.kdf = "pbkdf2";
+          },
+        ),
+        "rpc-url":
+          "https://ethereum-rpc.publicnode.com/path",
+      },
+    },
+    {
+      name: "non power-of-two scrypt n",
+      secrets: {
+        "treasury-keystore": mutateFundingKeystore(
+          (value) => {
+            value.crypto.kdfparams.n = 3;
+          },
+        ),
+        "rpc-url":
+          "https://ethereum-rpc.publicnode.com/path",
+      },
+    },
+    {
+      name: "zero address",
+      input: fundingRuntimeInput({
+        expectedTreasuryAddress:
+          "0x0000000000000000000000000000000000000000",
+      }),
+      secrets: {
+        "treasury-keystore": fundingKeystore(
+          "0x0000000000000000000000000000000000000000",
+        ),
+        "rpc-url":
+          "https://ethereum-rpc.publicnode.com/path",
+      },
+    },
+  ];
+  for (const { input, name, secrets } of cases) {
+    const calls = [];
+    await assert.rejects(
+      fundingEntrypoint({
+        client: {
+          async send(command) {
+            calls.push(["secret", command.input]);
+            const key = command.input.SecretId.endsWith(
+              "treasury-keystore",
+            )
+              ? "treasury-keystore"
+              : "rpc-url";
+            return { SecretString: secrets[key] };
+          },
+        },
+        createTempDir: async () => {
+          calls.push(["createTempDir"]);
+          throw new Error("scratch must not start");
+        },
+        env: {
+          AWS_RUNTIME_INPUT:
+            input ?? fundingRuntimeInput(),
+        },
+        run: async () => {
+          calls.push(["run"]);
+          assert.fail("run must not start");
+        },
+      }),
+      /AWS funding entrypoint failed safely|AWS runtime input failed safely/,
+      name,
+    );
+    assert.equal(
+      calls.some(([call]) => call === "createTempDir"),
+      false,
+      name,
+    );
+    assert.equal(
+      calls.some(([call]) => call === "run"),
+      false,
+      name,
+    );
+  }
+});
+
+test("funding entrypoint fails closed when scratch cleanup fails after run", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "clockchain-funding-entrypoint-"),
+  );
+  const scratch = join(root, "clockchain-funding-");
+  const calls = [];
+  try {
+    await assert.rejects(
+      fundingEntrypoint({
+        client: {
+          async send(command) {
+            return {
+              SecretString:
+                command.input.SecretId.endsWith(
+                  "treasury-keystore",
+                )
+                  ? fundingKeystore()
+                  : "https://ethereum-rpc.publicnode.com/path",
+            };
+          },
+        },
+        createTempDir: async (prefix) => {
+          const path = await mkdtemp(`${scratch}-`);
+          calls.push(["createTempDir", prefix, path]);
+          return path;
+        },
+        env: {
+          AWS_RUNTIME_INPUT: fundingRuntimeInput(),
+        },
+        removeDir: async (path) => {
+          calls.push(["removeDir", path]);
+          throw new Error("cleanup canary");
+        },
+        removeFile: async (path) => {
+          calls.push(["removeFile", path]);
+          throw new Error("cleanup canary");
+        },
+        run: async () => {
+          calls.push(["run"]);
+          return {
+            paymentMoved: false,
+            status: "FUNDED",
+          };
+        },
+      }),
+      (error) => {
+        assert.equal(
+          error.message,
+          "AWS funding entrypoint failed safely.",
+        );
+        assert.doesNotMatch(
+          String(error),
+          /cleanup canary|treasury|ethereum-rpc/,
+        );
+        return true;
+      },
+    );
+  } finally {
+    await rm(root, {
+      force: true,
+      recursive: true,
+    });
+  }
+  const scratchDir = calls[0][2];
+  assert.deepEqual(calls, [
+    [
+      "createTempDir",
+      join(tmpdir(), "clockchain-funding-"),
+      scratchDir,
+    ],
+    ["run"],
+    [
+      "removeFile",
+      join(scratchDir, "treasury-keystore.json"),
+    ],
+    [
+      "removeFile",
+      join(
+        scratchDir,
+        "treasury-keystore.public.json",
+      ),
+    ],
+    [
+      "removeFile",
+      join(scratchDir, "sepolia-rpc-url"),
+    ],
+    ["removeDir", scratchDir],
   ]);
 });
 
