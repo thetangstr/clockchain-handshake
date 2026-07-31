@@ -44,7 +44,7 @@ const REQUESTOR_SAFETY_RULES = Object.freeze([
   "Do not print or share private keys, capabilities, tokens, launch manifests, or live evidence.",
   "Do not claim the final verdict; only the operator fresh aggregate verifier may report it.",
 ]);
-const REQUESTOR_REQUIRED_COMMAND = "npm run bilateral:request-payment -- --discovery-url <signed-discovery-url> --intake-request-id <uuid-v4> --state <absolute-private-requestor-state-root>";
+const REQUESTOR_REQUIRED_COMMAND = "npm run bilateral:request-payment -- --discovery-url <signed-discovery-url> --state <absolute-private-requestor-state-root>";
 const REQUESTOR_SUMMARY = "The Payer requires Clockchain Handshake before this payment request can be evaluated.";
 
 function invalid() {

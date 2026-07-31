@@ -22,10 +22,10 @@ const OPERATOR_KEY_ID = "operator";
 const CAPABILITY = "ab".repeat(32);
 const REPOSITORY_ROOT = resolve(new URL("../", import.meta.url).pathname);
 
-function paymentInput() {
+function paymentInput(intakeRequestId = INTAKE_REQUEST_ID) {
   return {
     amount: { currency: "USD", value: "100" },
-    intakeRequestId: INTAKE_REQUEST_ID,
+    intakeRequestId,
     invoiceReference: "invoice-001",
     paymentMoved: false,
     purpose: "Handshake demo",
@@ -112,7 +112,6 @@ async function fixture(t) {
   return {
     args: [
       "--discovery-url", "https://payer.example.test/discovery.json",
-      "--intake-request-id", INTAKE_REQUEST_ID,
       "--state", stateRoot,
     ],
     certificateFingerprint,
@@ -203,9 +202,10 @@ test("Requestor CLI exposes only one-shot discovery flags and completes bootstra
       assert.equal(input.mcpUrl, fx.discovery.publicUrl);
       assert.equal(input.tlsFingerprint, fx.discovery.certificateFingerprint);
       assert.equal(input.stateRoot, fx.stateRoot);
+      assert.match(input.intakeRequestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
       return buildPaymentIntakeToolResult({
         repositorySha: REPOSITORY_SHA,
-        toolInput: paymentInput(),
+        toolInput: paymentInput(input.intakeRequestId),
       }).structuredContent;
     },
     async runSupervisor(input) {
@@ -228,7 +228,19 @@ test("Requestor CLI exposes only one-shot discovery flags and completes bootstra
     },
   });
   assert.deepEqual(result, { paymentMoved: false, supervisor: "started" });
-  assert.deepEqual(REQUEST_PAYMENT_CLI_FLAGS, ["--discovery-url", "--intake-request-id", "--state"]);
+  assert.deepEqual(REQUEST_PAYMENT_CLI_FLAGS, ["--discovery-url", "--state"]);
+  const intakeRecordPath = join(`${fx.stateRoot}.bootstrap`, "requestor-intake-request.json");
+  const intakeRecordStats = await lstat(intakeRecordPath);
+  assert.equal(intakeRecordStats.mode & 0o777, 0o600);
+  const intakeRecord = JSON.parse(await readFile(intakeRecordPath, "utf8"));
+  assert.deepEqual(Object.keys(intakeRecord), [
+    "intakeRequestId",
+    "paymentMoved",
+    "schema",
+  ]);
+  assert.match(intakeRecord.intakeRequestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(intakeRecord.paymentMoved, false);
+  assert.equal(intakeRecord.schema, "clockchain.requestor-intake-request/v1");
   assert.match(capturedClaim.claimNonce, /^[0-9a-f]{8}-[0-9a-f]{4}-4/);
   assert.equal(capturedClaim.paymentMoved, false);
   assert.equal(capturedClaim.repositorySha, REPOSITORY_SHA);
@@ -372,6 +384,7 @@ test("Requestor CLI rejects dirty repo before discovery, network, private state,
     /Request payment startup failed safely/,
   );
   assert.deepEqual(calls, ["inspectRepository"]);
+  await assert.rejects(lstat(`${fx.stateRoot}.bootstrap`), { code: "ENOENT" });
 });
 
 test("Requestor CLI fails closed on malformed args, stale discovery, wrong SHA, and wrong certificate", async (t) => {
@@ -379,6 +392,11 @@ test("Requestor CLI fails closed on malformed args, stale discovery, wrong SHA, 
   for (const args of [
     fx.args.slice(0, -2),
     [...fx.args, "--launch-manifest", "/tmp/secret.json"],
+    [
+      "--discovery-url", "https://payer.example.test/discovery.json",
+      "--intake-request-id", INTAKE_REQUEST_ID,
+      "--state", fx.stateRoot,
+    ],
     fx.args.map((value) => value === fx.stateRoot ? "relative" : value),
   ]) {
     await assert.rejects(main(args, {}), /Request payment startup failed safely/);
@@ -408,6 +426,202 @@ test("Requestor CLI fails closed on malformed args, stale discovery, wrong SHA, 
       /Request payment startup failed safely/,
     );
   }
+});
+
+test("Requestor CLI reuses one private intake request ID after an interrupted bootstrap", async (t) => {
+  const fx = await fixture(t);
+  let firstClaim;
+  await assert.rejects(
+    main(fx.args, {
+      async inspectRepository() {
+        return { clean: true, detached: true, head: REPOSITORY_SHA };
+      },
+      async fetchJson() {
+        return fx.discovery;
+      },
+      async readOperatorPublicKey() {
+        return fx.operatorPublicKey;
+      },
+      async fetchText() {
+        return fx.tlsCertificatePem;
+      },
+      async requestBootstrap(input) {
+        firstClaim = input.claim;
+        throw new Error("interrupted");
+      },
+    }),
+    /Request payment startup failed safely/,
+  );
+
+  const persisted = JSON.parse(
+    await readFile(join(`${fx.stateRoot}.bootstrap`, "requestor-intake-request.json"), "utf8"),
+  );
+  let secondIntakeRequestId;
+  await main(fx.args, {
+    async inspectRepository() {
+      return { clean: true, detached: true, head: REPOSITORY_SHA };
+    },
+    async fetchJson() {
+      return fx.discovery;
+    },
+    async readOperatorPublicKey() {
+      return fx.operatorPublicKey;
+    },
+    async fetchText() {
+      return fx.tlsCertificatePem;
+    },
+    async requestBootstrap(input) {
+      assert.deepEqual(input.claim, firstClaim);
+      return sealedBrokerResponse({
+        claim: input.claim,
+        manifestBytes: fx.manifestBytes,
+        operator: fx.operator,
+      });
+    },
+    async requestPayment(input) {
+      secondIntakeRequestId = input.intakeRequestId;
+      return buildPaymentIntakeToolResult({
+        repositorySha: REPOSITORY_SHA,
+        toolInput: paymentInput(input.intakeRequestId),
+      }).structuredContent;
+    },
+    async runSupervisor() {
+      return { paymentMoved: false, supervisor: "started" };
+    },
+    writeStatus() {},
+  });
+  assert.equal(secondIntakeRequestId, persisted.intakeRequestId);
+});
+
+test("Requestor CLI creates a fresh intake request ID for each new private state root", async (t) => {
+  const first = await fixture(t);
+  const second = await fixture(t);
+  const sequences = [
+    [
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+    ],
+    [
+      "33333333-3333-4333-8333-333333333333",
+      "44444444-4444-4444-8444-444444444444",
+    ],
+  ];
+  for (const [index, fx] of [first, second].entries()) {
+    const identifiers = [...sequences[index]];
+    await assert.rejects(
+      main(fx.args, {
+        async inspectRepository() {
+          return { clean: true, detached: true, head: REPOSITORY_SHA };
+        },
+        async fetchJson() {
+          return fx.discovery;
+        },
+        async readOperatorPublicKey() {
+          return fx.operatorPublicKey;
+        },
+        async fetchText() {
+          return fx.tlsCertificatePem;
+        },
+        randomUUID() {
+          return identifiers.shift();
+        },
+        async requestBootstrap() {
+          throw new Error("interrupted");
+        },
+      }),
+      /Request payment startup failed safely/,
+    );
+    assert.equal(identifiers.length, 0);
+  }
+
+  const firstRecord = JSON.parse(
+    await readFile(join(`${first.stateRoot}.bootstrap`, "requestor-intake-request.json"), "utf8"),
+  );
+  const secondRecord = JSON.parse(
+    await readFile(join(`${second.stateRoot}.bootstrap`, "requestor-intake-request.json"), "utf8"),
+  );
+  assert.equal(firstRecord.intakeRequestId, sequences[0][1]);
+  assert.equal(secondRecord.intakeRequestId, sequences[1][1]);
+  assert.notEqual(firstRecord.intakeRequestId, secondRecord.intakeRequestId);
+});
+
+test("Requestor CLI rejects an intake request ID that collides with its bootstrap claim", async (t) => {
+  const fx = await fixture(t);
+  const identifier = "11111111-1111-4111-8111-111111111111";
+  let bootstrapCalls = 0;
+  await assert.rejects(
+    main(fx.args, {
+      async inspectRepository() {
+        return { clean: true, detached: true, head: REPOSITORY_SHA };
+      },
+      async fetchJson() {
+        return fx.discovery;
+      },
+      async readOperatorPublicKey() {
+        return fx.operatorPublicKey;
+      },
+      async fetchText() {
+        return fx.tlsCertificatePem;
+      },
+      randomUUID() {
+        return identifier;
+      },
+      async requestBootstrap() {
+        bootstrapCalls += 1;
+      },
+    }),
+    /Request payment startup failed safely/,
+  );
+  assert.equal(bootstrapCalls, 0);
+});
+
+test("Requestor CLI rejects a changed private intake request record before bootstrap or MCP", async (t) => {
+  const fx = await fixture(t);
+  const bootstrapRoot = `${fx.stateRoot}.bootstrap`;
+  await mkdir(bootstrapRoot, { mode: 0o700 });
+  await writeFile(
+    join(bootstrapRoot, "requestor-intake-request.json"),
+    `${JSON.stringify({
+      intakeRequestId: INTAKE_REQUEST_ID,
+      paymentMoved: true,
+      schema: "clockchain.requestor-intake-request/v1",
+    })}\n`,
+    { mode: 0o600 },
+  );
+  const calls = [];
+  await assert.rejects(
+    main(fx.args, {
+      async inspectRepository() {
+        calls.push("inspectRepository");
+        return { clean: true, detached: true, head: REPOSITORY_SHA };
+      },
+      async fetchJson() {
+        calls.push("fetchJson");
+        return fx.discovery;
+      },
+      async readOperatorPublicKey() {
+        calls.push("readOperatorPublicKey");
+        return fx.operatorPublicKey;
+      },
+      async fetchText() {
+        calls.push("fetchText");
+        return fx.tlsCertificatePem;
+      },
+      async requestBootstrap() {
+        calls.push("requestBootstrap");
+      },
+      async requestPayment() {
+        calls.push("requestPayment");
+      },
+    }),
+    /Request payment startup failed safely/,
+  );
+  assert.deepEqual(calls, [
+    "inspectRepository",
+    "fetchJson",
+    "readOperatorPublicKey",
+    "fetchText",
+  ]);
 });
 
 test("Requestor CLI validates discovery candidate before operator-key lookup", async (t) => {

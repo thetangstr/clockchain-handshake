@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
-import { link, lstat, mkdir, open, unlink } from "node:fs/promises";
 import https from "node:https";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createHash, createPublicKey, randomUUID, verify } from "node:crypto";
@@ -27,11 +25,16 @@ import {
   verifySignedRequestorDiscovery,
 } from "../scripts/publish-requestor-discovery.mjs";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
+import { inspectParticipantPrerequisites } from "../src/bilateral/platform-tools.mjs";
+import {
+  preparePrivateDirectory,
+  readPrivateText,
+  writePrivateFile,
+} from "../src/bilateral/private-path.mjs";
 import { canonicalizeReceiptEventValue } from "../src/canonical.mjs";
 
 export const REQUEST_PAYMENT_CLI_FLAGS = Object.freeze([
   "--discovery-url",
-  "--intake-request-id",
   "--state",
 ]);
 
@@ -39,19 +42,8 @@ const execFileAsync = promisify(execFile);
 const FAILURE_LINE = '{"code":"REQUEST_PAYMENT_FAILED","paymentMoved":false}\n';
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const INTAKE_REQUEST_SCHEMA = "clockchain.requestor-intake-request/v1";
 const REQUEST_PAYMENT_REPOSITORY_ROOT = resolve(fileURLToPath(new URL("../", import.meta.url)));
-const GIT_ENV = Object.freeze(Object.assign(Object.create(null), {
-  GIT_ATTR_NOSYSTEM: "1",
-  GIT_CONFIG_GLOBAL: "/dev/null",
-  GIT_CONFIG_NOSYSTEM: "1",
-  GIT_CONFIG_SYSTEM: "/dev/null",
-  GIT_NO_REPLACE_OBJECTS: "1",
-  GIT_OPTIONAL_LOCKS: "0",
-  GIT_TERMINAL_PROMPT: "0",
-  LANG: "C",
-  LC_ALL: "C",
-  PATH: "/usr/bin:/bin",
-}));
 const GIT_PREFIX = Object.freeze(["--no-pager", "--no-replace-objects", "-c", "core.attributesFile=/dev/null", "-c", "core.excludesFile=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false", "-C"]);
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const MAX_FETCH_BYTES = 262_144;
@@ -80,7 +72,6 @@ function parseArguments(arguments_) {
   const stateRoot = absolutePrivatePath(parsed["--state"]);
   return Object.freeze({
     discoveryUrl: httpsUrl(parsed["--discovery-url"]),
-    intakeRequestId: parsed["--intake-request-id"],
     stateRoot,
   });
 }
@@ -109,13 +100,51 @@ function bootstrapUrl(publicUrl) {
   return url.href;
 }
 
-async function inspectRepository(repositoryRoot = REQUEST_PAYMENT_REPOSITORY_ROOT) {
+function gitEnvironment(activePlatform = process.platform) {
+  const nullDevice = activePlatform === "win32" ? "NUL" : "/dev/null";
+  const environment = Object.assign(Object.create(null), {
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: nullDevice,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_SYSTEM: nullDevice,
+    GIT_NO_REPLACE_OBJECTS: "1",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0",
+    LANG: "C",
+    LC_ALL: "C",
+  });
+  for (const name of [
+    "COMSPEC",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "PATH",
+    "PATHEXT",
+    "SystemRoot",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+  ]) {
+    if (typeof process.env[name] === "string") environment[name] = process.env[name];
+  }
+  return Object.freeze(environment);
+}
+
+async function inspectRepository(
+  repositoryRoot = REQUEST_PAYMENT_REPOSITORY_ROOT,
+  {
+    gitCommand,
+    platform = process.platform,
+  } = {},
+) {
+  if (typeof gitCommand !== "string" || gitCommand.length === 0) fail();
   const cwd = resolve(repositoryRoot);
-  const git = (arguments_) => execFileAsync("/usr/bin/git", arguments_, {
+  const git = (arguments_) => execFileAsync(gitCommand, arguments_, {
     cwd,
     encoding: "utf8",
-    env: GIT_ENV,
+    env: gitEnvironment(platform),
     maxBuffer: 8192,
+    windowsHide: true,
   });
   const run = (arguments_) => git([...GIT_PREFIX, cwd, ...arguments_]);
   const { stdout: head } = await run(["rev-parse", "--verify", "HEAD^{commit}"]);
@@ -191,17 +220,27 @@ function discoveryFromFetch(value) {
   return value;
 }
 
-async function readReviewedOperatorPublicKey(repositorySha, keyId, repositoryRoot = REQUEST_PAYMENT_REPOSITORY_ROOT) {
+async function readReviewedOperatorPublicKey(
+  repositorySha,
+  keyId,
+  repositoryRoot = REQUEST_PAYMENT_REPOSITORY_ROOT,
+  {
+    gitCommand,
+    platform = process.platform,
+  } = {},
+) {
   if (typeof repositorySha !== "string" || !SHA_PATTERN.test(repositorySha) || typeof keyId !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(keyId)) fail();
+  if (typeof gitCommand !== "string" || gitCommand.length === 0) fail();
   const cwd = resolve(repositoryRoot);
   const { stdout } = await execFileAsync(
-    "/usr/bin/git",
+    gitCommand,
     [...GIT_PREFIX, cwd, "show", `${repositorySha}:docs/operator-keys/${keyId}.pub`],
     {
       cwd,
       encoding: "utf8",
-      env: GIT_ENV,
+      env: gitEnvironment(platform),
       maxBuffer: 8192,
+      windowsHide: true,
     },
   );
   const text = stdout.trim();
@@ -209,65 +248,35 @@ async function readReviewedOperatorPublicKey(repositorySha, keyId, repositoryRoo
   return text;
 }
 
-async function ensurePrivateDirectory(path) {
-  await mkdir(path, { mode: 0o700, recursive: false }).catch((error) => {
-    if (error?.code !== "EEXIST") throw error;
+function privatePathOptions({ activePlatform, runIcacls }) {
+  return Object.freeze({
+    platform: activePlatform,
+    ...(runIcacls === undefined ? {} : { runIcacls }),
   });
-  const stats = await lstat(path);
-  if (!stats.isDirectory() || stats.isSymbolicLink() || (stats.mode & 0o777) !== 0o700) fail();
 }
 
-async function readPrivateText(path) {
-  const stats = await lstat(path);
-  if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1 || (stats.mode & 0o777) !== 0o600 || stats.size <= 0 || stats.size > 65_536) fail();
-  const handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
-  try {
-    const opened = await handle.stat();
-    if (opened.dev !== stats.dev || opened.ino !== stats.ino || opened.size !== stats.size || (opened.mode & 0o777) !== 0o600) fail();
-    return await handle.readFile("utf8");
-  } finally {
-    await handle.close();
-  }
-}
-
-async function writePrivateFile(path, bytes) {
-  const temporary = join(dirname(path), `.requestor-bootstrap-${randomUUID()}.tmp`);
-  let handle;
-  try {
-    handle = await open(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600);
-    await handle.writeFile(bytes);
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await link(temporary, path);
-    await unlink(temporary);
-    const stats = await lstat(path);
-    if (!stats.isFile() || stats.isSymbolicLink() || (stats.mode & 0o777) !== 0o600 || stats.size !== bytes.length) fail();
-  } catch (error) {
-    if (handle) await handle.close();
-    await unlink(temporary).catch(() => {});
-    throw error;
-  }
-}
-
-async function loadOrCreateRequestorKey(root) {
+async function loadOrCreateRequestorKey(root, options) {
   const path = join(root, "requestor-bootstrap-key.json");
   try {
-    const existing = JSON.parse(await readPrivateText(path));
+    const existing = JSON.parse(await readPrivateText({ path, ...options }));
     if (typeof existing.publicKey !== "string" || !existing.privateKey) fail();
     return existing;
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
   const key = createRequestorBootstrapKey();
-  await writePrivateFile(path, Buffer.from(`${JSON.stringify(key)}\n`, "utf8"));
+  await writePrivateFile({
+    bytes: Buffer.from(`${JSON.stringify(key)}\n`, "utf8"),
+    path,
+    ...options,
+  });
   return key;
 }
 
-async function loadOrCreateClaim({ requestorPublicKey, root, repositorySha }) {
+async function loadOrCreateClaim({ randomUuid, requestorPublicKey, root, repositorySha }, options) {
   const path = join(root, "claim.json");
   try {
-    const existing = JSON.parse(await readPrivateText(path));
+    const existing = JSON.parse(await readPrivateText({ path, ...options }));
     if (
       !UUID_V4_PATTERN.test(existing.claimNonce) ||
       existing.paymentMoved !== false ||
@@ -286,14 +295,56 @@ async function loadOrCreateClaim({ requestorPublicKey, root, repositorySha }) {
     if (error?.code !== "ENOENT") throw error;
   }
   const claim = Object.freeze({
-    claimNonce: randomUUID(),
+    claimNonce: randomUuid(),
     paymentMoved: false,
     repositorySha,
     requestorPublicKey,
   });
   if (!UUID_V4_PATTERN.test(claim.claimNonce)) fail();
-  await writePrivateFile(path, Buffer.from(`${JSON.stringify(claim)}\n`, "utf8"));
+  await writePrivateFile({
+    bytes: Buffer.from(`${JSON.stringify(claim)}\n`, "utf8"),
+    path,
+    ...options,
+  });
   return claim;
+}
+
+async function loadOrCreateIntakeRequest({ claimNonce, randomUuid, root }, options) {
+  const path = join(root, "requestor-intake-request.json");
+  try {
+    const text = await readPrivateText({ path, ...options });
+    const existing = JSON.parse(text);
+    if (
+      existing === null ||
+      typeof existing !== "object" ||
+      Array.isArray(existing) ||
+      Object.getPrototypeOf(existing) !== Object.prototype ||
+      JSON.stringify(existing) + "\n" !== text ||
+      JSON.stringify(Object.keys(existing)) !==
+      JSON.stringify(["intakeRequestId", "paymentMoved", "schema"]) ||
+      !UUID_V4_PATTERN.test(existing.intakeRequestId) ||
+      existing.intakeRequestId === claimNonce ||
+      existing.paymentMoved !== false ||
+      existing.schema !== INTAKE_REQUEST_SCHEMA
+    ) {
+      fail();
+    }
+    return Object.freeze(existing);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const record = Object.freeze({
+    intakeRequestId: randomUuid(),
+    paymentMoved: false,
+    schema: INTAKE_REQUEST_SCHEMA,
+  });
+  if (!UUID_V4_PATTERN.test(record.intakeRequestId) || record.intakeRequestId === claimNonce) fail();
+  await writePrivateFile({
+    bytes: Buffer.from(`${JSON.stringify(record)}\n`, "utf8"),
+    path,
+    ...options,
+  });
+  return record;
 }
 
 function verifySealedBrokerResponse({ claim, discovery, operatorPublicKey, sealed }) {
@@ -310,21 +361,57 @@ function verifySealedBrokerResponse({ claim, discovery, operatorPublicKey, seale
 export async function main(arguments_ = process.argv.slice(2), dependencies = {}) {
   try {
     const parsed = parseArguments(arguments_);
-    const inspect = dependencies.inspectRepository ?? inspectRepository;
+    if (dependencies === null || typeof dependencies !== "object" || Array.isArray(dependencies)) fail();
+    const activePlatform = dependencies.platform ?? process.platform;
+    const inspectPrerequisites =
+      dependencies.inspectPrerequisites ??
+      ((input) => inspectParticipantPrerequisites(input));
+    if (typeof inspectPrerequisites !== "function") fail();
+    const prerequisites = await inspectPrerequisites({
+      platform: activePlatform,
+      role: "requestor",
+    });
+    if (
+      prerequisites === null ||
+      typeof prerequisites !== "object" ||
+      typeof prerequisites.git?.command !== "string" ||
+      prerequisites.git.command.length === 0
+    ) {
+      fail();
+    }
+    const inspect =
+      dependencies.inspectRepository ??
+      ((repositoryRoot) =>
+        inspectRepository(repositoryRoot, {
+          gitCommand: prerequisites.git.command,
+          platform: activePlatform,
+        }));
     if (typeof inspect !== "function") fail();
     const verifiedHead = validateRepositoryProof(await inspect(REQUEST_PAYMENT_REPOSITORY_ROOT));
     const fetchJson = dependencies.fetchJson ?? defaultFetchJson;
     const fetchCertificate = dependencies.fetchCertificate ?? dependencies.fetchText ?? defaultFetchCertificate;
     const nowMs = dependencies.nowMs ?? Date.now;
+    const randomUuid = dependencies.randomUUID ?? randomUUID;
     const sleep = dependencies.sleep ?? ((ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)));
-    if (typeof nowMs !== "function" || typeof sleep !== "function") fail();
+    if (typeof nowMs !== "function" || typeof randomUuid !== "function" || typeof sleep !== "function") fail();
     const discoveryRaw = discoveryFromFetch(await fetchJson(parsed.discoveryUrl));
     const discoveryCandidate = validateRequestorDiscoveryCandidate({
       discovery: discoveryRaw,
       nowMs: nowMs(),
       repositorySha: verifiedHead,
     });
-    const readOperatorPublicKey = dependencies.readOperatorPublicKey ?? readReviewedOperatorPublicKey;
+    const readOperatorPublicKey =
+      dependencies.readOperatorPublicKey ??
+      ((repositorySha, keyId) =>
+        readReviewedOperatorPublicKey(
+          repositorySha,
+          keyId,
+          REQUEST_PAYMENT_REPOSITORY_ROOT,
+          {
+            gitCommand: prerequisites.git.command,
+            platform: activePlatform,
+          },
+        ));
     const operatorPublicKey = ed25519PublicKeyFromRawBase64(await readOperatorPublicKey(verifiedHead, discoveryCandidate.operatorKeyId));
     const discovery = verifySignedRequestorDiscovery({
       discovery: discoveryCandidate,
@@ -336,9 +423,23 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
     const tlsFingerprint = createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex");
     if (tlsFingerprint !== discovery.certificateFingerprint) fail();
     const bootstrapRoot = `${parsed.stateRoot}.bootstrap`;
-    await ensurePrivateDirectory(bootstrapRoot);
-    const requestorKey = await loadOrCreateRequestorKey(bootstrapRoot);
-    const claim = await loadOrCreateClaim({ requestorPublicKey: requestorKey.publicKey, repositorySha: verifiedHead, root: bootstrapRoot });
+    const pathOptions = privatePathOptions({
+      activePlatform,
+      runIcacls: dependencies.runIcacls,
+    });
+    await preparePrivateDirectory({ path: bootstrapRoot, ...pathOptions });
+    const requestorKey = await loadOrCreateRequestorKey(bootstrapRoot, pathOptions);
+    const claim = await loadOrCreateClaim({
+      randomUuid,
+      requestorPublicKey: requestorKey.publicKey,
+      repositorySha: verifiedHead,
+      root: bootstrapRoot,
+    }, pathOptions);
+    const intakeRequest = await loadOrCreateIntakeRequest({
+      claimNonce: claim.claimNonce,
+      randomUuid,
+      root: bootstrapRoot,
+    }, pathOptions);
     const requestBootstrap = dependencies.requestBootstrap ?? requestBootstrapThroughPayerMcp;
     let sealed;
     const approvalDeadlineMs = Math.min(Number(discovery.expiresAtMs), nowMs() + BOOTSTRAP_MAX_WAIT_MS);
@@ -367,7 +468,11 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
       requestorPrivateKey: requestorKey.privateKey,
     });
     const manifestPath = join(bootstrapRoot, "payee.launch.json");
-    await writePrivateFile(manifestPath, manifestBytes);
+    await writePrivateFile({
+      bytes: manifestBytes,
+      path: manifestPath,
+      ...pathOptions,
+    });
     const reader = dependencies.readLaunchManifest ?? readLaunchManifest;
     const manifest = await reader(manifestPath);
     if (
@@ -383,7 +488,7 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
     const requestPayment = dependencies.requestPayment ?? requestPaymentThroughPayerMcp;
     const intakeResult = await requestPayment({
       capability: manifest.payerMcpIntakeCapability,
-      intakeRequestId: parsed.intakeRequestId,
+      intakeRequestId: intakeRequest.intakeRequestId,
       mcpUrl: discovery.publicUrl,
       repositorySha: manifest.repositorySha,
       stateRoot: parsed.stateRoot,

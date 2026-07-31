@@ -620,7 +620,6 @@ async function runSupervisorRole(value, role) {
   if (role === "payee" && configuration.requestPayment !== null) {
     const requestArguments = [
       "--discovery-url", configuration.requestPayment.discoveryUrl,
-      "--intake-request-id", configuration.requestPayment.intakeRequestId,
       "--state", configuration.stateRoot,
     ];
     await requestPaymentMain(requestArguments, {

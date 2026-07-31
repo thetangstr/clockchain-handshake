@@ -23,7 +23,7 @@ const REQUESTOR_INSTRUCTIONS = Object.freeze({
     "After the sealed manifest is written locally, let this command call request_payment once and start the Requestor supervisor.",
     "Stay attached until the three public anchors are visible: PROPOSED, ACCEPTED, ACKNOWLEDGED.",
   ],
-  requiredCommand: "npm run bilateral:request-payment -- --discovery-url <signed-discovery-url> --intake-request-id <uuid-v4> --state <absolute-private-requestor-state-root>",
+  requiredCommand: "npm run bilateral:request-payment -- --discovery-url <signed-discovery-url> --state <absolute-private-requestor-state-root>",
   safetyRules: [
     "Do not act as Payer.",
     "Do not change payer terms.",
