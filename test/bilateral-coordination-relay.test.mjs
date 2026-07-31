@@ -4039,6 +4039,47 @@ test("binds relay locally while validating client Host against required advertis
   await running.close();
 });
 
+test("allows wildcard bind while still enforcing the concrete advertised Host", async (t) => {
+  const tls = await tlsFixture(t);
+  const state = await privateRoot(t);
+  const port = await availablePort();
+  let running;
+  try {
+    running = await relayMain(
+      relayArguments({
+        advertisedHost: "127.0.0.1",
+        certificatePath: tls.certificatePath,
+        host: "0.0.0.0",
+        port,
+        privateKeyPath: tls.privateKeyPath,
+        state,
+      }),
+      { checkoutProbe: cleanCheckoutProbe },
+    );
+  } finally {
+    t.after(() => running?.close().catch(() => {}));
+  }
+  assert.equal(running.address.host, "0.0.0.0");
+  assert.equal(running.address.port, port);
+  const accepted = await httpsRequest({
+    ca: tls.certificate,
+    headers: { host: `127.0.0.1:${port}` },
+    method: "GET",
+    path: `/v1/sessions/${SESSION_ID}/events?waitMs=0`,
+    port,
+  });
+  assert.equal(accepted.statusCode, 200);
+  const localMismatch = await httpsRequest({
+    ca: tls.certificate,
+    headers: { host: `127.0.0.2:${port}` },
+    method: "GET",
+    path: `/v1/sessions/${SESSION_ID}/events?waitMs=0`,
+    port,
+  });
+  assert.equal(localMismatch.statusCode, 400);
+  await running.close();
+});
+
 test("production checkout attestation ignores poisoned Git repository, index, worktree, config, executable, and locale environment", async (t) => {
   const tls = await tlsFixture(t);
   const state = await privateRoot(t);

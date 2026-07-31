@@ -376,15 +376,15 @@ test("automated bilateral happy path limits the user to four fundings and two su
   }
   assert.match(
     payer,
-    /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/,
+    /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-bootstrap-broker-url "\$PAYER_MCP_BOOTSTRAP_BROKER_URL" \\\n  --payer-mcp-bootstrap-broker-capability-file "\$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/,
   );
   assert.doesNotMatch(payer, /npm run bilateral:request-payment/);
   assert.match(payer, /\bPAYER_MCP_READY\b/);
-  assert.match(payer, /share only the public MCP URL,\s+public TLS certificate, and lowercase 64-hex certificate fingerprint/i);
+  assert.match(payer, /public\s+MCP URL and public TLS certificate to publish one signed Requestor discovery\s+URL/i);
   assert.doesNotMatch(payer, /\bcapability\b[^.\n]*\bshare/i);
   assert.match(
     requestor,
-    /npm run bilateral:request-payment -- \\\n  --launch-manifest "\$REQUESTOR_LAUNCH_MANIFEST" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --mcp-url "\$PAYER_MCP_URL" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE" \\\n  --tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --tls-fingerprint "\$PAYER_MCP_TLS_FINGERPRINT"/,
+    /npm run bilateral:request-payment -- \\\n  --discovery-url "\$REQUESTOR_DISCOVERY_URL" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE"/,
   );
   assert.match(requestor, /\bHANDSHAKE_REQUIRED\b[\s\S]*\bwrapper\b[\s\S]*\bstarts the Requestor\s+supervisor/i);
   assert.doesNotMatch(requestor, /Start Requestor's one long-lived supervisor exactly\s+once[\s\S]*npm run bilateral:supervisor/i);
@@ -447,7 +447,7 @@ test("manual role instructions preserve long-lived state and use a non-terminati
   for (const { contents, relativePath } of files) {
     assert.match(contents, /Preserve the assigned private state root unchanged\./i, relativePath);
     assert.match(contents, /Underfunding\s+is\s+pending\s+until\s+the\s+bounded\s+eight-minute\s+funding\s+deadline\./i, relativePath);
-    assert.match(contents, /Do\s+not\s+retry\s+a\s+consumed\s+launch\s+manifest\./i, relativePath);
+    assert.match(contents, /Do\s+not\s+retry\s+(?:a\s+)?consumed\s+(?:launch\s+manifest|bootstrap\s+material)\./i, relativePath);
     assert.match(contents, /AWS\s+forwards\s+raw\s+TCP\s+and\s+does\s+not\s+terminate\s+Payer\s+MCP\s+TLS\./i, relativePath);
   }
 
@@ -461,7 +461,7 @@ test("manual role instructions preserve long-lived state and use a non-terminati
   assert.doesNotMatch(payer, /export PAYER_MCP_HOST="0\.0\.0\.0"/);
   assert.match(requestor, /Start this long-lived request-payment wrapper exactly once\./i);
   assert.match(requestor, /Do not start a replacement request-payment wrapper or supervisor\./i);
-  assert.match(requestor, /exact `PAYER_MCP_READY` public URL,\s+certificate, and fingerprint tuple/i);
+  assert.match(requestor, /exact\s+`PAYER_MCP_READY`[\s\S]*one public signed discovery URL/i);
   assert.match(relay, /GatewayPorts clientspecified/);
   assert.match(relay, /ExitOnForwardFailure=yes/);
   assert.match(relay, /ServerAliveInterval=30/);
@@ -528,12 +528,12 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /chmod 0700 "\$BILATERAL_RELEASE_ROOT\/relay-state"/);
   assert.match(primaryRunbook, /test "\$\(stat -f '%Lp' "\$SEPOLIA_RPC_URL_FILE"\)" = "600"/);
   assert.match(primaryRunbook, /payer\.launch\.json[^.\n]*only to Payer/i);
-  assert.match(primaryRunbook, /payee\.launch\.json[^.\n]*only to Requestor/i);
-  assert.match(primaryRunbook, /launch manifests expire after 60 minutes/i);
+  assert.match(primaryRunbook, /Requestor receives only[^.\n]*signed discovery\s+URL/i);
+  assert.match(primaryRunbook, /Private launch material expires after 60 minutes/i);
   assert.match(primaryRunbook, /npm run bilateral:fund -- \\/);
   assert.match(
     primaryRunbook,
-    /relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED/,
+    /relay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED/,
   );
   assert.match(primaryRunbook, /\bPayer-owned TLS MCP `\/mcp` endpoint\b/i);
   assert.doesNotMatch(primaryRunbook, /https:\/\/mcp\.clockchain\.network\/mcp/i);
@@ -575,7 +575,7 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /already prepared repo-private `\$REPOSITORY_ROOT\/\.context\/bilateral-live-2026-07-28\/sepolia-rpc\.url`/);
   assert.doesNotMatch(primaryRunbook, /printf '%s\\n' "\$SEPOLIA_RPC_URL" > "\$SEPOLIA_RPC_URL_FILE"/);
   assert.match(requestor, /You are Stakeholder 2, Requestor, the payment requestor\./);
-  assert.match(requestor, /\bDo not start `npm run bilateral:supervisor` directly\b/i);
+  assert.match(requestor, /\bDo\s+not\s+start\s+`npm run bilateral:supervisor`\s+directly\b/i);
   assert.match(requestor, /\bHANDSHAKE_REQUIRED\b/);
   assert.match(requestor, /Requestor receives or derives these private inputs and paths:/);
   assert.doesNotMatch(
@@ -607,7 +607,10 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
     assert.match(prompt, /do not run the watcher or verifier/i);
     assert.match(prompt, /do not declare authorization/i);
     assert.match(prompt, /clean detached checkout[^.]*reviewed 40-character SHA/i);
-    assert.match(prompt, /launch manifest expires after 60 minutes/i);
+    assert.match(
+      prompt,
+      /(?:launch manifest expires after 60 minutes|Bootstrap material is time bounded)/i,
+    );
   }
 });
 
@@ -659,7 +662,7 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
     /wait[^.\n]*both role computers[^.\n]*ready[^.\n]*manifests expire after 60 minutes/i,
   );
   assert.match(quickStart, /payer\.launch\.json[^.\n]*only Payer/i);
-  assert.match(quickStart, /payee\.launch\.json[^.\n]*only Requestor/i);
+  assert.match(quickStart, /transfer only that signed discovery\s+URL to Requestor/i);
   assert.match(
     quickStart,
     /coordinator-owned[^.\n]*funding-addresses\.json/i,
@@ -698,7 +701,7 @@ test("live bilateral handoff pins the public operator checklist without secrets"
     "utf8",
   );
   const startupOrder =
-    "relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED";
+    "relay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED";
 
   assert.doesNotMatch(handoff, new RegExp(RETIRED_LIVE_HANDOFF_RELEASE_SHA));
   assert.match(handoff, /BILATERAL_REPOSITORY_SHA[^.\n]*operator-provided exact reviewed 40-character SHA/i);
@@ -748,9 +751,9 @@ test("live bilateral handoff pins the public operator checklist without secrets"
   assert.match(handoff, /--advertised-host "\$RELAY_ADVERTISED_IP"/);
   assert.match(handoff, /npm run bilateral:coordinator -- \\/);
   assert.match(handoff, /npm run bilateral:console -- \\/);
-  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/);
+  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-bootstrap-broker-url "\$PAYER_MCP_BOOTSTRAP_BROKER_URL" \\\n  --payer-mcp-bootstrap-broker-capability-file "\$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/);
   assert.match(handoff, /\bwait\b[\s\S]*\bPAYER_MCP_READY\b/i);
-  assert.match(handoff, /npm run bilateral:request-payment -- \\\n  --launch-manifest "\$REQUESTOR_LAUNCH_MANIFEST" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --mcp-url "\$PAYER_MCP_URL" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE" \\\n  --tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --tls-fingerprint "\$PAYER_MCP_TLS_FINGERPRINT"/);
+  assert.match(handoff, /npm run bilateral:request-payment -- \\\n  --discovery-url "\$REQUESTOR_DISCOVERY_URL" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE"/);
   assert.match(handoff, /\bHANDSHAKE_REQUIRED\b[\s\S]*\bRequestor supervisor\b/i);
   assert.doesNotMatch(handoff, /https:\/\/mcp\.clockchain\.network\/mcp/i);
   assert.match(handoff, /export FUNDING_RECORD_FILE="\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json"/);
@@ -887,7 +890,7 @@ test("turnkey bilateral docs pin the mandate, console, funding, and readiness co
   const helperUrl =
     "https://clockchain-research.vercel.app/handshake/run";
   const startupOrder =
-    "relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED";
+    "relay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED";
 
   assert.match(
     payerPrompt,
@@ -1153,14 +1156,14 @@ test("documentation checker rejects bilateral manifest and funding drift", async
       "relay readiness before coordinator",
     ],
     [
-      "payer.launch.json only to Payer",
-      "payer.launch.json to both stakeholders",
+      "Privately transfer\n`payer.launch.json` only to Payer. Requestor receives only the signed discovery\nURL",
+      "Privately transfer\n`payer.launch.json` to both stakeholders. Requestor receives private launch\nmaterial",
       "private launch manifest delivery",
     ],
     [
-      "Launch manifests expire after 60 minutes",
+      "Private launch material expires after 60 minutes",
       "launch manifests remain valid until used",
-      "60-minute launch manifests",
+      "time-bounded private launch material",
     ],
     [
       "npm run bilateral:fund --",

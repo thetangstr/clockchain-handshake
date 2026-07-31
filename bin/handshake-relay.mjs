@@ -322,8 +322,6 @@ function parseArguments(arguments_) {
     advertisedHost === "0.0.0.0" ||
     advertisedHost === "::" ||
     !isCanonicalIpText(host) ||
-    host === "0.0.0.0" ||
-    host === "::" ||
     !PORT_PATTERN.test(portText) ||
     Number(portText) > 65_535 ||
     !REPOSITORY_SHA_PATTERN.test(repositorySha)
