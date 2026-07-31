@@ -25,6 +25,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
 const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+const MAX_DISCOVERY_BYTES = 65_536;
 
 class RequestorDiscoveryError extends Error {
   constructor() {
@@ -41,6 +42,144 @@ function exactObject(value, keys) {
   const ownKeys = Reflect.ownKeys(value);
   if (ownKeys.length !== keys.length || keys.some((key, index) => ownKeys[index] !== key)) fail();
   return value;
+}
+
+function rejectDuplicateJsonKeys(text) {
+  if (typeof text !== "string" || text.length === 0 || Buffer.byteLength(text, "utf8") > MAX_DISCOVERY_BYTES) fail();
+  let index = 0;
+  const whitespace = () => {
+    while (/[\t\n\r ]/.test(text[index] ?? "")) index += 1;
+  };
+  const parseString = () => {
+    if (text[index] !== "\"") fail();
+    index += 1;
+    let value = "";
+    while (index < text.length) {
+      const char = text[index];
+      if (char === "\"") {
+        index += 1;
+        return value;
+      }
+      if (char === "\\") {
+        index += 1;
+        const escaped = text[index];
+        if (escaped === undefined) fail();
+        if ("\"\\/".includes(escaped)) value += escaped;
+        else if (escaped === "b") value += "\b";
+        else if (escaped === "f") value += "\f";
+        else if (escaped === "n") value += "\n";
+        else if (escaped === "r") value += "\r";
+        else if (escaped === "t") value += "\t";
+        else if (escaped === "u") {
+          const hex = text.slice(index + 1, index + 5);
+          if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail();
+          value += String.fromCharCode(Number.parseInt(hex, 16));
+          index += 4;
+        } else fail();
+      } else {
+        if (char < " ") fail();
+        value += char;
+      }
+      index += 1;
+    }
+    fail();
+  };
+  const parseNumber = () => {
+    const start = index;
+    if (text[index] === "-") index += 1;
+    if (text[index] === "0") index += 1;
+    else if (/[1-9]/.test(text[index] ?? "")) while (/[0-9]/.test(text[index] ?? "")) index += 1;
+    else fail();
+    if (text[index] === ".") {
+      index += 1;
+      if (!/[0-9]/.test(text[index] ?? "")) fail();
+      while (/[0-9]/.test(text[index] ?? "")) index += 1;
+    }
+    if (text[index] === "e" || text[index] === "E") {
+      index += 1;
+      if (text[index] === "+" || text[index] === "-") index += 1;
+      if (!/[0-9]/.test(text[index] ?? "")) fail();
+      while (/[0-9]/.test(text[index] ?? "")) index += 1;
+    }
+    if (index === start) fail();
+  };
+  const parseLiteral = (literal) => {
+    if (text.slice(index, index + literal.length) !== literal) fail();
+    index += literal.length;
+  };
+  const parseArray = () => {
+    index += 1;
+    whitespace();
+    if (text[index] === "]") {
+      index += 1;
+      return;
+    }
+    for (;;) {
+      parseValue();
+      whitespace();
+      if (text[index] === "]") {
+        index += 1;
+        return;
+      }
+      if (text[index] !== ",") fail();
+      index += 1;
+      whitespace();
+    }
+  };
+  const parseObject = () => {
+    index += 1;
+    const keys = new Set();
+    whitespace();
+    if (text[index] === "}") {
+      index += 1;
+      return;
+    }
+    for (;;) {
+      const key = parseString();
+      if (keys.has(key)) fail();
+      keys.add(key);
+      whitespace();
+      if (text[index] !== ":") fail();
+      index += 1;
+      parseValue();
+      whitespace();
+      if (text[index] === "}") {
+        index += 1;
+        return;
+      }
+      if (text[index] !== ",") fail();
+      index += 1;
+      whitespace();
+    }
+  };
+  function parseValue() {
+    whitespace();
+    const char = text[index];
+    if (char === "{") return parseObject();
+    if (char === "[") return parseArray();
+    if (char === "\"") return parseString();
+    if (char === "t") return parseLiteral("true");
+    if (char === "f") return parseLiteral("false");
+    if (char === "n") return parseLiteral("null");
+    return parseNumber();
+  }
+  parseValue();
+  whitespace();
+  if (index !== text.length) fail();
+}
+
+export function parseRequestorDiscoveryWire(text) {
+  if (typeof text !== "string" || !text.endsWith("\n") || text.slice(0, -1).includes("\n")) fail();
+  const body = text.slice(0, -1);
+  rejectDuplicateJsonKeys(body);
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    fail();
+  }
+  if (`${JSON.stringify(parsed)}\n` !== text) fail();
+  return exactObject(parsed, DISCOVERY_KEYS);
 }
 
 function httpsUrl(value, path = null) {

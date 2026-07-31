@@ -288,6 +288,48 @@ test("Requestor CLI fails closed on malformed args, stale discovery, wrong SHA, 
   }
 });
 
+test("Requestor CLI rejects duplicate-key and noncanonical raw discovery JSON before operator key or certificate use", async (t) => {
+  const fx = await fixture(t);
+  for (const text of [
+    `{"certificateFingerprint":"${fx.discovery.certificateFingerprint}","certificateFingerprint":"${fx.discovery.certificateFingerprint}","certificateUrl":"${fx.discovery.certificateUrl}","expiresAtMs":"${fx.discovery.expiresAtMs}","operatorKeyId":"${OPERATOR_KEY_ID}","publicUrl":"${fx.discovery.publicUrl}","releaseId":"${RELEASE_ID}","repositorySha":"${REPOSITORY_SHA}","sessionId":"${SESSION_ID}","signature":${JSON.stringify(fx.discovery.signature)}}`,
+    JSON.stringify({
+      signature: fx.discovery.signature,
+      sessionId: SESSION_ID,
+      repositorySha: REPOSITORY_SHA,
+      releaseId: RELEASE_ID,
+      publicUrl: fx.discovery.publicUrl,
+      operatorKeyId: OPERATOR_KEY_ID,
+      expiresAtMs: fx.discovery.expiresAtMs,
+      certificateUrl: fx.discovery.certificateUrl,
+      certificateFingerprint: fx.discovery.certificateFingerprint,
+    }),
+  ]) {
+    const calls = [];
+    await assert.rejects(
+      main(fx.args, {
+        async inspectRepository() {
+          calls.push("inspectRepository");
+          return { clean: true, detached: true, head: REPOSITORY_SHA };
+        },
+        async fetchJson() {
+          calls.push("fetchJson");
+          return text;
+        },
+        async readOperatorPublicKey() {
+          calls.push("readOperatorPublicKey");
+          return fx.operatorPublicKey;
+        },
+        async fetchText() {
+          calls.push("fetchText");
+          return fx.tlsCertificatePem;
+        },
+      }),
+      /Request payment startup failed safely/,
+    );
+    assert.deepEqual(calls, ["inspectRepository", "fetchJson"]);
+  }
+});
+
 test("Requestor CLI refuses to overwrite an existing decrypted manifest destination", async (t) => {
   const fx = await fixture(t);
   const bootstrapRoot = `${fx.stateRoot}.bootstrap`;

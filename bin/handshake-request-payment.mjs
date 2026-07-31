@@ -21,7 +21,7 @@ import {
   openRequestorBootstrapEnvelope,
 } from "../src/bilateral/local-mcp/bootstrap-envelope.mjs";
 import { bootstrapClaimFingerprint } from "../src/bilateral/local-mcp/bootstrap-broker.mjs";
-import { verifySignedRequestorDiscovery } from "../scripts/publish-requestor-discovery.mjs";
+import { parseRequestorDiscoveryWire, verifySignedRequestorDiscovery } from "../scripts/publish-requestor-discovery.mjs";
 import { canonicalizeReceiptEventValue } from "../src/canonical.mjs";
 
 export const REQUEST_PAYMENT_CLI_FLAGS = Object.freeze([
@@ -172,7 +172,12 @@ async function defaultFetchText(url) {
 async function defaultFetchJson(url) {
   const text = await defaultFetchText(url);
   if (text.length === 0 || text.length > MAX_FETCH_BYTES) fail();
-  return JSON.parse(text);
+  return parseRequestorDiscoveryWire(text);
+}
+
+function discoveryFromFetch(value) {
+  if (typeof value === "string") return parseRequestorDiscoveryWire(value);
+  return value;
 }
 
 async function ensurePrivateDirectory(path) {
@@ -281,7 +286,7 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
     const verifiedHead = validateRepositoryProof(await inspect(REQUEST_PAYMENT_REPOSITORY_ROOT));
     const fetchJson = dependencies.fetchJson ?? defaultFetchJson;
     const fetchText = dependencies.fetchText ?? defaultFetchText;
-    const discoveryRaw = await fetchJson(parsed.discoveryUrl);
+    const discoveryRaw = discoveryFromFetch(await fetchJson(parsed.discoveryUrl));
     const readOperatorPublicKey = dependencies.readOperatorPublicKey ?? (async (repositorySha, keyId) => {
       const path = join(REQUEST_PAYMENT_REPOSITORY_ROOT, "docs", "operator-keys", `${keyId}.pub`);
       if (repositorySha !== verifiedHead) fail();

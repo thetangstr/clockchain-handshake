@@ -8,6 +8,7 @@ import { test } from "node:test";
 
 import {
   createSignedRequestorDiscovery,
+  parseRequestorDiscoveryWire,
   publishRequestorDiscovery,
   verifySignedRequestorDiscovery,
 } from "../scripts/publish-requestor-discovery.mjs";
@@ -162,5 +163,39 @@ test("discovery verification rejects stale, wrong SHA, HTTP URLs, redirects, and
       }),
       /Requestor discovery failed safely/,
     );
+  }
+});
+
+test("discovery wire parser rejects duplicate keys and reordered noncanonical text", async (t) => {
+  const cert = await certificateFixture(t);
+  const operator = generateKeyPairSync("ed25519");
+  const discovery = createSignedRequestorDiscovery({
+    certificateFingerprint: cert.certificateFingerprint,
+    certificateUrl: "https://payer.example.test/payer-mcp.crt",
+    expiresAtMs: String(Date.now() + 60_000),
+    operatorKeyId: OPERATOR_KEY_ID,
+    operatorPrivateKey: operator.privateKey,
+    publicUrl: "https://127.0.0.1:9443/mcp",
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    sessionId: SESSION_ID,
+  });
+  const canonical = `${JSON.stringify(discovery)}\n`;
+  assert.deepEqual(parseRequestorDiscoveryWire(canonical), discovery);
+  for (const text of [
+    canonical.replace("\"certificateUrl\"", "\"certificateFingerprint\":\"x\",\"certificateUrl\""),
+    JSON.stringify({
+      signature: discovery.signature,
+      sessionId: discovery.sessionId,
+      repositorySha: discovery.repositorySha,
+      releaseId: discovery.releaseId,
+      publicUrl: discovery.publicUrl,
+      operatorKeyId: discovery.operatorKeyId,
+      expiresAtMs: discovery.expiresAtMs,
+      certificateUrl: discovery.certificateUrl,
+      certificateFingerprint: discovery.certificateFingerprint,
+    }),
+  ]) {
+    assert.throws(() => parseRequestorDiscoveryWire(text), /Requestor discovery failed safely/);
   }
 });
