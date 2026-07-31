@@ -533,6 +533,27 @@ test("runtime rejects a substituted certificate before it trusts any private inp
   values["--tls-fingerprint"] = fingerprint;
   const config = await readCoordinatorRuntimeConfig(values, { gitInspector: { head: "a".repeat(40), operatorKey: async () => publicKey } });
   assert.equal(config.tlsFingerprint, fingerprint);
+  const dnsConfig =
+    await readCoordinatorRuntimeConfig(
+      {
+        ...values,
+        "--release-root":
+          join(root, "dns-release"),
+        "--relay-url":
+          "https://relay.example.test:8443",
+      },
+      {
+        gitInspector: {
+          head: "a".repeat(40),
+          operatorKey: async () => publicKey,
+        },
+      },
+    );
+  assert.equal(
+    dnsConfig.relayUrl,
+    "https://relay.example.test:8443",
+  );
+  await dnsConfig.releaseRoot.handle.close();
   const runtime = createCoordinatorRuntimeDependencies(config, { createClient: () => ({}), createTransport: () => ({}) });
   const originalNow = Date.now;
   Date.now = () => 1;

@@ -3,7 +3,6 @@ import { createHash, createPrivateKey, createPublicKey, randomUUID, X509Certific
 import { execFile, spawn } from "node:child_process";
 import { link, lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { isIP } from "node:net";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createPublicClient, http } from "viem";
@@ -33,6 +32,9 @@ import { validatePublishedBilateralVerdict as validateVerdictPublication } from 
 import { createMcpClient } from "../../mcp.mjs";
 import { assertSecretFree } from "../../redact.mjs";
 import { validateFundingRecord } from "../funding/record.mjs";
+import {
+  validatePublicEndpoint,
+} from "../network-endpoint.mjs";
 
 export const COORDINATOR_CLI_FLAGS = Object.freeze([
   "--clockchain-token-file", "--operator-key-id", "--operator-private-key",
@@ -456,7 +458,25 @@ export async function runPinnedVerifierChild(root, args, deadline, runner = runC
   await assertRoot(root);
   try { return await runner(args, deadline); } finally { await assertRoot(root); }
 }
-function relayUrl(value) { let parsed; try { parsed = new URL(value); } catch { fail(); } if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash || isIP(parsed.hostname) !== 4) fail(); return parsed.href.endsWith("/") ? parsed.href.slice(0, -1) : parsed.href; }
+function relayUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+    if (parsed.port === "") fail();
+    const endpoint = validatePublicEndpoint(
+      `${value}/`,
+      {
+        allowedPaths: ["/"],
+        allowTestAddresses: true,
+        defaultPort: Number(parsed.port),
+        protocols: ["https:"],
+      },
+    );
+    return endpoint.url.slice(0, -1);
+  } catch {
+    fail();
+  }
+}
 function rpcEndpoint(value) { let endpoint; try { endpoint = new URL(value); } catch { fail(); } if (!/^https?:$/.test(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.hash || endpoint.search || endpoint.pathname !== "/") fail(); return endpoint.href; }
 async function gitInspector(repositoryRoot = ROOT) {
   const run = (args) => exec("/usr/bin/git", ["--no-pager", "--no-replace-objects", "-c", "core.attributesFile=/dev/null", "-c", "core.hooksPath=/dev/null", "-C", repositoryRoot, ...args], { cwd: repositoryRoot, encoding: "utf8", env: GIT_ENV, maxBuffer: 8192 });
