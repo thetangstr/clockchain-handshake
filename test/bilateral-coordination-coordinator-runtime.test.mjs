@@ -30,12 +30,13 @@ import {
   runCoordinatorUntilComplete,
   writeVerifierContext,
 } from "../src/bilateral/coordination/coordinator-runtime.mjs";
-import { createSignedEnvelope, rawPublicKeyBase64FromPem } from "../src/bilateral/descriptor.mjs";
+import { createSignedEnvelope, dSession, rawPublicKeyBase64FromPem } from "../src/bilateral/descriptor.mjs";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import { payerMandateDigest, signPayerMandate } from "../src/bilateral/payer-mandate.mjs";
-import { signPaymentRequest } from "../src/bilateral/payment-request.mjs";
-import { runCoordinator as runCoordinatorCore } from "../src/bilateral/coordination/coordinator.mjs";
+import { paymentRequestDigest, signPaymentRequest } from "../src/bilateral/payment-request.mjs";
+import { COORDINATOR_STATE_SCHEMA, runCoordinator as runCoordinatorCore } from "../src/bilateral/coordination/coordinator.mjs";
 import { validateFundingRecord } from "../src/bilateral/funding/record.mjs";
+import { publishAwsVerifierHandoff } from "../infra/aws/runtime/coordinator-operator-handoff.mjs";
 
 const execFile = promisify(execFileCallback);
 
@@ -94,6 +95,19 @@ function expectedFundingRecord(addresses = FUNDING_ADDRESSES) {
     })),
     schema: "clockchain.bilateral-funding-addresses/v1",
   };
+}
+
+function relayPackage(name, content) {
+  return canonicalBytes({
+    files: [{
+      byteLength: String(content.length),
+      contentBase64: content.toString("base64"),
+      name,
+      sha256: createHash("sha256").update(content).digest("hex"),
+    }],
+    paymentMoved: false,
+    schema: "clockchain.bilateral-relay-package/v1",
+  });
 }
 
 function intentParties() {
@@ -754,6 +768,522 @@ test("verifier package binding requires the exact role, repository, session, and
   for (const change of [
     { role: "payee" }, { repositorySha: "c".repeat(40) }, { sessionDigest: "d".repeat(64) }, { signature: { address: descriptor.payee.address } },
   ]) assert.throws(() => validateVerifierPackageBinding({ descriptor, party: { ...base, ...change }, repositorySha: "a".repeat(40), role: "payer", sessionDigest: "b".repeat(64) }));
+});
+
+test("production verifier publication adoption does not run a coordinator verifier child", async (t) => {
+  const rootPath = await mkdtemp(join(tmpdir(), "coordinator-aws-verifier-"));
+  await chmod(rootPath, 0o700);
+  t.after(() => rm(rootPath, { recursive: true, force: true }));
+  const certificatePath = join(rootPath, "relay.pem");
+  await execFile("openssl", ["req", "-x509", "-newkey", "ed25519", "-keyout", join(rootPath, "relay.key"), "-out", certificatePath, "-nodes", "-days", "1", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"]);
+  const tlsCertificatePem = await readFile(certificatePath, "utf8");
+  const tokenPath = join(rootPath, "token");
+  const rpcPath = join(rootPath, "rpc");
+  const operatorKeyPath = join(rootPath, "operator.pem");
+  await writeFile(tokenPath, "clockchain-token", { mode: 0o600 });
+  await writeFile(rpcPath, "https://127.0.0.1/\n", { mode: 0o600 });
+  const pair = generateKeyPairSync("ed25519");
+  const privateKeyPem = pair.privateKey.export({ format: "pem", type: "pkcs8" });
+  const publicKey = rawPublicKeyBase64FromPem(pair.publicKey.export({ format: "pem", type: "spki" }));
+  await writeFile(operatorKeyPath, privateKeyPem, { mode: 0o600 });
+  const before = await lstat(rootPath);
+  const handle = await open(rootPath, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0));
+  t.after(() => handle.close());
+  const release = {
+    repositorySha: "a".repeat(40),
+    sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd",
+  };
+  release.releaseId = `release-${createHash("sha256").update(release.sessionId, "utf8").digest("hex").slice(0, 16)}`;
+  const mandateBytes = Buffer.from('{"mandate":{"paymentMoved":false}}\n');
+  const requestBytes = Buffer.from('{"request":{"paymentMoved":false}}\n');
+  const mandateDigest = createHash("sha256").update(mandateBytes).digest("hex");
+  const requestDigest = createHash("sha256").update(requestBytes).digest("hex");
+  const descriptor = {
+    amountOptions: [{ currency: "USD", value: "100" }],
+    chainId: "11155111",
+    expirySeconds: "600",
+    mandateDigest,
+    namespace: "cbv1",
+    payee: { address: "0xffeeddccbbaa99887766554433221100ffeeddcc", agentId: "8678", displayName: "Billie", role: "payee" },
+    payer: { address: "0x00112233445566778899aabbccddeeff00112233", agentId: "8677", displayName: "Iris", role: "payer" },
+    paymentMoved: false,
+    promptSha256: "c".repeat(64),
+    protocol: "clockchain.bilateral-authorization/v1",
+    protocolVersion: "1",
+    registry: "0x8004a818bfb912233c491871b3d84c89a494bd9e",
+    repositorySha: release.repositorySha,
+    requestDigest,
+    schema: "clockchain.bilateral-session-descriptor/v2",
+    sessionId: deriveDescriptorSessionId({ ...release, subjectRun: "stakeholder" }),
+    settlement: "not-executed",
+  };
+  const descriptorBytes = canonicalBytes(createSignedEnvelope(descriptor, { keyId: "clockchain-demo-2026", privateKeyPem }));
+  const descriptorDigest = createHash("sha256").update(descriptorBytes).digest("hex");
+  const payerPackage = relayPackage("payer-result.json", Buffer.from("payer-result"));
+  const payeePackage = relayPackage("payee-result.json", Buffer.from("payee-result"));
+  const payerPackageDigest = createHash("sha256").update(payerPackage).digest("hex");
+  const payeePackageDigest = createHash("sha256").update(payeePackage).digest("hex");
+  const artifactByDigest = new Map([
+    [descriptorDigest, descriptorBytes],
+    [mandateDigest, mandateBytes],
+    [requestDigest, requestBytes],
+    [payerPackageDigest, payerPackage],
+    [payeePackageDigest, payeePackage],
+  ]);
+  const evidenceDigest = createHash("sha256").update(canonicalBytes({
+    descriptorDigest,
+    mandateDigest: descriptor.mandateDigest,
+    packageDigests: { payee: payeePackageDigest, payer: payerPackageDigest },
+    paymentMoved: false,
+    releaseId: release.releaseId,
+    repositorySha: release.repositorySha,
+    requestDigest: descriptor.requestDigest,
+    sessionId: release.sessionId,
+    subjectRun: "stakeholder",
+  })).digest("hex");
+  const coordinatorState = {
+    capabilityDigests: ["1".repeat(64), "2".repeat(64)],
+    checkpoints: [
+      { action: "STAKEHOLDER_DESCRIPTOR", artifactDigest: descriptorDigest, eventDigest: "3".repeat(64), role: "operator", status: "EVENT_APPENDED", subjectRun: "stakeholder" },
+      { action: "ROLE_PACKAGE", artifactDigest: payerPackageDigest, eventDigest: "4".repeat(64), role: "payer", status: "EVENT_APPENDED", subjectRun: "stakeholder" },
+      { action: "ROLE_PACKAGE", artifactDigest: payeePackageDigest, eventDigest: "5".repeat(64), role: "payee", status: "EVENT_APPENDED", subjectRun: "stakeholder" },
+    ],
+    paymentMoved: false,
+    releaseId: release.releaseId,
+    repositorySha: release.repositorySha,
+    schema: COORDINATOR_STATE_SCHEMA,
+    sessionId: release.sessionId,
+    state: "STAKEHOLDER_PACKAGES_READY",
+  };
+  await writeFile(join(rootPath, "coordinator-state.json"), `${JSON.stringify(coordinatorState)}\n`, { mode: 0o600 });
+  const publication = {
+    attemptId: "11111111-1111-4111-8111-111111111111",
+    evidenceDigest,
+    paymentMoved: false,
+    publicationDigest: "f".repeat(64),
+    repositorySha: release.repositorySha,
+    revision: 9,
+    schema: "clockchain.aws-verifier-task-publication/v1",
+    status: "VERIFICATION_PASSED",
+    taskArn:
+      "arn:aws:ecs:us-west-2:123456789012:task/clockchain/11111111111111111111111111111111",
+    writtenAtMs: "2000000000000",
+  };
+  const handoffs = [];
+  const stagedEvidence = new Map();
+  const localHandoffPath = join(rootPath, "aws-verifier-handoff-stakeholder.json");
+  const expectedHandoffPath = `/var/lib/clockchain/operator/releases/${release.releaseId}/verifier-handoff-stakeholder.json`;
+  const publishVerifierHandoff = async (input) => {
+    assert.deepEqual(Reflect.ownKeys(input), ["evidence", "handoff", "path"]);
+    assert.equal(input.path, expectedHandoffPath);
+    assert.deepEqual(Reflect.ownKeys(input.evidence), [
+      "descriptorBytes",
+      "payeePackageBytes",
+      "payerMandateBytes",
+      "payerPackageBytes",
+      "paymentRequestBytes",
+    ]);
+    assert.deepEqual(Reflect.ownKeys(input.handoff), [
+      "descriptorDigest",
+      "descriptorPath",
+      "evidenceDigest",
+      "mandateDigest",
+      "payerMandatePath",
+      "payeeResultsPath",
+      "payerResultsPath",
+      "paymentMoved",
+      "paymentRequestPath",
+      "publicationPath",
+      "releaseId",
+      "repositorySha",
+      "requestDigest",
+      "schema",
+      "sessionDigest",
+      "sessionId",
+      "subjectRun",
+    ]);
+    const exactEvidence = [
+      [input.handoff.descriptorPath, input.evidence.descriptorBytes, input.handoff.descriptorDigest],
+      [input.handoff.payerMandatePath, input.evidence.payerMandateBytes, input.handoff.mandateDigest],
+      [input.handoff.paymentRequestPath, input.evidence.paymentRequestBytes, input.handoff.requestDigest],
+      [input.handoff.payerResultsPath, input.evidence.payerPackageBytes, payerPackageDigest],
+      [input.handoff.payeeResultsPath, input.evidence.payeePackageBytes, payeePackageDigest],
+    ];
+    for (const [path, bytes, expectedDigest] of exactEvidence) {
+      const prior = stagedEvidence.get(path);
+      if (prior !== undefined && !prior.equals(bytes)) throw new Error(`changed evidence for ${path}`);
+      assert.equal(createHash("sha256").update(bytes).digest("hex"), expectedDigest);
+      stagedEvidence.set(path, Buffer.from(bytes));
+    }
+    const published = await publishAwsVerifierHandoff({
+      path: localHandoffPath,
+      handoff: input.handoff,
+    });
+    handoffs.push(input);
+    return published;
+  };
+  const verdictValidations = [];
+  const runtime = createCoordinatorRuntimeDependencies({
+    clockchainToken: "clockchain-token",
+    clockchainTokenPath: tokenPath,
+    operatorIdentity: { keyId: "clockchain-demo-2026", privateKeyPem, publicKey },
+    operatorPrivateKeyPath: operatorKeyPath,
+    operatorPublicKey: publicKey,
+    releaseRoot: { before, handle, path: rootPath },
+    repositorySha: release.repositorySha,
+    relayUrl: "https://127.0.0.1:8443",
+    rpcUrl: "https://127.0.0.1/",
+    rpcUrlPath: rpcPath,
+    tlsCertificatePath: certificatePath,
+    tlsCertificatePem,
+    tlsFingerprint: createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex"),
+  }, {
+    createClient: () => ({
+      getArtifact: async ({ digest }) => artifactByDigest.get(digest),
+      readEvents: async () => [
+        { artifactDigest: mandateDigest, kind: "PAYER_MANDATE_READY", role: "payer", subjectRun: "stakeholder" },
+        { artifactDigest: requestDigest, kind: "PAYMENT_REQUEST_READY", role: "payee", subjectRun: "stakeholder" },
+      ],
+    }),
+    createTransport: () => ({}),
+    provenanceProvider: {
+      async verify() {
+        return {
+          imageDigest: null,
+          operatorPublicKey: publicKey,
+          repositorySha: release.repositorySha,
+          sourceTreeSha256: "1".repeat(64),
+        };
+      },
+    },
+    runVerifierChild: async () => assert.fail("coordinator must not run the local verifier child in AWS publication adoption"),
+    publishVerifierHandoff,
+    validateVerdictPublication: async (input) => {
+      verdictValidations.push(input);
+      return {
+        publicationDigest: publication.publicationDigest,
+        status: "VERIFICATION_PASSED",
+      };
+    },
+    validateArtifactWithFacts: async ({ artifactType, bytes, expectedDigest }) => {
+      assert.equal(createHash("sha256").update(bytes).digest("hex"), expectedDigest);
+      if (artifactType === "signed-descriptor") return { facts: createSignedEnvelope(descriptor, { keyId: "clockchain-demo-2026", privateKeyPem }) };
+      if (artifactType === "party-result-package") {
+        return {
+          facts: {
+            partyResult: {
+              paymentMoved: false,
+              repositorySha: release.repositorySha,
+              role: expectedDigest === payerPackageDigest ? "payer" : "payee",
+              sessionDigest: dSession(descriptor),
+              signature: { address: expectedDigest === payerPackageDigest ? descriptor.payer.address : descriptor.payee.address },
+            },
+          },
+        };
+      }
+      return { facts: {} };
+    },
+    verifierPublication: publication,
+  });
+  const prepared = await runtime.runDependencies({ ...release, state: "STAKEHOLDER_PACKAGES_READY" }).prepareVerifierHandoff({
+    releaseId: release.releaseId,
+    repositorySha: release.repositorySha,
+    sessionId: release.sessionId,
+    subjectRun: "stakeholder",
+  });
+  await assert.rejects(
+    publishVerifierHandoff({
+      ...handoffs[0],
+      evidence: {
+        ...handoffs[0].evidence,
+        descriptorBytes: Buffer.from("changed descriptor bytes"),
+      },
+    }),
+    /changed evidence/,
+  );
+  await assert.rejects(
+    publishVerifierHandoff({
+      ...handoffs[0],
+      handoff: {
+        ...handoffs[0].handoff,
+        evidenceDigest: "e".repeat(64),
+      },
+    }),
+    /AWS coordinator operator handoff failed safely/,
+  );
+  const adopted = await runtime.runDependencies({ ...release, state: "STAKEHOLDER_PACKAGES_READY" }).prepareVerifierHandoff({
+    releaseId: release.releaseId,
+    repositorySha: release.repositorySha,
+    sessionId: release.sessionId,
+    subjectRun: "stakeholder",
+  });
+  assert.deepEqual(adopted, prepared);
+  const result = await runtime.runDependencies(release).launchVerifier({
+    descriptorDigest,
+    outputDirectory: join(rootPath, "verifier", "stakeholder"),
+    packageDigests: { payee: payeePackageDigest, payer: payerPackageDigest },
+    subjectRun: "stakeholder",
+  });
+  assert.equal(result.result.publicationDigest, publication.publicationDigest);
+  assert.equal(result.result.status, "VERIFICATION_PASSED");
+  assert.equal(handoffs.length, 3);
+  assert.deepEqual(handoffs[1].handoff, handoffs[0].handoff);
+  assert.deepEqual(handoffs[2].handoff, handoffs[0].handoff);
+  assert.equal(handoffs[0].path, `/var/lib/clockchain/operator/releases/${release.releaseId}/verifier-handoff-stakeholder.json`);
+  assert.equal(handoffs[0].handoff.descriptorPath, `/var/lib/clockchain/evidence/releases/${release.releaseId}/stakeholder/descriptor.json`);
+  assert.equal(handoffs[0].handoff.payerMandatePath, `/var/lib/clockchain/evidence/releases/${release.releaseId}/stakeholder/payer-mandate.json`);
+  assert.equal(handoffs[0].handoff.paymentRequestPath, `/var/lib/clockchain/evidence/releases/${release.releaseId}/stakeholder/payment-request.json`);
+  assert.equal(handoffs[0].handoff.payerResultsPath, `/var/lib/clockchain/evidence/releases/${release.releaseId}/stakeholder/payer-results`);
+  assert.equal(handoffs[0].handoff.payeeResultsPath, `/var/lib/clockchain/evidence/releases/${release.releaseId}/stakeholder/payee-results`);
+  assert.equal(handoffs[0].handoff.publicationPath, `/var/lib/clockchain/verifier-output/releases/${release.releaseId}/stakeholder-publication.json`);
+  assert.equal(handoffs[0].handoff.paymentMoved, false);
+  assert.equal(handoffs[0].handoff.evidenceDigest, evidenceDigest);
+  assert.deepEqual(verdictValidations, [{
+    mandateDigest: descriptor.mandateDigest,
+    outputDirectory: `/var/lib/clockchain/verifier-output/releases/${release.releaseId}/attempts/11111111-1111-4111-8111-111111111111`,
+    repositorySha: release.repositorySha,
+    requestDigest: descriptor.requestDigest,
+    sessionDigest: dSession(descriptor),
+  }]);
+});
+
+test("restarted aws verifier context drives console state from the attempt output root", async (t) => {
+  const rootPath = await mkdtemp(join(tmpdir(), "coordinator-aws-console-restart-"));
+  await chmod(rootPath, 0o700);
+  t.after(() => rm(rootPath, { recursive: true, force: true }));
+  const certificatePath = join(rootPath, "relay.pem");
+  await execFile("openssl", ["req", "-x509", "-newkey", "ed25519", "-keyout", join(rootPath, "relay.key"), "-out", certificatePath, "-nodes", "-days", "1", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"]);
+  const tlsCertificatePem = await readFile(certificatePath, "utf8");
+  const tokenPath = join(rootPath, "token");
+  const rpcPath = join(rootPath, "rpc");
+  const operatorKeyPath = join(rootPath, "operator.pem");
+  await writeFile(tokenPath, "clockchain-token", { mode: 0o600 });
+  await writeFile(rpcPath, "https://127.0.0.1/\n", { mode: 0o600 });
+  const pair = generateKeyPairSync("ed25519");
+  const privateKeyPem = pair.privateKey.export({ format: "pem", type: "pkcs8" });
+  const publicKey = rawPublicKeyBase64FromPem(pair.publicKey.export({ format: "pem", type: "spki" }));
+  await writeFile(operatorKeyPath, privateKeyPem, { mode: 0o600 });
+  const before = await lstat(rootPath);
+  const handle = await open(rootPath, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0));
+  t.after(() => handle.close());
+  const release = {
+    releaseId: "release-3f336b4ac8e4e682",
+    repositorySha: "a".repeat(40),
+    sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd",
+  };
+  const { mandateEnvelope, requestEnvelope } = await signedIntents({ repositorySha: release.repositorySha });
+  const mandateBytes = canonicalBytes(mandateEnvelope);
+  const requestBytes = canonicalBytes(requestEnvelope);
+  const mandateArtifactDigest = createHash("sha256").update(mandateBytes).digest("hex");
+  const requestArtifactDigest = createHash("sha256").update(requestBytes).digest("hex");
+  const descriptor = {
+    amountOptions: [{ currency: "USD", value: "100" }],
+    chainId: "11155111",
+    expirySeconds: "600",
+    mandateDigest: payerMandateDigest(mandateEnvelope),
+    namespace: "cbv1",
+    payee: { address: "0xffeeddccbbaa99887766554433221100ffeeddcc", agentId: "8678", displayName: "Billie", role: "payee" },
+    payer: { address: "0x00112233445566778899aabbccddeeff00112233", agentId: "8677", displayName: "Iris", role: "payer" },
+    paymentMoved: false,
+    promptSha256: "c".repeat(64),
+    protocol: "clockchain.bilateral-authorization/v1",
+    protocolVersion: "1",
+    registry: "0x8004a818bfb912233c491871b3d84c89a494bd9e",
+    repositorySha: release.repositorySha,
+    requestDigest: paymentRequestDigest(requestEnvelope),
+    schema: "clockchain.bilateral-session-descriptor/v2",
+    sessionId: deriveDescriptorSessionId({ ...release, subjectRun: "stakeholder" }),
+    settlement: "not-executed",
+  };
+  const descriptorBytes = canonicalBytes(createSignedEnvelope(descriptor, { keyId: "clockchain-demo-2026", privateKeyPem }));
+  const descriptorDigest = createHash("sha256").update(descriptorBytes).digest("hex");
+  const attemptId = "11111111-1111-4111-8111-111111111111";
+  const attemptRoot = `/var/lib/clockchain/verifier-output/releases/${release.releaseId}/attempts/${attemptId}`;
+  const localFallback = join(rootPath, "verifier", "stakeholder");
+  await mkdir(localFallback, { recursive: true, mode: 0o700 });
+  await writeFile(join(localFallback, "bilateral-verdict.json"), '{"paymentMoved":false,"transitions":[]}\n', { mode: 0o600 });
+  const context = {
+    descriptorDigest,
+    mandateDigest: descriptor.mandateDigest,
+    outputDirectory: attemptRoot,
+    packageDigests: { payee: "2".repeat(64), payer: "1".repeat(64) },
+    paymentMoved: false,
+    publicationDigest: "f".repeat(64),
+    releaseId: release.releaseId,
+    repositorySha: release.repositorySha,
+    requestDigest: descriptor.requestDigest,
+    schema: "clockchain.bilateral-coordinator-verifier-context/v1",
+    sessionId: release.sessionId,
+    subjectRun: "stakeholder",
+  };
+  await writeVerifierContext({ before, handle, path: rootPath }, ".verifier-context-stakeholder.json", context);
+  const verdict = {
+    paymentMoved: false,
+    transitions: [
+      { blockHeight: "10", digest: "a".repeat(64), ledgerId: "sepolia" },
+      { blockHeight: "11", digest: "b".repeat(64), ledgerId: "sepolia" },
+      { blockHeight: "12", digest: "c".repeat(64), ledgerId: "sepolia" },
+    ],
+  };
+  const readerCalls = [];
+  const validationCalls = [];
+  const runtime = createCoordinatorRuntimeDependencies({
+    clockchainToken: "clockchain-token",
+    clockchainTokenPath: tokenPath,
+    operatorIdentity: { keyId: "clockchain-demo-2026", privateKeyPem, publicKey },
+    operatorPrivateKeyPath: operatorKeyPath,
+    operatorPublicKey: publicKey,
+    releaseRoot: { before, handle, path: rootPath },
+    repositorySha: release.repositorySha,
+    relayUrl: "https://127.0.0.1:8443",
+    rpcUrl: "https://127.0.0.1/",
+    rpcUrlPath: rpcPath,
+    tlsCertificatePath: certificatePath,
+    tlsCertificatePem,
+    tlsFingerprint: createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex"),
+  }, {
+    createClient: () => ({
+      getArtifact: async ({ artifactType, digest }) => {
+        if (artifactType === "signed-descriptor" && digest === descriptorDigest) return descriptorBytes;
+        if (artifactType === "payer-mandate" && digest === mandateArtifactDigest) return mandateBytes;
+        if (artifactType === "payment-request" && digest === requestArtifactDigest) return requestBytes;
+        return Buffer.from("{}\n");
+      },
+      readEvents: async () => [
+        { artifactDigest: mandateArtifactDigest, kind: "PAYER_MANDATE_READY", role: "payer", subjectRun: "stakeholder" },
+        { artifactDigest: requestArtifactDigest, kind: "PAYMENT_REQUEST_READY", role: "payee", subjectRun: "stakeholder" },
+        { artifactDigest: null, kind: "PAYMENT_REQUEST_MATCHED", role: "payer", subjectRun: "stakeholder" },
+      ],
+    }),
+    createTransport: () => ({}),
+    now: () => 1_785_294_400_000,
+    provenanceProvider: {
+      async verify() {
+        return {
+          imageDigest: null,
+          operatorPublicKey: publicKey,
+          repositorySha: release.repositorySha,
+          sourceTreeSha256: "1".repeat(64),
+        };
+      },
+    },
+    readVerifierVerdictBytes: async ({ outputDirectory }) => {
+      readerCalls.push(outputDirectory);
+      assert.equal(outputDirectory, attemptRoot);
+      assert.notEqual(outputDirectory, localFallback);
+      return Buffer.from(`${JSON.stringify(verdict)}\n`);
+    },
+    sleeper: async () => {},
+    validateArtifactWithFacts: async ({ artifactType }) => {
+      if (artifactType === "signed-descriptor") return { facts: createSignedEnvelope(descriptor, { keyId: "clockchain-demo-2026", privateKeyPem }) };
+      if (artifactType === "payer-mandate") return { facts: mandateEnvelope };
+      if (artifactType === "payment-request") return { facts: requestEnvelope };
+      return { facts: {} };
+    },
+    validateVerdictPublication: async (input) => {
+      validationCalls.push(input);
+      assert.equal(input.outputDirectory, attemptRoot);
+      assert.notEqual(input.outputDirectory, localFallback);
+      return {
+        publicationDigest: context.publicationDigest,
+        status: "VERIFICATION_PASSED",
+      };
+    },
+    watchBilateralSession: async ({ output }) => {
+      output({
+        paymentMoved: false,
+        state: "ACKNOWLEDGED",
+        terminal: null,
+        transitions: [
+          { blockHeight: "10", cardinality: "1", ledgerId: "sepolia", slot: "proposal", verified: true },
+          { blockHeight: "11", cardinality: "1", ledgerId: "sepolia", slot: "acceptance", verified: true },
+          { blockHeight: "12", cardinality: "1", ledgerId: "sepolia", slot: "acknowledgment", verified: true },
+        ],
+      });
+    },
+  });
+  await runtime.runDependencies({ ...release, state: "STAKEHOLDER_VERIFIED" }).writeConsoleState({
+    lifecycleView: {
+      paymentMoved: false,
+      releaseId: release.releaseId,
+      repositorySha: release.repositorySha,
+      sessionId: release.sessionId,
+      state: "STAKEHOLDER_VERIFIED",
+    },
+    subjectRun: "stakeholder",
+  });
+  assert.deepEqual(readerCalls, [attemptRoot]);
+  assert.deepEqual(validationCalls.map((call) => call.outputDirectory), [attemptRoot]);
+
+  const badContext = {
+    ...context,
+    outputDirectory: `/var/lib/clockchain/verifier-output/releases/${release.releaseId}/attempts/not-a-uuid`,
+  };
+  await writeVerifierContext({ before, handle, path: rootPath }, ".verifier-context-stakeholder.json", badContext);
+  const nonStringContext = {
+    ...context,
+    outputDirectory: 123,
+  };
+  await writeFile(
+    join(rootPath, ".verifier-context-stakeholder.json"),
+    `${JSON.stringify(nonStringContext)}\n`,
+    { mode: 0o600 },
+  );
+  let typeErrorReaderCalled = false;
+  await assert.rejects(
+    runtime.runDependencies({ ...release, state: "STAKEHOLDER_VERIFIED" }).writeConsoleState({
+      lifecycleView: {
+        paymentMoved: false,
+        releaseId: release.releaseId,
+        repositorySha: release.repositorySha,
+        sessionId: release.sessionId,
+        state: "STAKEHOLDER_VERIFIED",
+      },
+      subjectRun: "stakeholder",
+    }),
+    /Coordinator startup failed safely/,
+  );
+  assert.equal(typeErrorReaderCalled, false);
+  await writeVerifierContext({ before, handle, path: rootPath }, ".verifier-context-stakeholder.json", badContext);
+  let badReaderCalled = false;
+  const restartedBadRuntime = createCoordinatorRuntimeDependencies({
+    clockchainToken: "clockchain-token",
+    clockchainTokenPath: tokenPath,
+    operatorIdentity: { keyId: "clockchain-demo-2026", privateKeyPem, publicKey },
+    operatorPrivateKeyPath: operatorKeyPath,
+    operatorPublicKey: publicKey,
+    releaseRoot: { before, handle, path: rootPath },
+    repositorySha: release.repositorySha,
+    relayUrl: "https://127.0.0.1:8443",
+    rpcUrl: "https://127.0.0.1/",
+    rpcUrlPath: rpcPath,
+    tlsCertificatePath: certificatePath,
+    tlsCertificatePem,
+    tlsFingerprint: createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex"),
+  }, {
+    createClient: () => ({ getArtifact: async () => descriptorBytes }),
+    createTransport: () => ({}),
+    readVerifierVerdictBytes: async () => {
+      badReaderCalled = true;
+      return Buffer.from(`${JSON.stringify(verdict)}\n`);
+    },
+    validateArtifactWithFacts: async () => ({ facts: createSignedEnvelope(descriptor, { keyId: "clockchain-demo-2026", privateKeyPem }) }),
+    validateVerdictPublication: async () => assert.fail("wrong attempt root must fail before publication validation"),
+  });
+  await assert.rejects(
+    restartedBadRuntime.runDependencies({ ...release, state: "STAKEHOLDER_VERIFIED" }).writeConsoleState({
+      lifecycleView: {
+        paymentMoved: false,
+        releaseId: release.releaseId,
+        repositorySha: release.repositorySha,
+        sessionId: release.sessionId,
+        state: "STAKEHOLDER_VERIFIED",
+      },
+      subjectRun: "stakeholder",
+    }),
+    /Coordinator startup failed safely/,
+  );
+  assert.equal(badReaderCalled, false);
 });
 
 test("watcher lifecycle starts once, emits bounded observation, and surfaces failure", async () => {

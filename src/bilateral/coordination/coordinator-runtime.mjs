@@ -56,6 +56,10 @@ const VERIFIER_PUBLICATION_SCHEMA = "clockchain.bilateral-verifier-publication/v
 const AWS_VERIFIER_EVIDENCE_SCHEMA = "clockchain.aws-verifier-evidence/v1";
 const SHA40 = /^[0-9a-f]{40}$/;
 const SHA64 = /^[0-9a-f]{64}$/;
+const ATTEMPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const AWS_PUBLICATION_KEYS = Object.freeze(["attemptId", "evidenceDigest", "paymentMoved", "publicationDigest", "repositorySha", "revision", "schema", "status", "taskArn", "writtenAtMs"]);
+const TASK_ARN = /^arn:aws(?:-[a-z]+)?:ecs:[a-z0-9-]+:[0-9]{12}:task\/(?:[A-Za-z0-9_-]{1,255}\/)?[0-9a-f]{32}$/;
+const DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 const ADDRESS = /^0x[0-9a-f]{40}$/;
 const GIT_ENV = Object.freeze({ GIT_ATTR_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_SYSTEM: "/dev/null", GIT_NO_REPLACE_OBJECTS: "1", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", LANG: "C", LC_ALL: "C", PATH: "/usr/bin:/bin" });
 const exec = promisify(execFile);
@@ -441,7 +445,7 @@ export async function readVerifierContext(root, name) {
   const bytes = await readStable(path, STATE_MAX_BYTES, privateFile);
   let value; try { value = JSON.parse(bytes.toString("utf8")); } catch { fail(); }
   const keys = ["descriptorDigest", "mandateDigest", "outputDirectory", "packageDigests", "paymentMoved", "publicationDigest", "releaseId", "repositorySha", "requestDigest", "schema", "sessionId", "subjectRun"];
-  if (!value || Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key)) || !SHA64.test(value.descriptorDigest) || !SHA64.test(value.mandateDigest) || !SHA64.test(value.packageDigests?.payer) || !SHA64.test(value.packageDigests?.payee) || !SHA64.test(value.publicationDigest) || !SHA64.test(value.requestDigest) || value.paymentMoved !== false || value.schema !== VERIFIER_CONTEXT_SCHEMA || !["rehearsal", "stakeholder"].includes(value.subjectRun) || !canonical(value).equals(bytes)) fail();
+  if (!value || Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key)) || !SHA64.test(value.descriptorDigest) || !SHA64.test(value.mandateDigest) || typeof value.outputDirectory !== "string" || !SHA64.test(value.packageDigests?.payer) || !SHA64.test(value.packageDigests?.payee) || !SHA64.test(value.publicationDigest) || !SHA64.test(value.requestDigest) || value.paymentMoved !== false || value.schema !== VERIFIER_CONTEXT_SCHEMA || !["rehearsal", "stakeholder"].includes(value.subjectRun) || !canonical(value).equals(bytes)) fail();
   await assertRoot(root); return Object.freeze(value);
 }
 export async function runChildWithDeadline(args, deadlineMs = COORDINATOR_FUNDING_DEADLINE_MS, graceMs = 5_000) {
@@ -598,6 +602,10 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
   ) fail();
   const transport = (dependencies.createTransport ?? createPinnedOperatorHttpsTransport)({ expectedFingerprint: config.tlsFingerprint, relayUrl: config.relayUrl, tlsCertificatePem: config.tlsCertificatePem });
   const artifactValidator = dependencies.validateArtifactWithFacts ?? validateRelayArtifactWithFacts;
+  const verdictPublicationValidator = dependencies.validateVerdictPublication ?? validateVerdictPublication;
+  if (typeof verdictPublicationValidator !== "function") fail();
+  const verifierVerdictReader = dependencies.readVerifierVerdictBytes ?? (async ({ outputDirectory }) => readStable(join(outputDirectory, "bilateral-verdict.json"), 1_048_576, privateFile));
+  if (typeof verifierVerdictReader !== "function") fail();
   const clientFor = (release) => (dependencies.createClient ?? createOperatorRelayClient)({ operatorIdentity: config.operatorIdentity, releaseId: release.releaseId, repositorySha: config.repositorySha, sessionId: release.sessionId, transport });
   let newRelease = null;
   const watcherSnapshots = new Map();
@@ -708,6 +716,77 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
         for (const controller of watcherControllers.values()) controller.abort();
         await Promise.allSettled([...watcherTasks.values()]);
       };
+      const prepareVerifierHandoff = async ({ releaseId, repositorySha, sessionId, subjectRun }) => {
+        if (releaseId !== release.releaseId || repositorySha !== config.repositorySha || sessionId !== release.sessionId || subjectRun !== "stakeholder" || typeof dependencies.publishVerifierHandoff !== "function") fail();
+        await immutable();
+        const persisted = await state.readState();
+        if (!persisted || persisted.releaseId !== release.releaseId || persisted.repositorySha !== config.repositorySha || persisted.sessionId !== release.sessionId || persisted.state !== "STAKEHOLDER_PACKAGES_READY") fail();
+        const descriptorCheckpoint = persisted.checkpoints.find((entry) => entry.action === "STAKEHOLDER_DESCRIPTOR" && entry.role === "operator" && entry.subjectRun === "stakeholder" && entry.status === "EVENT_APPENDED");
+        const packageDigests = Object.freeze(Object.fromEntries(["payer", "payee"].map((role) => {
+          const entry = persisted.checkpoints.find((candidate) => candidate.action === "ROLE_PACKAGE" && candidate.role === role && candidate.subjectRun === "stakeholder" && candidate.status === "EVENT_APPENDED");
+          return [role, entry?.artifactDigest];
+        })));
+        if (descriptorCheckpoint?.artifactDigest === null || !SHA64.test(descriptorCheckpoint?.artifactDigest ?? "") || !SHA64.test(packageDigests.payer ?? "") || !SHA64.test(packageDigests.payee ?? "")) fail();
+        const descriptorDigest = descriptorCheckpoint.artifactDigest;
+        const descriptorBytes = await client.getArtifact({ artifactType: "signed-descriptor", digest: descriptorDigest });
+        if (!Buffer.isBuffer(descriptorBytes) || createHash("sha256").update(descriptorBytes).digest("hex") !== descriptorDigest) fail();
+        const descriptorEnvelope = (await artifactValidator({ artifactType: "signed-descriptor", bytes: descriptorBytes, expectedDigest: descriptorDigest, secretCanaries: [] })).facts;
+        validatePinnedDescriptorEnvelope(descriptorEnvelope, { keyId: config.operatorIdentity.keyId, publicKey: config.operatorPublicKey, repositorySha: config.repositorySha, sessionId: deriveDescriptorSessionId({ releaseId: release.releaseId, repositorySha: config.repositorySha, sessionId: release.sessionId, subjectRun }) });
+        const mandateArtifact = await freshArtifact({ artifactType: "payer-mandate", kinds: ["PAYER_MANDATE_READY"], role: "payer", subjectRun });
+        const requestArtifact = await freshArtifact({ artifactType: "payment-request", kinds: ["PAYMENT_REQUEST_READY"], role: "payee", subjectRun });
+        const packageFor = async (role) => {
+          const digest = packageDigests[role];
+          const bytes = await client.getArtifact({ artifactType: "party-result-package", digest });
+          if (!Buffer.isBuffer(bytes) || createHash("sha256").update(bytes).digest("hex") !== digest) fail();
+          const facts = await artifactValidator({ artifactType: "party-result-package", bytes, expectedDigest: digest, secretCanaries: [] }); const party = facts.facts?.partyResult;
+          validateVerifierPackageBinding({ descriptor: descriptorEnvelope.descriptor, party, repositorySha: config.repositorySha, role, sessionDigest: dSession(descriptorEnvelope.descriptor) });
+          await stagePackage(config.releaseRoot, `verifier-${role}-${digest.slice(0, 16)}`, "party-result-package", bytes, { validate: artifactValidator });
+          return bytes;
+        };
+        const [payerPackageBytes, payeePackageBytes] = await Promise.all([packageFor("payer"), packageFor("payee")]);
+        const evidenceDigest = createHash("sha256").update(canonicalBytes({
+          descriptorDigest,
+          mandateDigest: descriptorEnvelope.descriptor.mandateDigest,
+          packageDigests,
+          paymentMoved: false,
+          releaseId: release.releaseId,
+          repositorySha: config.repositorySha,
+          requestDigest: descriptorEnvelope.descriptor.requestDigest,
+          sessionId: release.sessionId,
+          subjectRun,
+        })).digest("hex");
+        const evidenceRoot = `/var/lib/clockchain/evidence/releases/${release.releaseId}/${subjectRun}`;
+        const handoff = Object.freeze({
+          descriptorDigest,
+          descriptorPath: join(evidenceRoot, "descriptor.json"),
+          evidenceDigest,
+          mandateDigest: descriptorEnvelope.descriptor.mandateDigest,
+          payerMandatePath: join(evidenceRoot, "payer-mandate.json"),
+          payeeResultsPath: join(evidenceRoot, "payee-results"),
+          payerResultsPath: join(evidenceRoot, "payer-results"),
+          paymentMoved: false,
+          paymentRequestPath: join(evidenceRoot, "payment-request.json"),
+          publicationPath: `/var/lib/clockchain/verifier-output/releases/${release.releaseId}/${subjectRun}-publication.json`,
+          releaseId: release.releaseId,
+          repositorySha: config.repositorySha,
+          requestDigest: descriptorEnvelope.descriptor.requestDigest,
+          schema: "clockchain.aws-verifier-handoff/v1",
+          sessionDigest: dSession(descriptorEnvelope.descriptor),
+          sessionId: release.sessionId,
+          subjectRun,
+        });
+        return dependencies.publishVerifierHandoff({
+          evidence: Object.freeze({
+            descriptorBytes,
+            payeePackageBytes,
+            payerMandateBytes: mandateArtifact.bytes,
+            payerPackageBytes,
+            paymentRequestBytes: requestArtifact.bytes,
+          }),
+          handoff,
+          path: `/var/lib/clockchain/operator/releases/${release.releaseId}/verifier-handoff-${subjectRun}.json`,
+        });
+      };
       const runtimeDependencies = Object.freeze({
         appendOperatorEvent: client.appendOperatorEvent, appendVerifiedEvent: client.appendVerifiedEvent, createVerifiedEvent: client.createVerifiedEvent, getArtifact: client.getArtifact, putArtifact: client.putArtifact, readEnrollmentSet: client.readEnrollmentSet, readEvents: client.readEvents, readSessionView: client.readSessionView, readVerifierPublication: client.readVerifierPublication,
         readState: state.readState, writeState: state.writeState, resolveOperatorPublicKey: async () => config.operatorPublicKey, waitForFunding: dependencies.waitForFunding ?? createProductionFundingWaiter({ now, rpcUrl: config.rpcUrl, sleeper }), now, sleeper, displayAddresses: async (addresses) => { if (displayedFunding) fail(); displayedFunding = true; const bytes = await publishFundingAddresses(config.releaseRoot, addresses, { fs: fundingFileSystem(dependencies.fundingFileSystem), inspectAdmission: (publishedAddresses) => createFundingAdmissionInspector({ createClient: dependencies.createFundingAdmissionClient, rpcUrl: config.rpcUrl })(publishedAddresses) }); (dependencies.output ?? ((line) => process.stdout.write(line)))(bytes.toString("utf8")); }, createTransport: () => transport,
@@ -721,6 +800,7 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
           return Object.freeze({ bytes, digest: createHash("sha256").update(bytes).digest("hex") });
         },
         waitForIdentityPackage: async ({ subjectRun }) => Promise.all(["payer", "payee"].map((role) => waitForRawEvent(client, release, { kinds: ["IDENTITY_PACKAGE_READY"], role, subjectRun }))),
+        prepareVerifierHandoff,
         // START_* is the authority delivered to long-lived supervisors.  The
         // operator must never spawn a second local role command.
         startRole: async ({ role, subjectRun }) => { if (!["payer", "payee"].includes(role) || !["rehearsal", "stakeholder"].includes(subjectRun)) fail(); },
@@ -784,28 +864,94 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
             if (createHash("sha256").update(bytes).digest("hex") !== digest) fail();
             const facts = await artifactValidator({ artifactType: "party-result-package", bytes, expectedDigest: digest, secretCanaries: [] }); const party = facts.facts?.partyResult;
             validateVerifierPackageBinding({ descriptor: descriptorEnvelope.descriptor, party, repositorySha: config.repositorySha, role, sessionDigest: dSession(descriptorEnvelope.descriptor) });
-            return stagePackage(config.releaseRoot, `verifier-${role}-${digest.slice(0, 16)}`, "party-result-package", bytes, { validate: artifactValidator });
+            return Object.freeze({
+              bytes,
+              directory: await stagePackage(config.releaseRoot, `verifier-${role}-${digest.slice(0, 16)}`, "party-result-package", bytes, { validate: artifactValidator }),
+            });
           };
-          const [payerDirectory, payeeDirectory] = await Promise.all([packageFor("payer"), packageFor("payee")]);
+          const [payerPackage, payeePackage] = await Promise.all([packageFor("payer"), packageFor("payee")]);
+          const payerDirectory = payerPackage.directory;
+          const payeeDirectory = payeePackage.directory;
           await privateStage(config.releaseRoot, "verifier");
           try { await lstat(outputDirectory); fail(); } catch (error) { if (error?.message === "Coordinator startup failed safely.") throw error; if (error?.code !== "ENOENT") fail(); }
+          const evidenceDigest = createHash("sha256").update(canonicalBytes({
+            descriptorDigest,
+            mandateDigest: descriptorEnvelope.descriptor.mandateDigest,
+            packageDigests,
+            paymentMoved: false,
+            releaseId: release.releaseId,
+            repositorySha: config.repositorySha,
+            requestDigest: descriptorEnvelope.descriptor.requestDigest,
+            sessionId: release.sessionId,
+            subjectRun,
+          })).digest("hex");
+          if (dependencies.publishVerifierHandoff !== undefined) {
+            if (typeof dependencies.publishVerifierHandoff !== "function") fail();
+            const evidenceRoot = `/var/lib/clockchain/evidence/releases/${release.releaseId}/${subjectRun}`;
+            await dependencies.publishVerifierHandoff({
+              evidence: Object.freeze({
+                descriptorBytes,
+                payeePackageBytes: payeePackage.bytes,
+                payerMandateBytes: mandateArtifact.bytes,
+                payerPackageBytes: payerPackage.bytes,
+                paymentRequestBytes: requestArtifact.bytes,
+              }),
+              handoff: Object.freeze({
+                descriptorDigest,
+                descriptorPath: join(evidenceRoot, "descriptor.json"),
+                evidenceDigest,
+                mandateDigest: descriptorEnvelope.descriptor.mandateDigest,
+                payerMandatePath: join(evidenceRoot, "payer-mandate.json"),
+                payeeResultsPath: join(evidenceRoot, "payee-results"),
+                payerResultsPath: join(evidenceRoot, "payer-results"),
+                paymentMoved: false,
+                paymentRequestPath: join(evidenceRoot, "payment-request.json"),
+                publicationPath: `/var/lib/clockchain/verifier-output/releases/${release.releaseId}/${subjectRun}-publication.json`,
+                releaseId: release.releaseId,
+                repositorySha: config.repositorySha,
+                requestDigest: descriptorEnvelope.descriptor.requestDigest,
+                schema: "clockchain.aws-verifier-handoff/v1",
+                sessionDigest: dSession(descriptorEnvelope.descriptor),
+                sessionId: release.sessionId,
+                subjectRun,
+              }),
+              path: `/var/lib/clockchain/operator/releases/${release.releaseId}/verifier-handoff-${subjectRun}.json`,
+            });
+          }
           let verifierResult;
-          if (dependencies.verifierLauncher === undefined) {
+          if (dependencies.verifierPublication !== undefined) {
+            const publication = dependencies.verifierPublication;
+            if (
+              !publication ||
+              typeof publication !== "object" ||
+              Array.isArray(publication) ||
+              Object.getPrototypeOf(publication) !== Object.prototype ||
+              Reflect.ownKeys(publication).length !== AWS_PUBLICATION_KEYS.length ||
+              AWS_PUBLICATION_KEYS.some((key, index) => Reflect.ownKeys(publication)[index] !== key) ||
+              !ATTEMPT_ID.test(publication.attemptId) ||
+              publication.evidenceDigest !== evidenceDigest ||
+              publication.paymentMoved !== false ||
+              !SHA64.test(publication.publicationDigest) ||
+              publication.repositorySha !== config.repositorySha ||
+              !Number.isSafeInteger(publication.revision) ||
+              publication.revision < 0 ||
+              publication.schema !== "clockchain.aws-verifier-task-publication/v1" ||
+              publication.status !== "VERIFICATION_PASSED" ||
+              !TASK_ARN.test(publication.taskArn) ||
+              !DECIMAL.test(publication.writtenAtMs)
+            ) fail();
+            verifierResult = Object.freeze({
+              exitCode: 0,
+              publicationDigest: publication.publicationDigest,
+              status: "VERIFICATION_PASSED",
+              stderr: "",
+              stdout: "",
+            });
+          } else if (dependencies.verifierLauncher === undefined) {
             const args = [join(ROOT, "scripts/verify-bilateral-results.mjs"), "--clockchain-token-file", config.clockchainTokenPath, "--descriptor", descriptorPath, "--output", outputDirectory, "--payer-mandate", mandatePath, "--payee-results", payeeDirectory, "--payer-results", payerDirectory, "--payment-request", requestPath, "--rpc-url", config.rpcUrl];
             await assertRoot(config.releaseRoot); const outcome = await runPinnedVerifierChild(config.releaseRoot, args, dependencies.verifierDeadlineMs ?? COORDINATOR_FUNDING_DEADLINE_MS, dependencies.runVerifierChild ?? runChildWithDeadline); if (outcome !== 0) fail();
             verifierResult = Object.freeze({ exitCode: 0, publicationDigest: null, status: null, stderr: "", stdout: "" });
           } else {
-            const evidenceDigest = createHash("sha256").update(canonicalBytes({
-              descriptorDigest,
-              mandateDigest: descriptorEnvelope.descriptor.mandateDigest,
-              packageDigests,
-              paymentMoved: false,
-              releaseId: release.releaseId,
-              repositorySha: config.repositorySha,
-              requestDigest: descriptorEnvelope.descriptor.requestDigest,
-              sessionId: release.sessionId,
-              subjectRun,
-            })).digest("hex");
             verifierResult = await launchExternalVerifier({
               evidenceDescriptor: Object.freeze({
                 descriptorDigest,
@@ -823,24 +969,38 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
           }
           const envelope = (await artifactValidator({ artifactType: "signed-descriptor", bytes: await readStable(descriptorPath, 1_048_576, privateFile), expectedDigest: descriptorDigest, secretCanaries: [] })).facts;
           await immutable(); await assertRoot(config.releaseRoot); validatePinnedDescriptorEnvelope(envelope, { keyId: config.operatorIdentity.keyId, publicKey: config.operatorPublicKey, repositorySha: config.repositorySha, sessionId: expectedSession });
-          const publication = await validateVerdictPublication({ mandateDigest: envelope.descriptor.mandateDigest, outputDirectory, repositorySha: config.repositorySha, requestDigest: envelope.descriptor.requestDigest, sessionDigest: dSession(envelope.descriptor) });
+          const publication = dependencies.verifierPublication === undefined
+            ? await verdictPublicationValidator({ mandateDigest: envelope.descriptor.mandateDigest, outputDirectory, repositorySha: config.repositorySha, requestDigest: envelope.descriptor.requestDigest, sessionDigest: dSession(envelope.descriptor) })
+            : await verdictPublicationValidator({
+                mandateDigest: envelope.descriptor.mandateDigest,
+                outputDirectory: `/var/lib/clockchain/verifier-output/releases/${release.releaseId}/attempts/${dependencies.verifierPublication.attemptId}`,
+                repositorySha: config.repositorySha,
+                requestDigest: envelope.descriptor.requestDigest,
+                sessionDigest: dSession(envelope.descriptor),
+              });
           await assertRoot(config.releaseRoot);
           if (
             verifierResult.publicationDigest !== null &&
             verifierResult.publicationDigest !== publication.publicationDigest
           ) fail();
-          const context = Object.freeze({ descriptorDigest, mandateDigest: envelope.descriptor.mandateDigest, outputDirectory, packageDigests: Object.freeze({ ...packageDigests }), paymentMoved: false, publicationDigest: publication.publicationDigest, releaseId: release.releaseId, repositorySha: config.repositorySha, requestDigest: envelope.descriptor.requestDigest, schema: VERIFIER_CONTEXT_SCHEMA, sessionId: release.sessionId, subjectRun });
+          const contextOutputDirectory = dependencies.verifierPublication === undefined
+            ? outputDirectory
+            : `/var/lib/clockchain/verifier-output/releases/${release.releaseId}/attempts/${dependencies.verifierPublication.attemptId}`;
+          const context = Object.freeze({ descriptorDigest, mandateDigest: envelope.descriptor.mandateDigest, outputDirectory: contextOutputDirectory, packageDigests: Object.freeze({ ...packageDigests }), paymentMoved: false, publicationDigest: publication.publicationDigest, releaseId: release.releaseId, repositorySha: config.repositorySha, requestDigest: envelope.descriptor.requestDigest, schema: VERIFIER_CONTEXT_SCHEMA, sessionId: release.sessionId, subjectRun });
           await writeVerifierContext(config.releaseRoot, `.verifier-context-${subjectRun}.json`, context); await assertRoot(config.releaseRoot); verifierContexts.set(outputDirectory, context);
           return Object.freeze({ outputDirectory, result: Object.freeze({ exitCode: 0, publicationDigest: publication.publicationDigest, status: "VERIFICATION_PASSED", stderr: "", stdout: "" }) });
         },
         validatePublishedBilateralVerdict: async ({ outputDirectory, packageDigests, publicationDigest, repositorySha, subjectRun }) => {
           await assertRoot(config.releaseRoot);
           if (outputDirectory !== join(config.releaseRoot.path, "verifier", subjectRun)) fail();
-          const context = verifierContexts.get(outputDirectory) ?? await readVerifierContext(config.releaseRoot, `.verifier-context-${subjectRun}.json`); await assertRoot(config.releaseRoot); if (!context || context.outputDirectory !== outputDirectory || context.publicationDigest !== publicationDigest || context.subjectRun !== subjectRun || context.releaseId !== release.releaseId || context.sessionId !== release.sessionId || repositorySha !== config.repositorySha || JSON.stringify(context.packageDigests) !== JSON.stringify(packageDigests)) fail();
+          const context = verifierContexts.get(outputDirectory) ?? await readVerifierContext(config.releaseRoot, `.verifier-context-${subjectRun}.json`);
+          const awsAttemptRoot = `/var/lib/clockchain/verifier-output/releases/${release.releaseId}/attempts/`;
+          const contextIsAwsAttempt = subjectRun === "stakeholder" && context?.outputDirectory?.startsWith(awsAttemptRoot) && ATTEMPT_ID.test(context.outputDirectory.slice(awsAttemptRoot.length));
+          await assertRoot(config.releaseRoot); if (!context || !(context.outputDirectory === outputDirectory || contextIsAwsAttempt) || context.publicationDigest !== publicationDigest || context.subjectRun !== subjectRun || context.releaseId !== release.releaseId || context.sessionId !== release.sessionId || repositorySha !== config.repositorySha || JSON.stringify(context.packageDigests) !== JSON.stringify(packageDigests)) fail();
           const descriptor = await client.getArtifact({ artifactType: "signed-descriptor", digest: context.descriptorDigest }); const envelope = (await artifactValidator({ artifactType: "signed-descriptor", bytes: descriptor, expectedDigest: context.descriptorDigest, secretCanaries: [] })).facts;
           await assertRoot(config.releaseRoot); await immutable(); await assertRoot(config.releaseRoot); validatePinnedDescriptorEnvelope(envelope, { keyId: config.operatorIdentity.keyId, publicKey: config.operatorPublicKey, repositorySha: config.repositorySha, sessionId: deriveDescriptorSessionId({ releaseId: release.releaseId, repositorySha: config.repositorySha, sessionId: release.sessionId, subjectRun }) });
           if (envelope.descriptor.mandateDigest !== context.mandateDigest || envelope.descriptor.requestDigest !== context.requestDigest) fail();
-          const publication = await validateVerdictPublication({ mandateDigest: context.mandateDigest, outputDirectory, repositorySha, requestDigest: context.requestDigest, sessionDigest: dSession(envelope.descriptor) });
+          const publication = await verdictPublicationValidator({ mandateDigest: context.mandateDigest, outputDirectory: context.outputDirectory, repositorySha, requestDigest: context.requestDigest, sessionDigest: dSession(envelope.descriptor) });
           await assertRoot(config.releaseRoot);
           if (
             !publication ||
@@ -864,6 +1024,9 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
           const outputDirectory = join(config.releaseRoot.path, "verifier", subjectRun);
           const context = verifierContexts.get(outputDirectory) ?? await readVerifierContext(config.releaseRoot, `.verifier-context-${subjectRun}.json`);
           if (!context || context.subjectRun !== subjectRun || context.releaseId !== release.releaseId || context.sessionId !== release.sessionId || context.repositorySha !== config.repositorySha) fail();
+          const awsAttemptRoot = `/var/lib/clockchain/verifier-output/releases/${release.releaseId}/attempts/`;
+          const contextIsAwsAttempt = subjectRun === "stakeholder" && context.outputDirectory.startsWith(awsAttemptRoot) && ATTEMPT_ID.test(context.outputDirectory.slice(awsAttemptRoot.length));
+          if (!(context.outputDirectory === outputDirectory || contextIsAwsAttempt)) fail();
           const descriptorBytes = await client.getArtifact({ artifactType: "signed-descriptor", digest: context.descriptorDigest });
           const descriptorEnvelope = (await artifactValidator({ artifactType: "signed-descriptor", bytes: descriptorBytes, expectedDigest: context.descriptorDigest, secretCanaries: [] })).facts;
           validatePinnedDescriptorEnvelope(descriptorEnvelope, { keyId: config.operatorIdentity.keyId, publicKey: config.operatorPublicKey, repositorySha: config.repositorySha, sessionId: deriveDescriptorSessionId({ releaseId: release.releaseId, repositorySha: config.repositorySha, sessionId: release.sessionId, subjectRun }) });
@@ -872,9 +1035,10 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
           const mandateEnvelope = mandateArtifact.checked.facts;
           const requestEnvelope = requestArtifact.checked.facts;
           if (payerMandateDigest(mandateEnvelope) !== context.mandateDigest || paymentRequestDigest(requestEnvelope) !== context.requestDigest) fail();
-          const publication = await validateVerdictPublication({ mandateDigest: context.mandateDigest, outputDirectory, repositorySha: config.repositorySha, requestDigest: context.requestDigest, sessionDigest: dSession(descriptorEnvelope.descriptor) });
+          const publication = await verdictPublicationValidator({ mandateDigest: context.mandateDigest, outputDirectory: context.outputDirectory, repositorySha: config.repositorySha, requestDigest: context.requestDigest, sessionDigest: dSession(descriptorEnvelope.descriptor) });
           if (publication.publicationDigest !== context.publicationDigest) fail();
-          const verdictBytes = await readStable(join(outputDirectory, "bilateral-verdict.json"), 1_048_576, privateFile);
+          const verdictBytes = await verifierVerdictReader({ outputDirectory: context.outputDirectory });
+          if (!Buffer.isBuffer(verdictBytes) || verdictBytes.length > 1_048_576) fail();
           let verdict; try { verdict = JSON.parse(verdictBytes.toString("utf8")); } catch { fail(); }
           if (verdict?.paymentMoved !== false || !Array.isArray(verdict.transitions) || verdict.transitions.length !== 3) fail();
           const events = await client.readEvents({ after: null, waitMs: 0 });

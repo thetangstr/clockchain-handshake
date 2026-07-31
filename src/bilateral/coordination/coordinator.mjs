@@ -133,7 +133,7 @@ const RUN_ORCHESTRATION_DEPENDENCY_KEYS = Object.freeze([
   "startWatcher", "validatePublishedBilateralVerdict", "waitForDescriptorAcceptance",
   "validateRehearsalPackage", "waitForRolePackage", "waitForRoleStarted",
 ]);
-const RUN_OPTIONAL_DEPENDENCY_KEYS = Object.freeze(["drainWatchers", "writeConsoleState"]);
+const RUN_OPTIONAL_DEPENDENCY_KEYS = Object.freeze(["drainWatchers", "prepareVerifierHandoff", "writeConsoleState"]);
 const SUCCESS_STATUS = "VERIFICATION_PASSED";
 const FUNDING_RECORD_KEYS = Object.freeze([
   "address",

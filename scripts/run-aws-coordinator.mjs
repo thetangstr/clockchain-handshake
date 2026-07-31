@@ -16,7 +16,6 @@ const RELEASE_ID =
 const SESSION_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const GATED_STATES = Object.freeze({
-  REHEARSAL_PACKAGES_READY: "rehearsal",
   STAKEHOLDER_PACKAGES_READY: "stakeholder",
 });
 const COORDINATOR_STATES = new Set([
@@ -135,6 +134,7 @@ export async function runAwsCoordinatorCycle({
   mounts,
   ownerLease,
   readVerifyAction,
+  readVerifierPublication,
   runStep,
   verifierLauncher,
   writeProjection,
@@ -149,15 +149,17 @@ export async function runAwsCoordinatorCycle({
       typeof config.releaseRoot.path !== "string" ||
       !SHA40.test(config.repositorySha) ||
       !Array.isArray(mounts) ||
-      mounts.length !== 2 ||
+      mounts.length !== 3 ||
       typeof createRuntime !== "function" ||
       typeof loadRelease !== "function" ||
       !plain(ownerLease) ||
       typeof ownerLease.acquire !== "function" ||
-      typeof readVerifyAction !== "function" ||
+      (
+        typeof readVerifyAction !== "function" &&
+        typeof readVerifierPublication !== "function"
+      ) ||
       typeof runStep !== "function" ||
-      !plain(verifierLauncher) ||
-      typeof verifierLauncher.launch !== "function" ||
+      verifierLauncher !== undefined ||
       typeof writeProjection !== "function"
     ) {
       invalid();
@@ -167,6 +169,10 @@ export async function runAwsCoordinatorCycle({
       readOnly: false,
     });
     const verdictMount = mount(mounts[1], {
+      purpose: "verifier-evidence",
+      readOnly: false,
+    });
+    const outputMount = mount(mounts[2], {
       purpose: "verdict-output",
       readOnly: true,
     });
@@ -180,8 +186,8 @@ export async function runAwsCoordinatorCycle({
       invalid();
     }
     if (
-      verdictMount.path !==
-        join(config.releaseRoot.path, "verifier")
+      verdictMount.path !== "/var/lib/clockchain/evidence" ||
+      outputMount.path !== "/var/lib/clockchain/verifier-output"
     ) {
       invalid();
     }
@@ -208,7 +214,27 @@ export async function runAwsCoordinatorCycle({
     );
     const subjectRun = GATED_STATES[release.state];
     let verifierAction;
+    let verifierPublication;
     if (subjectRun !== undefined) {
+      const preparationRuntime = createRuntime({
+        runMode: "aws-stakeholder-only",
+        verifierEvidenceRoot: verdictMount.path,
+        verifierOutputRoot: outputMount.path,
+      });
+      if (
+        !plain(preparationRuntime) ||
+        typeof preparationRuntime.prepareVerifierHandoff !== "function" ||
+        typeof readVerifyAction !== "function" ||
+        typeof readVerifierPublication !== "function"
+      ) {
+        invalid();
+      }
+      const handoff = await preparationRuntime.prepareVerifierHandoff({
+        releaseId: release.releaseId,
+        repositorySha: release.repositorySha,
+        sessionId: release.sessionId,
+        subjectRun,
+      });
       const candidate = await readVerifyAction({
         releaseId: release.releaseId,
         repositorySha: release.repositorySha,
@@ -229,15 +255,40 @@ export async function runAwsCoordinatorCycle({
           release,
           subjectRun,
         );
+        const publication = await readVerifierPublication({
+          expectedRevision: verifierAction.expectedRevision,
+          handoff,
+          releaseId: release.releaseId,
+          repositorySha: release.repositorySha,
+          sessionId: release.sessionId,
+          subjectRun,
+        });
+        if (publication === null) {
+          await writeProjection(
+            projection(
+              release,
+              "WAITING_FOR_OPERATOR_VERIFY",
+            ),
+          );
+          result = Object.freeze({ ...release });
+        } else {
+          verifierPublication = publication;
+        }
       }
     }
     if (result === undefined) {
-      const runtime = createRuntime({
+      const runtimeInput = {
+        runMode: "aws-stakeholder-only",
+        verifierEvidenceRoot: verdictMount.path,
+        verifierOutputRoot: outputMount.path,
         ...(verifierAction === undefined
           ? {}
           : { verifierAction }),
-        verifierLauncher,
-      });
+        ...(verifierPublication === undefined
+          ? {}
+          : { verifierPublication }),
+      };
+      const runtime = createRuntime(runtimeInput);
       const advanced = releaseScope(
         await runStep({ release, runtime }),
         config.repositorySha,

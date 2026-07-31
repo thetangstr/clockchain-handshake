@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 
 import {
@@ -16,9 +17,9 @@ import {
 
 const REPOSITORY_SHA =
   "abcdef0123456789abcdef0123456789abcdef01";
-const RELEASE_ID = "release-0123456789abcdef";
 const SESSION_ID =
   "11111111-2222-4333-8444-555555555555";
+const RELEASE_ID = `release-${createHash("sha256").update(SESSION_ID, "utf8").digest("hex").slice(0, 16)}`;
 
 test("relay adapter injects only the Fargate lease and immutable provenance for its assigned mount", async () => {
   const calls = [];
@@ -102,7 +103,17 @@ test("coordinator remains waiting at package completion until an exact VERIFY ac
     },
     createRuntime: (input) => {
       runtimeCalls += 1;
-      return input;
+      return {
+        ...input,
+        prepareVerifierHandoff: async () => ({
+          evidenceDigest: "e".repeat(64),
+          paymentMoved: false,
+          releaseId: RELEASE_ID,
+          repositorySha: REPOSITORY_SHA,
+          sessionId: SESSION_ID,
+          subjectRun: "stakeholder",
+        }),
+      };
     },
     loadRelease: async () => release,
     mounts: [
@@ -112,7 +123,12 @@ test("coordinator remains waiting at package completion until an exact VERIFY ac
         readOnly: false,
       },
       {
-        path: "/mnt/operator/release/verifier",
+        path: "/var/lib/clockchain/evidence",
+        purpose: "verifier-evidence",
+        readOnly: false,
+      },
+      {
+        path: "/var/lib/clockchain/verifier-output",
         purpose: "verdict-output",
         readOnly: true,
       },
@@ -133,14 +149,14 @@ test("coordinator remains waiting at package completion until an exact VERIFY ac
         };
       },
     },
-    runStep: async ({ release: current }) => {
+    runStep: async ({ release: current, runtime }) => {
       stepCalls += 1;
+      assert.equal(Object.hasOwn(runtime, "verifierLauncher"), false);
       return {
         ...current,
         state: "STAKEHOLDER_VERIFIED",
       };
     },
-    verifierLauncher: { launch: async () => ({}) },
     writeProjection: async (projection) => {
       projections.push(projection);
     },
@@ -148,9 +164,10 @@ test("coordinator remains waiting at package completion until an exact VERIFY ac
   const waiting = await runAwsCoordinatorCycle({
     ...base,
     readVerifyAction: async () => null,
+    readVerifierPublication: async () => assert.fail("publication is not read before VERIFY action"),
   });
   assert.equal(waiting.state, "STAKEHOLDER_PACKAGES_READY");
-  assert.equal(runtimeCalls, 0);
+  assert.equal(runtimeCalls, 1);
   assert.equal(stepCalls, 0);
   assert.deepEqual(leaseCalls[0], [
     "acquire",
@@ -177,11 +194,248 @@ test("coordinator remains waiting at package completion until an exact VERIFY ac
   const advanced = await runAwsCoordinatorCycle({
     ...base,
     readVerifyAction: async () => action,
+    readVerifierPublication: async () => ({
+      attemptId: "22222222-2222-4222-8222-222222222222",
+      evidenceDigest: "e".repeat(64),
+      paymentMoved: false,
+      publicationDigest: "f".repeat(64),
+      repositorySha: REPOSITORY_SHA,
+      revision: 7,
+      schema: "clockchain.aws-verifier-task-publication/v1",
+      status: "VERIFICATION_PASSED",
+      taskArn:
+        "arn:aws:ecs:us-west-2:123456789012:task/clockchain/11111111111111111111111111111111",
+      writtenAtMs: "2000000000000",
+    }),
   });
   assert.equal(advanced.state, "STAKEHOLDER_VERIFIED");
-  assert.equal(runtimeCalls, 1);
+  assert.equal(runtimeCalls, 3);
   assert.equal(stepCalls, 1);
   assert.equal(projections.at(-1).status, "ADVANCED");
+});
+
+test("coordinator prepares stakeholder verifier handoff and waits for operator publication without launching", async () => {
+  const projections = [];
+  const handoffs = [];
+  const publications = [];
+  const release = {
+    paymentMoved: false,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    sessionId: SESSION_ID,
+    state: "STAKEHOLDER_PACKAGES_READY",
+  };
+  const base = {
+    config: {
+      releaseRoot: { path: "/mnt/operator/release" },
+      repositorySha: REPOSITORY_SHA,
+    },
+    createRuntime: (input) => ({
+      ...input,
+      publicationDigestFromClosure: () => input.verifierPublication?.publicationDigest,
+      prepareVerifierHandoff: async (request) => {
+        handoffs.push({ input, request });
+        return {
+          evidenceDigest: "e".repeat(64),
+          paymentMoved: false,
+          publicationPath:
+            `/var/lib/clockchain/verifier-output/releases/${RELEASE_ID}/stakeholder-publication.json`,
+          releaseId: RELEASE_ID,
+          repositorySha: REPOSITORY_SHA,
+          sessionId: SESSION_ID,
+          subjectRun: "stakeholder",
+        };
+      },
+    }),
+    loadRelease: async () => release,
+    mounts: [
+      {
+        path: "/mnt/operator",
+        purpose: "operator-state",
+        readOnly: false,
+      },
+      {
+        path: "/var/lib/clockchain/evidence",
+        purpose: "verifier-evidence",
+        readOnly: false,
+      },
+      {
+        path: "/var/lib/clockchain/verifier-output",
+        purpose: "verdict-output",
+        readOnly: true,
+      },
+    ],
+    ownerLease: {
+      async acquire() {
+        return {
+          async assertCurrent() {},
+          async heartbeat() {},
+          async release() {},
+        };
+      },
+    },
+    readVerifyAction: async () => ({
+      action: "VERIFY",
+      expectedRevision: 8,
+      releaseId: RELEASE_ID,
+      repositorySha: REPOSITORY_SHA,
+      sessionId: SESSION_ID,
+      subjectRun: "stakeholder",
+    }),
+    readVerifierPublication: async (input) => {
+      publications.push(input);
+      return null;
+    },
+    runStep: async () => assert.fail("coordinator must wait for operator verifier publication"),
+    writeProjection: async (projection) => projections.push(projection),
+  };
+  const waiting = await runAwsCoordinatorCycle(base);
+  assert.equal(waiting.state, "STAKEHOLDER_PACKAGES_READY");
+  assert.equal(handoffs.length, 1);
+  assert.equal(handoffs[0].input.runMode, "aws-stakeholder-only");
+  assert.equal(handoffs[0].input.verifierEvidenceRoot, "/var/lib/clockchain/evidence");
+  assert.equal(handoffs[0].input.verifierOutputRoot, "/var/lib/clockchain/verifier-output");
+  assert.deepEqual(handoffs[0].request, {
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    sessionId: SESSION_ID,
+    subjectRun: "stakeholder",
+  });
+  assert.equal(publications[0].expectedRevision, 8);
+  assert.equal(publications[0].handoff.evidenceDigest, "e".repeat(64));
+  assert.equal(
+    projections.at(-1).status,
+    "WAITING_FOR_OPERATOR_VERIFY",
+  );
+  assert.equal(
+    JSON.stringify({ handoffs, projections }).includes("AUTHORIZED"),
+    false,
+  );
+
+  const publication = {
+    attemptId: "22222222-2222-4222-8222-222222222222",
+    evidenceDigest: "e".repeat(64),
+    paymentMoved: false,
+    publicationDigest: "f".repeat(64),
+    repositorySha: REPOSITORY_SHA,
+    revision: 8,
+    schema: "clockchain.aws-verifier-task-publication/v1",
+    status: "VERIFICATION_PASSED",
+    taskArn:
+      "arn:aws:ecs:us-west-2:123456789012:task/clockchain/11111111111111111111111111111111",
+    writtenAtMs: "2000000000000",
+  };
+  const advanced = await runAwsCoordinatorCycle({
+    ...base,
+    readVerifierPublication: async ({ handoff }) => ({
+      ...publication,
+      evidenceDigest: handoff.evidenceDigest,
+    }),
+    runStep: async ({ release: current, runtime }) => {
+      assert.equal(runtime.runMode, "aws-stakeholder-only");
+      assert.equal(runtime.verifierPublication.publicationDigest, "f".repeat(64));
+      assert.equal(runtime.publicationDigestFromClosure(), "f".repeat(64));
+      assert.equal(Object.hasOwn(runtime, "verifierLauncher"), false);
+      return { ...current, state: "STAKEHOLDER_VERIFIED" };
+    },
+  });
+  assert.equal(advanced.state, "STAKEHOLDER_VERIFIED");
+  assert.equal(projections.at(-1).status, "ADVANCED");
+});
+
+test("coordinator does not gate rehearsal package completion through verifier handoff", async () => {
+  let stepCalls = 0;
+  const release = {
+    paymentMoved: false,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    sessionId: SESSION_ID,
+    state: "REHEARSAL_PACKAGES_READY",
+  };
+  const advanced = await runAwsCoordinatorCycle({
+    config: {
+      releaseRoot: { path: "/mnt/operator/release" },
+      repositorySha: REPOSITORY_SHA,
+    },
+    createRuntime: (input) => input,
+    loadRelease: async () => release,
+    mounts: [
+      { path: "/mnt/operator", purpose: "operator-state", readOnly: false },
+      { path: "/var/lib/clockchain/evidence", purpose: "verifier-evidence", readOnly: false },
+      { path: "/var/lib/clockchain/verifier-output", purpose: "verdict-output", readOnly: true },
+    ],
+    ownerLease: {
+      async acquire() {
+        return {
+          async assertCurrent() {},
+          async heartbeat() {},
+          async release() {},
+        };
+      },
+    },
+    readVerifyAction: async () => assert.fail("rehearsal must not read verifier action"),
+    readVerifierPublication: async () => assert.fail("rehearsal must not read verifier publication"),
+    runStep: async ({ release: current }) => {
+      stepCalls += 1;
+      return { ...current, state: "REHEARSAL_VERIFIED" };
+    },
+    writeProjection: async () => {},
+  });
+  assert.equal(stepCalls, 1);
+  assert.equal(advanced.state, "REHEARSAL_VERIFIED");
+});
+
+test("aws coordinator rejects verifier launchers and requires evidence and output mounts", async () => {
+  const base = {
+    config: {
+      releaseRoot: { path: "/mnt/operator/release" },
+      repositorySha: REPOSITORY_SHA,
+    },
+    createRuntime: (input) => input,
+    loadRelease: async () => ({
+      paymentMoved: false,
+      releaseId: RELEASE_ID,
+      repositorySha: REPOSITORY_SHA,
+      sessionId: SESSION_ID,
+      state: "STAKEHOLDER_PACKAGES_READY",
+    }),
+    ownerLease: {
+      async acquire() {
+        return {
+          async assertCurrent() {},
+          async heartbeat() {},
+          async release() {},
+        };
+      },
+    },
+    readVerifyAction: async () => null,
+    runStep: async () => ({}),
+    writeProjection: async () => {},
+  };
+  await assert.rejects(runAwsCoordinatorCycle({
+    ...base,
+    mounts: [
+      { path: "/mnt/operator", purpose: "operator-state", readOnly: false },
+      { path: "/var/lib/clockchain/evidence", purpose: "verifier-evidence", readOnly: false },
+      { path: "/var/lib/clockchain/verifier-output", purpose: "verdict-output", readOnly: true },
+    ],
+    verifierLauncher: { launch: async () => ({}) },
+  }), /AWS coordinator adapter failed safely/);
+  await assert.rejects(runAwsCoordinatorCycle({
+    ...base,
+    mounts: [
+      { path: "/mnt/operator", purpose: "operator-state", readOnly: false },
+      { path: "/mnt/operator/release/verifier", purpose: "verdict-output", readOnly: true },
+    ],
+  }), /AWS coordinator adapter failed safely/);
+  await assert.rejects(runAwsCoordinatorCycle({
+    ...base,
+    mounts: [
+      { path: "/mnt/operator", purpose: "operator-state", readOnly: false },
+      { path: "/tmp/var/lib/clockchain/evidence", purpose: "verifier-evidence", readOnly: false },
+      { path: "/tmp/var/lib/clockchain/verifier-output", purpose: "verdict-output", readOnly: true },
+    ],
+  }), /AWS coordinator adapter failed safely/);
 });
 
 test("heartbeat owner wrapper renews an idle Fargate lease and fences heartbeat failure", async () => {
