@@ -10,6 +10,7 @@ import {
 } from "node:crypto";
 import { types } from "node:util";
 
+import { canonicalizeReceiptEventValue } from "../../canonical.mjs";
 import { canonicalBytes } from "../canonical.mjs";
 
 export const REQUESTOR_BOOTSTRAP_ENVELOPE_ALGORITHM =
@@ -244,7 +245,8 @@ function manifestSnapshot(value) {
     invalid();
   }
   try {
-    if (!canonicalBytes(parsed).equals(value)) invalid();
+    const stable = Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(parsed)), "utf8");
+    if (!stable.equals(value)) invalid();
   } catch {
     invalid();
   }

@@ -9,6 +9,7 @@ import {
 import test from "node:test";
 
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
+import { canonicalizeReceiptEventValue } from "../src/canonical.mjs";
 import {
   REQUESTOR_BOOTSTRAP_ENVELOPE_ALGORITHM,
   REQUESTOR_BOOTSTRAP_ENVELOPE_SCHEMA,
@@ -50,6 +51,36 @@ function manifest(overrides = {}) {
 
 function manifestBytes(value = manifest()) {
   return canonicalBytes(value);
+}
+
+function stableJsonBytes(value) {
+  return Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(value)), "utf8");
+}
+
+function launchManifest(overrides = {}) {
+  const tlsCertificatePem = [
+    "-----BEGIN CERTIFICATE-----",
+    "A".repeat(384),
+    "-----END CERTIFICATE-----",
+    "",
+  ].join("\n");
+  return {
+    bootstrapCapability: "c".repeat(64),
+    expectedTlsFingerprint: "d".repeat(64),
+    expiresAtMs: "1785123600000",
+    issuedAtMs: "1785120000000",
+    operatorKeyId: "operator-demo",
+    payerMcpIntakeCapability: "e".repeat(64),
+    protocol: "clockchain.bilateral-authorization/v1",
+    relayUrl: "https://127.0.0.1:8443",
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    role: "payee",
+    schema: "clockchain.bilateral-launch-manifest/v1",
+    sessionId: SESSION_ID,
+    tlsCertificatePem,
+    ...overrides,
+  };
 }
 
 function mutateBase64url(value) {
@@ -188,6 +219,33 @@ test("accepts repository session UUID versions while keeping claim nonce v4", ()
   assertThrowsSecretFree(() => sealRequestorBootstrapManifest({
     context: context({ claimNonce: SESSION_ID_V7, sessionId: SESSION_ID_V7 }),
     manifestBytes: bytes,
+    requestorPublicKey: requestorKey.publicKey,
+  }));
+});
+
+test("round-trips stable JSON launch manifest bytes with PEM newlines and long fields", () => {
+  const requestorKey = assertNotPromise(createRequestorBootstrapKey());
+  const value = launchManifest();
+  const bytes = stableJsonBytes(value);
+  assert.match(bytes.toString("utf8"), /\\n/);
+  assert.ok(value.tlsCertificatePem.length > 256);
+
+  const envelope = sealRequestorBootstrapManifest({
+    context: context(),
+    manifestBytes: bytes,
+    requestorPublicKey: requestorKey.publicKey,
+  });
+  const opened = openRequestorBootstrapEnvelope({
+    context: context(),
+    envelope,
+    requestorPrivateKey: requestorKey.privateKey,
+  });
+  assert.deepEqual(opened, bytes);
+
+  const noncanonicalBytes = Buffer.from(`${bytes.toString("utf8")}\n`, "utf8");
+  assertThrowsSecretFree(() => sealRequestorBootstrapManifest({
+    context: context(),
+    manifestBytes: noncanonicalBytes,
     requestorPublicKey: requestorKey.publicKey,
   }));
 });
