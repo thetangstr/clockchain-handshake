@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   createCipheriv,
+  createPrivateKey,
   createPublicKey,
   diffieHellman,
   generateKeyPairSync,
@@ -26,6 +27,7 @@ const SESSION_ID_V7 = "01890f0d-5d3b-7cc7-9f4b-123456789abc";
 const PRIVATE_CANARY = "requestor-private-canary";
 const KEY_CANARY = "requestor-key-canary";
 const PUBLIC_KEY_DER_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
+const PRIVATE_KEY_DER_PREFIX = Buffer.from("302e020100300506032b656e04220420", "hex");
 const LEGACY_HKDF_INFO = Buffer.from(REQUESTOR_BOOTSTRAP_ENVELOPE_SCHEMA, "utf8");
 
 function context(overrides = {}) {
@@ -125,6 +127,50 @@ function publicKeyFromRawBase64url(value) {
 function rawPublicKey(publicKey) {
   return publicKey.export({ format: "der", type: "spki" }).subarray(PUBLIC_KEY_DER_PREFIX.length);
 }
+
+function fixedPrivateKey(byte) {
+  return createPrivateKey({
+    key: Buffer.concat([
+      PRIVATE_KEY_DER_PREFIX,
+      Buffer.alloc(32, byte),
+    ]),
+    format: "der",
+    type: "pkcs8",
+  });
+}
+
+test("preserves the exact deterministic Requestor v1 wire envelope", () => {
+  const recipientPrivateKey = fixedPrivateKey(0x11);
+  const recipientPublicKey = rawPublicKey(
+    createPublicKey(recipientPrivateKey),
+  ).toString("base64url");
+  const ephemeralPrivateKey = fixedPrivateKey(0x22);
+  const envelope = sealRequestorBootstrapManifest({
+    context: context(),
+    manifestBytes: manifestBytes(),
+    requestorPublicKey: recipientPublicKey,
+  }, {
+    generateKeyPair() {
+      return {
+        privateKey: ephemeralPrivateKey,
+        publicKey: createPublicKey(ephemeralPrivateKey),
+      };
+    },
+    randomBytes(length) {
+      assert.equal(length, 12);
+      return Buffer.from("000102030405060708090a0b", "hex");
+    },
+  });
+  assert.deepEqual(envelope, {
+    algorithm: "X25519-HKDF-SHA256-AES-256-GCM",
+    ciphertextBase64url: "rBDCWzBXG0mvfamA6OGia4aysH0L6-P2tzAAfvjKl_IyyL5thAjoGjdeeNyZQXAm_u7oq2lV17j1KzDYpGecsSGFe04U6iTtYW9BYnhReCoUALugRBS_72vI-X6TRkLziCyoNagXjjoGhpA19QdJzaMOPRqIEirmbNOQKEo800lvrp-o3fczYZehRyl_WB1CQRH02KcSFGzX_7SQdznaUUEv-hU8TRkw6xStzsPIdz6HkhxgOofUZA",
+    ephemeralPublicKey: "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+    ivBase64url: "AAECAwQFBgcICQoL",
+    paymentMoved: false,
+    schema: "clockchain.requestor-bootstrap-envelope/v1",
+    tagBase64url: "BEHqxWuWVd4QUz6eHz9GUA",
+  });
+});
 
 function legacyInfoOmittedContextEnvelope({ contextValue, manifestValue, requestorPublicKey }) {
   const ephemeral = generateKeyPairSync("x25519");
