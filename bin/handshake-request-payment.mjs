@@ -376,7 +376,6 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
       manifest.repositorySha !== verifiedHead ||
       manifest.releaseId !== discovery.releaseId ||
       manifest.sessionId !== discovery.sessionId ||
-      manifest.expectedTlsFingerprint !== discovery.certificateFingerprint ||
       Number(manifest.expiresAtMs) <= nowMs()
     ) {
       fail();

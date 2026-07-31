@@ -440,15 +440,14 @@ const PAYER_SUPERVISOR_COMMAND = `npm run bilateral:supervisor -- \\
   --payer-mcp-host "$PAYER_MCP_HOST" \\
   --payer-mcp-port "$PAYER_MCP_PORT" \\
   --payer-mcp-public-url "$PAYER_MCP_PUBLIC_URL" \\
+  --payer-mcp-bootstrap-broker-url "$PAYER_MCP_BOOTSTRAP_BROKER_URL" \\
+  --payer-mcp-bootstrap-broker-capability-file "$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" \\
   --payer-mcp-tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \\
   --payer-mcp-tls-private-key "$PAYER_MCP_TLS_PRIVATE_KEY"`;
 const REQUESTOR_REQUEST_PAYMENT_COMMAND = `npm run bilateral:request-payment -- \\
-  --launch-manifest "$REQUESTOR_LAUNCH_MANIFEST" \\
+  --discovery-url "$REQUESTOR_DISCOVERY_URL" \\
   --intake-request-id "$REQUESTOR_INTAKE_REQUEST_ID" \\
-  --mcp-url "$PAYER_MCP_URL" \\
-  --state "$REQUESTOR_SUPERVISOR_STATE" \\
-  --tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \\
-  --tls-fingerprint "$PAYER_MCP_TLS_FINGERPRINT"`;
+  --state "$REQUESTOR_SUPERVISOR_STATE"`;
 const PAYER_TERMINAL_ROLE_JSON =
   /\{"paymentMoved":false,"role":"payer","state":"ACKNOWLEDGED","status":"PARTY_COMPLETE"\}/;
 const REQUESTOR_TERMINAL_ROLE_JSON =
@@ -561,6 +560,20 @@ function bilateralContractFailures(relativePath, contents) {
       `${relativePath}: must not claim the operator privately sets Requestor-derived or received MCP request inputs.`,
     );
   }
+  if (relativePath === "prompts/run-requestor-bilateral-demo.md") {
+    for (const [label, pattern] of [
+      ["legacy launch-manifest flag", /--launch-manifest\b/],
+      ["legacy MCP URL flag", /--mcp-url\b/],
+      ["legacy TLS certificate flag", /--tls-certificate\b/],
+      ["legacy TLS fingerprint flag", /--tls-fingerprint\b/],
+      ["legacy Requestor launch manifest variable", /REQUESTOR_LAUNCH_MANIFEST/],
+      ["legacy Payer MCP TLS variable", /PAYER_MCP_TLS_/],
+      ["attachment instruction", /\battach(?:ing)?\s+(?:a\s+)?(?:file|manifest|certificate)|\battachment(?:s)?\b/i],
+      ["manual second prompt", /\bsecond prompt\b/i],
+    ]) {
+      if (pattern.test(contents)) failures.push(`${relativePath}: contains ${label}.`);
+    }
+  }
   for (const { label, pattern } of BILATERAL_COMMON_REQUIREMENTS) {
     if (!pattern.test(contents)) {
       failures.push(
@@ -585,9 +598,9 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact request-payment command",
-        /npm run bilateral:request-payment -- \\\n  --launch-manifest "\$REQUESTOR_LAUNCH_MANIFEST" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --mcp-url "\$PAYER_MCP_URL" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE" \\\n  --tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --tls-fingerprint "\$PAYER_MCP_TLS_FINGERPRINT"/,
+        /npm run bilateral:request-payment -- \\\n  --discovery-url "\$REQUESTOR_DISCOVERY_URL" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE"/,
       ],
-      ["no direct supervisor startup", /\bDo not start `npm run bilateral:supervisor` directly\b/i],
+      ["no direct supervisor startup", /\bDo not start\s+`npm run bilateral:supervisor`\s+directly\b/i],
       ["HANDSHAKE_REQUIRED gate", /\bHANDSHAKE_REQUIRED\b[\s\S]*\bwrapper\b[\s\S]*\bstarts the Requestor\s+supervisor\b/i],
       ["two-run supervisor lifetime", /\bstays alive\b[^.]*\bboth runs\b/i],
       ["closed command policy", /\bmust not improvise commands\b/i],
@@ -618,12 +631,12 @@ function bilateralContractFailures(relativePath, contents) {
         /\bclean detached checkout\b[^.]*\breviewed 40-character SHA\b/i,
       ],
       [
-        "60-minute launch manifests",
-        /\blaunch manifest expires after 60 minutes\b/i,
+        "time-bounded bootstrap material",
+        /\bBootstrap material is time bounded\b/i,
       ],
       [
-        "TLS certificate fingerprint pin",
-        /\bTLS certificate fingerprint\b[\s\S]{0,160}\bpins that fingerprint\b/i,
+        "coordination TLS identity pin",
+        /\bcoordination\s+relay TLS identity\b[\s\S]{0,160}\bpins that binding\b/i,
       ],
       [
         "neutral private input ownership",
@@ -653,12 +666,12 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact supervisor command",
-        /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/,
+        /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-bootstrap-broker-url "\$PAYER_MCP_BOOTSTRAP_BROKER_URL" \\\n  --payer-mcp-bootstrap-broker-capability-file "\$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/,
       ],
       ["PAYER_MCP_READY gate", /\bPAYER_MCP_READY\b/],
       [
         "safe public MCP handoff",
-        /\bshare only the public MCP URL,\s+public TLS certificate, and lowercase 64-hex certificate fingerprint\b/i,
+        /\bshare only\b[\s\S]{0,160}\bsigned discovery URL\b/i,
       ],
       ["two-run supervisor lifetime", /\bstays alive\b[^.]*\bboth runs\b/i],
       ["closed command policy", /\bmust not improvise commands\b/i],
@@ -845,12 +858,12 @@ function bilateralContractFailures(relativePath, contents) {
         /\bpayer\.launch\.json\b[^.\n]*\bonly to Payer\b/i,
       ],
       [
-        "private launch manifest delivery",
-        /\bpayee\.launch\.json\b[^.\n]*\bonly to Requestor\b/i,
+        "signed discovery only Requestor",
+        /\bRequestor receives only\b[^.\n]*\bsigned discovery\s+URL\b/i,
       ],
       [
-        "60-minute launch manifests",
-        /\blaunch manifests expire after 60 minutes\b/i,
+        "time-bounded private launch material",
+        /\bPrivate launch material expires after 60 minutes\b/i,
       ],
       [
         "funding record capture",
@@ -1049,8 +1062,8 @@ function bilateralContractFailures(relativePath, contents) {
         /\bpayer\.launch\.json\b[^.\n]*\bonly Payer\b/i,
       ],
       [
-        "payee manifest only Requestor",
-        /\bpayee\.launch\.json\b[^.\n]*\bonly Requestor\b/i,
+        "signed discovery only Requestor",
+        /\bsigned discovery URL\b[^.\n]*\bRequestor\b/i,
       ],
       [
         "coordinator-owned funding record",

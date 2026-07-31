@@ -28,9 +28,8 @@ This demo uses a Payer-owned TLS MCP `/mcp` endpoint for payment intake. Payer
 keeps the service loopback-only and exposes it through an operator-provided AWS
 raw-TCP relay. The hosted Clockchain MCP server is not used for
 `request_payment`. AWS forwards raw TCP and does not terminate Payer MCP TLS.
-Payer must be ready first and must provide only the public MCP URL, public TLS
-certificate, and lowercase 64-hex certificate fingerprint through the
-operator-approved public channel.
+Payer must be ready first. The operator-approved public channel provides only
+the signed discovery URL for Requestor.
 
 Only the operator's fresh aggregate verifier may emit the authorizing verdict.
 Requestor may report local progress and marker-complete public artifact digests,
@@ -57,34 +56,40 @@ npm ci --ignore-scripts
 
 Keep Requestor's private state root separate from the operator and Payer roots.
 Preserve the assigned private state root unchanged. Underfunding is pending
-until the bounded eight-minute funding deadline. Do not retry a consumed launch
-manifest.
+until the bounded eight-minute funding deadline. Do not retry consumed bootstrap
+material.
 
-The operator privately provides one Requestor launch-manifest path, one fresh
-private state directory, and the exact `PAYER_MCP_READY` public URL,
-certificate, and fingerprint tuple after Payer reports readiness. Do not start `npm run bilateral:supervisor` directly. Generate one fresh canonical UUIDv4
+Wait until Yang/the operator says the Payer side has published exact
+`PAYER_MCP_READY` and gives you one public signed discovery URL. Do not accept
+private bootstrap material, MCP capability, token, invitation, or private file
+transfer. Do not start
+`npm run bilateral:supervisor` directly. Generate one fresh canonical UUIDv4
 intake request ID. Start this long-lived request-payment wrapper exactly once.
-Run:
+The wrapper fetches the signed discovery, asks the Payer-owned MCP for the
+required payment process, receives exact `HANDSHAKE_REQUIRED`, decrypts its
+own bootstrap material, and automatically starts the Requestor supervisor. Run:
 
 ```sh
+export REQUESTOR_DISCOVERY_URL="${REQUESTOR_DISCOVERY_URL:?set operator-provided public signed discovery URL}"
+export REQUESTOR_SUPERVISOR_STATE="${REQUESTOR_SUPERVISOR_STATE:?set fresh blank Requestor private state root}"
+mkdir -p "$REQUESTOR_SUPERVISOR_STATE"
+chmod 0700 "$REQUESTOR_SUPERVISOR_STATE"
 REQUESTOR_INTAKE_REQUEST_ID="$(node -e 'console.log(require("node:crypto").randomUUID())')"
 npm run bilateral:request-payment -- \
-  --launch-manifest "$REQUESTOR_LAUNCH_MANIFEST" \
+  --discovery-url "$REQUESTOR_DISCOVERY_URL" \
   --intake-request-id "$REQUESTOR_INTAKE_REQUEST_ID" \
-  --mcp-url "$PAYER_MCP_URL" \
-  --state "$REQUESTOR_SUPERVISOR_STATE" \
-  --tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
-  --tls-fingerprint "$PAYER_MCP_TLS_FINGERPRINT"
+  --state "$REQUESTOR_SUPERVISOR_STATE"
 ```
 
-The wrapper must visibly emit exact `HANDSHAKE_REQUIRED`; the wrapper alone then
-starts the Requestor supervisor and stays attached. Treat any other status,
-missing status, changed MCP TLS certificate, changed fingerprint, or direct
-supervisor instruction as a fail-closed stop.
+The MCP's exact `HANDSHAKE_REQUIRED` response is the executable gate. It is not
+free-form authority and it is not authorization. The wrapper alone follows that
+gate into the supervisor and stays attached. Treat any other status, missing
+status, changed signed discovery, or direct supervisor instruction as a
+fail-closed stop.
 
 Do not start a replacement request-payment wrapper or supervisor. If the
-wrapper exits, report the exit and preserve state; do not consume another
-manifest.
+wrapper exits, report the exit and preserve state; do not request private
+bootstrap files or run a second command.
 
 `HANDSHAKE_REQUIRED`, `WAITING_FOR_PEER`, and `PEER_READY` are intermediate
 statuses. Keep the same wrapper and supervisor attached through operator
@@ -100,12 +105,13 @@ It creates and retains Requestor's coordination key, preflight key, one token,
 and two invitation secrets locally. It follows only authenticated operator
 events and repository-owned command builders. It must not improvise commands,
 alter paths, or accept a replacement SHA, prompt, token, invitation, descriptor,
-MCP detail, or output directory. The launch manifest expires after 60 minutes;
-after expiry, stop and request a newly reviewed release instead of reusing it.
+MCP detail, or output directory. Bootstrap material is time bounded; after
+expiry, stop and request a newly reviewed release instead of reusing it.
 
-The launch manifest binds the exact relay URL and TLS certificate fingerprint.
-The supervisor pins that fingerprint before sending or receiving coordination
-events. A missing or changed TLS binding stops the session.
+The bootstrap material recovered by the wrapper binds the exact coordination
+relay TLS identity. The supervisor pins that binding before sending or
+receiving coordination events. A missing or changed TLS binding stops the
+session.
 
 Use a clean detached checkout of the reviewed 40-character SHA with Node.js 22
 and `npm ci --ignore-scripts`. Do not inspect secret bytes, do not switch roles,
@@ -117,15 +123,10 @@ Requestor receives or derives these private inputs and paths:
 
 - `BILATERAL_REPOSITORY_SHA`: reviewed immutable repository SHA, exactly 40
   lowercase hexadecimal characters.
-- `REQUESTOR_LAUNCH_MANIFEST`: Requestor's operator-signed launch manifest.
 - `REQUESTOR_INTAKE_REQUEST_ID`: one fresh canonical UUIDv4 for this payment
   request.
-- `PAYER_MCP_URL`: Payer-owned public TLS MCP `/mcp` URL from
-  `PAYER_MCP_READY`.
-- `PAYER_MCP_TLS_CERTIFICATE`: transferred Payer-owned public TLS
-  certificate path.
-- `PAYER_MCP_TLS_FINGERPRINT`: pinned lowercase 64-hex certificate fingerprint
-  from `PAYER_MCP_READY`.
+- `REQUESTOR_DISCOVERY_URL`: operator-provided public signed discovery URL for
+  the Payer-owned MCP and public bootstrap route.
 - `REQUESTOR_SUPERVISOR_STATE`: Requestor's mode-`0700` private supervisor state root.
 - `REQUESTOR_INVITATION_FILE`: Requestor's reserved mode-`0600` invitation, used only
   by approved repository commands.
@@ -140,7 +141,7 @@ in Git.
 
 Before any network action, the supervisor and command builders verify the
 reviewed repository SHA, clean worktree state, descriptor signature, prompt
-hash, launch manifest, role identity, and output directory. Stop on failure. Do
+hash, recovered bootstrap material, role identity, and output directory. Stop on failure. Do
 not fall back to a branch, tag, abbreviated revision, different directory, or
 replacement credential.
 

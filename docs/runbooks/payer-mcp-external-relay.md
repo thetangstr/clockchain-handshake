@@ -104,16 +104,17 @@ that public URL in exact `PAYER_MCP_READY`.
 
 ## Requestor handoff and validation
 
-Transfer only the exact `PAYER_MCP_READY` public URL, certificate, and
-fingerprint tuple. Requestor supplies those three values to
-`npm run bilateral:request-payment`. Success at this layer is exact
-`HANDSHAKE_REQUIRED`; it is not authorization.
+After exact `PAYER_MCP_READY`, the operator approves the pending bootstrap
+claim fingerprint in the loopback broker and publishes one signed Requestor
+discovery URL. Transfer only that signed discovery URL. Requestor supplies that
+URL to `npm run bilateral:request-payment -- --discovery-url ...`. Success at
+this layer is exact `HANDSHAKE_REQUIRED`; it is not authorization.
 
 Fail closed if:
 
-- the public URL IP or port differs from `PAYER_MCP_READY`;
-- the certificate SAN does not match the public IP;
-- the fingerprint differs;
+- the signed discovery URL is missing, expired, malformed, or not operator-signed;
+- the public URL in discovery differs from `PAYER_MCP_READY`;
+- the broker claim fingerprint is missing, duplicated, or mismatched;
 - the endpoint returns anything other than exact `HANDSHAKE_REQUIRED`;
 - the tunnel or either long-lived role process exits;
 - any participant address is underfunded after the eight-minute deadline,

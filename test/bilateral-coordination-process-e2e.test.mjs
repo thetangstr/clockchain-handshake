@@ -337,6 +337,10 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
     join(ROOT, "src/bilateral/runner.mjs"),
     join(clone, "src/bilateral/runner.mjs"),
   );
+  await cp(
+    join(ROOT, "bin/handshake-request-payment.mjs"),
+    join(clone, "bin/handshake-request-payment.mjs"),
+  );
 
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const operatorKey = rawPublicKeyBase64FromPem(
@@ -614,6 +618,19 @@ test("one long-lived Payer and Requestor span rehearsal and stakeholder with two
   assert.deepEqual(
     coordinatorReport.mcpMilestones.map(({ stage }) => stage),
     ["PAYER_MCP_READY", "HANDSHAKE_REQUIRED", "REQUESTOR_SUPERVISOR_START"],
+  );
+  assert.deepEqual(
+    [
+      coordinatorReport.mcpMilestones[0].stage,
+      coordinatorReport.mcpMilestones[1].stage,
+      payerResult.transitions[0].message.kind === "proposal" ? "PROPOSED" : null,
+      payerResult.transitions[1].message.kind === "acceptance" && payerResult.transitions[1].message.decision === "ACCEPT"
+        ? "ACCEPTED"
+        : null,
+      payerResult.transitions[2].message.outcome,
+      verdict.outcome,
+    ],
+    ["PAYER_MCP_READY", "HANDSHAKE_REQUIRED", "PROPOSED", "ACCEPTED", "ACKNOWLEDGED", "AUTHORIZED"],
   );
   assert.match(coordinatorReport.release.releaseId, /^release-[0-9a-f]{16}$/);
   assert.equal(coordinatorReport.release.repositorySha, session.repositorySha);
@@ -983,6 +1000,15 @@ test("one long-lived Payer and Requestor span rehearsal and stakeholder with two
   for (const root of Object.values(session.roleRoots)) await assertRoot(root);
   assert.notEqual(session.roleRoots.payer, session.roleRoots.payee);
   const roleConfigurations = [session.configurations.payer, session.configurations.payee];
+  const [payerConfiguration, payeeConfiguration] = await Promise.all(roleConfigurations.map(async (path) => JSON.parse(await readFile(path, "utf8"))));
+  assert.equal(payeeConfiguration.launchManifestPath, null);
+  assert.deepEqual(Object.keys(payeeConfiguration.requestPayment), ["discoveryUrl", "intakeRequestId"]);
+  assert.match(payeeConfiguration.requestPayment.discoveryUrl, /^https:\/\/127\.0\.0\.1:[0-9]+\/requestor-discovery\.json$/);
+  assert.equal(JSON.stringify(payeeConfiguration.requestPayment).includes("launchManifest"), false);
+  assert.equal(JSON.stringify(payeeConfiguration.requestPayment).includes("certificate"), false);
+  assert.equal(JSON.stringify(payeeConfiguration.requestPayment).includes("fingerprint"), false);
+  assert.equal(JSON.stringify(payeeConfiguration.requestPayment).includes("capability"), false);
+  assert.equal(payerConfiguration.payerMcpServer.bootstrapBrokerUrl.startsWith("http://127.0.0.1:"), true);
   const roleTokens = [join(session.roleRoots.payer, "clockchain.token"), join(session.roleRoots.payee, "clockchain.token")];
   const coordinationKeys = [join(session.roleRoots.payer, "payer-coordination.pem"), join(session.roleRoots.payee, "payee-coordination.pem")];
   const preflightKeys = [join(session.roleRoots.payer, "preflight", "preflight.ed25519.pem"), join(session.roleRoots.payee, "preflight", "preflight.ed25519.pem")];

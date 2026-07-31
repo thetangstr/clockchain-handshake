@@ -209,18 +209,19 @@ test -f "$SEPOLIA_TREASURY_PUBLIC_METADATA"
 test -f "$SEPOLIA_RPC_URL_FILE"
 ```
 
-The coordinator publishes two private launch manifests under the release root.
-Launch manifests expire after 60 minutes. Privately transfer payer.launch.json only to Payer.
-Privately transfer payee.launch.json only to Requestor through a separate private
-channel. Never transfer the other role's manifest, an invitation, a token, a
-private key, the Sepolia RPC URL, or the treasury keystore. Each role machine
-uses its prompt, one manifest, one private state directory, and the same clean
-detached checkout of the reviewed 40-character SHA.
+The coordinator publishes private launch material under the release root.
+Private launch material expires after 60 minutes. Privately transfer
+`payer.launch.json` only to Payer. Requestor receives only the signed discovery
+URL after Payer MCP readiness and broker approval. Never transfer the other
+role's private launch material, an invitation, a token, a private key, the
+Sepolia RPC URL, or the treasury keystore. Each role machine uses its prompt,
+one private state directory, and the same clean detached checkout of the
+reviewed 40-character SHA.
 
 The user has exactly two kinds of demo-day action:
 
 1. Start exactly two role sessions: Payer once with `payer.launch.json` and
-   Requestor once with `payee.launch.json`.
+   Requestor once with the signed discovery URL.
 2. Fund the four displayed addresses with the reusable Sepolia treasury command.
 
 Start Payer first and do not start Requestor until Payer prints exact
@@ -233,6 +234,8 @@ export PAYER_MCP_PUBLIC_IP="${PAYER_MCP_PUBLIC_IP:?set operator-provided AWS Ela
 export PAYER_MCP_PUBLIC_PORT="${PAYER_MCP_PUBLIC_PORT:?set operator-provided public relay port}"
 export PAYER_MCP_PUBLIC_URL="https://$PAYER_MCP_PUBLIC_IP:$PAYER_MCP_PUBLIC_PORT/mcp"
 export PAYER_MCP_RELAY_SSH_HOST="${PAYER_MCP_RELAY_SSH_HOST:?set preconfigured Payer-owned SSH host alias}"
+export PAYER_MCP_BOOTSTRAP_BROKER_URL="${PAYER_MCP_BOOTSTRAP_BROKER_URL:?set operator loopback broker URL}"
+export PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE="${PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE:?set operator broker capability file path}"
 export PAYER_MCP_TLS_ROOT="${PAYER_SUPERVISOR_STATE%/}.payer-mcp-tls"
 mkdir -p "$PAYER_MCP_TLS_ROOT"
 chmod 0700 "$PAYER_MCP_TLS_ROOT"
@@ -268,6 +271,8 @@ npm run bilateral:supervisor -- \
   --payer-mcp-host "$PAYER_MCP_HOST" \
   --payer-mcp-port "$PAYER_MCP_PORT" \
   --payer-mcp-public-url "$PAYER_MCP_PUBLIC_URL" \
+  --payer-mcp-bootstrap-broker-url "$PAYER_MCP_BOOTSTRAP_BROKER_URL" \
+  --payer-mcp-bootstrap-broker-capability-file "$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" \
   --payer-mcp-tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
   --payer-mcp-tls-private-key "$PAYER_MCP_TLS_PRIVATE_KEY"
 ```
@@ -279,22 +284,20 @@ printed. The sibling TLS root preserves supervisor restart scanning because it
 is outside `PAYER_SUPERVISOR_STATE`, while operator and AWS never handle the
 key. Do not start a replacement supervisor.
 
-After exact `PAYER_MCP_READY`, transfer only the public MCP URL, public TLS
-certificate, and lowercase 64-hex certificate fingerprint to Requestor. Never
-transfer the MCP capability, manifest contents, TLS private key, invitation,
-token, participant key, checkpoint bytes, or live evidence.
+After exact `PAYER_MCP_READY`, the operator approves the exact pending
+bootstrap claim fingerprint and publishes one signed Requestor discovery URL.
+Transfer only that signed discovery URL to Requestor. Never transfer the MCP
+capability, broker capability, private bootstrap material, TLS private key,
+invitation, token, participant key, checkpoint bytes, or live evidence.
 
 Requestor machine:
 
 ```sh
 REQUESTOR_INTAKE_REQUEST_ID="$(node -e 'console.log(require("node:crypto").randomUUID())')"
 npm run bilateral:request-payment -- \
-  --launch-manifest "$REQUESTOR_LAUNCH_MANIFEST" \
+  --discovery-url "$REQUESTOR_DISCOVERY_URL" \
   --intake-request-id "$REQUESTOR_INTAKE_REQUEST_ID" \
-  --mcp-url "$PAYER_MCP_URL" \
-  --state "$REQUESTOR_SUPERVISOR_STATE" \
-  --tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
-  --tls-fingerprint "$PAYER_MCP_TLS_FINGERPRINT"
+  --state "$REQUESTOR_SUPERVISOR_STATE"
 ```
 
 Requestor must visibly receive exact `HANDSHAKE_REQUIRED`; the wrapper alone

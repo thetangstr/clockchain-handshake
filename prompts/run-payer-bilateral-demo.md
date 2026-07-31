@@ -60,7 +60,8 @@ manifest.
 
 The operator privately provides one role-specific launch-manifest path, one
 fresh private state directory, the AWS relay's stable Elastic IP and public
-port, and a preconfigured Payer-owned SSH host alias. Generate the TLS MCP
+port, a preconfigured Payer-owned SSH host alias, and an operator-owned
+loopback bootstrap broker URL plus capability file path. Generate the TLS MCP
 certificate and private key in a Payer-owned sibling TLS root outside
 `PAYER_SUPERVISOR_STATE`, with the certificate SAN matching the exact AWS
 Elastic IP. Never bind Payer MCP to `0.0.0.0`, and never read or print the
@@ -74,6 +75,8 @@ export PAYER_MCP_PUBLIC_IP="${PAYER_MCP_PUBLIC_IP:?set operator-provided AWS Ela
 export PAYER_MCP_PUBLIC_PORT="${PAYER_MCP_PUBLIC_PORT:?set operator-provided public relay port}"
 export PAYER_MCP_PUBLIC_URL="https://$PAYER_MCP_PUBLIC_IP:$PAYER_MCP_PUBLIC_PORT/mcp"
 export PAYER_MCP_RELAY_SSH_HOST="${PAYER_MCP_RELAY_SSH_HOST:?set preconfigured Payer-owned SSH host alias}"
+export PAYER_MCP_BOOTSTRAP_BROKER_URL="${PAYER_MCP_BOOTSTRAP_BROKER_URL:?set operator loopback broker URL}"
+export PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE="${PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE:?set operator broker capability file path}"
 export PAYER_MCP_TLS_ROOT="${PAYER_SUPERVISOR_STATE%/}.payer-mcp-tls"
 mkdir -p "$PAYER_MCP_TLS_ROOT"
 chmod 0700 "$PAYER_MCP_TLS_ROOT"
@@ -110,6 +113,8 @@ npm run bilateral:supervisor -- \
   --payer-mcp-host "$PAYER_MCP_HOST" \
   --payer-mcp-port "$PAYER_MCP_PORT" \
   --payer-mcp-public-url "$PAYER_MCP_PUBLIC_URL" \
+  --payer-mcp-bootstrap-broker-url "$PAYER_MCP_BOOTSTRAP_BROKER_URL" \
+  --payer-mcp-bootstrap-broker-capability-file "$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" \
   --payer-mcp-tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
   --payer-mcp-tls-private-key "$PAYER_MCP_TLS_PRIVATE_KEY"
 ```
@@ -136,11 +141,12 @@ The launch manifest binds the exact relay URL and TLS certificate fingerprint.
 The supervisor pins that fingerprint before sending or receiving coordination
 events. A missing or changed TLS binding stops the session.
 
-Wait for exact `PAYER_MCP_READY`. Stay attached. Share only the public MCP URL,
-public TLS certificate, and lowercase 64-hex certificate fingerprint through
-the operator-approved public channel. Never share the MCP capability, launch
-manifest contents, private TLS key, invitation, token, participant key,
-checkpoint bytes, or live evidence.
+Wait for exact `PAYER_MCP_READY`. Stay attached. The operator uses the public
+MCP URL, public TLS certificate, and exact broker claim fingerprint to publish
+one signed Requestor discovery URL. Share only that signed discovery URL through
+the operator-approved public channel. Never share the MCP capability, broker
+capability, launch manifest contents, private TLS key, invitation, token,
+participant key, checkpoint bytes, or live evidence.
 
 Use a clean detached checkout of the reviewed 40-character SHA with Node.js 22
 and `npm ci --ignore-scripts`. Do not inspect secret bytes, do not switch roles,
@@ -163,6 +169,10 @@ Payer receives or derives these private inputs and paths:
   `PAYER_MCP_READY`.
 - `PAYER_MCP_RELAY_SSH_HOST`: preconfigured Payer-owned SSH host alias. Do not
   open or print its private key.
+- `PAYER_MCP_BOOTSTRAP_BROKER_URL`: operator-owned loopback bootstrap broker
+  URL used only by the Payer MCP public bootstrap route.
+- `PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE`: mode-`0600` path to the broker
+  capability. Do not open, print, or copy the raw value.
 - `PAYER_MCP_TLS_ROOT`: Payer-owned sibling TLS root, exactly
   `${PAYER_SUPERVISOR_STATE%/}.payer-mcp-tls`, mode `0700`.
 - `PAYER_MCP_TLS_CERTIFICATE`: Payer-generated local MCP public TLS certificate

@@ -63,10 +63,9 @@ No additional Hermes message is required after operator funding. Payer remains a
   operator console. Keep all three terminals attached.
 - Wait until both role computers are ready because launch manifests expire after 60 minutes.
 - Deliver `payer.launch.json` only Payer through Payer's private channel.
-- Wait for Payer to report exact `PAYER_MCP_READY`, then transfer only the public
-  MCP URL, public TLS certificate, and lowercase 64-hex certificate fingerprint
-  to Requestor.
-- Deliver `payee.launch.json` only Requestor through Requestor's private channel.
+- Wait for Payer to report exact `PAYER_MCP_READY`, approve the exact pending
+  bootstrap claim fingerprint through the operator broker, then transfer only
+  the signed discovery URL to Requestor.
 - Keep `funding-addresses.json` coordinator-owned and use that file directly for funding.
 
 ## Payer checklist
@@ -84,8 +83,7 @@ No additional Hermes message is required after operator funding. Payer remains a
 - Use the Requestor prompt and only the Requestor private state directory.
 - Confirm the clean exact reviewed SHA and Node.js 22 before running the
   request-payment wrapper.
-- Use only `payee.launch.json` plus Payer's public MCP URL, public TLS
-  certificate, and lowercase 64-hex certificate fingerprint.
+- Use only one signed discovery URL plus a blank private state root.
 - Do not start `npm run bilateral:supervisor` directly. Start
   `npm run bilateral:request-payment`, require exact `HANDSHAKE_REQUIRED`, and
   let the wrapper start the Requestor supervisor.
@@ -106,10 +104,10 @@ record is ready.
 4. Human operator validates and arms the reusable Sepolia treasury funding lane.
 5. Human operator delivers `payer.launch.json` only to Payer. Payer starts its
    non-terminating reverse SSH tunnel, then its loopback TLS MCP/supervisor.
-6. Payer waits for exact `PAYER_MCP_READY` and shares only the public MCP URL,
-   public TLS certificate, and lowercase 64-hex certificate fingerprint.
-7. Human operator delivers `payee.launch.json` only to Requestor. Requestor
-   starts `npm run bilateral:request-payment`, receives exact
+6. Payer waits for exact `PAYER_MCP_READY`; the operator approves the exact
+   pending bootstrap fingerprint and publishes one signed discovery URL.
+7. Requestor starts `npm run bilateral:request-payment` with only that
+   discovery URL and a blank private state root, receives exact
    `HANDSHAKE_REQUIRED`, and the wrapper starts the Requestor supervisor.
 8. The supervisors automatically create the Payer-signed mandate and matching
    Requestor-signed request; no operator-authored terms or manual artifact copy is allowed.
