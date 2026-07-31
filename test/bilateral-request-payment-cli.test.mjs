@@ -1,51 +1,59 @@
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
-import { createHash, X509Certificate } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { createHash, generateKeyPairSync, sign, X509Certificate } from "node:crypto";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { promisify } from "node:util";
 
 import { main, REQUEST_PAYMENT_CLI_FLAGS } from "../bin/handshake-request-payment.mjs";
-import { createPayerMcpIntakeStore } from "../src/bilateral/local-mcp/intake-store.mjs";
-import { requestPaymentThroughPayerMcp } from "../src/bilateral/local-mcp/client.mjs";
-import { createPayerMcpServer } from "../src/bilateral/local-mcp/server.mjs";
+import { canonicalBytes } from "../src/bilateral/canonical.mjs";
+import { createLaunchManifest } from "../src/bilateral/coordination/manifest.mjs";
+import { bootstrapClaimFingerprint } from "../src/bilateral/local-mcp/bootstrap-broker.mjs";
+import { sealRequestorBootstrapManifest } from "../src/bilateral/local-mcp/bootstrap-envelope.mjs";
+import { canonicalizeReceiptEventValue } from "../src/canonical.mjs";
 
-const CAPABILITY = "ab".repeat(32);
 const REPOSITORY_SHA = "abcdef0123456789abcdef0123456789abcdef01";
 const INTAKE_REQUEST_ID = "00000000-0000-4000-8000-000000000000";
-const execFileAsync = promisify(execFile);
-const REPOSITORY_ROOT = resolve(fileURLToPath(new URL("../", import.meta.url)));
+const RELEASE_ID = "release-requestor-bootstrap";
+const SESSION_ID = "22222222-2222-4222-8222-222222222222";
+const OPERATOR_KEY_ID = "operator";
+const CAPABILITY = "ab".repeat(32);
+const REPOSITORY_ROOT = resolve(new URL("../", import.meta.url).pathname);
 
-async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "request-payment-cli-"));
-  await chmod(root, 0o700);
-  const manifestPath = join(root, "manifest.json");
-  const certificatePath = join(root, "cert.pem");
-  const stateRoot = join(root, "state");
-  await chmod(root, 0o700);
-  await writeFile(certificatePath, "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n", { mode: 0o600 });
+function rawEd25519PublicKey(pair) {
+  return pair.publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64");
+}
+
+function signatureValue(privateKey, value) {
+  return sign(null, canonicalBytes(value), privateKey).toString("base64");
+}
+
+function signedDiscovery({ certificateFingerprint, certificateUrl, expiresAtMs, operator, publicUrl }) {
+  const unsigned = {
+    certificateFingerprint,
+    certificateUrl,
+    expiresAtMs,
+    operatorKeyId: OPERATOR_KEY_ID,
+    publicUrl,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    sessionId: SESSION_ID,
+  };
   return {
-    args: [
-      "--launch-manifest", manifestPath,
-      "--intake-request-id", INTAKE_REQUEST_ID,
-      "--mcp-url", "https://127.0.0.1:443/mcp",
-      "--state", stateRoot,
-      "--tls-certificate", certificatePath,
-      "--tls-fingerprint", "a".repeat(64),
-    ],
-    certificatePath,
-    manifestPath,
-    root,
-    stateRoot,
+    ...unsigned,
+    signature: {
+      algorithm: "ed25519",
+      keyId: OPERATOR_KEY_ID,
+      value: signatureValue(operator.privateKey, unsigned),
+    },
   };
 }
 
-async function mcpFixture(t) {
-  const root = await mkdtemp(join(tmpdir(), "request-payment-cli-mcp-"));
+async function fixture(t) {
+  const root = await mkdtemp(join(tmpdir(), "request-payment-one-shot-"));
   await chmod(root, 0o700);
+  t.after(() => rm(root, { force: true, recursive: true }));
   const certificatePath = join(root, "cert.pem");
   const privateKeyPath = join(root, "key.pem");
   execFileSync("openssl", [
@@ -66,204 +74,174 @@ async function mcpFixture(t) {
     "subjectAltName=IP:127.0.0.1",
   ], { stdio: "ignore" });
   const tlsCertificatePem = await readFile(certificatePath, "utf8");
-  const tlsPrivateKeyPem = await readFile(privateKeyPath, "utf8");
-  const capabilityDigest = createHash("sha256").update(Buffer.from(CAPABILITY, "hex")).digest("hex");
-  const server = createPayerMcpServer({
-    capabilityDigest,
-    host: "127.0.0.1",
-    intakeStore: await createPayerMcpIntakeStore({ repositorySha: REPOSITORY_SHA, stateRoot: root }),
-    port: 0,
-    randomBytes: () => Buffer.alloc(16, 9),
-    repositorySha: REPOSITORY_SHA,
-    tlsCertificatePem,
-    tlsPrivateKeyPem,
+  const certificateFingerprint = createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex");
+  const operator = generateKeyPairSync("ed25519");
+  const stateRoot = join(root, "requestor-state");
+  const discovery = signedDiscovery({
+    certificateFingerprint,
+    certificateUrl: "https://payer.example.test/payer-mcp.crt",
+    expiresAtMs: String(Date.now() + 60_000),
+    operator,
+    publicUrl: "https://127.0.0.1:9443/mcp",
   });
-  const listening = await server.start();
-  t.after(async () => {
-    await server.stop();
-    await rm(root, { force: true, recursive: true });
+  const { manifest } = createLaunchManifest({
+    expectedTlsFingerprint: certificateFingerprint,
+    nowMs: Date.now(),
+    operatorKeyId: OPERATOR_KEY_ID,
+    randomBytes: () => Buffer.alloc(32, 9),
+    relayUrl: "https://127.0.0.1:8443",
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    role: "payee",
+    sessionId: SESSION_ID,
+    tlsCertificatePem,
+    payerMcpIntakeCapability: CAPABILITY,
   });
   return {
-    ...listening,
-    fingerprint: createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex"),
+    args: [
+      "--discovery-url", "https://payer.example.test/discovery.json",
+      "--intake-request-id", INTAKE_REQUEST_ID,
+      "--state", stateRoot,
+    ],
+    certificateFingerprint,
+    discovery,
+    manifestBytes: Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(manifest)), "utf8"),
+    operator,
+    operatorPublicKey: rawEd25519PublicKey(operator),
     root,
+    stateRoot,
     tlsCertificatePem,
   };
 }
 
-test("Requestor CLI exposes exactly six options, validates clean immutable state, calls MCP, then starts supervisor once", async () => {
-  const fx = await fixture();
-  const calls = [];
-  const result = await main(fx.args, {
-    async readLaunchManifest(path) {
-      calls.push(["readLaunchManifest", path]);
-      assert.equal(path, fx.manifestPath);
-      return {
-        payerMcpIntakeCapability: CAPABILITY,
-        repositorySha: REPOSITORY_SHA,
-        role: "payee",
-      };
+function sealedBrokerResponse({ claim, manifestBytes, operator }) {
+  const context = {
+    claimNonce: claim.claimNonce,
+    paymentMoved: false,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    sessionId: SESSION_ID,
+  };
+  const unsigned = {
+    claimFingerprint: bootstrapClaimFingerprint(claim),
+    context,
+    envelope: sealRequestorBootstrapManifest({
+      context,
+      manifestBytes,
+      requestorPublicKey: claim.requestorPublicKey,
+    }),
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.requestor-bootstrap-broker-response/v1",
+    status: "SEALED",
+  };
+  return {
+    ...unsigned,
+    signature: {
+      algorithm: "ed25519",
+      keyId: OPERATOR_KEY_ID,
+      value: sign(null, Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(unsigned)), "utf8"), operator.privateKey).toString("base64"),
     },
-    async inspectRepository() {
-      calls.push(["inspectRepository"]);
+  };
+}
+
+test("Requestor CLI exposes only one-shot discovery flags and completes bootstrap before unchanged MCP and supervisor", async (t) => {
+  const fx = await fixture(t);
+  const calls = [];
+  let bootstrapAttempts = 0;
+  let capturedClaim;
+  const result = await main(fx.args, {
+    async inspectRepository(repositoryRoot) {
+      calls.push(["inspectRepository", repositoryRoot]);
       return { clean: true, detached: true, head: REPOSITORY_SHA };
     },
-    async readTextFile(path) {
-      calls.push(["readTextFile", path]);
-      assert.equal(path, fx.certificatePath);
-      return readFile(path, "utf8");
+    async fetchJson(url) {
+      calls.push(["fetchJson", url]);
+      assert.equal(url, "https://payer.example.test/discovery.json");
+      return fx.discovery;
+    },
+    async readOperatorPublicKey(repositorySha, keyId) {
+      calls.push(["readOperatorPublicKey", repositorySha, keyId]);
+      return fx.operatorPublicKey;
+    },
+    async fetchText(url) {
+      calls.push(["fetchText", url]);
+      assert.equal(url, fx.discovery.certificateUrl);
+      return fx.tlsCertificatePem;
+    },
+    async requestBootstrap(input) {
+      calls.push(["requestBootstrap", input.bootstrapUrl, input.claim.paymentMoved]);
+      assert.equal(input.bootstrapUrl, "https://127.0.0.1:9443/bootstrap");
+      assert.equal(Object.hasOwn(input, "capability"), false);
+      capturedClaim = input.claim;
+      bootstrapAttempts += 1;
+      return bootstrapAttempts === 1
+        ? {
+            claimFingerprint: bootstrapClaimFingerprint(input.claim),
+            paymentMoved: false,
+            repositorySha: REPOSITORY_SHA,
+            schema: "clockchain.requestor-bootstrap-broker-response/v1",
+            status: "PENDING_APPROVAL",
+          }
+        : sealedBrokerResponse({ claim: input.claim, manifestBytes: fx.manifestBytes, operator: fx.operator });
     },
     async requestPayment(input) {
-      calls.push(["requestPayment", input.capability, input.stateRoot]);
+      calls.push(["requestPayment", input.capability, input.mcpUrl]);
       assert.equal(input.capability, CAPABILITY);
+      assert.equal(input.mcpUrl, fx.discovery.publicUrl);
+      assert.equal(input.tlsFingerprint, fx.discovery.certificateFingerprint);
       assert.equal(input.stateRoot, fx.stateRoot);
       return { paymentMoved: false, status: "HANDSHAKE_REQUIRED" };
     },
     async runSupervisor(input) {
       calls.push(["runSupervisor", input.launchManifestPath, input.stateRoot]);
-      assert.equal(input.launchManifestPath, fx.manifestPath);
       assert.equal(input.stateRoot, fx.stateRoot);
+      assert.equal(input.launchManifestPath.endsWith("requestor-state.bootstrap/payee.launch.json"), true);
+      const manifestStats = await lstat(input.launchManifestPath);
+      assert.equal(manifestStats.mode & 0o777, 0o600);
+      assert.equal((await readFile(input.launchManifestPath)).equals(fx.manifestBytes), true);
       return { paymentMoved: false, supervisor: "started" };
     },
     writeStatus(value) {
       calls.push(["writeStatus", value]);
       assert.deepEqual(value, { paymentMoved: false, status: "HANDSHAKE_REQUIRED" });
       assert.equal(JSON.stringify(value).includes(CAPABILITY), false);
+      assert.equal(JSON.stringify(value).includes(fx.operatorPublicKey), false);
     },
   });
   assert.deepEqual(result, { paymentMoved: false, supervisor: "started" });
-  assert.deepEqual(REQUEST_PAYMENT_CLI_FLAGS, [
-    "--launch-manifest",
-    "--intake-request-id",
-    "--mcp-url",
-    "--state",
-    "--tls-certificate",
-    "--tls-fingerprint",
-  ]);
+  assert.deepEqual(REQUEST_PAYMENT_CLI_FLAGS, ["--discovery-url", "--intake-request-id", "--state"]);
+  assert.match(capturedClaim.claimNonce, /^[0-9a-f]{8}-[0-9a-f]{4}-4/);
+  assert.equal(capturedClaim.paymentMoved, false);
+  assert.equal(capturedClaim.repositorySha, REPOSITORY_SHA);
   assert.deepEqual(calls.map((entry) => entry[0]), [
     "inspectRepository",
-    "readLaunchManifest",
-    "readTextFile",
+    "fetchJson",
+    "readOperatorPublicKey",
+    "fetchText",
+    "requestBootstrap",
+    "requestBootstrap",
     "requestPayment",
     "writeStatus",
     "runSupervisor",
   ]);
+  assert.equal(calls[0][1], REPOSITORY_ROOT);
 });
 
-test("Requestor CLI default success path emits fixed secret-free HANDSHAKE_REQUIRED line and starts supervisor", async () => {
-  const fx = await fixture();
-  const writes = [];
-  const originalWrite = process.stdout.write;
-  process.stdout.write = function patchedWrite(chunk, ...rest) {
-    writes.push(String(chunk));
-    return true;
-  };
-  try {
-    const result = await main(fx.args, {
-      async inspectRepository() {
-        return { clean: true, detached: true, head: REPOSITORY_SHA };
-      },
-      async readLaunchManifest() {
-        return {
-          payerMcpIntakeCapability: CAPABILITY,
-          repositorySha: REPOSITORY_SHA,
-          role: "payee",
-        };
-      },
-      async readTextFile() {
-        return "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n";
-      },
-      async requestPayment() {
-        return { paymentMoved: false, status: "HANDSHAKE_REQUIRED" };
-      },
-      async runSupervisor() {
-        return { paymentMoved: false, supervisor: "started" };
-      },
-    });
-    assert.deepEqual(result, { paymentMoved: false, supervisor: "started" });
-  } finally {
-    process.stdout.write = originalWrite;
-  }
-  assert.deepEqual(writes, ['{"paymentMoved":false,"status":"HANDSHAKE_REQUIRED"}\n']);
-  assert.equal(writes.join("").includes(CAPABILITY), false);
-});
-
-test("Requestor CLI retry after crash-before-supervisor accepts existing intake and starts supervisor once", async (t) => {
-  const fx = await fixture();
-  const mcp = await mcpFixture(t);
-  const args = fx.args.map((value, index) => {
-    if (fx.args[index - 1] === "--mcp-url") return mcp.url;
-    if (fx.args[index - 1] === "--tls-fingerprint") return mcp.fingerprint;
-    return value;
-  });
-  await writeFile(fx.certificatePath, mcp.tlsCertificatePem, { mode: 0o600 });
-  t.after(() => rm(fx.root, { force: true, recursive: true }));
-  let supervisorCalls = 0;
-  let crashBeforeSupervisor = true;
-  const dependencies = {
-    async inspectRepository() {
-      return { clean: true, detached: true, head: REPOSITORY_SHA };
-    },
-    async readLaunchManifest() {
-      return {
-        payerMcpIntakeCapability: CAPABILITY,
-        repositorySha: REPOSITORY_SHA,
-        role: "payee",
-      };
-    },
-    requestPayment: requestPaymentThroughPayerMcp,
-    async runSupervisor() {
-      supervisorCalls += 1;
-      return { paymentMoved: false, supervisor: "started" };
-    },
-    writeStatus() {
-      if (crashBeforeSupervisor) {
-        crashBeforeSupervisor = false;
-        throw new Error("simulated crash after persistence");
-      }
-    },
-  };
-
-  await assert.rejects(main(args, dependencies), /Request payment startup failed safely/);
-  assert.equal(supervisorCalls, 0);
-  const result = await main(args, dependencies);
-  assert.deepEqual(result, { paymentMoved: false, supervisor: "started" });
-  assert.equal(supervisorCalls, 1);
-});
-
-test("spawned Requestor CLI failure emits exact secret-free REQUEST_PAYMENT_FAILED line and no stack", async () => {
-  await assert.rejects(
-    execFileAsync(process.execPath, ["bin/handshake-request-payment.mjs"], {
-      cwd: process.cwd(),
-      encoding: "utf8",
-    }),
-    (error) => {
-      assert.equal(error.code, 1);
-      assert.equal(error.stdout, '{"code":"REQUEST_PAYMENT_FAILED","paymentMoved":false}\n');
-      assert.equal(error.stderr, "");
-      assert.equal(error.stdout.includes(CAPABILITY), false);
-      assert.equal(error.stdout.includes("Error:"), false);
-      return true;
-    },
-  );
-});
-
-test("Requestor CLI verifies clean detached HEAD before reading manifest, TLS, or capability", async () => {
-  const fx = await fixture();
+test("Requestor CLI rejects dirty repo before discovery, network, private state, or supervisor work", async (t) => {
+  const fx = await fixture(t);
   const calls = [];
   await assert.rejects(
     main(fx.args, {
-      async readLaunchManifest() {
-        calls.push("readLaunchManifest");
-        throw new Error("manifest read must be after repository proof");
-      },
-      async readTextFile() {
-        calls.push("readTextFile");
-        throw new Error("TLS read must be after repository proof");
-      },
       async inspectRepository() {
         calls.push("inspectRepository");
         return { clean: false, detached: true, head: REPOSITORY_SHA };
+      },
+      async fetchJson() {
+        calls.push("fetchJson");
+      },
+      async requestBootstrap() {
+        calls.push("requestBootstrap");
       },
       async runSupervisor() {
         calls.push("runSupervisor");
@@ -274,130 +252,76 @@ test("Requestor CLI verifies clean detached HEAD before reading manifest, TLS, o
   assert.deepEqual(calls, ["inspectRepository"]);
 });
 
-test("Requestor CLI verifies the module repository root before private reads even when cwd is a separate clean checkout", async (t) => {
-  const fx = await fixture();
-  const otherRoot = await mkdtemp(join(tmpdir(), "request-payment-clean-cwd-"));
-  t.after(() => execFileSync("/bin/rm", ["-rf", otherRoot]));
-  execFileSync("/usr/bin/git", ["init"], { cwd: otherRoot, stdio: "ignore" });
-  execFileSync("/usr/bin/git", ["config", "user.email", "fixture@example.invalid"], { cwd: otherRoot });
-  execFileSync("/usr/bin/git", ["config", "user.name", "fixture"], { cwd: otherRoot });
-  await writeFile(join(otherRoot, "README.md"), "clean other repo\n");
-  execFileSync("/usr/bin/git", ["add", "."], { cwd: otherRoot });
-  execFileSync("/usr/bin/git", ["commit", "-m", "other repo"], { cwd: otherRoot, stdio: "ignore" });
-  const otherHead = execFileSync("/usr/bin/git", ["rev-parse", "HEAD"], { cwd: otherRoot, encoding: "utf8" }).trim();
-  execFileSync("/usr/bin/git", ["checkout", "--detach", otherHead], { cwd: otherRoot, stdio: "ignore" });
-
-  const originalCwd = process.cwd();
-  process.chdir(otherRoot);
-  try {
-    const calls = [];
-    await assert.rejects(
-      main(fx.args, {
-        async readLaunchManifest() {
-          calls.push("readLaunchManifest");
-          return {
-            payerMcpIntakeCapability: CAPABILITY,
-            repositorySha: otherHead,
-            role: "payee",
-          };
-        },
-        async readTextFile() {
-          calls.push("readTextFile");
-          return "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n";
-        },
-        async requestPayment() {
-          calls.push("requestPayment");
-          return { paymentMoved: false, status: "HANDSHAKE_REQUIRED" };
-        },
-        async runSupervisor() {
-          calls.push("runSupervisor");
-        },
-      }),
-      /Request payment startup failed safely/,
-    );
-    assert.equal(calls.includes("readTextFile"), false);
-    assert.equal(calls.includes("requestPayment"), false);
-    assert.equal(calls.includes("runSupervisor"), false);
-  } finally {
-    process.chdir(originalCwd);
-  }
-  assert.equal(REPOSITORY_ROOT.endsWith("riyadh-v3"), true);
-});
-
-test("Requestor CLI binds manifest repositorySha to verified clean detached HEAD before private capability use", async () => {
-  const fx = await fixture();
-  const calls = [];
-  await assert.rejects(
-    main(fx.args, {
-      async inspectRepository() {
-        calls.push("inspectRepository");
-        return { clean: true, detached: true, head: REPOSITORY_SHA };
-      },
-      async readLaunchManifest() {
-        calls.push("readLaunchManifest");
-        return {
-          payerMcpIntakeCapability: CAPABILITY,
-          repositorySha: "b".repeat(40),
-          role: "payee",
-        };
-      },
-      async readTextFile() {
-        calls.push("readTextFile");
-        return "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n";
-      },
-      async requestPayment() {
-        calls.push("requestPayment");
-        return { paymentMoved: false, status: "HANDSHAKE_REQUIRED" };
-      },
-      async runSupervisor() {
-        calls.push("runSupervisor");
-      },
-    }),
-    /Request payment startup failed safely/,
-  );
-  assert.deepEqual(calls, ["inspectRepository", "readLaunchManifest"]);
-});
-
-test("Requestor CLI rejects bad arguments, wrong role, dirty SHA, and any prior failure without supervisor start", async () => {
-  const fx = await fixture();
+test("Requestor CLI fails closed on malformed args, stale discovery, wrong SHA, and wrong certificate", async (t) => {
+  const fx = await fixture(t);
   for (const args of [
     fx.args.slice(0, -2),
-    [...fx.args, "--unknown", "x"],
-    [...fx.args, "--state", fx.stateRoot],
-    fx.args.map((value) => value === fx.manifestPath ? "relative.json" : value),
+    [...fx.args, "--launch-manifest", "/tmp/secret.json"],
+    fx.args.map((value) => value === fx.stateRoot ? "relative" : value),
   ]) {
     await assert.rejects(main(args, {}), /Request payment startup failed safely/);
   }
 
-  const failures = [
-    { manifest: { payerMcpIntakeCapability: CAPABILITY, repositorySha: REPOSITORY_SHA, role: "payer" } },
-    { manifest: { payerMcpIntakeCapability: CAPABILITY, repositorySha: REPOSITORY_SHA, role: "payee" }, requestFails: true },
-  ];
-  for (const failure of failures) {
-    let supervisorCalls = 0;
+  for (const mutate of [
+    (discovery) => ({ ...discovery, expiresAtMs: "1" }),
+    (discovery) => ({ ...discovery, repositorySha: "b".repeat(40) }),
+    (discovery) => ({ ...discovery, certificateFingerprint: "0".repeat(64) }),
+    (discovery) => ({ ...discovery, publicUrl: "http://127.0.0.1:9443/mcp" }),
+  ]) {
     await assert.rejects(
       main(fx.args, {
-        async readLaunchManifest() {
-          return failure.manifest;
-        },
         async inspectRepository() {
           return { clean: true, detached: true, head: REPOSITORY_SHA };
         },
-        async readTextFile() {
-          return "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n";
+        async fetchJson() {
+          return mutate(fx.discovery);
         },
-        async requestPayment() {
-          if (failure.requestFails) throw new Error("boom");
-          return { paymentMoved: false, status: "HANDSHAKE_REQUIRED" };
+        async readOperatorPublicKey() {
+          return fx.operatorPublicKey;
         },
-        async runSupervisor() {
-          supervisorCalls += 1;
+        async fetchText() {
+          return fx.tlsCertificatePem;
         },
       }),
       /Request payment startup failed safely/,
     );
-    assert.equal(supervisorCalls, 0);
   }
+});
 
-  assert.equal(resolve(fx.manifestPath), fx.manifestPath);
+test("Requestor CLI refuses to overwrite an existing decrypted manifest destination", async (t) => {
+  const fx = await fixture(t);
+  const bootstrapRoot = `${fx.stateRoot}.bootstrap`;
+  await mkdir(bootstrapRoot, { mode: 0o700 });
+  await writeFile(join(bootstrapRoot, "payee.launch.json"), "existing", { mode: 0o600 });
+  let requestPaymentCalls = 0;
+  let supervisorCalls = 0;
+  await assert.rejects(
+    main(fx.args, {
+      async inspectRepository() {
+        return { clean: true, detached: true, head: REPOSITORY_SHA };
+      },
+      async fetchJson() {
+        return fx.discovery;
+      },
+      async readOperatorPublicKey() {
+        return fx.operatorPublicKey;
+      },
+      async fetchText() {
+        return fx.tlsCertificatePem;
+      },
+      async requestBootstrap(input) {
+        return sealedBrokerResponse({ claim: input.claim, manifestBytes: fx.manifestBytes, operator: fx.operator });
+      },
+      async requestPayment() {
+        requestPaymentCalls += 1;
+      },
+      async runSupervisor() {
+        supervisorCalls += 1;
+      },
+    }),
+    /Request payment startup failed safely/,
+  );
+  assert.equal(requestPaymentCalls, 0);
+  assert.equal(supervisorCalls, 0);
+  assert.equal(await readFile(join(bootstrapRoot, "payee.launch.json"), "utf8"), "existing");
 });
