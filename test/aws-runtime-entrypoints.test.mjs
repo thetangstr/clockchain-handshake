@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import {
+  createHash,
+  generateKeyPairSync,
+} from "node:crypto";
 import {
   lstat,
   mkdtemp,
@@ -10,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 
 import {
   installSecretFile,
@@ -22,15 +27,37 @@ import {
   main as fundingEntrypoint,
 } from "../infra/aws/runtime/funding-entrypoint.mjs";
 import {
+  main as operatorWorkerEntrypoint,
+} from "../infra/aws/runtime/operator-worker-entrypoint.mjs";
+import {
   main as verifierEntrypoint,
 } from "../infra/aws/runtime/verifier-entrypoint.mjs";
 
+const execFileAsync = promisify(execFile);
 const VERIFIER_ATTEMPT_ID =
   "11111111-1111-4111-8111-111111111111";
 const VERIFIER_TASK_ARN =
   "arn:aws:ecs:us-west-2:123456789012:task/clockchain/11111111111111111111111111111111";
+const OPERATOR_SESSION_ID =
+  "22222222-2222-4222-8222-222222222222";
+const OPERATOR_RELEASE_ID = `release-${createHash("sha256").update(OPERATOR_SESSION_ID, "utf8").digest("hex").slice(0, 16)}`;
+const COORDINATOR_SESSION_ID =
+  "33333333-3333-4333-8333-333333333333";
+const COORDINATOR_RELEASE_ID = `release-${createHash("sha256").update(COORDINATOR_SESSION_ID, "utf8").digest("hex").slice(0, 16)}`;
+const COORDINATOR_RELEASE_ROOT =
+  `/var/lib/clockchain/operator/releases/${COORDINATOR_RELEASE_ID}`;
 const TREASURY_ADDRESS =
   "0x157a377e4181f3f87c7f6efed5ddc340ccc00dce";
+
+function ed25519PrivateKeyPem() {
+  const { privateKey } = generateKeyPairSync(
+    "ed25519",
+  );
+  return privateKey.export({
+    format: "pem",
+    type: "pkcs8",
+  });
+}
 
 function fundingKeystore(address = TREASURY_ADDRESS) {
   return JSON.stringify({
@@ -80,6 +107,59 @@ function fundingRuntimeInput(overrides = {}) {
   };
   return JSON.stringify({
     funding,
+    paymentMoved: false,
+    schema: "clockchain.aws-runtime-input/v1",
+  });
+}
+
+function operatorRuntimeInput(overrides = {}) {
+  const operator = {
+    actionQueueUrl:
+      "https://sqs.us-west-2.amazonaws.com/123456789012/clockchain-actions",
+    actionTableName:
+      "ClockchainHandshakeControl",
+    paymentMoved: false,
+    releaseId: OPERATOR_RELEASE_ID,
+    repositorySha:
+      "abcdef0123456789abcdef0123456789abcdef01",
+    schema:
+      "clockchain.aws-operator-runtime/v1",
+    sessionId: OPERATOR_SESSION_ID,
+    ...overrides,
+  };
+  return JSON.stringify({
+    operator,
+    paymentMoved: false,
+    schema: "clockchain.aws-runtime-input/v1",
+  });
+}
+
+function coordinatorRuntimeInput(overrides = {}) {
+  const coordinator = {
+    clockchainTokenSecretArn:
+      "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-token",
+    operatorKeyId: "clockchain-demo-2026",
+    operatorKeySecretArn:
+      "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key",
+    releaseIdentity: {
+      releaseId: COORDINATOR_RELEASE_ID,
+      sessionId: COORDINATOR_SESSION_ID,
+    },
+    releaseRoot:
+      COORDINATOR_RELEASE_ROOT,
+    relayUrl:
+      "https://relay.clockchain.network:8443",
+    repositorySha:
+      "abcdef0123456789abcdef0123456789abcdef01",
+    rpcSecretArn:
+      "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
+    tlsCertificatePath:
+      `${COORDINATOR_RELEASE_ROOT}/payer-mcp.crt`,
+    tlsFingerprint: "b".repeat(64),
+    ...overrides,
+  };
+  return JSON.stringify({
+    coordinator,
     paymentMoved: false,
     schema: "clockchain.aws-runtime-input/v1",
   });
@@ -239,32 +319,986 @@ test("secret material is installed atomically with mode 0600 and never returned"
   );
 });
 
-test("coordinator entrypoint binds the operator-created release and session identity", async () => {
+test("coordinator entrypoint materializes validated secrets into unique private argv files", async () => {
+  const operatorKey = ed25519PrivateKeyPem();
+  const secretReads = [];
+  const runCalls = [];
+  for (let index = 0; index < 2; index += 1) {
+    await coordinatorEntrypoint({
+      client: {
+        async send(command) {
+          secretReads.push(command.input);
+          if (
+            command.input.SecretId.endsWith(
+              "clockchain-token",
+            )
+          ) {
+            return {
+              SecretString: `clockchain-token-${index}`,
+            };
+          }
+          if (
+            command.input.SecretId.endsWith(
+              "operator-key",
+            )
+          ) {
+            return {
+              SecretString: operatorKey,
+            };
+          }
+          if (
+            command.input.SecretId.endsWith(
+              "rpc-url",
+            )
+          ) {
+            return {
+              SecretString:
+                "https://ethereum-rpc.publicnode.com/",
+            };
+          }
+          assert.fail(
+            `unexpected secret read ${command.input.SecretId}`,
+          );
+        },
+      },
+      env: {
+        AWS_RUNTIME_INPUT:
+          coordinatorRuntimeInput(),
+      },
+      run: async (argv, dependencies) => {
+        const values = Object.fromEntries(
+          Array.from(
+            { length: argv.length / 2 },
+            (_, pair) => [
+              argv[pair * 2],
+              argv[pair * 2 + 1],
+            ],
+          ),
+        );
+        runCalls.push({
+          argv,
+          dependencies,
+          values,
+        });
+        assert.equal(
+          (await lstat(
+            values["--clockchain-token-file"],
+          )).mode & 0o777,
+          0o600,
+        );
+        assert.equal(
+          (await lstat(
+            values["--operator-private-key"],
+          )).mode & 0o777,
+          0o600,
+        );
+        assert.equal(
+          (await lstat(
+            values["--rpc-url-file"],
+          )).mode & 0o777,
+          0o600,
+        );
+        assert.equal(
+          await readFile(
+            values["--clockchain-token-file"],
+            "utf8",
+          ),
+          `clockchain-token-${index}`,
+        );
+        assert.equal(
+          await readFile(
+            values["--operator-private-key"],
+            "utf8",
+          ),
+          operatorKey,
+        );
+        assert.equal(
+          await readFile(
+            values["--rpc-url-file"],
+            "utf8",
+          ),
+          "https://ethereum-rpc.publicnode.com/\n",
+        );
+        return 0;
+      },
+    });
+  }
+
+  assert.deepEqual(secretReads, [
+    {
+      SecretId:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-token",
+    },
+    {
+      SecretId:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key",
+    },
+    {
+      SecretId:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
+    },
+    {
+      SecretId:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-token",
+    },
+    {
+      SecretId:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key",
+    },
+    {
+      SecretId:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
+    },
+  ]);
+  assert.equal(runCalls.length, 2);
+  const expectedPublicArgv = (values) => [
+    "--clockchain-token-file",
+    values["--clockchain-token-file"],
+    "--operator-key-id",
+    "clockchain-demo-2026",
+    "--operator-private-key",
+    values["--operator-private-key"],
+    "--release-root",
+    COORDINATOR_RELEASE_ROOT,
+    "--relay-url",
+    "https://relay.clockchain.network:8443",
+    "--repository-sha",
+    "abcdef0123456789abcdef0123456789abcdef01",
+    "--rpc-url-file",
+    values["--rpc-url-file"],
+    "--tls-certificate",
+    `${COORDINATOR_RELEASE_ROOT}/payer-mcp.crt`,
+    "--tls-fingerprint",
+    "b".repeat(64),
+  ];
+  for (const call of runCalls) {
+    assert.deepEqual(
+      call.argv,
+      expectedPublicArgv(call.values),
+    );
+    assert.deepEqual(call.dependencies, {
+      releaseIdentity: {
+        releaseId: COORDINATOR_RELEASE_ID,
+        sessionId: COORDINATOR_SESSION_ID,
+      },
+    });
+    await assert.rejects(
+      lstat(
+        call.values["--clockchain-token-file"],
+      ),
+      { code: "ENOENT" },
+    );
+    await assert.rejects(
+      lstat(
+        call.values["--operator-private-key"],
+      ),
+      { code: "ENOENT" },
+    );
+    await assert.rejects(
+      lstat(call.values["--rpc-url-file"]),
+      { code: "ENOENT" },
+    );
+  }
+  assert.notEqual(
+    dirname(
+      runCalls[0].values[
+        "--clockchain-token-file"
+      ],
+    ),
+    dirname(
+      runCalls[1].values[
+        "--clockchain-token-file"
+      ],
+    ),
+  );
+});
+
+test("coordinator entrypoint rejects malformed runtime input before secret reads", async () => {
+  const cases = [
+    coordinatorRuntimeInput({
+      releaseIdentity: {
+        releaseId: "release-0000000000000000",
+        sessionId: COORDINATOR_SESSION_ID,
+      },
+    }),
+    coordinatorRuntimeInput({
+      releaseRoot:
+        "/var/lib/clockchain/operator/releases/release-0000000000000000",
+    }),
+    coordinatorRuntimeInput({
+      tlsCertificatePath:
+        "/var/lib/clockchain/operator/releases/release-0000000000000000/payer-mcp.crt",
+    }),
+    coordinatorRuntimeInput({
+      tlsCertificatePath:
+        COORDINATOR_RELEASE_ROOT,
+    }),
+    coordinatorRuntimeInput({
+      tlsCertificatePath:
+        "/var/lib/clockchain/operator/releases/release-0000000000000000/../payer-mcp.crt",
+    }),
+    coordinatorRuntimeInput({
+      relayUrl:
+        "https://relay.clockchain.network:8443?x=1",
+    }),
+    coordinatorRuntimeInput({
+      relayUrl:
+        "https://relay.clockchain.network",
+    }),
+    coordinatorRuntimeInput({
+      operatorKeyId: "Clockchain-Demo-2026",
+    }),
+    coordinatorRuntimeInput({
+      operatorKeyId: "-clockchain-demo-2026",
+    }),
+    coordinatorRuntimeInput({
+      tlsCertificatePath:
+        "/tmp/payer-mcp.crt",
+    }),
+    coordinatorRuntimeInput({
+      tlsFingerprint: "B".repeat(64),
+    }),
+    coordinatorRuntimeInput({
+      rpcSecretArn: "not-an-arn",
+    }),
+    JSON.stringify({
+      coordinator: JSON.parse(
+        coordinatorRuntimeInput(),
+      ).coordinator,
+      paymentMoved: false,
+      schema:
+        "clockchain.aws-runtime-input/v1",
+      z: "unknown",
+    }),
+  ];
+  for (const runtimeInput of cases) {
+    let secretReads = 0;
+    await assert.rejects(
+      coordinatorEntrypoint({
+        client: {
+          async send() {
+            secretReads += 1;
+            return { SecretString: "secret" };
+          },
+        },
+        env: {
+          AWS_RUNTIME_INPUT: runtimeInput,
+        },
+        run: async () => {
+          assert.fail("run must not start");
+        },
+      }),
+      /AWS coordinator entrypoint failed safely|AWS runtime input failed safely/,
+    );
+    assert.equal(secretReads, 0);
+  }
+});
+
+test("coordinator entrypoint rejects invalid secrets before scratch creation or run", async () => {
+  const operatorKey = ed25519PrivateKeyPem();
+  const rsaKey = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+  }).privateKey.export({
+    format: "pem",
+    type: "pkcs8",
+  });
+  const cases = [
+    {
+      token: "clockchain-token\nsecond-line",
+      operatorKey,
+      rpc: "https://ethereum-rpc.publicnode.com/",
+    },
+    {
+      token: "clockchain-token",
+      operatorKey: rsaKey,
+      rpc: "https://ethereum-rpc.publicnode.com/",
+    },
+    {
+      token: "clockchain-token",
+      operatorKey,
+      rpc: "https://127.0.0.1/",
+    },
+    {
+      token: "clockchain-token",
+      operatorKey,
+      rpc: "https://[::ffff:7f00:1]/",
+    },
+    {
+      token: "clockchain-token",
+      operatorKey,
+      rpc: "https://[2001:db8::1]/",
+    },
+  ];
+  for (const value of cases) {
+    const calls = [];
+    await assert.rejects(
+      coordinatorEntrypoint({
+        client: {
+          async send(command) {
+            calls.push(command.input.SecretId);
+            if (
+              command.input.SecretId.endsWith(
+                "clockchain-token",
+              )
+            ) {
+              return { SecretString: value.token };
+            }
+            if (
+              command.input.SecretId.endsWith(
+                "operator-key",
+              )
+            ) {
+              return {
+                SecretString: value.operatorKey,
+              };
+            }
+            return { SecretString: value.rpc };
+          },
+        },
+        createTempDir: async () => {
+          calls.push("createTempDir");
+          throw new Error(
+            "scratch should not be created",
+          );
+        },
+        env: {
+          AWS_RUNTIME_INPUT:
+            coordinatorRuntimeInput(),
+        },
+        run: async () => {
+          calls.push("run");
+        },
+      }),
+      (error) => {
+        assert.match(
+          error.message,
+          /AWS coordinator entrypoint failed safely|AWS runtime input failed safely/,
+        );
+        assert.doesNotMatch(
+          String(error),
+          /clockchain-token|ethereum-rpc|PRIVATE KEY|127\.0\.0\.1/,
+        );
+        return true;
+      },
+    );
+    assert.deepEqual(
+      calls.filter(
+        (call) => call === "createTempDir" || call === "run",
+      ),
+      [],
+    );
+  }
+});
+
+test("coordinator entrypoint rejects non-public RPC IP literals before scratch creation or run", async () => {
+  const operatorKey = ed25519PrivateKeyPem();
+  for (const rpc of [
+    "https://100.64.0.1/",
+    "https://192.0.0.1/",
+    "https://192.0.2.1/",
+    "https://192.88.99.1/",
+    "https://198.18.0.1/",
+    "https://198.51.100.1/",
+    "https://203.0.113.1/",
+    "https://224.0.0.1/",
+    "https://240.0.0.1/",
+    "https://[100::1]/",
+    "https://[2001::1]/",
+    "https://[2002::1]/",
+    "https://[ff02::1]/",
+    "https://[::ffff:100.64.0.1]/",
+    "https://[::ffff:c612:1]/",
+  ]) {
+    const calls = [];
+    await assert.rejects(
+      coordinatorEntrypoint({
+        client: {
+          async send(command) {
+            calls.push(command.input.SecretId);
+            if (
+              command.input.SecretId.endsWith(
+                "clockchain-token",
+              )
+            ) {
+              return {
+                SecretString: "clockchain-token",
+              };
+            }
+            if (
+              command.input.SecretId.endsWith(
+                "operator-key",
+              )
+            ) {
+              return { SecretString: operatorKey };
+            }
+            return { SecretString: rpc };
+          },
+        },
+        createTempDir: async () => {
+          calls.push("createTempDir");
+          throw new Error(
+            "scratch should not be created",
+          );
+        },
+        env: {
+          AWS_RUNTIME_INPUT:
+            coordinatorRuntimeInput(),
+        },
+        run: async () => {
+          calls.push("run");
+        },
+      }),
+      /AWS coordinator entrypoint failed safely|AWS runtime input failed safely/,
+      rpc,
+    );
+    assert.deepEqual(
+      calls.filter(
+        (call) => call === "createTempDir" || call === "run",
+      ),
+      [],
+      rpc,
+    );
+  }
+});
+
+test("coordinator entrypoint accepts known public IPv4 and IPv6 RPC literals", async () => {
+  const operatorKey = ed25519PrivateKeyPem();
+  const calls = [];
+  for (const rpc of [
+    "https://8.8.8.8/",
+    "https://[2606:4700:4700::1111]/",
+  ]) {
+    await coordinatorEntrypoint({
+      client: {
+        async send(command) {
+          if (
+            command.input.SecretId.endsWith(
+              "clockchain-token",
+            )
+          ) {
+            return {
+              SecretString: "clockchain-token",
+            };
+          }
+          if (
+            command.input.SecretId.endsWith(
+              "operator-key",
+            )
+          ) {
+            return { SecretString: operatorKey };
+          }
+          return { SecretString: rpc };
+        },
+      },
+      env: {
+        AWS_RUNTIME_INPUT:
+          coordinatorRuntimeInput(),
+      },
+      run: async (argv) => {
+        const values = Object.fromEntries(
+          Array.from(
+            { length: argv.length / 2 },
+            (_, pair) => [
+              argv[pair * 2],
+              argv[pair * 2 + 1],
+            ],
+          ),
+        );
+        calls.push(
+          await readFile(
+            values["--rpc-url-file"],
+            "utf8",
+          ),
+        );
+        return 0;
+      },
+    });
+  }
+  assert.deepEqual(calls, [
+    "https://8.8.8.8/\n",
+    "https://[2606:4700:4700::1111]/\n",
+  ]);
+});
+
+test("coordinator entrypoint accepts a known public IPv6 RPC literal", async () => {
+  const operatorKey = ed25519PrivateKeyPem();
   const calls = [];
   await coordinatorEntrypoint({
-    env: {
-      AWS_RUNTIME_INPUT:
-        '{"coordinator":{"argv":["--test"],"releaseIdentity":{"releaseId":"release-bd7662a5eeb41614","sessionId":"11111111-1111-4111-8111-111111111111"}},"paymentMoved":false,"schema":"clockchain.aws-runtime-input/v1"}',
+    client: {
+      async send(command) {
+        if (
+          command.input.SecretId.endsWith(
+            "clockchain-token",
+          )
+        ) {
+          return {
+            SecretString: "clockchain-token",
+          };
+        }
+        if (
+          command.input.SecretId.endsWith(
+            "operator-key",
+          )
+        ) {
+          return { SecretString: operatorKey };
+        }
+        return {
+          SecretString:
+            "https://[2606:4700:4700::1111]/",
+        };
+      },
     },
-    run: async (argv, dependencies) => {
-      calls.push([
-        argv,
-        dependencies.releaseIdentity,
-      ]);
+    env: {
+      AWS_RUNTIME_INPUT: coordinatorRuntimeInput(),
+    },
+    run: async (argv) => {
+      const values = Object.fromEntries(
+        Array.from(
+          { length: argv.length / 2 },
+          (_, pair) => [
+            argv[pair * 2],
+            argv[pair * 2 + 1],
+          ],
+        ),
+      );
+      calls.push(
+        await readFile(
+          values["--rpc-url-file"],
+          "utf8",
+        ),
+      );
       return 0;
     },
   });
   assert.deepEqual(calls, [
+    "https://[2606:4700:4700::1111]/\n",
+  ]);
+});
+
+test("coordinator entrypoint attempts all cleanup and fails closed when cleanup fails", async () => {
+  const root = await mkdtemp(
+    join(
+      tmpdir(),
+      "clockchain-coordinator-entrypoint-",
+    ),
+  );
+  const scratch = join(
+    root,
+    "clockchain-coordinator-",
+  );
+  const calls = [];
+  try {
+    await assert.rejects(
+      coordinatorEntrypoint({
+        client: {
+          async send(command) {
+            if (
+              command.input.SecretId.endsWith(
+                "clockchain-token",
+              )
+            ) {
+              return {
+                SecretString: "clockchain-token",
+              };
+            }
+            if (
+              command.input.SecretId.endsWith(
+                "operator-key",
+              )
+            ) {
+              return {
+                SecretString: ed25519PrivateKeyPem(),
+              };
+            }
+            return {
+              SecretString:
+                "https://ethereum-rpc.publicnode.com/",
+            };
+          },
+        },
+        createTempDir: async (prefix) => {
+          const path = await mkdtemp(
+            `${scratch}-`,
+          );
+          calls.push([
+            "createTempDir",
+            prefix,
+            path,
+          ]);
+          return path;
+        },
+        env: {
+          AWS_RUNTIME_INPUT:
+            coordinatorRuntimeInput(),
+        },
+        removeDir: async (path) => {
+          calls.push(["removeDir", path]);
+          throw new Error("cleanup canary");
+        },
+        removeFile: async (path) => {
+          calls.push([
+            "removeFile",
+            path,
+          ]);
+          throw new Error("cleanup canary");
+        },
+        run: async () => {
+          calls.push(["run"]);
+          return 0;
+        },
+      }),
+      (error) => {
+        assert.equal(
+          error.message,
+          "AWS coordinator entrypoint failed safely.",
+        );
+        assert.doesNotMatch(
+          String(error),
+          /cleanup canary|clockchain-token|ethereum-rpc|PRIVATE KEY/,
+        );
+        return true;
+      },
+    );
+  } finally {
+    await rm(root, {
+      force: true,
+      recursive: true,
+    });
+  }
+  const scratchDir = calls[0][2];
+  assert.deepEqual(calls, [
     [
-      ["--test"],
+      "createTempDir",
+      join(tmpdir(), "clockchain-coordinator-"),
+      scratchDir,
+    ],
+    ["run"],
+    [
+      "removeFile",
+      join(scratchDir, "clockchain-token"),
+    ],
+    [
+      "removeFile",
+      join(
+        scratchDir,
+        "operator-private-key.pem",
+      ),
+    ],
+    [
+      "removeFile",
+      join(scratchDir, "sepolia-rpc-url"),
+    ],
+    ["removeDir", scratchDir],
+  ]);
+});
+
+test("coordinator production CLI fails closed without leaking runtime values", async () => {
+  const result = await execFileAsync(
+    process.execPath,
+    ["infra/aws/runtime/coordinator-entrypoint.mjs"],
+    {
+      env: {
+        ...process.env,
+        AWS_RUNTIME_INPUT: coordinatorRuntimeInput(),
+      },
+    },
+  ).catch((error) => error);
+  assert.equal(result.code, 1);
+  assert.equal(
+    result.stderr,
+    "AWS_COORDINATOR_ENTRYPOINT_FAILED\n",
+  );
+  assert.equal(result.stdout, "");
+});
+
+test("operator worker entrypoint composes exact AWS clients and loop dependencies", async () => {
+  const sqs = { send: async () => ({}) };
+  const dynamodb = {
+    name: "dynamodb",
+    send: async () => ({}),
+  };
+  const documentClient = { send: async () => ({}) };
+  const buildTransitions = async () => ({});
+  const signal = AbortSignal.abort();
+  const calls = [];
+  await operatorWorkerEntrypoint({
+    buildTransitions,
+    createClients: async () => {
+      calls.push(["createClients"]);
+      return {
+        dynamodb,
+        ecs: { send: async () => ({}) },
+        s3: { send: async () => ({}) },
+        secrets: { send: async () => ({}) },
+        sqs,
+      };
+    },
+    createDocumentClient: (client) => {
+      calls.push([
+        "createDocumentClient",
+        client,
+      ]);
+      return documentClient;
+    },
+    env: {
+      AWS_RUNTIME_INPUT: operatorRuntimeInput(),
+    },
+    run: async (config, dependencies) => {
+      calls.push([
+        "run",
+        config,
+        dependencies,
+      ]);
+      return {
+        paymentMoved: false,
+        status: "IDLE",
+      };
+    },
+    signal,
+  });
+  assert.deepEqual(calls, [
+    ["createClients"],
+    ["createDocumentClient", dynamodb],
+    [
+      "run",
       {
-        releaseId:
-          "release-bd7662a5eeb41614",
-        sessionId:
-          "11111111-1111-4111-8111-111111111111",
+        actionQueueUrl:
+          "https://sqs.us-west-2.amazonaws.com/123456789012/clockchain-actions",
+        actionTableName:
+          "ClockchainHandshakeControl",
+        paymentMoved: false,
+        releaseId: OPERATOR_RELEASE_ID,
+        repositorySha:
+          "abcdef0123456789abcdef0123456789abcdef01",
+        schema:
+          "clockchain.aws-operator-runtime/v1",
+        sessionId: OPERATOR_SESSION_ID,
+      },
+      {
+        buildTransitions,
+        documentClient,
+        signal,
+        sqs,
       },
     ],
   ]);
+});
+
+test("operator worker entrypoint accepts the default operator loop with an aborted signal", async () => {
+  await operatorWorkerEntrypoint({
+    buildTransitions: async () => ({}),
+    createClients: async () => ({
+      dynamodb: { send: async () => ({}) },
+      sqs: { send: async () => ({}) },
+    }),
+    createDocumentClient: (client) => ({
+      client,
+      send: async () => ({}),
+    }),
+    env: {
+      AWS_RUNTIME_INPUT: operatorRuntimeInput(),
+    },
+    signal: AbortSignal.abort(),
+  });
+});
+
+test("operator worker entrypoint accepts SQS queue names at the standard and FIFO length boundaries", async () => {
+  const acceptedQueueNames = [
+    "a".repeat(80),
+    `${"a".repeat(75)}.fifo`,
+  ];
+  for (const queueName of acceptedQueueNames) {
+    const calls = [];
+    await operatorWorkerEntrypoint({
+      buildTransitions: async () => ({}),
+      createClients: async () => ({
+        dynamodb: { send: async () => ({}) },
+        sqs: { send: async () => ({}) },
+      }),
+      createDocumentClient: (client) => ({
+        client,
+        send: async () => ({}),
+      }),
+      env: {
+        AWS_RUNTIME_INPUT: operatorRuntimeInput({
+          actionQueueUrl:
+            `https://sqs.us-west-2.amazonaws.com/123456789012/${queueName}`,
+        }),
+      },
+      run: async (config) => {
+        calls.push(config.actionQueueUrl);
+        return {
+          paymentMoved: false,
+          status: "IDLE",
+        };
+      },
+    });
+    assert.deepEqual(calls, [
+      `https://sqs.us-west-2.amazonaws.com/123456789012/${queueName}`,
+    ]);
+  }
+});
+
+test("operator worker entrypoint rejects malformed operator runtime input before client creation", async () => {
+  const cases = [
+    operatorRuntimeInput({
+      releaseId: "release-0000000000000000",
+    }),
+    operatorRuntimeInput({
+      paymentMoved: true,
+    }),
+    operatorRuntimeInput({
+      actionQueueUrl:
+        "http://sqs.us-west-2.amazonaws.com/123456789012/clockchain-actions",
+    }),
+    operatorRuntimeInput({
+      actionQueueUrl:
+        "https://sqs.us-west-2.amazonaws.com/",
+    }),
+    operatorRuntimeInput({
+      actionQueueUrl:
+        "https://sqs.us-west-2.amazonaws.com/123456789012",
+    }),
+    operatorRuntimeInput({
+      actionQueueUrl:
+        "https://sqs.us-west-2.amazonaws.com/123456789012/",
+    }),
+    operatorRuntimeInput({
+      actionQueueUrl:
+        "https://sqs.us-west-2.amazonaws.com/12345678901/clockchain-actions",
+    }),
+    operatorRuntimeInput({
+      actionQueueUrl:
+        "https://sqs.us-west-2.amazonaws.com/123456789012/clockchain-actions/extra",
+    }),
+    operatorRuntimeInput({
+      actionQueueUrl:
+        "https://sqs.us-west-2.amazonaws.com/123456789012//clockchain-actions",
+    }),
+    operatorRuntimeInput({
+      actionQueueUrl:
+        "https://sqs.us-west-2.amazonaws.com/123456789012/clockchain actions",
+    }),
+    operatorRuntimeInput({
+      actionQueueUrl:
+        `https://sqs.us-west-2.amazonaws.com/123456789012/${"a".repeat(81)}`,
+    }),
+    operatorRuntimeInput({
+      actionQueueUrl:
+        `https://sqs.us-west-2.amazonaws.com/123456789012/${"a".repeat(76)}.fifo`,
+    }),
+    operatorRuntimeInput({
+      actionTableName: "no spaces",
+    }),
+    operatorRuntimeInput({
+      repositorySha: "a".repeat(39),
+    }),
+    JSON.stringify({
+      operator: JSON.parse(
+        operatorRuntimeInput(),
+      ).operator,
+      paymentMoved: false,
+      schema:
+        "clockchain.aws-runtime-input/v1",
+      z: "unknown",
+    }),
+    JSON.stringify({
+      paymentMoved: false,
+      operator: JSON.parse(
+        operatorRuntimeInput(),
+      ).operator,
+      schema:
+        "clockchain.aws-runtime-input/v1",
+    }),
+  ];
+  for (const runtimeInput of cases) {
+    let clientCreations = 0;
+    await assert.rejects(
+      operatorWorkerEntrypoint({
+        buildTransitions: async () => ({}),
+        createClients: async () => {
+          clientCreations += 1;
+          return {};
+        },
+        env: {
+          AWS_RUNTIME_INPUT: runtimeInput,
+        },
+        run: async () => {
+          assert.fail("run must not start");
+        },
+      }),
+      /AWS operator worker entrypoint failed safely|AWS runtime input failed safely/,
+    );
+    assert.equal(clientCreations, 0);
+  }
+});
+
+test("operator worker entrypoint rejects invalid dependency composition safely", async () => {
+  const cases = [
+    {
+      createClients: null,
+    },
+    {
+      createClients: async () => ({
+        dynamodb: {},
+        sqs: { send: async () => ({}) },
+      }),
+    },
+    {
+      createClients: async () => ({
+        dynamodb: { send: async () => ({}) },
+      }),
+    },
+    {
+      createDocumentClient: null,
+    },
+    {
+      buildTransitions: null,
+    },
+    {
+      run: null,
+    },
+  ];
+  for (const overrides of cases) {
+    await assert.rejects(
+      operatorWorkerEntrypoint({
+        buildTransitions: async () => ({}),
+        createClients: async () => ({
+          dynamodb: { send: async () => ({}) },
+          sqs: { send: async () => ({}) },
+        }),
+        createDocumentClient: () => ({
+          send: async () => ({}),
+        }),
+        env: {
+          AWS_RUNTIME_INPUT: operatorRuntimeInput(),
+        },
+        run: async () => {},
+        ...overrides,
+      }),
+      /AWS operator worker entrypoint failed safely|AWS runtime input failed safely/,
+    );
+  }
+});
+
+test("operator worker production CLI fails closed until transition builder wiring exists", async () => {
+  const result = await execFileAsync(
+    process.execPath,
+    ["infra/aws/runtime/operator-worker-entrypoint.mjs"],
+    {
+      env: {
+        ...process.env,
+        AWS_RUNTIME_INPUT: operatorRuntimeInput(),
+      },
+      reject: false,
+    },
+  ).catch((error) => error);
+  assert.equal(result.code, 1);
+  assert.equal(
+    result.stderr,
+    "AWS_OPERATOR_WORKER_ENTRYPOINT_FAILED\n",
+  );
+  assert.equal(result.stdout, "");
 });
 
 test("funding entrypoint materializes keystore metadata and RPC secrets into private scratch paths", async () => {
