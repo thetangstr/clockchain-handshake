@@ -169,6 +169,7 @@ export function createDeploymentPlan({
     legacyInfrastructure: {
       action: "preserve",
     },
+    operatorPublicKey,
     region,
     relayPublicHostname,
     repositorySha,

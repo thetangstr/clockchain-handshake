@@ -147,6 +147,10 @@ test("deployment plan uses image digests and fixed account without deleting lega
   assert.equal(plan.region, "us-west-2");
   assert.equal(plan.repositorySha, SHA);
   assert.equal(
+    plan.operatorPublicKey,
+    "oIcoZqI/cqzG4UbXcaV+k1fxwt8EBb+9S+XNcb9pq3k=",
+  );
+  assert.equal(
     plan.relayPublicHostname,
     "relay.clockchain.net",
   );
@@ -227,6 +231,12 @@ test("deployment contexts encode the public TLS certificate without multiline ar
       `570035913370.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake-tunnel@${DIGEST}`,
   });
   const contexts = createDeploymentContexts(plan);
+  assert.equal(
+    contexts.includes(
+      "operatorPublicKey=oIcoZqI/cqzG4UbXcaV+k1fxwt8EBb+9S+XNcb9pq3k=",
+    ),
+    true,
+  );
   const certificate = contexts.find((value) =>
     value.startsWith(
       "relayTlsCertificatePemBase64=",
