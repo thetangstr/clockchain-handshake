@@ -8,13 +8,17 @@ import {
   open,
   readFile,
   rename,
+  unlink,
 } from "node:fs/promises";
 import http from "node:http";
 import {
   createPrivateKey,
+  createPublicKey,
   createHash,
+  randomUUID,
   sign,
   timingSafeEqual,
+  verify,
 } from "node:crypto";
 import {
   dirname,
@@ -23,13 +27,15 @@ import {
 import { types } from "node:util";
 
 import { canonicalBytes } from "../canonical.mjs";
-import { readLaunchManifest } from "../coordination/manifest.mjs";
+import { validateLaunchManifest } from "../coordination/manifest.mjs";
 import { sealRequestorBootstrapManifest } from "./bootstrap-envelope.mjs";
 import { canonicalizeReceiptEventValue } from "../../canonical.mjs";
 import { KEY_ID_PATTERN } from "../descriptor.mjs";
 
 export const BOOTSTRAP_BROKER_JOURNAL_FILE =
   "bootstrap-broker-journal.json";
+const BOOTSTRAP_BROKER_LOCK_FILE =
+  "bootstrap-broker-seal.lock";
 export const BOOTSTRAP_BROKER_RESPONSE_SCHEMA =
   "clockchain.requestor-bootstrap-broker-response/v1";
 
@@ -62,7 +68,10 @@ const HEX64_PATTERN = /^[0-9a-f]{64}$/;
 const CAPABILITY_PATTERN = /^[0-9a-f]{64}$/;
 const BASE64_PATTERN =
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
 const MAX_BODY_BYTES = 16_384;
+const MAX_MANIFEST_BYTES = 131_072;
+const stateMutexes = new Map();
 
 export class BootstrapBrokerError extends Error {
   constructor() {
@@ -119,6 +128,25 @@ function durableBytes(value) {
     return Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(value)), "utf8");
   } catch {
     invalid();
+  }
+}
+
+async function withStateMutex(stateRoot, operation) {
+  const previous = stateMutexes.get(stateRoot) ?? Promise.resolve();
+  let release;
+  const current = new Promise((resolvePromise) => {
+    release = resolvePromise;
+  });
+  const chain = previous.then(() => current, () => current);
+  stateMutexes.set(stateRoot, chain);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (stateMutexes.get(stateRoot) === chain) {
+      stateMutexes.delete(stateRoot);
+    }
   }
 }
 
@@ -295,7 +323,7 @@ async function readJsonFile(path, fallback) {
 
 async function writeJsonFile(path, value) {
   const bytes = durableBytes(value);
-  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   const handle = await open(
     temporary,
     fsConstants.O_RDWR |
@@ -328,6 +356,66 @@ async function writeJsonFile(path, value) {
   }
 }
 
+async function withSealLock(stateRoot, operation) {
+  const lockPath = joinPath(stateRoot, BOOTSTRAP_BROKER_LOCK_FILE);
+  let handle;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      handle = await open(
+        lockPath,
+        fsConstants.O_RDWR |
+          fsConstants.O_CREAT |
+          fsConstants.O_EXCL |
+          (fsConstants.O_NOFOLLOW ?? 0),
+        0o600,
+      );
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST" || attempt > 0) invalid();
+      let stats;
+      try {
+        stats = await lstat(lockPath);
+      } catch {
+        continue;
+      }
+      if (
+        !privateRegular(stats, 1_024) ||
+        Date.now() - stats.mtimeMs <= 30_000
+      ) {
+        invalid();
+      }
+      await unlink(lockPath);
+    }
+  }
+  if (handle === undefined) invalid();
+  let failure;
+  try {
+    const lease = durableBytes({
+      createdAtMs: String(Date.now()),
+      paymentMoved: false,
+      pid: String(process.pid),
+      schema: "clockchain.requestor-bootstrap-broker-lock/v1",
+    });
+    await handle.write(lease, 0, lease.length, 0);
+    await handle.sync();
+    return await operation();
+  } catch (error) {
+    failure = error;
+  } finally {
+    try {
+      await handle.close();
+    } catch (error) {
+      failure ??= error;
+    }
+    try {
+      await unlink(lockPath);
+    } catch (error) {
+      if (error?.code !== "ENOENT") failure ??= error;
+    }
+  }
+  throw failure;
+}
+
 function emptyJournal(repositoryShaValue) {
   return Object.freeze({
     claims: {},
@@ -336,30 +424,205 @@ function emptyJournal(repositoryShaValue) {
   });
 }
 
-function validateJournal(value, repositoryShaValue) {
+function exactKeySet(value, keys) {
   if (
     value === null ||
     typeof value !== "object" ||
     Array.isArray(value) ||
-    value.schema !== JOURNAL_SCHEMA ||
-    (repositoryShaValue !== undefined &&
-      value.repositorySha !== repositoryShaValue) ||
-    value.claims === null ||
-    typeof value.claims !== "object" ||
-    Array.isArray(value.claims)
+    types.isProxy(value)
+  ) {
+    invalid();
+  }
+  const ownKeys = Reflect.ownKeys(value);
+  if (
+    ownKeys.length !== keys.length ||
+    ownKeys.some((key) => typeof key !== "string" || !keys.includes(key))
   ) {
     invalid();
   }
   return value;
 }
 
-async function readJournal(stateRoot, repositoryShaValue) {
+function validateContext(value, claim, repositoryShaValue) {
+  exactKeySet(value, ["claimNonce", "paymentMoved", "releaseId", "repositorySha", "sessionId"]);
+  if (
+    value.claimNonce !== claim.claimNonce ||
+    value.paymentMoved !== false ||
+    typeof value.releaseId !== "string" ||
+    value.releaseId.length === 0 ||
+    value.releaseId.length > 256 ||
+    value.releaseId.trim() !== value.releaseId ||
+    value.repositorySha !== repositoryShaValue ||
+    typeof value.sessionId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.sessionId)
+  ) {
+    invalid();
+  }
+}
+
+function validateEnvelope(value) {
+  exactKeySet(value, [
+    "algorithm",
+    "ciphertextBase64url",
+    "ephemeralPublicKey",
+    "ivBase64url",
+    "paymentMoved",
+    "schema",
+    "tagBase64url",
+  ]);
+  for (const key of ["ciphertextBase64url", "ephemeralPublicKey", "ivBase64url", "tagBase64url"]) {
+    if (
+      typeof value[key] !== "string" ||
+      value[key].length === 0 ||
+      !BASE64URL_PATTERN.test(value[key]) ||
+      value[key].includes("=") ||
+      Buffer.from(value[key], "base64url").toString("base64url") !== value[key]
+    ) {
+      invalid();
+    }
+  }
+  if (
+    value.algorithm !== "X25519-HKDF-SHA256-AES-256-GCM" ||
+    value.paymentMoved !== false ||
+    value.schema !== "clockchain.requestor-bootstrap-envelope/v1" ||
+    Buffer.from(value.ephemeralPublicKey, "base64url").length !== 32 ||
+    Buffer.from(value.ivBase64url, "base64url").length !== 12 ||
+    Buffer.from(value.tagBase64url, "base64url").length !== 16 ||
+    Buffer.from(value.ciphertextBase64url, "base64url").length > 65_536
+  ) {
+    invalid();
+  }
+}
+
+function validateSignature(value, response, operatorKeyId, operatorPublicKey) {
+  exactKeySet(value, ["algorithm", "keyId", "value"]);
+  if (
+    value.algorithm !== "ed25519" ||
+    value.keyId !== operatorKeyId ||
+    typeof value.value !== "string" ||
+    !BASE64_PATTERN.test(value.value)
+  ) {
+    invalid();
+  }
+  const signature = Buffer.from(value.value, "base64");
+  if (
+    signature.length !== 64 ||
+    signature.toString("base64") !== value.value
+  ) {
+    invalid();
+  }
+  if (operatorPublicKey !== undefined) {
+    const { signature: _signature, ...unsigned } = response;
+    if (!verify(null, durableBytes(unsigned), operatorPublicKey, signature)) {
+      invalid();
+    }
+  }
+}
+
+function validateSealedResponse(value, {
+  claim,
+  claimFingerprint,
+  operatorKeyId,
+  operatorPublicKey,
+  repositorySha: repositoryShaValue,
+}) {
+  exactKeySet(value, [
+    "claimFingerprint",
+    "context",
+    "envelope",
+    "paymentMoved",
+    "repositorySha",
+    "schema",
+    "signature",
+    "status",
+  ]);
+  if (
+    value.claimFingerprint !== claimFingerprint ||
+    value.paymentMoved !== false ||
+    value.repositorySha !== repositoryShaValue ||
+    value.schema !== BOOTSTRAP_BROKER_RESPONSE_SCHEMA ||
+    value.status !== "SEALED"
+  ) {
+    invalid();
+  }
+  validateContext(value.context, claim, repositoryShaValue);
+  validateEnvelope(value.envelope);
+  validateSignature(value.signature, value, operatorKeyId, operatorPublicKey);
+}
+
+function validateJournal(value, {
+  operatorKeyId,
+  operatorPublicKey,
+  repositorySha: repositoryShaValue,
+} = {}) {
+  exactKeySet(value, ["claims", "repositorySha", "schema"]);
+  if (
+    value.schema !== JOURNAL_SCHEMA ||
+    (repositoryShaValue !== undefined &&
+      value.repositorySha !== repositoryShaValue) ||
+    value.claims === null ||
+    typeof value.claims !== "object" ||
+    Array.isArray(value.claims) ||
+    types.isProxy(value.claims)
+  ) {
+    invalid();
+  }
+  for (const [fingerprint, entry] of Object.entries(value.claims)) {
+    if (!HEX64_PATTERN.test(fingerprint)) invalid();
+    exactKeySet(entry, entry.status === "PENDING_APPROVAL"
+      ? ["claim", "claimDigest", "claimFingerprint", "paymentMoved", "status"]
+      : entry.status === "APPROVED"
+        ? ["approvedAtMs", "claim", "claimDigest", "claimFingerprint", "paymentMoved", "status"]
+        : entry.status === "SEALED"
+          ? ["approvedAtMs", "claim", "claimDigest", "claimFingerprint", "paymentMoved", "sealedResponse", "sealedResponseDigest", "status"]
+          : []);
+    const claim = canonicalClaim(entry.claim);
+    const claimFingerprint = bootstrapClaimFingerprint(claim);
+    if (
+      fingerprint !== claimFingerprint ||
+      entry.claimFingerprint !== claimFingerprint ||
+      entry.claimDigest !== claimFingerprint ||
+      entry.paymentMoved !== false
+    ) {
+      invalid();
+    }
+    if (entry.status === "APPROVED" || entry.status === "SEALED") {
+      if (
+        typeof entry.approvedAtMs !== "string" ||
+        !/^(?:0|[1-9][0-9]*)$/.test(entry.approvedAtMs)
+      ) {
+        invalid();
+      }
+    }
+    if (entry.status === "SEALED") {
+      if (typeof entry.sealedResponseDigest !== "string" || !HEX64_PATTERN.test(entry.sealedResponseDigest)) {
+        invalid();
+      }
+      validateSealedResponse(entry.sealedResponse, {
+        claim,
+        claimFingerprint,
+        operatorKeyId,
+        operatorPublicKey,
+        repositorySha: repositoryShaValue ?? value.repositorySha,
+      });
+      if (sha256(durableBytes(entry.sealedResponse)) !== entry.sealedResponseDigest) {
+        invalid();
+      }
+    }
+  }
+  return value;
+}
+
+async function readJournal(stateRoot, repositoryShaValue, options = {}) {
   return validateJournal(
     await readJsonFile(
       joinPath(stateRoot, BOOTSTRAP_BROKER_JOURNAL_FILE),
       emptyJournal(repositoryShaValue),
     ),
-    repositoryShaValue,
+    {
+      ...options,
+      repositorySha: repositoryShaValue,
+    },
   );
 }
 
@@ -450,9 +713,60 @@ function authorize(request, capability) {
   return timingSafeEqual(Buffer.from(supplied, "hex"), Buffer.from(capability, "hex"));
 }
 
-async function assertManifestPinned({ expected, manifestPath }) {
-  const current = await lstat(manifestPath);
-  if (!sameIdentity(expected, current)) invalid();
+async function readPinnedLaunchManifest(manifestPath, expectedStats = undefined) {
+  const before = await lstat(manifestPath);
+  if (!privateRegular(before, MAX_MANIFEST_BYTES)) invalid();
+  if (expectedStats !== undefined && !sameIdentity(before, expectedStats)) invalid();
+  const handle = await open(
+    manifestPath,
+    fsConstants.O_RDONLY |
+      (fsConstants.O_NOFOLLOW ?? 0) |
+      fsConstants.O_NONBLOCK,
+  );
+  try {
+    const opened = await handle.stat();
+    if (!sameIdentity(before, opened)) invalid();
+    const output = Buffer.alloc(MAX_MANIFEST_BYTES + 1);
+    let offset = 0;
+    for (;;) {
+      const { bytesRead } = await handle.read(
+        output,
+        offset,
+        output.length - offset,
+        offset,
+      );
+      offset += bytesRead;
+      if (bytesRead === 0 || offset === output.length) break;
+    }
+    const after = await handle.stat();
+    const pathnameAfter = await lstat(manifestPath);
+    if (
+      offset !== before.size ||
+      offset === 0 ||
+      offset > MAX_MANIFEST_BYTES ||
+      !sameIdentity(before, after) ||
+      !sameIdentity(before, pathnameAfter)
+    ) {
+      invalid();
+    }
+    const bytes = Buffer.from(output.subarray(0, offset));
+    const text = bytes.toString("utf8");
+    if (Buffer.byteLength(text, "utf8") !== bytes.length) invalid();
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      invalid();
+    }
+    if (!durableBytes(parsed).equals(bytes)) invalid();
+    return Object.freeze({
+      bytes,
+      manifest: validateLaunchManifest(parsed),
+      stats: before,
+    });
+  } finally {
+    await handle.close();
+  }
 }
 
 function assertManifestUnexpired(manifest) {
@@ -506,10 +820,8 @@ async function sealApprovedClaim({
   repositorySha,
   stateRoot,
 }) {
-  await assertManifestPinned({ expected: manifestStats, manifestPath });
-  const manifest = await readLaunchManifest(manifestPath);
-  const rawManifestBytes = await readFile(manifestPath);
-  await assertManifestPinned({ expected: manifestStats, manifestPath });
+  const { bytes: rawManifestBytes, manifest } =
+    await readPinnedLaunchManifest(manifestPath, manifestStats);
   if (
     manifest.role !== "payee" ||
     manifest.repositorySha !== repositorySha ||
@@ -534,7 +846,10 @@ async function sealApprovedClaim({
       repositorySha,
     }),
   });
-  const journal = await readJournal(stateRoot, repositorySha);
+  const journal = await readJournal(stateRoot, repositorySha, {
+    operatorKeyId,
+    operatorPublicKey: createPublicKey(operatorPrivateKey),
+  });
   const existing = journal.claims[claimFingerprint];
   if (existing?.sealedResponse !== undefined) {
     return existing.sealedResponse;
@@ -566,6 +881,7 @@ export function createBootstrapBroker(input) {
   let capability;
   let manifestStats;
   let operatorPrivateKey;
+  let operatorPublicKey;
 
   return Object.freeze({
     async start() {
@@ -573,9 +889,10 @@ export function createBootstrapBroker(input) {
       await ensurePrivateRoot(stateRoot);
       capability = await readCapability(capabilityFile);
       operatorPrivateKey = await readOperatorPrivateKey(operatorPrivateKeyPath);
-      manifestStats = await lstat(manifestPath);
-      if (!privateRegular(manifestStats)) invalid();
-      const manifest = await readLaunchManifest(manifestPath);
+      operatorPublicKey = createPublicKey(operatorPrivateKey);
+      const snapshot = await readPinnedLaunchManifest(manifestPath);
+      manifestStats = snapshot.stats;
+      const manifest = snapshot.manifest;
       if (
         manifest.role !== "payee" ||
         manifest.repositorySha !== repositoryShaValue ||
@@ -586,7 +903,10 @@ export function createBootstrapBroker(input) {
       assertManifestUnexpired(manifest);
       await writeJournal(
         stateRoot,
-        await readJournal(stateRoot, repositoryShaValue),
+        await readJournal(stateRoot, repositoryShaValue, {
+          operatorKeyId,
+          operatorPublicKey,
+        }),
       );
       server = http.createServer(async (request, response) => {
         try {
@@ -606,58 +926,70 @@ export function createBootstrapBroker(input) {
             safeHttpError(response, 400);
             return;
           }
-          const claimFingerprint = bootstrapClaimFingerprint(claim);
-          const journal = await readJournal(stateRoot, repositoryShaValue);
-          const fingerprints = Object.keys(journal.claims);
-          const existing = journal.claims[claimFingerprint];
-          if (
-            existing === undefined &&
-            fingerprints.length > 0
-          ) {
-            safeHttpError(response, 409);
-            return;
-          }
-          if (existing === undefined) {
-            journal.claims[claimFingerprint] = {
-              claim,
-              claimDigest: claimFingerprint,
-              claimFingerprint,
-              paymentMoved: false,
-              status: "PENDING_APPROVAL",
-            };
-            await writeJournal(stateRoot, journal);
-            writeHttpJson(response, 202, pendingResponse({
-              claimFingerprint,
-              repositorySha: repositoryShaValue,
-            }));
-            return;
-          }
-          if (sha256(stable(existing.claim)) !== claimFingerprint) {
-            safeHttpError(response, 409);
-            return;
-          }
-          if (existing.sealedResponse !== undefined) {
-            writeHttpJson(response, 200, existing.sealedResponse);
-            return;
-          }
-          if (existing.status !== "APPROVED") {
-            writeHttpJson(response, 202, pendingResponse({
-              claimFingerprint,
-              repositorySha: repositoryShaValue,
-            }));
-            return;
-          }
-          const sealed = await sealApprovedClaim({
-            claim,
-            claimFingerprint,
-            manifestPath,
-            manifestStats,
-            operatorKeyId,
-            operatorPrivateKey,
-            repositorySha: repositoryShaValue,
-            stateRoot,
+          await withStateMutex(stateRoot, async () => {
+            const claimFingerprint = bootstrapClaimFingerprint(claim);
+            const journal = await readJournal(stateRoot, repositoryShaValue, {
+              operatorKeyId,
+              operatorPublicKey,
+            });
+            const fingerprints = Object.keys(journal.claims);
+            const existing = journal.claims[claimFingerprint];
+            if (
+              existing === undefined &&
+              fingerprints.length > 0
+            ) {
+              safeHttpError(response, 409);
+              return;
+            }
+            if (existing === undefined) {
+              journal.claims[claimFingerprint] = {
+                claim,
+                claimDigest: claimFingerprint,
+                claimFingerprint,
+                paymentMoved: false,
+                status: "PENDING_APPROVAL",
+              };
+              await writeJournal(stateRoot, journal);
+              writeHttpJson(response, 202, pendingResponse({
+                claimFingerprint,
+                repositorySha: repositoryShaValue,
+              }));
+              return;
+            }
+            if (existing.sealedResponse !== undefined) {
+              writeHttpJson(response, 200, existing.sealedResponse);
+              return;
+            }
+            if (existing.status !== "APPROVED") {
+              writeHttpJson(response, 202, pendingResponse({
+                claimFingerprint,
+                repositorySha: repositoryShaValue,
+              }));
+              return;
+            }
+            const sealed = await withSealLock(stateRoot, async () => {
+              const lockedJournal = await readJournal(stateRoot, repositoryShaValue, {
+                operatorKeyId,
+                operatorPublicKey,
+              });
+              const lockedExisting = lockedJournal.claims[claimFingerprint];
+              if (lockedExisting?.sealedResponse !== undefined) {
+                return lockedExisting.sealedResponse;
+              }
+              if (lockedExisting?.status !== "APPROVED") invalid();
+              return sealApprovedClaim({
+                claim,
+                claimFingerprint,
+                manifestPath,
+                manifestStats,
+                operatorKeyId,
+                operatorPrivateKey,
+                repositorySha: repositoryShaValue,
+                stateRoot,
+              });
+            });
+            writeHttpJson(response, 200, sealed);
           });
-          writeHttpJson(response, 200, sealed);
         } catch {
           safeHttpError(response, 400);
         }

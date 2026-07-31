@@ -255,6 +255,45 @@ test("broker keeps public claims pending until exact fingerprint approval then r
   assert.doesNotMatch(journalBytes, new RegExp(CAPABILITY));
 });
 
+test("broker serializes concurrent approved claims to one byte-identical sealed response", async (t) => {
+  const root = await privateRoot(t);
+  const stateRoot = join(root, "state");
+  const capabilityFile = await writeCapability(root);
+  const operator = await operatorFixture(root);
+  const { manifestPath } = await manifestFixture(t, root);
+  const requestor = createRequestorBootstrapKey();
+  const broker = createBootstrapBroker({
+    capabilityFile,
+    host: "127.0.0.1",
+    manifestPath,
+    operatorKeyId: OPERATOR_KEY_ID,
+    operatorPrivateKeyPath: operator.operatorPrivateKeyPath,
+    port: 0,
+    repositorySha: REPOSITORY_SHA,
+    stateRoot,
+  });
+  const listening = await broker.start();
+  t.after(() => broker.stop());
+
+  const exactClaim = claim(requestor.publicKey);
+  const pending = await postJson(listening.url, exactClaim);
+  assert.equal(pending.status, 202);
+  await approveBootstrapClaim({
+    claimFingerprint: JSON.parse(pending.body).claimFingerprint,
+    stateRoot,
+  });
+
+  const responses = await Promise.all(
+    Array.from({ length: 30 }, () => postJson(listening.url, exactClaim)),
+  );
+  assert.deepEqual(
+    responses.map((response) => response.status),
+    Array.from({ length: 30 }, () => 200),
+  );
+  assert.equal(new Set(responses.map((response) => response.body)).size, 1);
+  assertOperatorSignature(JSON.parse(responses[0].body), operator.publicKey);
+});
+
 test("broker fails closed on alternate key, malformed claim, wrong SHA, auth failure, duplicate JSON key, and unsafe manifest path", async (t) => {
   const root = await privateRoot(t);
   const stateRoot = join(root, "state");
@@ -422,4 +461,104 @@ test("broker rejects expired, wrong-role, wrong-SHA, wrong-mode, changed, and wr
   });
   await writeFile(changedManifest, await readFile(changedManifest), { mode: 0o600 });
   assert.equal((await postJson(changedListening.url, claim(requestor.publicKey))).status, 400);
+});
+
+test("broker rejects corrupted journal claims, digests, sealed responses, and signatures before serving", async (t) => {
+  const root = await privateRoot(t);
+  const stateRoot = join(root, "state");
+  const capabilityFile = await writeCapability(root);
+  const operator = await operatorFixture(root);
+  const { manifestPath } = await manifestFixture(t, root);
+  const requestor = createRequestorBootstrapKey();
+  const exactClaim = claim(requestor.publicKey);
+
+  async function readyBroker(prefix) {
+    const caseRoot = await privateRoot(t, prefix);
+    const caseState = join(caseRoot, "state");
+    const caseCapability = await writeCapability(caseRoot);
+    const caseOperator = await operatorFixture(caseRoot);
+    const { manifestPath: caseManifest } = await manifestFixture(t, caseRoot);
+    const caseBroker = createBootstrapBroker({
+      capabilityFile: caseCapability,
+      host: "127.0.0.1",
+      manifestPath: caseManifest,
+      operatorKeyId: OPERATOR_KEY_ID,
+      operatorPrivateKeyPath: caseOperator.operatorPrivateKeyPath,
+      port: 0,
+      repositorySha: REPOSITORY_SHA,
+      stateRoot: caseState,
+    });
+    const listening = await caseBroker.start();
+    t.after(() => caseBroker.stop());
+    const pending = await postJson(listening.url, exactClaim);
+    const { claimFingerprint } = JSON.parse(pending.body);
+    await approveBootstrapClaim({ claimFingerprint, stateRoot: caseState });
+    const sealed = await postJson(listening.url, exactClaim);
+    assert.equal(sealed.status, 200);
+    return {
+      claimFingerprint,
+      journalPath: join(caseState, "bootstrap-broker-journal.json"),
+      listening,
+    };
+  }
+
+  for (const [name, mutate] of [
+    ["claim digest", (journal, fingerprint) => {
+      journal.claims[fingerprint].claimDigest = "0".repeat(64);
+    }],
+    ["sealed digest", (journal, fingerprint) => {
+      journal.claims[fingerprint].sealedResponseDigest = "1".repeat(64);
+    }],
+    ["signature", (journal, fingerprint) => {
+      journal.claims[fingerprint].sealedResponse.signature.value =
+        Buffer.alloc(64, 7).toString("base64");
+    }],
+    ["context", (journal, fingerprint) => {
+      journal.claims[fingerprint].sealedResponse.context.releaseId = "tampered";
+    }],
+    ["status", (journal, fingerprint) => {
+      journal.claims[fingerprint].status = "APPROVED";
+    }],
+  ]) {
+    const fixture = await readyBroker(`bootstrap-broker-journal-${name.replaceAll(" ", "-")}-`);
+    const journal = JSON.parse(await readFile(fixture.journalPath, "utf8"));
+    mutate(journal, fixture.claimFingerprint);
+    await writeFile(
+      fixture.journalPath,
+      Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(journal)), "utf8"),
+      { mode: 0o600 },
+    );
+    assert.equal(
+      (await postJson(fixture.listening.url, exactClaim)).status,
+      400,
+      name,
+    );
+  }
+
+  const broker = createBootstrapBroker({
+    capabilityFile,
+    host: "127.0.0.1",
+    manifestPath,
+    operatorKeyId: OPERATOR_KEY_ID,
+    operatorPrivateKeyPath: operator.operatorPrivateKeyPath,
+    port: 0,
+    repositorySha: REPOSITORY_SHA,
+    stateRoot,
+  });
+  const listening = await broker.start();
+  t.after(() => broker.stop());
+  const pending = await postJson(listening.url, exactClaim);
+  const { claimFingerprint } = JSON.parse(pending.body);
+  const journalPath = join(stateRoot, "bootstrap-broker-journal.json");
+  const journal = JSON.parse(await readFile(journalPath, "utf8"));
+  delete journal.claims[claimFingerprint].claim;
+  await writeFile(
+    journalPath,
+    Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(journal)), "utf8"),
+    { mode: 0o600 },
+  );
+  await assert.rejects(
+    approveBootstrapClaim({ claimFingerprint, stateRoot }),
+    { code: "REQUESTOR_BOOTSTRAP_BROKER_INVALID" },
+  );
 });
