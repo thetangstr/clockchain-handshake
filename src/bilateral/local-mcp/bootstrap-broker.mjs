@@ -698,7 +698,11 @@ function authorize(request, capability) {
   return timingSafeEqual(Buffer.from(supplied, "hex"), Buffer.from(capability, "hex"));
 }
 
-async function readPinnedLaunchManifest(manifestPath, expectedStats = undefined) {
+async function readPinnedLaunchManifest(
+  manifestPath,
+  expectedStats = undefined,
+  networkOptions = undefined,
+) {
   const before = await lstat(manifestPath);
   if (!privateRegular(before, MAX_MANIFEST_BYTES)) invalid();
   if (expectedStats !== undefined && !sameIdentity(before, expectedStats)) invalid();
@@ -746,7 +750,10 @@ async function readPinnedLaunchManifest(manifestPath, expectedStats = undefined)
     if (!durableBytes(parsed).equals(bytes)) invalid();
     return Object.freeze({
       bytes,
-      manifest: validateLaunchManifest(parsed),
+      manifest: validateLaunchManifest(
+        parsed,
+        networkOptions,
+      ),
       stats: before,
     });
   } finally {
@@ -800,13 +807,18 @@ async function sealApprovedClaim({
   claimFingerprint,
   manifestPath,
   manifestStats,
+  networkOptions,
   operatorKeyId,
   operatorPrivateKey,
   repositorySha,
   stateRoot,
 }) {
   const { bytes: rawManifestBytes, manifest } =
-    await readPinnedLaunchManifest(manifestPath, manifestStats);
+    await readPinnedLaunchManifest(
+      manifestPath,
+      manifestStats,
+      networkOptions,
+    );
   if (
     manifest.role !== "payee" ||
     manifest.repositorySha !== repositorySha ||
@@ -849,7 +861,22 @@ async function sealApprovedClaim({
   return response;
 }
 
-export function createBootstrapBroker(input) {
+export function createBootstrapBroker(
+  input,
+  dependencies,
+) {
+  const networkOptions =
+    dependencies === undefined
+      ? Object.freeze({
+          allowTestAddresses: false,
+        })
+      : exactDataObject(
+          dependencies,
+          ["allowTestAddresses"],
+        );
+  if (typeof networkOptions.allowTestAddresses !== "boolean") {
+    invalid();
+  }
   const config = exactDataObject(input, CREATE_KEYS);
   const host = loopbackHost(config.host);
   const manifestPath = absolutePath(config.manifestPath);
@@ -875,7 +902,12 @@ export function createBootstrapBroker(input) {
       capability = await readCapability(capabilityFile);
       operatorPrivateKey = await readOperatorPrivateKey(operatorPrivateKeyPath);
       operatorPublicKey = createPublicKey(operatorPrivateKey);
-      const snapshot = await readPinnedLaunchManifest(manifestPath);
+      const snapshot =
+        await readPinnedLaunchManifest(
+          manifestPath,
+          undefined,
+          networkOptions,
+        );
       manifestStats = snapshot.stats;
       const manifest = snapshot.manifest;
       if (
@@ -967,6 +999,7 @@ export function createBootstrapBroker(input) {
                 claimFingerprint,
                 manifestPath,
                 manifestStats,
+                networkOptions,
                 operatorKeyId,
                 operatorPrivateKey,
                 repositorySha: repositoryShaValue,

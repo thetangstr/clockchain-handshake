@@ -20,13 +20,25 @@ import { createRoleSupervisor } from "../../src/bilateral/coordination/superviso
 import { createGitInspector, createProductionSupervisorDependencies } from "../../src/bilateral/coordination/supervisor-runtime.mjs";
 import { createCoordinatorRuntimeDependencies, loadOrCreateCoordinatorRelease, parseCoordinatorArguments, readCoordinatorRuntimeConfig } from "../../src/bilateral/coordination/coordinator-runtime.mjs";
 import { runCoordinator as runProductionCoordinator } from "../../src/bilateral/coordination/coordinator.mjs";
+import {
+  createLaunchManifest,
+  readLaunchManifest,
+  writeLaunchManifest,
+} from "../../src/bilateral/coordination/manifest.mjs";
 import { validateRelayArtifactWithFacts } from "../../src/bilateral/coordination/artifact.mjs";
 import {
   approveBootstrapClaim,
   BOOTSTRAP_BROKER_JOURNAL_FILE,
   createBootstrapBroker,
 } from "../../src/bilateral/local-mcp/bootstrap-broker.mjs";
-import { createSignedRequestorDiscovery } from "../../scripts/publish-requestor-discovery.mjs";
+import {
+  requestBootstrapThroughPayerMcp,
+  requestPaymentThroughPayerMcp,
+} from "../../src/bilateral/local-mcp/client.mjs";
+import {
+  createSignedRequestorDiscovery,
+  REQUESTOR_DISCOVERY_SCHEMA,
+} from "../../scripts/publish-requestor-discovery.mjs";
 import { main as proposeMain } from "../../bin/handshake-propose.mjs";
 import { main as acceptMain } from "../../bin/handshake-accept.mjs";
 import { main as requestPaymentMain } from "../../bin/handshake-request-payment.mjs";
@@ -537,6 +549,7 @@ async function runSupervisorRole(value, role) {
   const createDependencies = async (launchManifestPath) => {
     if (!absolute(launchManifestPath)) fail();
     const production = await createProductionSupervisorDependencies({
+      allowTestAddresses: true,
       launchManifestPath,
       ...(configuration.payerMcpServer === null ? {} : { payerMcpServerOptions: configuration.payerMcpServer }),
       repositoryRoot: configuration.repositoryRoot,
@@ -640,6 +653,15 @@ async function runSupervisorRole(value, role) {
       },
       async readOperatorPublicKey(repositorySha, keyId) {
         return inspector.operatorKey(repositorySha, keyId);
+      },
+      async readLaunchManifest(path) {
+        return readLaunchManifest(path, undefined, { allowTestAddresses: true });
+      },
+      async requestBootstrap(input) {
+        return requestBootstrapThroughPayerMcp(input, { allowTestAddresses: true });
+      },
+      async requestPayment(input) {
+        return requestPaymentThroughPayerMcp(input, { allowTestAddresses: true });
       },
       nowMs: () => configuration.clockMs,
       async sleep() {
@@ -1324,6 +1346,19 @@ async function runProductionCoordinatorChild(input) {
       admittedFundingAddresses.set(address, facts);
     };
     runtime = createCoordinatorRuntimeDependencies(config, {
+      createLaunchManifest: (input) =>
+        createLaunchManifest(
+          input,
+          { allowTestAddresses: true },
+        ),
+      writeLaunchManifest:
+        (path, manifest) =>
+          writeLaunchManifest(
+            path,
+            manifest,
+            undefined,
+            { allowTestAddresses: true },
+          ),
       createFundingAdmissionClient,
       repositoryRoot: value.repositoryRoot,
       now: () => value.clockMs + (
@@ -1375,16 +1410,24 @@ async function runProductionCoordinatorChild(input) {
       } catch (error) {
         if (error?.code !== "EEXIST") throw error;
       }
-      bootstrapBroker = createBootstrapBroker({
-        capabilityFile: bootstrapBrokerCapabilityFile,
-        host: "127.0.0.1",
-        manifestPath: brokerPayeeManifestPath,
-        operatorKeyId: config.operatorIdentity.keyId,
-        operatorPrivateKeyPath: config.operatorPrivateKeyPath,
-        port: 0,
-        repositorySha: config.repositorySha,
-        stateRoot: bootstrapBrokerState,
-      });
+      bootstrapBroker = createBootstrapBroker(
+        {
+          capabilityFile:
+            bootstrapBrokerCapabilityFile,
+          host: "127.0.0.1",
+          manifestPath:
+            brokerPayeeManifestPath,
+          operatorKeyId:
+            config.operatorIdentity.keyId,
+          operatorPrivateKeyPath:
+            config.operatorPrivateKeyPath,
+          port: 0,
+          repositorySha:
+            config.repositorySha,
+          stateRoot: bootstrapBrokerState,
+        },
+        { allowTestAddresses: true },
+      );
       const bootstrapBrokerListening = await bootstrapBroker.start();
       value.payerMcp.bootstrapBroker = Object.freeze({
         capabilityFile: bootstrapBrokerCapabilityFile,
@@ -1424,15 +1467,18 @@ async function runProductionCoordinatorChild(input) {
       const requestorDiscoveryUrl = payerMcpReady.url.replace(/\/mcp$/, "/requestor-discovery.json");
       const requestorCertificateUrl = payerMcpReady.url.replace(/\/mcp$/, "/payer-mcp.crt");
       const requestorDiscovery = createSignedRequestorDiscovery({
-        certificateFingerprint: value.payerMcp.fingerprint,
-        certificateUrl: requestorCertificateUrl,
-        expiresAtMs: String(value.clockMs + 300_000),
-        operatorKeyId: config.operatorIdentity.keyId,
-        operatorPrivateKey: createPrivateKey(config.operatorIdentity.privateKeyPem),
-        publicUrl: payerMcpReady.url,
+        schema: REQUESTOR_DISCOVERY_SCHEMA,
+        paymentMoved: false,
+        imageDigest: `570035913370.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake@sha256:${"a".repeat(64)}`,
         releaseId: release.releaseId,
-        repositorySha: config.repositorySha,
         sessionId: release.sessionId,
+        repositorySha: config.repositorySha,
+        publicUrl: payerMcpReady.url,
+        certificateUrl: requestorCertificateUrl,
+        certificateFingerprint: value.payerMcp.fingerprint,
+        operatorKeyId: config.operatorIdentity.keyId,
+        expiresAtMs: String(value.clockMs + 300_000),
+        operatorPrivateKey: createPrivateKey(config.operatorIdentity.privateKeyPem),
       });
       await writeFile(join(value.children.payee.stateRoot, "requestor-discovery.json"), `${JSON.stringify(requestorDiscovery)}\n`, {
         encoding: "utf8",

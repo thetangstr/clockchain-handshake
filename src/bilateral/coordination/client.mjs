@@ -1370,6 +1370,7 @@ function createCoordinationClientCore({
   identity,
   initialState,
   launchState,
+  networkOptions,
   transport,
 }) {
   try {
@@ -1550,12 +1551,16 @@ function createCoordinationClientCore({
           invalid();
         }
         const activeLaunchState =
-          await createActiveLaunchState({
-            coordinationIdentity: identity,
-            enrollment,
-            manifest,
-            receiptBytes: authoritativeResponse,
-          });
+          await createActiveLaunchState(
+            {
+              coordinationIdentity: identity,
+              enrollment,
+              manifest,
+              receiptBytes:
+                authoritativeResponse,
+            },
+            networkOptions,
+          );
         const result = Object.freeze({
           activeLaunchState,
           receipt,
@@ -2277,11 +2282,41 @@ function createCoordinationClientCore({
   }
 }
 
-export function createCoordinationClient(input) {
+function clientNetworkOptions(
+  dependencies,
+) {
+  if (dependencies === undefined) {
+    return Object.freeze({
+      allowTestAddresses: false,
+    });
+  }
+  if (
+    !isPlainObject(dependencies) ||
+    Reflect.ownKeys(dependencies).length !== 1 ||
+    Reflect.ownKeys(dependencies)[0] !==
+      "allowTestAddresses" ||
+    typeof dependencies.allowTestAddresses !==
+      "boolean"
+  ) {
+    invalid();
+  }
+  return Object.freeze({
+    allowTestAddresses:
+      dependencies.allowTestAddresses,
+  });
+}
+
+export function createCoordinationClient(
+  input,
+  dependencies,
+) {
   try {
+    const networkOptions =
+      clientNetworkOptions(dependencies);
     const data = readExactData(input, CLIENT_KEYS);
     const manifest = validateLaunchManifest(
       data.manifest,
+      networkOptions,
     );
     const identity = validateIdentity(
       data.coordinationIdentity,
@@ -2297,6 +2332,7 @@ export function createCoordinationClient(input) {
       identity,
       initialState: validateSenderState(undefined),
       launchState: manifest,
+      networkOptions,
       transport: validateTransport(data.transport),
     });
   } catch (error) {
@@ -2309,8 +2345,11 @@ export function createCoordinationClient(input) {
 
 export async function createResumedCoordinationClient(
   input,
+  dependencies,
 ) {
   try {
+    const networkOptions =
+      clientNetworkOptions(dependencies);
     const data = readExactData(
       input,
       RESUMED_CLIENT_KEYS,
@@ -2318,6 +2357,7 @@ export async function createResumedCoordinationClient(
     const activeLaunchState =
       await validateActiveLaunchState(
         data.activeLaunchState,
+        networkOptions,
       );
     const identity = validateIdentity(
       data.coordinationIdentity,
@@ -2345,6 +2385,7 @@ export async function createResumedCoordinationClient(
         data.senderState,
       ),
       launchState: activeLaunchState,
+      networkOptions,
       transport: validateTransport(data.transport),
     });
   } catch (error) {

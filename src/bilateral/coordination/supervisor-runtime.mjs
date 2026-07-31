@@ -572,9 +572,15 @@ export async function createCoordinationIdentity({ role, stateRoot }) {
   } finally { await root.handle.close(); }
 }
 
-export function createTransport(manifestOrActive) {
+export function createTransport(
+  manifestOrActive,
+  dependencies,
+) {
   if (!manifestOrActive || typeof manifestOrActive.relayUrl !== 'string' || typeof manifestOrActive.tlsCertificatePem !== 'string') fail();
-  return createPinnedHttpsTransport({ expectedFingerprint: manifestOrActive.expectedTlsFingerprint, relayUrl: manifestOrActive.relayUrl, tlsCertificatePem: manifestOrActive.tlsCertificatePem });
+  return createPinnedHttpsTransport(
+    { expectedFingerprint: manifestOrActive.expectedTlsFingerprint, relayUrl: manifestOrActive.relayUrl, tlsCertificatePem: manifestOrActive.tlsCertificatePem },
+    dependencies,
+  );
 }
 export async function verifyRepositoryState({ repositorySha, probe }) {
   if (!/^[0-9a-f]{40}$/.test(repositorySha) || typeof probe !== 'function') fail();
@@ -654,6 +660,7 @@ export async function ensureInvitations({ capabilityDigest, releaseId, repositor
   return Object.freeze(proofs);
 }
 export async function createProductionSupervisorDependencies({
+  allowTestAddresses = false,
   createAwsRequestorBootstrapBrokerClient =
     createDefaultAwsRequestorBootstrapBrokerClient,
   createPayerMcpServer = createDefaultPayerMcpServer,
@@ -671,13 +678,17 @@ export async function createProductionSupervisorDependencies({
   sepoliaRpc,
   createSepoliaClient,
 } = {}) {
+  if (typeof allowTestAddresses !== "boolean") fail();
+  const networkOptions = Object.freeze({
+    allowTestAddresses,
+  });
   const store = await createPrivateSupervisorStateStore({ stateRoot });
   await createFixedRunDirectories(stateRoot);
   const repositoryInspector = createGitInspector(repositoryRoot);
   const checkpoint = await store.readState();
   const resumed = checkpoint !== null && checkpoint?.phase !== "LOCAL_SECRETS_READY";
-  const manifest = resumed ? null : await readLaunchManifest(launchManifestPath);
-  const active = resumed ? await validateActiveLaunchState(checkpoint.activeLaunchState) : null;
+  const manifest = resumed ? null : await readLaunchManifest(launchManifestPath, undefined, networkOptions);
+  const active = resumed ? await validateActiveLaunchState(checkpoint.activeLaunchState, networkOptions) : null;
   const scope = Object.freeze(resumed
     ? { capabilityDigest: active.capabilityDigest, ...(active.role === "payer" ? { payerMcpIntakeCapabilityDigest: active.payerMcpIntakeCapabilityDigest } : {}), releaseId: active.releaseId, repositorySha: active.repositorySha, role: active.role, sessionId: active.sessionId }
     : { capabilityDigest: createHash('sha256').update(Buffer.from(manifest.bootstrapCapability, 'hex')).digest('hex'), ...(manifest.role === "payer" ? { payerMcpIntakeCapabilityDigest: manifest.payerMcpIntakeCapabilityDigest } : {}), releaseId: manifest.releaseId, repositorySha: manifest.repositorySha, role: manifest.role, sessionId: manifest.sessionId });
@@ -837,10 +848,24 @@ export async function createProductionSupervisorDependencies({
       if (!enrollment || checked.facts.identity.address !== enrollment.invitations[context.subjectRun]?.address || checked.facts.identity.repositorySha !== context.repositorySha) fail();
       return checked;
     },
-    createTransport,
-    createCoordinationClient,
-    createResumedCoordinationClient,
-    validateActiveLaunchState,
+    createTransport: (value) =>
+      createTransport(value, networkOptions),
+    createCoordinationClient: (value) =>
+      createCoordinationClient(
+        value,
+        networkOptions,
+      ),
+    createResumedCoordinationClient:
+      (value) =>
+        createResumedCoordinationClient(
+          value,
+          networkOptions,
+        ),
+    validateActiveLaunchState: (value) =>
+      validateActiveLaunchState(
+        value,
+        networkOptions,
+      ),
     async resolveOperatorPublicKey(active) {
       if (!active || active.repositorySha !== scope.repositorySha || typeof active.operatorKeyId !== 'string') fail();
       return repositoryInspector.operatorKey(scope.repositorySha, active.operatorKeyId);

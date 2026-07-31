@@ -534,6 +534,14 @@ export function createProductionFundingWaiter({ createClient = createPublicClien
 
 export function createCoordinatorRuntimeDependencies(config, dependencies = {}) {
   if (!config || typeof config !== "object" || !config.releaseRoot?.path || !config.operatorIdentity || !SHA40.test(config.repositorySha)) fail();
+  if (
+    dependencies.createLaunchManifest !== undefined &&
+    typeof dependencies.createLaunchManifest !== "function"
+  ) fail();
+  if (
+    dependencies.writeLaunchManifest !== undefined &&
+    typeof dependencies.writeLaunchManifest !== "function"
+  ) fail();
   const transport = (dependencies.createTransport ?? createPinnedOperatorHttpsTransport)({ expectedFingerprint: config.tlsFingerprint, relayUrl: config.relayUrl, tlsCertificatePem: config.tlsCertificatePem });
   const artifactValidator = dependencies.validateArtifactWithFacts ?? validateRelayArtifactWithFacts;
   const clientFor = (release) => (dependencies.createClient ?? createOperatorRelayClient)({ operatorIdentity: config.operatorIdentity, releaseId: release.releaseId, repositorySha: config.repositorySha, sessionId: release.sessionId, transport });
@@ -566,6 +574,18 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
   const runDependencyCache = new Map();
   return Object.freeze({
     createReleaseDependencies: Object.freeze({
+      ...(dependencies.createLaunchManifest === undefined
+        ? {}
+        : {
+            createLaunchManifest:
+              dependencies.createLaunchManifest,
+          }),
+      ...(dependencies.writeLaunchManifest === undefined
+        ? {}
+        : {
+            writeLaunchManifest:
+              dependencies.writeLaunchManifest,
+          }),
       now,
       randomUUID: () => {
         const sessionId = randomUUID();

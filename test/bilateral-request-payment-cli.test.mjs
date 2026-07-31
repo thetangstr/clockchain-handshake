@@ -7,12 +7,15 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 
 import { main, REQUEST_PAYMENT_CLI_FLAGS } from "../bin/handshake-request-payment.mjs";
-import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import { createLaunchManifest } from "../src/bilateral/coordination/manifest.mjs";
 import { bootstrapClaimFingerprint } from "../src/bilateral/local-mcp/bootstrap-broker.mjs";
 import { sealRequestorBootstrapManifest } from "../src/bilateral/local-mcp/bootstrap-envelope.mjs";
 import { buildPaymentIntakeToolResult } from "../src/bilateral/local-mcp/payment-intake.mjs";
 import { canonicalizeReceiptEventValue } from "../src/canonical.mjs";
+import {
+  createSignedRequestorDiscovery,
+  REQUESTOR_DISCOVERY_SCHEMA,
+} from "../scripts/publish-requestor-discovery.mjs";
 
 const REPOSITORY_SHA = "abcdef0123456789abcdef0123456789abcdef01";
 const INTAKE_REQUEST_ID = "00000000-0000-4000-8000-000000000000";
@@ -21,6 +24,8 @@ const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const OPERATOR_KEY_ID = "operator";
 const CAPABILITY = "ab".repeat(32);
 const REPOSITORY_ROOT = resolve(new URL("../", import.meta.url).pathname);
+const IMAGE_DIGEST =
+  `570035913370.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake@sha256:${"a".repeat(64)}`;
 
 function paymentInput(intakeRequestId = INTAKE_REQUEST_ID) {
   return {
@@ -37,29 +42,21 @@ function rawEd25519PublicKey(pair) {
   return pair.publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64");
 }
 
-function signatureValue(privateKey, value) {
-  return sign(null, canonicalBytes(value), privateKey).toString("base64");
-}
-
 function signedDiscovery({ certificateFingerprint, certificateUrl, expiresAtMs, operator, publicUrl }) {
-  const unsigned = {
-    certificateFingerprint,
-    certificateUrl,
-    expiresAtMs,
-    operatorKeyId: OPERATOR_KEY_ID,
-    publicUrl,
+  return createSignedRequestorDiscovery({
+    schema: REQUESTOR_DISCOVERY_SCHEMA,
+    paymentMoved: false,
+    imageDigest: IMAGE_DIGEST,
     releaseId: RELEASE_ID,
-    repositorySha: REPOSITORY_SHA,
     sessionId: SESSION_ID,
-  };
-  return {
-    ...unsigned,
-    signature: {
-      algorithm: "ed25519",
-      keyId: OPERATOR_KEY_ID,
-      value: signatureValue(operator.privateKey, unsigned),
-    },
-  };
+    repositorySha: REPOSITORY_SHA,
+    publicUrl,
+    certificateUrl,
+    certificateFingerprint,
+    operatorKeyId: OPERATOR_KEY_ID,
+    expiresAtMs,
+    operatorPrivateKey: operator.privateKey,
+  });
 }
 
 async function fixture(t) {
@@ -656,18 +653,11 @@ test("Requestor CLI validates discovery candidate before operator-key lookup", a
 test("Requestor CLI rejects duplicate-key and noncanonical raw discovery JSON before operator key or certificate use", async (t) => {
   const fx = await fixture(t);
   for (const text of [
-    `{"certificateFingerprint":"${fx.discovery.certificateFingerprint}","certificateFingerprint":"${fx.discovery.certificateFingerprint}","certificateUrl":"${fx.discovery.certificateUrl}","expiresAtMs":"${fx.discovery.expiresAtMs}","operatorKeyId":"${OPERATOR_KEY_ID}","publicUrl":"${fx.discovery.publicUrl}","releaseId":"${RELEASE_ID}","repositorySha":"${REPOSITORY_SHA}","sessionId":"${SESSION_ID}","signature":${JSON.stringify(fx.discovery.signature)}}`,
-    JSON.stringify({
-      signature: fx.discovery.signature,
-      sessionId: SESSION_ID,
-      repositorySha: REPOSITORY_SHA,
-      releaseId: RELEASE_ID,
-      publicUrl: fx.discovery.publicUrl,
-      operatorKeyId: OPERATOR_KEY_ID,
-      expiresAtMs: fx.discovery.expiresAtMs,
-      certificateUrl: fx.discovery.certificateUrl,
-      certificateFingerprint: fx.discovery.certificateFingerprint,
-    }),
+    `${JSON.stringify(fx.discovery).replace(
+      '"paymentMoved":false',
+      '"paymentMoved":false,"paymentMoved":false',
+    )}\n`,
+    `${JSON.stringify(Object.fromEntries(Object.entries(fx.discovery).reverse()))}\n`,
   ]) {
     const calls = [];
     await assert.rejects(

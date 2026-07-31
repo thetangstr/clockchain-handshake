@@ -1201,6 +1201,7 @@ async function assertUnchangedParent(
 export async function readLaunchManifest(
   path,
   dependencies,
+  options,
 ) {
   let handle;
   let parent;
@@ -1283,7 +1284,10 @@ export async function readLaunchManifest(
       }
       invalid();
     }
-    manifest = validateLaunchManifest(parsed);
+    manifest = validateLaunchManifest(
+      parsed,
+      options,
+    );
   } catch (error) {
     failure =
       error instanceof LaunchManifestError
@@ -1318,6 +1322,7 @@ export async function writeLaunchManifest(
   path,
   value,
   dependencies,
+  options,
 ) {
   let fileHandle;
   let parent;
@@ -1329,7 +1334,10 @@ export async function writeLaunchManifest(
   try {
     fileSystem = readFileSystem(dependencies);
     const normalizedPath = normalizePath(path);
-    const manifest = validateLaunchManifest(value);
+    const manifest = validateLaunchManifest(
+      value,
+      options,
+    );
     const bytes = stableBytes(manifest);
     if (
       bytes.length === 0 ||
