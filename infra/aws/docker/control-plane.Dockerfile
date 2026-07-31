@@ -10,6 +10,7 @@ WORKDIR /opt/clockchain/source
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY . .
+RUN npm ci --prefix infra/aws --omit=dev --ignore-scripts
 
 RUN test -n "$REPOSITORY_SHA" \
     && test "$(git rev-parse HEAD)" = "$REPOSITORY_SHA" \

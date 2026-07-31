@@ -11,7 +11,8 @@ WORKDIR /opt/clockchain/source
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY . .
-RUN cp infra/aws/docker/sshd_config /etc/ssh/clockchain_sshd_config
+RUN npm ci --prefix infra/aws --omit=dev --ignore-scripts \
+    && cp infra/aws/docker/sshd_config /etc/ssh/clockchain_sshd_config
 
 RUN test -n "$REPOSITORY_SHA" \
     && test "$(git rev-parse HEAD)" = "$REPOSITORY_SHA" \
@@ -25,4 +26,4 @@ RUN test -n "$REPOSITORY_SHA" \
 ENV NODE_ENV=production
 EXPOSE 2222 9443 8080
 VOLUME ["/run/clockchain"]
-CMD ["node", "scripts/run-aws-tunnel-service.mjs"]
+CMD ["node", "infra/aws/runtime/tunnel-entrypoint.mjs"]

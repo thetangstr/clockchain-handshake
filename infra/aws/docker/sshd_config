@@ -1,6 +1,6 @@
 Port 2222
 Protocol 2
-HostKey /run/secrets/ssh_host_ed25519_key
+HostKey /run/clockchain/ssh_host_ed25519_key
 PidFile /run/clockchain/sshd.pid
 AuthorizedKeysFile /run/clockchain/authorized_keys
 PasswordAuthentication no

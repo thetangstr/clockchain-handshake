@@ -34,6 +34,9 @@ test("tunnel image is Node 22, non-root, nologin, fixed-port, and read-only-root
   const dockerfile = read(
     "infra/aws/docker/tunnel.Dockerfile",
   );
+  const config = read(
+    "infra/aws/docker/sshd_config",
+  );
   assert.match(dockerfile, /^FROM node:22-/m);
   assert.match(
     dockerfile,
@@ -41,6 +44,18 @@ test("tunnel image is Node 22, non-root, nologin, fixed-port, and read-only-root
   );
   assert.match(dockerfile, /^EXPOSE 2222 9443 8080$/m);
   assert.match(dockerfile, /^VOLUME \["\/run\/clockchain"\]$/m);
+  assert.match(
+    dockerfile,
+    /npm ci --prefix infra\/aws --omit=dev --ignore-scripts/,
+  );
+  assert.match(
+    dockerfile,
+    /^CMD \["node", "infra\/aws\/runtime\/tunnel-entrypoint\.mjs"\]$/m,
+  );
+  assert.match(
+    config,
+    /^HostKey \/run\/clockchain\/ssh_host_ed25519_key$/m,
+  );
   assert.equal(/COPY .*?(?:\.key|secret|token|keystore)/i.test(dockerfile), false);
 });
 
