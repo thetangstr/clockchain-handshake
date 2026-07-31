@@ -82,6 +82,19 @@ function fixture(result = summary()) {
   };
 }
 
+function coercibleString(value, calls) {
+  return {
+    get toString() {
+      calls.count += 1;
+      return () => value;
+    },
+    valueOf() {
+      calls.count += 1;
+      return value;
+    },
+  };
+}
+
 test("runs one four-address Sepolia batch with a Secrets Manager password and confirmed exact receipts", async () => {
   const fx = fixture();
   const result = await runAwsFundingTask(
@@ -127,10 +140,128 @@ test("runs one four-address Sepolia batch with a Secrets Manager password and co
   );
 });
 
-test("rejects partial, adopted, duplicate, wrong-value, wrong-treasury, and non-false summaries", async () => {
+test("rejects object-valued summary regex fields without invoking string coercion hooks", async () => {
+  const cases = [
+    (value) => summary({ batchId: value }),
+    (value) =>
+      summary({
+        transfers: summary().transfers.map(
+          (transfer, index) =>
+            index === 0
+              ? { ...transfer, address: value }
+              : transfer,
+        ),
+      }),
+    (value) =>
+      summary({
+        transfers: summary().transfers.map(
+          (transfer, index) =>
+            index === 0
+              ? {
+                  ...transfer,
+                  fundingNonce: value,
+                }
+              : transfer,
+        ),
+      }),
+    (value) =>
+      summary({
+        transfers: summary().transfers.map(
+          (transfer, index) =>
+            index === 0
+              ? {
+                  ...transfer,
+                  transactionHash: value,
+                }
+              : transfer,
+        ),
+      }),
+    (value) =>
+      summary({
+        adopted: [
+          value,
+          RECIPIENTS[1],
+          RECIPIENTS[2],
+          RECIPIENTS[3],
+        ],
+      }),
+  ];
+  const values = [
+    "b".repeat(64),
+    RECIPIENTS[0],
+    "7",
+    `0x${"1".repeat(64)}`,
+    RECIPIENTS[0],
+  ];
+  for (const [index, makeSummary] of cases.entries()) {
+    const calls = { count: 0 };
+    await assert.rejects(
+      runAwsFundingTask(
+        input(),
+        fixture(
+          makeSummary(
+            coercibleString(values[index], calls),
+          ),
+        ).dependencies,
+      ),
+      /AWS funding task failed safely/,
+    );
+    assert.equal(calls.count, 0);
+  }
+});
+
+test("accepts completed journal-backed funding replay without changing the FUNDED result", async () => {
+  const first = await runAwsFundingTask(
+    input(),
+    fixture(summary()).dependencies,
+  );
+  const replay = await runAwsFundingTask(
+    input(),
+    fixture(
+      summary({
+        adopted: RECIPIENTS,
+      }),
+    ).dependencies,
+  );
+  assert.deepEqual(replay, first);
+  assert.deepEqual(replay, {
+    batchId: "b".repeat(64),
+    paymentMoved: false,
+    status: "FUNDED",
+    transactionHashes: summary().transfers.map(
+      ({ transactionHash }) => transactionHash,
+    ),
+  });
+});
+
+test("rejects partial, unsafe adopted, duplicate, wrong-value, wrong-treasury, malformed hash, and non-false summaries", async () => {
   const hostile = [
     summary({ transfers: summary().transfers.slice(0, 3) }),
     summary({ adopted: [RECIPIENTS[0]] }),
+    summary({
+      adopted: RECIPIENTS,
+      transfers: [],
+    }),
+    summary({
+      adopted: RECIPIENTS,
+      transfers: summary().transfers.slice(0, 3),
+    }),
+    summary({
+      adopted: [
+        RECIPIENTS[0],
+        RECIPIENTS[0],
+        RECIPIENTS[1],
+        RECIPIENTS[2],
+      ],
+    }),
+    summary({
+      adopted: [
+        RECIPIENTS[0],
+        RECIPIENTS[1],
+        RECIPIENTS[2],
+        "0x5555555555555555555555555555555555555555",
+      ],
+    }),
     summary({
       transfers: summary().transfers.map(
         (transfer, index) =>
@@ -147,6 +278,17 @@ test("rejects partial, adopted, duplicate, wrong-value, wrong-treasury, and non-
         (transfer, index) =>
           index === 2
             ? { ...transfer, valueWei: "1" }
+            : transfer,
+      ),
+    }),
+    summary({
+      transfers: summary().transfers.map(
+        (transfer, index) =>
+          index === 3
+            ? {
+                ...transfer,
+                transactionHash: `0x${"g".repeat(64)}`,
+              }
             : transfer,
       ),
     }),

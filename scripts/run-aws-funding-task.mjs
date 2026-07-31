@@ -103,13 +103,25 @@ function absolutePath(value) {
   return value;
 }
 
+function stringMatching(value, pattern) {
+  if (
+    typeof value !== "string" ||
+    !pattern.test(value)
+  ) {
+    fail();
+  }
+  return value;
+}
+
 function validateInput(value) {
   const input = exact(value, INPUT_KEYS);
   if (
-    !ADDRESS.test(
+    stringMatching(
       input.expectedTreasuryAddress,
-    ) ||
-    !SHA40.test(input.repositorySha) ||
+      ADDRESS,
+    ) !== input.expectedTreasuryAddress ||
+    stringMatching(input.repositorySha, SHA40) !==
+      input.repositorySha ||
     typeof input.secretId !== "string" ||
     input.secretId.length === 0 ||
     input.secretId.length > 256
@@ -142,10 +154,13 @@ function validateSummary(value, input) {
         input.journalDirectory,
         "funding-journal.json",
       ) ||
-    !SHA64.test(summary.batchId) ||
-    !SHA64.test(summary.rpcEndpointSha256) ||
+    stringMatching(summary.batchId, SHA64) !==
+      summary.batchId ||
+    stringMatching(
+      summary.rpcEndpointSha256,
+      SHA64,
+    ) !== summary.rpcEndpointSha256 ||
     !Array.isArray(summary.adopted) ||
-    summary.adopted.length !== 0 ||
     !Array.isArray(summary.transfers) ||
     summary.transfers.length !== 4
   ) {
@@ -165,10 +180,19 @@ function validateSummary(value, input) {
       TRANSFER_KEYS,
     );
     if (
-      !ADDRESS.test(transfer.address) ||
+      stringMatching(
+        transfer.address,
+        ADDRESS,
+      ) !== transfer.address ||
       addresses.has(transfer.address) ||
-      !DECIMAL.test(transfer.fundingNonce) ||
-      !HASH.test(transfer.transactionHash) ||
+      stringMatching(
+        transfer.fundingNonce,
+        DECIMAL,
+      ) !== transfer.fundingNonce ||
+      stringMatching(
+        transfer.transactionHash,
+        HASH,
+      ) !== transfer.transactionHash ||
       hashes.has(transfer.transactionHash) ||
       transfer.valueWei !== TARGET_WEI
     ) {
@@ -188,6 +212,31 @@ function validateSummary(value, input) {
     transactionHashes.push(
       transfer.transactionHash,
     );
+  }
+  if (
+    !(
+      summary.adopted.length === 0 ||
+      summary.adopted.length === 4
+    )
+  ) {
+    fail();
+  }
+  const adopted = new Set();
+  for (const address of summary.adopted) {
+    if (
+      stringMatching(address, ADDRESS) !== address ||
+      adopted.has(address) ||
+      !addresses.has(address)
+    ) {
+      fail();
+    }
+    adopted.add(address);
+  }
+  if (
+    adopted.size !== 0 &&
+    adopted.size !== addresses.size
+  ) {
+    fail();
   }
   return Object.freeze({
     batchId: summary.batchId,
