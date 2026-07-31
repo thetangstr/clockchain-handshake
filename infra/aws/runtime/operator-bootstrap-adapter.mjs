@@ -109,6 +109,16 @@ function exact(value, keys) {
   ) {
     fail();
   }
+  for (const key of keys) {
+    const descriptor =
+      Object.getOwnPropertyDescriptor(value, key);
+    if (
+      descriptor?.enumerable !== true ||
+      !Object.hasOwn(descriptor, "value")
+    ) {
+      fail();
+    }
+  }
   return value;
 }
 

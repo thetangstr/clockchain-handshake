@@ -8,6 +8,7 @@ import {
 import {
   chmodSync,
   linkSync,
+  lstatSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -308,6 +309,10 @@ test("approves and seals a Payer claim with an atomic grant that exposes no oper
   const grantBytes = readFileSync(
     fx.config.tunnelGrantPath,
   );
+  assert.equal(
+    lstatSync(fx.config.tunnelGrantPath).mode & 0o777,
+    0o600,
+  );
   const grant = validateTunnelGrantRecord(
     JSON.parse(grantBytes.toString("utf8")),
   );
@@ -331,6 +336,34 @@ test("approves and seals a Payer claim with an atomic grant that exposes no oper
   ]) {
     assert.equal(serialized.includes(secret), false);
   }
+});
+
+test("rejects config keys that are not enumerable own data properties without invoking accessors", async () => {
+  const fx = await fixture();
+  const hidden = { ...fx.config };
+  Object.defineProperty(hidden, "releaseId", {
+    enumerable: false,
+    value: RELEASE_ID,
+  });
+  assert.throws(
+    () => createAwsOperatorBootstrapAdapter(hidden),
+    /AWS operator bootstrap adapter failed safely/,
+  );
+
+  let accessed = false;
+  const accessor = { ...fx.config };
+  Object.defineProperty(accessor, "repositorySha", {
+    enumerable: true,
+    get() {
+      accessed = true;
+      return REPOSITORY_SHA;
+    },
+  });
+  assert.throws(
+    () => createAwsOperatorBootstrapAdapter(accessor),
+    /AWS operator bootstrap adapter failed safely/,
+  );
+  assert.equal(accessed, false);
 });
 
 test("approves and seals a Requestor claim using payee role without writing a tunnel grant", async () => {
@@ -384,7 +417,7 @@ test("approves and seals a Requestor claim using payee role without writing a tu
   );
 });
 
-test("adopts a sealed Payer grant on restart and rejects changed grant retries", async () => {
+test("adopts a sealed Payer grant on restart and rejects missing, malformed, symlink, hardlink, and changed grants", async () => {
   const claim = payerClaim();
   const claimFingerprint =
     payerBootstrapClaimFingerprint(claim);
@@ -418,6 +451,54 @@ test("adopts a sealed Payer grant on restart and rejects changed grant retries",
   await assert.rejects(
     createAwsOperatorBootstrapAdapter(
       fx.config,
+    ).approveAndSeal(input),
+    /AWS operator bootstrap adapter failed safely/,
+  );
+
+  const missing = await fixture({
+    claims: [{ claim, role: "payer" }],
+  });
+  await missing.adapter.approveAndSeal(input);
+  rmSync(missing.config.tunnelGrantPath);
+  await assert.rejects(
+    createAwsOperatorBootstrapAdapter(
+      missing.config,
+    ).approveAndSeal(input),
+    /AWS operator bootstrap adapter failed safely/,
+  );
+
+  const malformed = await fixture({
+    claims: [{ claim, role: "payer" }],
+  });
+  await malformed.adapter.approveAndSeal(input);
+  writeFileSync(
+    malformed.config.tunnelGrantPath,
+    "{\"paymentMoved\":false}",
+    { mode: 0o600 },
+  );
+  await assert.rejects(
+    createAwsOperatorBootstrapAdapter(
+      malformed.config,
+    ).approveAndSeal(input),
+    /AWS operator bootstrap adapter failed safely/,
+  );
+
+  const symlink = await fixture({
+    claims: [{ claim, role: "payer" }],
+  });
+  await symlink.adapter.approveAndSeal(input);
+  const symlinkTarget = `${symlink.config.tunnelGrantPath}.target`;
+  writeFileSync(symlinkTarget, grantBytes, {
+    mode: 0o600,
+  });
+  rmSync(symlink.config.tunnelGrantPath);
+  symlinkSync(
+    symlinkTarget,
+    symlink.config.tunnelGrantPath,
+  );
+  await assert.rejects(
+    createAwsOperatorBootstrapAdapter(
+      symlink.config,
     ).approveAndSeal(input),
     /AWS operator bootstrap adapter failed safely/,
   );
