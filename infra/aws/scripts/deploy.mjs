@@ -63,6 +63,7 @@ function validOperatorPublicKey(value) {
 
 export function createDeploymentPlan({
   account = DEFAULT_ACCOUNT,
+  activateServices = false,
   bootstrapBrokerCapabilityDigest,
   controlPlaneImage,
   operatorPublicKey,
@@ -76,6 +77,11 @@ export function createDeploymentPlan({
   sourceTreeSha256,
   tunnelImage,
 }) {
+  if (typeof activateServices !== "boolean") {
+    throw new Error(
+      "Service activation must be a boolean.",
+    );
+  }
   required(account, /^[0-9]{12}$/, "AWS account");
   required(
     region,
@@ -164,6 +170,7 @@ export function createDeploymentPlan({
   }
   return {
     account,
+    activateServices,
     bootstrapBrokerCapabilityDigest,
     controlPlaneImage,
     legacyInfrastructure: {
@@ -193,6 +200,8 @@ export function createDeploymentContexts(plan) {
     "utf8",
   ).toString("base64");
   return [
+    "-c",
+    `activateServices=${plan.activateServices}`,
     "-c",
     `repositorySha=${plan.repositorySha}`,
     "-c",
@@ -311,6 +320,17 @@ async function main() {
     process.env.OPERATOR_PUBLIC_KEY;
   const sourceTreeSha256 =
     process.env.SOURCE_TREE_SHA256;
+  const activateServicesInput =
+    process.env.ACTIVATE_SERVICES;
+  if (
+    activateServicesInput !== undefined &&
+    activateServicesInput !== "true" &&
+    activateServicesInput !== "false"
+  ) {
+    throw new Error(
+      "ACTIVATE_SERVICES must be exactly true or false.",
+    );
+  }
   if (
     typeof controlPlaneImage !== "string" ||
     typeof tunnelImage !== "string"
@@ -320,6 +340,8 @@ async function main() {
     );
   }
   const plan = createDeploymentPlan({
+    activateServices:
+      activateServicesInput === "true",
     controlPlaneImage,
     repositorySha,
     bootstrapBrokerCapabilityDigest,
@@ -366,6 +388,8 @@ async function main() {
   );
   const evidence = {
     account: plan.account,
+    activateServices:
+      plan.activateServices,
     controlPlaneImage:
       plan.controlPlaneImage,
     deployedAtMs: Date.now(),
@@ -392,6 +416,8 @@ async function main() {
     `${JSON.stringify(
       {
         account: plan.account,
+        activateServices:
+          plan.activateServices,
         evidencePath,
         legacyInfrastructure:
           plan.legacyInfrastructure,

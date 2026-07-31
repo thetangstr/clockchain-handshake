@@ -144,6 +144,7 @@ test("deployment plan uses image digests and fixed account without deleting lega
   });
 
   assert.equal(plan.account, "570035913370");
+  assert.equal(plan.activateServices, false);
   assert.equal(plan.region, "us-west-2");
   assert.equal(plan.repositorySha, SHA);
   assert.equal(
@@ -207,6 +208,7 @@ test("deployment plan rejects a relay certificate hostname mismatch", () => {
 
 test("deployment contexts encode the public TLS certificate without multiline argv", () => {
   const plan = createDeploymentPlan({
+    activateServices: true,
     account: "570035913370",
     bootstrapBrokerCapabilityDigest:
       "c".repeat(64),
@@ -231,6 +233,10 @@ test("deployment contexts encode the public TLS certificate without multiline ar
       `570035913370.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake-tunnel@${DIGEST}`,
   });
   const contexts = createDeploymentContexts(plan);
+  assert.equal(
+    contexts.includes("activateServices=true"),
+    true,
+  );
   assert.equal(
     contexts.includes(
       "operatorPublicKey=oIcoZqI/cqzG4UbXcaV+k1fxwt8EBb+9S+XNcb9pq3k=",
