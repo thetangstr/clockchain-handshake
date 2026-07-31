@@ -73,6 +73,7 @@ interface Workload {
 
 export interface ClockchainHandshakeStackProps
   extends StackProps {
+  readonly activateServices?: boolean;
   readonly controlPlaneImage: string;
   readonly repositorySha: string;
   readonly tunnelImage: string;
@@ -258,6 +259,8 @@ export class ClockchainHandshakeStack extends Stack {
 
     const relay = this.workload({
       cluster,
+      desiredCount:
+        props.activateServices === true ? 1 : 0,
       fileSystem,
       id: "Relay",
       image: controlImage,
@@ -282,6 +285,8 @@ export class ClockchainHandshakeStack extends Stack {
 
     const operator = this.workload({
       cluster,
+      desiredCount:
+        props.activateServices === true ? 1 : 0,
       fileSystem,
       id: "Operator",
       image: controlImage,
@@ -301,6 +306,8 @@ export class ClockchainHandshakeStack extends Stack {
 
     const bootstrap = this.workload({
       cluster,
+      desiredCount:
+        props.activateServices === true ? 1 : 0,
       fileSystem,
       id: "Bootstrap",
       image: controlImage,
@@ -331,6 +338,8 @@ export class ClockchainHandshakeStack extends Stack {
 
     const tunnel = this.workload({
       cluster,
+      desiredCount:
+        props.activateServices === true ? 1 : 0,
       fileSystem,
       id: "Tunnel",
       image: tunnelContainerImage,
@@ -371,6 +380,8 @@ export class ClockchainHandshakeStack extends Stack {
       );
     const publisher = this.workload({
       cluster,
+      desiredCount:
+        props.activateServices === true ? 1 : 0,
       fileSystem,
       id: "Publisher",
       image: controlImage,
@@ -398,6 +409,7 @@ export class ClockchainHandshakeStack extends Stack {
 
     const coordinator = this.workload({
       cluster,
+      desiredCount: 0,
       fileSystem,
       id: "Coordinator",
       image: controlImage,
@@ -429,6 +441,7 @@ export class ClockchainHandshakeStack extends Stack {
 
     const funding = this.workload({
       cluster,
+      desiredCount: 0,
       fileSystem,
       id: "Funding",
       image: controlImage,
@@ -460,6 +473,7 @@ export class ClockchainHandshakeStack extends Stack {
 
     const verifier = this.workload({
       cluster,
+      desiredCount: 0,
       fileSystem,
       id: "Verifier",
       image: controlImage,
@@ -1321,6 +1335,7 @@ export class ClockchainHandshakeStack extends Stack {
 
   private workload({
     cluster,
+    desiredCount,
     fileSystem,
     id,
     image,
@@ -1330,6 +1345,7 @@ export class ClockchainHandshakeStack extends Stack {
     vpc,
   }: {
     readonly cluster: ecs.Cluster;
+    readonly desiredCount: number;
     readonly fileSystem: efs.FileSystem;
     readonly id: string;
     readonly image: ecs.ContainerImage;
@@ -1465,7 +1481,7 @@ export class ClockchainHandshakeStack extends Stack {
             rollback: true,
           },
           cluster,
-          desiredCount: 1,
+          desiredCount,
           maxHealthyPercent: 200,
           minHealthyPercent: 100,
           platformVersion:

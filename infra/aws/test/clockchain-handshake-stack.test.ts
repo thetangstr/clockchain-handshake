@@ -53,6 +53,7 @@ function template(): Template {
       app,
       "TestStack",
       {
+        activateServices: true,
         controlPlaneImage: IMAGE,
         env: {
           account: "123456789012",
@@ -68,6 +69,45 @@ function template(): Template {
     ),
   );
 }
+
+test("keeps every long-lived service stopped until runtime activation is explicit", () => {
+  const app = new App();
+  const output = Template.fromStack(
+    new ClockchainHandshakeStack(
+      app,
+      "InactiveStack",
+      {
+        activateServices: false,
+        controlPlaneImage: IMAGE,
+        env: {
+          account: "123456789012",
+          region: "us-west-2",
+        },
+        repositorySha:
+          "abcdef0123456789abcdef0123456789abcdef01",
+        tunnelImage: IMAGE.replace(
+          /a+$/,
+          "b".repeat(64),
+        ),
+      },
+    ),
+  );
+  const resources = output.findResources(
+    "AWS::ECS::Service",
+  );
+  assert.equal(
+    Object.keys(resources).length,
+    5,
+  );
+  for (const resource of Object.values(
+    resources,
+  )) {
+    assert.equal(
+      resource.Properties.DesiredCount,
+      0,
+    );
+  }
+});
 
 test("creates a two-AZ no-NAT public Fargate foundation with encrypted EFS", () => {
   const output = template();

@@ -22,6 +22,21 @@ function required(
   return value;
 }
 
+function optionalBoolean(
+  value: unknown,
+  label: string,
+): boolean {
+  if (value === undefined || value === "false") {
+    return false;
+  }
+  if (value === "true") {
+    return true;
+  }
+  throw new Error(
+    `Invalid CDK context: ${label}.`,
+  );
+}
+
 const app = new App();
 
 new ClockchainHandshakeImagesStack(
@@ -53,22 +68,28 @@ if (
     app,
     "ClockchainHandshake",
     {
-    controlPlaneImage: required(
-      controlPlaneImage,
-      "controlPlaneImage",
-    ),
-    env: {
-      account: process.env.CDK_DEFAULT_ACCOUNT,
-      region: process.env.CDK_DEFAULT_REGION,
-    },
-    repositorySha: required(
-      repositorySha,
-      "repositorySha",
-    ),
-    tunnelImage: required(
-      tunnelImage,
-      "tunnelImage",
-    ),
+      activateServices: optionalBoolean(
+        app.node.tryGetContext(
+          "activateServices",
+        ),
+        "activateServices",
+      ),
+      controlPlaneImage: required(
+        controlPlaneImage,
+        "controlPlaneImage",
+      ),
+      env: {
+        account: process.env.CDK_DEFAULT_ACCOUNT,
+        region: process.env.CDK_DEFAULT_REGION,
+      },
+      repositorySha: required(
+        repositorySha,
+        "repositorySha",
+      ),
+      tunnelImage: required(
+        tunnelImage,
+        "tunnelImage",
+      ),
     },
   );
 }
