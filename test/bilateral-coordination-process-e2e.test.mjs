@@ -13,6 +13,7 @@ import { transitionDigest } from "../src/bilateral/messages.mjs";
 import { sessionKey } from "../src/bilateral/refid.mjs";
 import { createFakeBilateralClockchainHttpClient } from "./helpers/fake-bilateral-clockchain-service.mjs";
 import { COORDINATOR_CLI_FLAGS } from "../src/bilateral/coordination/coordinator-runtime.mjs";
+import { BOOTSTRAP_BROKER_JOURNAL_FILE } from "../src/bilateral/local-mcp/bootstrap-broker.mjs";
 import { decryptInvitation } from "../src/invitation.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -824,6 +825,20 @@ test("one long-lived Payer and Requestor span rehearsal and stakeholder with two
   assert.equal(payerIntakeRecord.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
   assert.equal(requestorIntakeResult.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
   assert.equal(payerIntakeRecord.intakeDigest, requestorIntakeResult.intakeDigest);
+  const bootstrapBrokerJournal = JSON.parse(await readFile(join(
+    session.roleRoots.payer,
+    "requestor-bootstrap-broker",
+    BOOTSTRAP_BROKER_JOURNAL_FILE,
+  ), "utf8"));
+  assert.equal(bootstrapBrokerJournal.schema, "clockchain.requestor-bootstrap-broker-journal/v1");
+  assert.equal(bootstrapBrokerJournal.repositorySha, session.repositorySha);
+  const bootstrapBrokerClaims = Object.values(bootstrapBrokerJournal.claims);
+  assert.equal(bootstrapBrokerClaims.length, 1);
+  assert.equal(bootstrapBrokerClaims[0].status, "SEALED");
+  assert.equal(bootstrapBrokerClaims[0].paymentMoved, false);
+  assert.equal(bootstrapBrokerClaims[0].claim.paymentMoved, false);
+  assert.equal(bootstrapBrokerClaims[0].sealedResponse.status, "SEALED");
+  assert.equal(bootstrapBrokerClaims[0].sealedResponse.paymentMoved, false);
   const mandate = JSON.parse(await readFile(join(session.roleRoots.payer, "rehearsal", "payer-mandate.json"), "utf8"));
   const request = JSON.parse(await readFile(join(session.roleRoots.payee, "rehearsal", "payment-request.json"), "utf8"));
   const stakeholderMandate = JSON.parse(await readFile(join(session.roleRoots.payer, "stakeholder", "payer-mandate.json"), "utf8"));

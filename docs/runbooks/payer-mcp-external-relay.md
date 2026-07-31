@@ -110,6 +110,37 @@ discovery URL. Transfer only that signed discovery URL. Requestor supplies that
 URL to `npm run bilateral:request-payment -- --discovery-url ...`. Success at
 this layer is exact `HANDSHAKE_REQUIRED`; it is not authorization.
 
+The operator broker uses the production CLI:
+
+```sh
+npm run bilateral:bootstrap-broker -- serve \
+  --capability-file "$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" \
+  --host 127.0.0.1 \
+  --manifest "$REQUESTOR_LAUNCH_MANIFEST" \
+  --operator-key-id "$OPERATOR_KEY_ID" \
+  --operator-private-key "$OPERATOR_PRIVATE_KEY_FILE" \
+  --port 0 \
+  --repository-sha "$BILATERAL_REPOSITORY_SHA" \
+  --state "$PAYER_MCP_BOOTSTRAP_BROKER_STATE"
+```
+
+After Requestor starts the one-shot wrapper, inspect the journal read-only and
+approve exactly one public pending fingerprint:
+
+```sh
+BOOTSTRAP_CLAIM_FINGERPRINT="$(node -e '
+const fs = require("node:fs");
+const journal = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+if (journal.schema !== "clockchain.requestor-bootstrap-broker-journal/v1") process.exit(1);
+const pending = Object.values(journal.claims).filter((claim) => claim.status === "PENDING_APPROVAL" && claim.paymentMoved === false);
+if (pending.length !== 1 || !/^[0-9a-f]{64}$/.test(pending[0].claimFingerprint)) process.exit(1);
+console.log(pending[0].claimFingerprint);
+' "$PAYER_MCP_BOOTSTRAP_BROKER_STATE/bootstrap-broker-journal.json")"
+npm run bilateral:bootstrap-broker -- approve \
+  --state "$PAYER_MCP_BOOTSTRAP_BROKER_STATE" \
+  --claim-fingerprint "$BOOTSTRAP_CLAIM_FINGERPRINT"
+```
+
 Fail closed if:
 
 - the signed discovery URL is missing, expired, malformed, or not operator-signed;

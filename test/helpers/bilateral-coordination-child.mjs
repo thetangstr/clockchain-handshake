@@ -2,12 +2,11 @@
 // Test-only process driver. It imports production parsers/builders while
 // injecting the localhost fake only through explicit test configuration.
 import { spawn } from "node:child_process";
-import { createHash, createPrivateKey, randomBytes, sign } from "node:crypto";
+import { createHash, createPrivateKey, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Agent, request as httpsRequest } from "node:https";
-import { createServer as createHttpServer } from "node:http";
 import process from "node:process";
 import { toHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -22,8 +21,11 @@ import { createGitInspector, createProductionSupervisorDependencies } from "../.
 import { createCoordinatorRuntimeDependencies, loadOrCreateCoordinatorRelease, parseCoordinatorArguments, readCoordinatorRuntimeConfig } from "../../src/bilateral/coordination/coordinator-runtime.mjs";
 import { runCoordinator as runProductionCoordinator } from "../../src/bilateral/coordination/coordinator.mjs";
 import { validateRelayArtifactWithFacts } from "../../src/bilateral/coordination/artifact.mjs";
-import { bootstrapClaimFingerprint } from "../../src/bilateral/local-mcp/bootstrap-broker.mjs";
-import { sealRequestorBootstrapManifest } from "../../src/bilateral/local-mcp/bootstrap-envelope.mjs";
+import {
+  approveBootstrapClaim,
+  BOOTSTRAP_BROKER_JOURNAL_FILE,
+  createBootstrapBroker,
+} from "../../src/bilateral/local-mcp/bootstrap-broker.mjs";
 import { createSignedRequestorDiscovery } from "../../scripts/publish-requestor-discovery.mjs";
 import { main as proposeMain } from "../../bin/handshake-propose.mjs";
 import { main as acceptMain } from "../../bin/handshake-accept.mjs";
@@ -1185,115 +1187,37 @@ async function waitForRequestorSupervisorStart(path, child) {
   return seen[0];
 }
 
-async function waitForBootstrapBrokerClaim(broker, child) {
+async function waitForBootstrapBrokerClaim(stateRoot, repositorySha, child) {
   const deadline = Date.now() + BARRIER_DEADLINE_MS;
   while (Date.now() < deadline) {
-    const claimFingerprint = broker.pendingClaimFingerprint();
-    if (typeof claimFingerprint === "string" && /^[0-9a-f]{64}$/.test(claimFingerprint)) return claimFingerprint;
+    const journalPath = join(stateRoot, BOOTSTRAP_BROKER_JOURNAL_FILE);
+    const journalText = await readFile(journalPath, "utf8").catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    });
+    if (journalText !== null) {
+      const journal = JSON.parse(journalText);
+      if (
+        journal?.schema !== "clockchain.requestor-bootstrap-broker-journal/v1" ||
+        journal.repositorySha !== repositorySha ||
+        journal.claims === null ||
+        typeof journal.claims !== "object" ||
+        Array.isArray(journal.claims)
+      ) {
+        fail();
+      }
+      const pending = Object.values(journal.claims).filter((entry) => entry?.status === "PENDING_APPROVAL");
+      if (pending.length > 1) fail();
+      if (pending.length === 1) {
+        const [{ claimFingerprint, paymentMoved }] = pending;
+        if (paymentMoved !== false || typeof claimFingerprint !== "string" || !/^[0-9a-f]{64}$/.test(claimFingerprint)) fail();
+        return claimFingerprint;
+      }
+    }
     if (childExited(child)) fail();
     await sleep(20);
   }
   fail();
-}
-
-function signedBootstrapBrokerResponse({ claim, manifest, manifestBytes, operatorKeyId, operatorPrivateKey, repositorySha }) {
-  const claimFingerprint = bootstrapClaimFingerprint(claim);
-  const context = Object.freeze({
-    claimNonce: claim.claimNonce,
-    paymentMoved: false,
-    releaseId: manifest.releaseId,
-    repositorySha: manifest.repositorySha,
-    sessionId: manifest.sessionId,
-  });
-  const unsigned = Object.freeze({
-    claimFingerprint,
-    context,
-    envelope: sealRequestorBootstrapManifest({
-      context,
-      manifestBytes,
-      requestorPublicKey: claim.requestorPublicKey,
-    }),
-    paymentMoved: false,
-    repositorySha,
-    schema: "clockchain.requestor-bootstrap-broker-response/v1",
-    status: "SEALED",
-  });
-  return Object.freeze({
-    ...unsigned,
-    signature: Object.freeze({
-      algorithm: "ed25519",
-      keyId: operatorKeyId,
-      value: sign(null, Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(unsigned)), "utf8"), operatorPrivateKey).toString("base64"),
-    }),
-  });
-}
-
-async function startProcessBootstrapBroker({ capabilityFile, host, manifestPath, operatorKeyId, operatorPrivateKeyPath, repositorySha }) {
-  const capability = (await readFile(capabilityFile, "utf8")).trim();
-  if (!/^[0-9a-f]{64}$/.test(capability)) fail();
-  const manifestBytes = await readFile(manifestPath);
-  const manifest = JSON.parse(manifestBytes.toString("utf8"));
-  if (manifest.role !== "payee" || manifest.repositorySha !== repositorySha || manifest.operatorKeyId !== operatorKeyId) fail();
-  const operatorPrivateKey = createPrivateKey(await readFile(operatorPrivateKeyPath, "utf8"));
-  let pendingClaim = null;
-  let approvedClaimFingerprint = null;
-  const server = createHttpServer(async (request, response) => {
-    try {
-      if (request.method !== "POST" || request.url !== "/claim" || request.headers.authorization !== `Bearer ${capability}`) {
-        response.writeHead(404, { "content-type": "application/json" });
-        response.end(canonicalJson({ paymentMoved: false, status: "FAILED" }));
-        return;
-      }
-      const chunks = [];
-      for await (const chunk of request) chunks.push(chunk);
-      const claim = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-      const claimFingerprint = bootstrapClaimFingerprint(claim);
-      if (claim.repositorySha !== repositorySha || (pendingClaim !== null && claimFingerprint !== bootstrapClaimFingerprint(pendingClaim))) fail();
-      pendingClaim = claim;
-      if (approvedClaimFingerprint !== claimFingerprint) {
-        response.writeHead(202, { "cache-control": "no-store", "content-type": "application/json" });
-        response.end(canonicalJson({
-          claimFingerprint,
-          paymentMoved: false,
-          repositorySha,
-          schema: "clockchain.requestor-bootstrap-broker-response/v1",
-          status: "PENDING_APPROVAL",
-        }));
-        return;
-      }
-      response.writeHead(200, { "cache-control": "no-store", "content-type": "application/json" });
-      response.end(canonicalJson(signedBootstrapBrokerResponse({
-        claim,
-        manifest,
-        manifestBytes,
-        operatorKeyId,
-        operatorPrivateKey,
-        repositorySha,
-      })));
-    } catch {
-      response.writeHead(400, { "content-type": "application/json" });
-      response.end(canonicalJson({ paymentMoved: false, status: "FAILED" }));
-    }
-  });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, host, resolve);
-  });
-  const address = server.address();
-  return Object.freeze({
-    approve(claimFingerprint) {
-      if (pendingClaim === null || bootstrapClaimFingerprint(pendingClaim) !== claimFingerprint) fail();
-      approvedClaimFingerprint = claimFingerprint;
-      return Object.freeze({ claimFingerprint, paymentMoved: false, status: "APPROVED" });
-    },
-    pendingClaimFingerprint() {
-      return pendingClaim === null ? null : bootstrapClaimFingerprint(pendingClaim);
-    },
-    async stop() {
-      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-    },
-    url: `http://${host}:${address.port}`,
-  });
 }
 
 function expectedPartyCompletion(role) {
@@ -1428,6 +1352,21 @@ async function runProductionCoordinatorChild(input) {
     if (!resumed) {
       const payeeManifest = release.manifests?.find((entry) => entry.role === "payee");
       if (!payeeManifest || !absolute(payeeManifest.path)) fail();
+      const payeeManifestValue = JSON.parse(await readFile(payeeManifest.path, "utf8"));
+      const manifestLifetimeMs = Number(payeeManifestValue.expiresAtMs) - Number(payeeManifestValue.issuedAtMs);
+      if (!Number.isSafeInteger(manifestLifetimeMs) || manifestLifetimeMs <= 0) fail();
+      const brokerIssuedAtMs = Date.now();
+      const brokerPayeeManifestPath = join(bootstrapBrokerState, "payee.launch-for-broker.json");
+      await mkdir(bootstrapBrokerState, { mode: 0o700, recursive: true });
+      await writeFile(
+        brokerPayeeManifestPath,
+        Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(Object.freeze({
+          ...payeeManifestValue,
+          expiresAtMs: String(brokerIssuedAtMs + manifestLifetimeMs),
+          issuedAtMs: String(brokerIssuedAtMs),
+        }))), "utf8"),
+        { flag: "wx", mode: 0o600 },
+      );
       try {
         await writeFile(bootstrapBrokerCapabilityFile, `${randomBytes(32).toString("hex")}\n`, {
           encoding: "utf8",
@@ -1437,18 +1376,21 @@ async function runProductionCoordinatorChild(input) {
       } catch (error) {
         if (error?.code !== "EEXIST") throw error;
       }
-      bootstrapBroker = await startProcessBootstrapBroker({
+      bootstrapBroker = createBootstrapBroker({
         capabilityFile: bootstrapBrokerCapabilityFile,
         host: "127.0.0.1",
-        manifestPath: payeeManifest.path,
+        manifestPath: brokerPayeeManifestPath,
         operatorKeyId: config.operatorIdentity.keyId,
         operatorPrivateKeyPath: config.operatorPrivateKeyPath,
+        port: 0,
         repositorySha: config.repositorySha,
+        stateRoot: bootstrapBrokerState,
       });
+      const bootstrapBrokerListening = await bootstrapBroker.start();
       value.payerMcp.bootstrapBroker = Object.freeze({
         capabilityFile: bootstrapBrokerCapabilityFile,
         stateRoot: bootstrapBrokerState,
-        url: bootstrapBroker.url,
+        url: bootstrapBrokerListening.url,
       });
     }
     const coordinatorDependencies = runtime.runDependencies(release);
@@ -1513,8 +1455,8 @@ async function runProductionCoordinatorChild(input) {
           role: "payee",
         }));
       }
-      const claimFingerprint = await guardRoleExits(waitForBootstrapBrokerClaim(bootstrapBroker, payeeProcess));
-      const approval = bootstrapBroker.approve(claimFingerprint);
+      const claimFingerprint = await guardRoleExits(waitForBootstrapBrokerClaim(bootstrapBrokerState, config.repositorySha, payeeProcess));
+      const approval = await approveBootstrapClaim({ claimFingerprint, stateRoot: bootstrapBrokerState });
       if (approval?.paymentMoved !== false || approval.status !== "APPROVED" || approval.claimFingerprint !== claimFingerprint) fail();
       await guardRoleExits(waitForRequestorSupervisorStart(value.children.payee.logs.stdout, payeeProcess));
       await guardRoleExits(waitForRoleBootstrap(privateRoleBarrier(value, "payee").ready, "payee"));

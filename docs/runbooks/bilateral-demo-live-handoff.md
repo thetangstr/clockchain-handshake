@@ -234,6 +234,49 @@ authorizes.
 
 ## Role supervisors
 
+Operator bootstrap broker terminal:
+
+```sh
+export PAYER_MCP_BOOTSTRAP_BROKER_STATE="$BILATERAL_RELEASE_ROOT/requestor-bootstrap-broker"
+export PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE="$BILATERAL_RELEASE_ROOT/requestor-bootstrap-broker.capability"
+export PAYER_LAUNCH_MANIFEST="$BILATERAL_RELEASE_ROOT/payer.launch.json"
+export REQUESTOR_LAUNCH_MANIFEST="$BILATERAL_RELEASE_ROOT/payee.launch.json"
+test -f "$PAYER_LAUNCH_MANIFEST"
+test -f "$REQUESTOR_LAUNCH_MANIFEST"
+mkdir -p "$PAYER_MCP_BOOTSTRAP_BROKER_STATE"
+chmod 0700 "$PAYER_MCP_BOOTSTRAP_BROKER_STATE"
+test -f "$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" || openssl rand -hex 32 > "$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE"
+chmod 0600 "$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE"
+npm run bilateral:bootstrap-broker -- serve \
+  --capability-file "$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" \
+  --host 127.0.0.1 \
+  --manifest "$REQUESTOR_LAUNCH_MANIFEST" \
+  --operator-key-id "$OPERATOR_KEY_ID" \
+  --operator-private-key "$OPERATOR_PRIVATE_KEY_FILE" \
+  --port 0 \
+  --repository-sha "$BILATERAL_REPOSITORY_SHA" \
+  --state "$PAYER_MCP_BOOTSTRAP_BROKER_STATE"
+```
+
+Keep this terminal attached. Copy the printed `url` into
+`PAYER_MCP_BOOTSTRAP_BROKER_URL` for the Payer supervisor. After Requestor runs
+the one-shot request-payment wrapper and the broker journal shows exactly one
+pending claim, inspect and approve only that public fingerprint:
+
+```sh
+BOOTSTRAP_CLAIM_FINGERPRINT="$(node -e '
+const fs = require("node:fs");
+const journal = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+if (journal.schema !== "clockchain.requestor-bootstrap-broker-journal/v1") process.exit(1);
+const pending = Object.values(journal.claims).filter((claim) => claim.status === "PENDING_APPROVAL" && claim.paymentMoved === false);
+if (pending.length !== 1 || !/^[0-9a-f]{64}$/.test(pending[0].claimFingerprint)) process.exit(1);
+console.log(pending[0].claimFingerprint);
+' "$PAYER_MCP_BOOTSTRAP_BROKER_STATE/bootstrap-broker-journal.json")"
+npm run bilateral:bootstrap-broker -- approve \
+  --state "$PAYER_MCP_BOOTSTRAP_BROKER_STATE" \
+  --claim-fingerprint "$BOOTSTRAP_CLAIM_FINGERPRINT"
+```
+
 Payer supervisor:
 
 ```sh
