@@ -285,6 +285,10 @@ export class ClockchainHandshakeStack extends Stack {
 
     const relay = this.workload({
       cluster,
+      command: [
+        "node",
+        "infra/aws/runtime/relay-entrypoint.mjs",
+      ],
       desiredCount:
         props.activateServices === true ? 1 : 0,
       fileSystem,
@@ -311,6 +315,10 @@ export class ClockchainHandshakeStack extends Stack {
 
     const operator = this.workload({
       cluster,
+      command: [
+        "node",
+        "infra/aws/runtime/operator-worker-entrypoint.mjs",
+      ],
       desiredCount:
         props.activateServices === true ? 1 : 0,
       fileSystem,
@@ -332,6 +340,10 @@ export class ClockchainHandshakeStack extends Stack {
 
     const bootstrap = this.workload({
       cluster,
+      command: [
+        "node",
+        "infra/aws/runtime/bootstrap-entrypoint.mjs",
+      ],
       desiredCount:
         props.activateServices === true ? 1 : 0,
       fileSystem,
@@ -364,6 +376,10 @@ export class ClockchainHandshakeStack extends Stack {
 
     const tunnel = this.workload({
       cluster,
+      command: [
+        "node",
+        "infra/aws/runtime/tunnel-entrypoint.mjs",
+      ],
       desiredCount:
         props.activateServices === true ? 1 : 0,
       fileSystem,
@@ -406,6 +422,10 @@ export class ClockchainHandshakeStack extends Stack {
       );
     const publisher = this.workload({
       cluster,
+      command: [
+        "node",
+        "infra/aws/runtime/publisher-entrypoint.mjs",
+      ],
       desiredCount:
         props.activateServices === true ? 1 : 0,
       fileSystem,
@@ -435,6 +455,10 @@ export class ClockchainHandshakeStack extends Stack {
 
     const coordinator = this.workload({
       cluster,
+      command: [
+        "node",
+        "infra/aws/runtime/coordinator-entrypoint.mjs",
+      ],
       desiredCount: 0,
       fileSystem,
       id: "Coordinator",
@@ -467,6 +491,10 @@ export class ClockchainHandshakeStack extends Stack {
 
     const funding = this.workload({
       cluster,
+      command: [
+        "node",
+        "infra/aws/runtime/funding-entrypoint.mjs",
+      ],
       desiredCount: 0,
       fileSystem,
       id: "Funding",
@@ -499,6 +527,10 @@ export class ClockchainHandshakeStack extends Stack {
 
     const verifier = this.workload({
       cluster,
+      command: [
+        "node",
+        "infra/aws/runtime/verifier-entrypoint.mjs",
+      ],
       desiredCount: 0,
       fileSystem,
       id: "Verifier",
@@ -1361,6 +1393,7 @@ export class ClockchainHandshakeStack extends Stack {
 
   private workload({
     cluster,
+    command,
     desiredCount,
     fileSystem,
     id,
@@ -1371,6 +1404,7 @@ export class ClockchainHandshakeStack extends Stack {
     vpc,
   }: {
     readonly cluster: ecs.Cluster;
+    readonly command: readonly string[];
     readonly desiredCount: number;
     readonly fileSystem: efs.FileSystem;
     readonly id: string;
@@ -1419,6 +1453,7 @@ export class ClockchainHandshakeStack extends Stack {
         essential: true,
         image:
           image,
+        command: [...command],
         logging: ecs.LogDrivers.awsLogs({
           logGroup,
           mode:

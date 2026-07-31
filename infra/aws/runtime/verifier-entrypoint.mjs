@@ -1,31 +1,28 @@
 #!/usr/bin/env node
 
 import {
-  createAwsRuntimeClients,
-} from "./aws-clients.mjs";
+  runAwsVerifierTask,
+} from "../../../scripts/run-aws-verifier-task.mjs";
 import {
   parseRuntimeInput,
 } from "./runtime-input.mjs";
 
 export async function main({
-  createClients = createAwsRuntimeClients,
   env = process.env,
-  run,
+  run = runAwsVerifierTask,
 } = {}) {
   const input = parseRuntimeInput(env);
   if (
-    typeof createClients !== "function" ||
+    input.verifier === null ||
+    typeof input.verifier !== "object" ||
+    Array.isArray(input.verifier) ||
     typeof run !== "function"
   ) {
     throw new Error(
-      "AWS publisher entrypoint failed safely.",
+      "AWS verifier entrypoint failed safely.",
     );
   }
-  const clients = await createClients();
-  await run({
-    clients,
-    input,
-  });
+  await run(input.verifier);
 }
 
 if (
@@ -35,7 +32,7 @@ if (
 ) {
   main().catch(() => {
     process.stderr.write(
-      "AWS_PUBLISHER_ENTRYPOINT_FAILED\n",
+      "AWS_VERIFIER_ENTRYPOINT_FAILED\n",
     );
     process.exitCode = 1;
   });

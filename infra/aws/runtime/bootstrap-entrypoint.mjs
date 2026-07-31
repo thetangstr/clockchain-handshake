@@ -1,12 +1,24 @@
 #!/usr/bin/env node
 
 import {
-  main,
+  main as bootstrapMain,
 } from "../../../scripts/run-aws-bootstrap-service.mjs";
 
-main().catch(() => {
-  process.stderr.write(
-    "AWS_BOOTSTRAP_ENTRYPOINT_FAILED\n",
-  );
-  process.exitCode = 1;
-});
+export async function main() {
+  await bootstrapMain();
+}
+
+if (
+  process.argv[1] !== undefined &&
+  import.meta.url ===
+    new URL(
+      `file://${process.argv[1]}`,
+    ).href
+) {
+  main().catch(() => {
+    process.stderr.write(
+      "AWS_BOOTSTRAP_ENTRYPOINT_FAILED\n",
+    );
+    process.exitCode = 1;
+  });
+}

@@ -345,3 +345,77 @@ test("creates private console and monitor distributions, immutable images, logs,
     );
   }
 });
+
+test("pins every AWS workload to its role-specific production entrypoint", () => {
+  const resources = template().toJSON()
+    .Resources as Record<
+    string,
+    {
+      Properties?: {
+        ContainerDefinitions?: Array<{
+          Command?: string[];
+          Name?: string;
+        }>;
+      };
+      Type: string;
+    }
+  >;
+  const commands = new Map(
+    Object.entries(resources)
+      .filter(
+        ([, resource]) =>
+          resource.Type ===
+          "AWS::ECS::TaskDefinition",
+      )
+      .map(([logicalId, resource]) => {
+        const container =
+          resource.Properties
+            ?.ContainerDefinitions?.[0];
+        assert.ok(container);
+        return [
+          logicalId.replace(
+            /Task[0-9A-F]+$/,
+            "",
+          ),
+          container.Command,
+        ];
+      }),
+  );
+  assert.deepEqual(
+    Object.fromEntries(commands),
+    {
+      Bootstrap: [
+        "node",
+        "infra/aws/runtime/bootstrap-entrypoint.mjs",
+      ],
+      Coordinator: [
+        "node",
+        "infra/aws/runtime/coordinator-entrypoint.mjs",
+      ],
+      Funding: [
+        "node",
+        "infra/aws/runtime/funding-entrypoint.mjs",
+      ],
+      Operator: [
+        "node",
+        "infra/aws/runtime/operator-worker-entrypoint.mjs",
+      ],
+      Publisher: [
+        "node",
+        "infra/aws/runtime/publisher-entrypoint.mjs",
+      ],
+      Relay: [
+        "node",
+        "infra/aws/runtime/relay-entrypoint.mjs",
+      ],
+      Tunnel: [
+        "node",
+        "infra/aws/runtime/tunnel-entrypoint.mjs",
+      ],
+      Verifier: [
+        "node",
+        "infra/aws/runtime/verifier-entrypoint.mjs",
+      ],
+    },
+  );
+});

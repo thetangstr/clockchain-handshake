@@ -3,17 +3,40 @@
 import {
   createAwsRuntimeClients,
 } from "./aws-clients.mjs";
+import {
+  parseRuntimeInput,
+} from "./runtime-input.mjs";
 
-async function main() {
-  await createAwsRuntimeClients();
-  throw new Error(
-    "Operator worker wiring is supplied by the deployed task definition.",
-  );
+export async function main({
+  createClients = createAwsRuntimeClients,
+  env = process.env,
+  run,
+} = {}) {
+  const input = parseRuntimeInput(env);
+  if (
+    typeof createClients !== "function" ||
+    typeof run !== "function"
+  ) {
+    throw new Error(
+      "AWS operator worker entrypoint failed safely.",
+    );
+  }
+  const clients = await createClients();
+  await run({
+    clients,
+    input,
+  });
 }
 
-main().catch(() => {
-  process.stderr.write(
-    "AWS_OPERATOR_WORKER_ENTRYPOINT_FAILED\n",
-  );
-  process.exitCode = 1;
-});
+if (
+  process.argv[1] !== undefined &&
+  import.meta.url ===
+    new URL(`file://${process.argv[1]}`).href
+) {
+  main().catch(() => {
+    process.stderr.write(
+      "AWS_OPERATOR_WORKER_ENTRYPOINT_FAILED\n",
+    );
+    process.exitCode = 1;
+  });
+}
