@@ -3,7 +3,7 @@ FROM node:22-bookworm-slim
 ARG REPOSITORY_SHA
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends git openssh-server ca-certificates \
+    && apt-get install --yes --no-install-recommends openssh-server ca-certificates \
     && useradd --system --create-home --home-dir /var/empty/clockchain-tunnel --shell /usr/sbin/nologin clockchain-tunnel \
     && rm -rf /var/lib/apt/lists/*
 
@@ -15,9 +15,6 @@ RUN npm ci --prefix infra/aws --omit=dev --ignore-scripts \
     && cp infra/aws/docker/sshd_config /etc/ssh/clockchain_sshd_config
 
 RUN test -n "$REPOSITORY_SHA" \
-    && test "$(git rev-parse HEAD)" = "$REPOSITORY_SHA" \
-    && git diff --quiet \
-    && test -z "$(git status --porcelain)" \
     && mkdir -p /opt/clockchain /run/clockchain \
     && chown clockchain-tunnel:clockchain-tunnel /run/clockchain \
     && chmod 0700 /run/clockchain \

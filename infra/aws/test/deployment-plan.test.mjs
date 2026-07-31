@@ -90,6 +90,21 @@ test("docker build always runs from the reviewed repository root", () => {
   );
 });
 
+test("container release metadata uses the prevalidated SHA without requiring copied Git metadata", async () => {
+  for (const dockerfile of [
+    "control-plane.Dockerfile",
+    "tunnel.Dockerfile",
+  ]) {
+    const source = await readFile(
+      new URL(`../docker/${dockerfile}`, import.meta.url),
+      "utf8",
+    );
+    assert.match(source, /REPOSITORY_SHA/);
+    assert.match(source, /clockchain\.container-release\/v1/);
+    assert.doesNotMatch(source, /git rev-parse|git diff|git status/);
+  }
+});
+
 test("deployment plan uses image digests and fixed account without deleting legacy infrastructure", () => {
   const plan = createDeploymentPlan({
     account: "570035913370",
