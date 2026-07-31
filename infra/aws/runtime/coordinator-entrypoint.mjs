@@ -7,6 +7,7 @@ import {
 import {
   createHash,
   createPrivateKey,
+  X509Certificate,
 } from "node:crypto";
 import {
   chmod,
@@ -49,7 +50,7 @@ const COORDINATOR_INPUT_KEYS = Object.freeze([
   "relayUrl",
   "repositorySha",
   "rpcSecretArn",
-  "tlsCertificatePath",
+  "tlsCertificatePem",
   "tlsFingerprint",
 ]);
 const RELEASE_IDENTITY_KEYS = Object.freeze([
@@ -152,15 +153,36 @@ function validateReleaseRoot(value, releaseId) {
   return path;
 }
 
-function validateTlsCertificatePath(value, releaseRoot) {
-  const path = normalizedAbsolute(value);
-  if (
-    !path.startsWith(`${releaseRoot}/`) ||
-    path.length <= releaseRoot.length + 1
-  ) {
+function validateTlsCertificatePem(value, fingerprint) {
+  try {
+    if (
+      typeof value !== "string" ||
+      value.length === 0 ||
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value) ||
+      Buffer.byteLength(value, "utf8") >
+        65_536
+    ) {
+      fail();
+    }
+    const certificate = new X509Certificate(value);
+    if (
+      certificate.toString() !== value ||
+      createHash("sha256")
+        .update(certificate.raw)
+        .digest("hex") !== fingerprint
+    ) {
+      fail();
+    }
+    return value;
+  } catch (error) {
+    if (
+      error instanceof
+      AwsCoordinatorEntrypointError
+    ) {
+      throw error;
+    }
     fail();
   }
-  return path;
 }
 
 async function defaultCreateTempDir(prefix) {
@@ -318,9 +340,9 @@ function validateCoordinatorInput(value) {
     relayUrl: coordinator.relayUrl,
     repositorySha: coordinator.repositorySha,
     rpcSecretArn: coordinator.rpcSecretArn,
-    tlsCertificatePath: validateTlsCertificatePath(
-      coordinator.tlsCertificatePath,
-      coordinator.releaseRoot,
+    tlsCertificatePem: validateTlsCertificatePem(
+      coordinator.tlsCertificatePem,
+      coordinator.tlsFingerprint,
     ),
     tlsFingerprint: coordinator.tlsFingerprint,
   });
@@ -369,6 +391,7 @@ export async function main({
   let result;
   let rpcUrlFile;
   let scratchDir;
+  let tlsCertificatePath;
   let tokenPath;
   try {
     const input = exact(parseRuntimeInput(env), [
@@ -433,6 +456,10 @@ export async function main({
       scratchDir,
       "sepolia-rpc-url",
     );
+    tlsCertificatePath = join(
+      scratchDir,
+      "relay-public-certificate.pem",
+    );
     await installPrivateFile({
       path: tokenPath,
       value: clockchainToken,
@@ -444,6 +471,10 @@ export async function main({
     await installPrivateFile({
       path: rpcUrlFile,
       value: `${rpcUrl}\n`,
+    });
+    await installPrivateFile({
+      path: tlsCertificatePath,
+      value: coordinator.tlsCertificatePem,
     });
     const argv = [
       "--clockchain-token-file",
@@ -461,7 +492,7 @@ export async function main({
       "--rpc-url-file",
       rpcUrlFile,
       "--tls-certificate",
-      coordinator.tlsCertificatePath,
+      tlsCertificatePath,
       "--tls-fingerprint",
       coordinator.tlsFingerprint,
     ];
@@ -480,6 +511,7 @@ export async function main({
         tokenPath,
         operatorKeyPath,
         rpcUrlFile,
+        tlsCertificatePath,
       ]) {
         if (path !== undefined) {
           try {

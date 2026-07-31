@@ -360,10 +360,20 @@ export function createOperatorChildLauncher(
             await dependencies.readFundingRecord({
               path: recordPath,
             });
+            const existing =
+              typeof dependencies.launchRecord
+                .read === "function"
+                ? await dependencies.launchRecord.read({
+                    identity,
+                  })
+                : null;
             const actionAtMs =
+              existing?.actionAtMs ??
               dependencies.nowMs();
             const runtimeInput =
               buildFundingRuntimeInput({
+                actionAtMs,
+                actionId: identity.actionId,
                 createdAt: child.createdAt,
                 expectedTreasuryAddress:
                   child.expectedTreasuryAddress,
@@ -376,6 +386,8 @@ export function createOperatorChildLauncher(
                   child.passwordSecretArn,
                 paymentMoved: false,
                 releaseId: identity.releaseId,
+                resultPath:
+                  `/var/lib/clockchain/funding-result/releases/${identity.releaseId}/actions/${identity.actionId}/funding-result.json`,
                 repositorySha:
                   identity.repositorySha,
                 rpcSecretArn:
@@ -414,7 +426,10 @@ export function createOperatorChildLauncher(
             );
             return fundingResult(
               await dependencies.readFundingResult({
-                identity,
+                identity: Object.freeze({
+                  ...identity,
+                  actionAtMs,
+                }),
                 taskArn: arn,
               }),
               arn,

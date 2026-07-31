@@ -40,6 +40,8 @@ const UNHEALTHY = Object.freeze({
   status: "UNHEALTHY",
 });
 const SHA256 = /^[0-9a-f]{64}$/;
+const ABORT_MARKER_SCHEMA =
+  "clockchain.aws-operator-abort-marker/v1";
 
 export class AwsTunnelServiceError extends Error {
   constructor() {
@@ -270,6 +272,7 @@ export function createAwsTunnelService({
   processController =
     defaultProcessController(),
   readGrant,
+  readAbortMarker = async () => null,
   stateRoot,
   tombstoneGrant = tombstoneTunnelGrant,
   validateGrant = validateTunnelGrantRecord,
@@ -293,6 +296,7 @@ export function createAwsTunnelService({
     typeof processController?.stop !==
       "function" ||
     typeof readGrant !== "function" ||
+    typeof readAbortMarker !== "function" ||
     typeof tombstoneGrant !== "function" ||
     typeof validateGrant !== "function" ||
     typeof writeTombstone !== "function"
@@ -338,6 +342,23 @@ export function createAwsTunnelService({
   async function reconcile() {
     try {
       currentHealth = UNHEALTHY;
+      const abortMarker = await readAbortMarker();
+      if (abortMarker !== null) {
+        if (
+          abortMarker === null ||
+          typeof abortMarker !== "object" ||
+          Array.isArray(abortMarker) ||
+          abortMarker.schema !==
+            ABORT_MARKER_SCHEMA ||
+          abortMarker.paymentMoved !== false ||
+          abortMarker.status !== "ABORTED"
+        ) {
+          fail();
+        }
+        await stopProcess();
+        fixedLog(logger, "ABORTED");
+        return UNHEALTHY;
+      }
       const grant = validateGrant(
         await readGrant(),
       );
@@ -499,6 +520,17 @@ async function readJson(path) {
   return JSON.parse(bytes.toString("utf8"));
 }
 
+async function readOptionalJson(path) {
+  try {
+    return await readJson(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
 function required(env, key) {
   const value = env[key];
   if (
@@ -516,7 +548,13 @@ export async function main(env = process.env) {
     env,
     "AWS_TUNNEL_GRANT_PATH",
   );
+  const abortMarkerPath = required(
+    env,
+    "AWS_TUNNEL_ABORT_MARKER_PATH",
+  );
   const service = createAwsTunnelService({
+    readAbortMarker: () =>
+      readOptionalJson(abortMarkerPath),
     readGrant: () => readJson(grantPath),
     stateRoot: required(
       env,

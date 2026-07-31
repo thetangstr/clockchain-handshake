@@ -1,5 +1,6 @@
 import {
   createHash,
+  X509Certificate,
 } from "node:crypto";
 import {
   isIP,
@@ -27,10 +28,12 @@ const COORDINATOR_KEYS = Object.freeze([
   "repositorySha",
   "rpcSecretArn",
   "sessionId",
-  "tlsCertificatePath",
+  "tlsCertificatePem",
   "tlsFingerprint",
 ]);
 const FUNDING_KEYS = Object.freeze([
+  "actionAtMs",
+  "actionId",
   "createdAt",
   "expectedTreasuryAddress",
   "fundingRecordPath",
@@ -39,6 +42,7 @@ const FUNDING_KEYS = Object.freeze([
   "passwordSecretArn",
   "paymentMoved",
   "releaseId",
+  "resultPath",
   "repositorySha",
   "rpcSecretArn",
   "sessionId",
@@ -297,6 +301,36 @@ function sha64(value) {
   return stringMatching(value, SHA64);
 }
 
+function certificatePem(value, fingerprint) {
+  try {
+    if (
+      typeof value !== "string" ||
+      value.length === 0 ||
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value) ||
+      Buffer.byteLength(value, "utf8") > 65_536
+    ) {
+      fail();
+    }
+    const certificate = new X509Certificate(value);
+    if (
+      createHash("sha256")
+        .update(certificate.raw)
+        .digest("hex") !== fingerprint
+    ) {
+      fail();
+    }
+    return value;
+  } catch (error) {
+    if (
+      error instanceof
+      AwsOperatorTaskInputError
+    ) {
+      throw error;
+    }
+    fail();
+  }
+}
+
 function topLevel(key, value) {
   if (key === "verifier") {
     return Object.freeze({
@@ -344,9 +378,9 @@ export function buildCoordinatorRuntimeInput(
       rpcSecretArn: secretArn(
         input.rpcSecretArn,
       ),
-      tlsCertificatePath: pathUnder(
-        input.tlsCertificatePath,
-        operatorRoot,
+      tlsCertificatePem: certificatePem(
+        input.tlsCertificatePem,
+        input.tlsFingerprint,
       ),
       tlsFingerprint: sha64(
         input.tlsFingerprint,
@@ -367,6 +401,16 @@ export function buildFundingRuntimeInput(value) {
   try {
     const input = exact(value, FUNDING_KEYS);
     const scope = validateScope(input);
+    const actionId = stringMatching(
+      input.actionId,
+      ATTEMPT_ID,
+    );
+    if (
+      !Number.isSafeInteger(input.actionAtMs) ||
+      input.actionAtMs < 0
+    ) {
+      fail();
+    }
     const fundingRecordPath = pathUnder(
       input.fundingRecordPath,
       `/var/lib/clockchain/funding-record/releases/${scope.releaseId}`,
@@ -374,6 +418,10 @@ export function buildFundingRuntimeInput(value) {
     const journalDirectory = pathUnder(
       input.journalDirectory,
       `/var/lib/clockchain/funding-journal/releases/${scope.releaseId}`,
+    );
+    const resultPath = exactPath(
+      input.resultPath,
+      `/var/lib/clockchain/funding-result/releases/${scope.releaseId}/actions/${actionId}/funding-result.json`,
     );
     const expectedTreasuryAddress =
       stringMatching(
@@ -384,6 +432,8 @@ export function buildFundingRuntimeInput(value) {
       fail();
     }
     return topLevel("funding", {
+      actionAtMs: input.actionAtMs,
+      actionId,
       createdAt: instant(input.createdAt),
       expectedTreasuryAddress:
         expectedTreasuryAddress,
@@ -395,10 +445,15 @@ export function buildFundingRuntimeInput(value) {
       passwordSecretArn: secretArn(
         input.passwordSecretArn,
       ),
+      releaseIdentity: Object.freeze({
+        releaseId: scope.releaseId,
+        sessionId: scope.sessionId,
+      }),
       repositorySha: scope.repositorySha,
       rpcSecretArn: secretArn(
         input.rpcSecretArn,
       ),
+      resultPath,
     });
   } catch (error) {
     if (

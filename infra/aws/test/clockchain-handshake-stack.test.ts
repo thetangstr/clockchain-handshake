@@ -14,6 +14,90 @@ import {
 const IMAGE =
   "123456789012.dkr.ecr.us-west-2.amazonaws.com/clockchain@sha256:" +
   "a".repeat(64);
+const RELAY_TLS_CERTIFICATE_PEM = `-----BEGIN CERTIFICATE-----
+MIIBdDCCASagAwIBAgIUPrXOrIpEJb7MiFXU0DDWShb37kIwBQYDK2VwMB8xHTAb
+BgNVBAMMFHJlbGF5LmNsb2NrY2hhaW4ubmV0MB4XDTI2MDczMTIyNDIyN1oXDTI2
+MDgwMTIyNDIyN1owHzEdMBsGA1UEAwwUcmVsYXkuY2xvY2tjaGFpbi5uZXQwKjAF
+BgMrZXADIQDwMVNUm7k6YU4Ra2V4wCNd0g55HJvSHdDe25+8kjDieaN0MHIwHQYD
+VR0OBBYEFMWEqIIWZMtV/0sLBCI8b/LPLlxKMB8GA1UdIwQYMBaAFMWEqIIWZMtV
+/0sLBCI8b/LPLlxKMA8GA1UdEwEB/wQFMAMBAf8wHwYDVR0RBBgwFoIUcmVsYXku
+Y2xvY2tjaGFpbi5uZXQwBQYDK2VwA0EAaeNXc+Bk8jhlk7JOWlWPgajcq14EO03b
+GzRaxazJRJqgomGuhMdWNo8pqbWf9+sUnkkr9ZGuAGcK3zyS6UeHDA==
+-----END CERTIFICATE-----
+`;
+const RELAY_TLS_FINGERPRINT =
+  "3dbe9d0ea7491d9d6e4586f978ddf2b67c4ac173780b3b8d5b86def84a0d73d9";
+const SESSION_ID =
+  "11111111-1111-4111-8111-111111111111";
+const RELAY_TLS_SECRET_ARN =
+  "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-relay-tls-AbCdEf";
+const STACK_PROPS = {
+  bootstrapBrokerCapabilityDigest:
+    "c".repeat(64),
+  controlPlaneImage: IMAGE,
+  operatorPublicKey:
+    "oIcoZqI/cqzG4UbXcaV+k1fxwt8EBb+9S+XNcb9pq3k=",
+  relayTlsCertificatePem:
+    RELAY_TLS_CERTIFICATE_PEM,
+  relayTlsFingerprint:
+    RELAY_TLS_FINGERPRINT,
+  relayPublicHostname:
+    "relay.clockchain.net",
+  relayTlsSecretArn: RELAY_TLS_SECRET_ARN,
+  repositorySha:
+    "abcdef0123456789abcdef0123456789abcdef01",
+  sessionId: SESSION_ID,
+  sourceTreeSha256: "e".repeat(64),
+  tunnelImage: IMAGE.replace(
+    /a+$/,
+    "b".repeat(64),
+  ),
+} as const;
+
+test("rejects a relay certificate that does not cover the public hostname", () => {
+  const app = new App();
+  assert.throws(
+    () =>
+      new ClockchainHandshakeStack(
+        app,
+        "HostnameMismatchStack",
+        {
+          ...STACK_PROPS,
+          env: {
+            account: "123456789012",
+            region: "us-west-2",
+          },
+          relayPublicHostname:
+            "other.clockchain.net",
+        },
+      ),
+    /hostname/i,
+  );
+});
+
+test("imports reviewed relay TLS material without synthesizing private key data", () => {
+  const output = template().toJSON();
+  const secrets = Object.entries(
+    output.Resources ?? {},
+  ).filter(
+    ([, resource]) =>
+      (resource as { Type?: string }).Type ===
+      "AWS::SecretsManager::Secret",
+  );
+  assert.equal(
+    secrets.some(([logicalId]) =>
+      logicalId.startsWith("RelayTls")),
+    false,
+  );
+  assert.match(
+    JSON.stringify(output),
+    new RegExp(RELAY_TLS_SECRET_ARN),
+  );
+  assert.doesNotMatch(
+    JSON.stringify(output),
+    /privateKeyPem/,
+  );
+});
 
 test("creates immutable bootstrap image repositories independently of runtime images", () => {
   const app = new App();
@@ -54,17 +138,11 @@ function template(): Template {
       "TestStack",
       {
         activateServices: true,
-        controlPlaneImage: IMAGE,
+        ...STACK_PROPS,
         env: {
           account: "123456789012",
           region: "us-west-2",
         },
-        repositorySha:
-          "abcdef0123456789abcdef0123456789abcdef01",
-        tunnelImage: IMAGE.replace(
-          /a+$/,
-          "b".repeat(64),
-        ),
       },
     ),
   );
@@ -78,17 +156,11 @@ test("keeps every long-lived service stopped until runtime activation is explici
       "InactiveStack",
       {
         activateServices: false,
-        controlPlaneImage: IMAGE,
+        ...STACK_PROPS,
         env: {
           account: "123456789012",
           region: "us-west-2",
         },
-        repositorySha:
-          "abcdef0123456789abcdef0123456789abcdef01",
-        tunnelImage: IMAGE.replace(
-          /a+$/,
-          "b".repeat(64),
-        ),
       },
     ),
   );
@@ -150,7 +222,7 @@ test("creates a two-AZ no-NAT public Fargate foundation with encrypted EFS", () 
   );
   output.resourceCountIs(
     "AWS::EFS::AccessPoint",
-    9,
+    10,
   );
   output.hasResourceProperties(
     "AWS::ECS::Service",
@@ -290,7 +362,7 @@ test("creates private console and monitor distributions, immutable images, logs,
       RequiresCompatibilities: string[];
     };
   }>;
-  assert.equal(taskDefinitions.length, 8);
+  assert.equal(taskDefinitions.length, 10);
   for (const task of taskDefinitions) {
     assert.equal(
       task.Properties.NetworkMode,
@@ -314,7 +386,7 @@ test("creates private console and monitor distributions, immutable images, logs,
   }
   output.resourceCountIs(
     "AWS::Logs::LogGroup",
-    9,
+    11,
   );
   output.resourceCountIs(
     "AWS::CloudWatch::Alarm",
@@ -388,6 +460,14 @@ test("pins every AWS workload to its role-specific production entrypoint", () =>
         "node",
         "infra/aws/runtime/bootstrap-entrypoint.mjs",
       ],
+      BootstrapApproval: [
+        "node",
+        "infra/aws/runtime/operator-bootstrap-approval-entrypoint.mjs",
+      ],
+      AbortTunnel: [
+        "node",
+        "infra/aws/runtime/operator-abort-entrypoint.mjs",
+      ],
       Coordinator: [
         "node",
         "infra/aws/runtime/coordinator-entrypoint.mjs",
@@ -417,5 +497,44 @@ test("pins every AWS workload to its role-specific production entrypoint", () =>
         "infra/aws/runtime/verifier-entrypoint.mjs",
       ],
     },
+  );
+});
+
+test("emits relay runtime keys in the entrypoint's exact canonical order", () => {
+  const resources = template().toJSON()
+    .Resources as Record<
+    string,
+    {
+      Properties?: {
+        ContainerDefinitions?: Array<{
+          Environment?: unknown;
+        }>;
+      };
+      Type: string;
+    }
+  >;
+  const relay = Object.entries(resources).find(
+    ([logicalId, resource]) =>
+      logicalId.startsWith("RelayTask") &&
+      resource.Type ===
+        "AWS::ECS::TaskDefinition",
+  )?.[1];
+  assert.notEqual(relay, undefined);
+  const environment = JSON.stringify(
+    relay?.Properties?.ContainerDefinitions?.[0]
+      ?.Environment,
+  );
+  const fingerprint = environment.indexOf(
+    '\\"tlsFingerprint\\"',
+  );
+  const secret = environment.indexOf(
+    '\\"tlsSecretArn\\"',
+  );
+  assert.notEqual(fingerprint, -1);
+  assert.notEqual(secret, -1);
+  assert.equal(fingerprint < secret, true);
+  assert.match(
+    environment,
+    /relay\.clockchain\.net/,
   );
 });

@@ -13,6 +13,41 @@ import {
 const IMAGE =
   "123456789012.dkr.ecr.us-west-2.amazonaws.com/clockchain@sha256:" +
   "a".repeat(64);
+const RELAY_TLS_SECRET_ARN =
+  "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-relay-tls-AbCdEf";
+const STACK_PROPS = {
+  bootstrapBrokerCapabilityDigest:
+    "c".repeat(64),
+  controlPlaneImage: IMAGE,
+  operatorPublicKey:
+    "oIcoZqI/cqzG4UbXcaV+k1fxwt8EBb+9S+XNcb9pq3k=",
+  relayPublicHostname:
+    "relay.clockchain.net",
+  relayTlsCertificatePem: `-----BEGIN CERTIFICATE-----
+MIIBdDCCASagAwIBAgIUPrXOrIpEJb7MiFXU0DDWShb37kIwBQYDK2VwMB8xHTAb
+BgNVBAMMFHJlbGF5LmNsb2NrY2hhaW4ubmV0MB4XDTI2MDczMTIyNDIyN1oXDTI2
+MDgwMTIyNDIyN1owHzEdMBsGA1UEAwwUcmVsYXkuY2xvY2tjaGFpbi5uZXQwKjAF
+BgMrZXADIQDwMVNUm7k6YU4Ra2V4wCNd0g55HJvSHdDe25+8kjDieaN0MHIwHQYD
+VR0OBBYEFMWEqIIWZMtV/0sLBCI8b/LPLlxKMB8GA1UdIwQYMBaAFMWEqIIWZMtV
+/0sLBCI8b/LPLlxKMA8GA1UdEwEB/wQFMAMBAf8wHwYDVR0RBBgwFoIUcmVsYXku
+Y2xvY2tjaGFpbi5uZXQwBQYDK2VwA0EAaeNXc+Bk8jhlk7JOWlWPgajcq14EO03b
+GzRaxazJRJqgomGuhMdWNo8pqbWf9+sUnkkr9ZGuAGcK3zyS6UeHDA==
+-----END CERTIFICATE-----
+`,
+  relayTlsFingerprint:
+    "3dbe9d0ea7491d9d6e4586f978ddf2b67c4ac173780b3b8d5b86def84a0d73d9",
+  relayTlsSecretArn:
+    RELAY_TLS_SECRET_ARN,
+  repositorySha:
+    "abcdef0123456789abcdef0123456789abcdef01",
+  sessionId:
+    "11111111-1111-4111-8111-111111111111",
+  sourceTreeSha256: "e".repeat(64),
+  tunnelImage: IMAGE.replace(
+    /a+$/,
+    "b".repeat(64),
+  ),
+} as const;
 
 function json(): Record<string, unknown> {
   const app = new App();
@@ -21,17 +56,11 @@ function json(): Record<string, unknown> {
       app,
       "BoundaryStack",
       {
-        controlPlaneImage: IMAGE,
+        ...STACK_PROPS,
         env: {
           account: "123456789012",
           region: "us-west-2",
         },
-        repositorySha:
-          "abcdef0123456789abcdef0123456789abcdef01",
-        tunnelImage: IMAGE.replace(
-          /a+$/,
-          "b".repeat(64),
-        ),
       },
     ),
   ).toJSON() as Record<string, unknown>;
@@ -80,9 +109,9 @@ test("task secret permissions are resource-scoped and absent from API, console, 
     false,
   );
   for (const name of [
+    "BootstrapBrokerCapability",
     "OperatorKey",
     "ClockchainToken",
-    "RelayTls",
     "SepoliaRpc",
     "TreasuryKeystore",
     "TreasuryPassword",
@@ -94,8 +123,20 @@ test("task secret permissions are resource-scoped and absent from API, console, 
       name,
     );
   }
+  assert.equal(
+    policies.includes(RELAY_TLS_SECRET_ARN),
+    true,
+    "RelayTls",
+  );
   const matrix = {
-    BootstrapTaskRole: ["OperatorKey"],
+    AbortTunnelTaskRole: [],
+    BootstrapApprovalTaskRole: [
+      "BootstrapBrokerCapability",
+      "OperatorKey",
+    ],
+    BootstrapTaskRole: [
+      "BootstrapBrokerCapability",
+    ],
     CoordinatorTaskRole: [
       "ClockchainToken",
       "OperatorKey",
@@ -106,7 +147,7 @@ test("task secret permissions are resource-scoped and absent from API, console, 
       "TreasuryKeystore",
       "TreasuryPassword",
     ],
-    OperatorTaskRole: ["OperatorKey"],
+    OperatorTaskRole: [],
     PublisherTaskRole: [],
     RelayTaskRole: ["RelayTls"],
     TunnelTaskRole: ["TunnelHostKey"],
@@ -143,16 +184,22 @@ test("task secret permissions are resource-scoped and absent from API, console, 
     const actual = secretStatements
       .map((statement) => {
         const resource = statement.Resource as
+          | string
           | { Ref?: string }
           | undefined;
+        if (resource === RELAY_TLS_SECRET_ARN) {
+          return "RelayTls";
+        }
         return Object.keys(matrix).reduce<
           string | null
         >(
           (found) => found,
-          resource?.Ref?.replace(
-            /[0-9A-F]{8}$/,
-            "",
-          ) ?? null,
+          typeof resource === "object"
+            ? resource?.Ref?.replace(
+                /[0-9A-F]{8}$/,
+                "",
+              ) ?? null
+            : null,
         );
       })
       .filter(
@@ -194,6 +241,71 @@ test("no synthesized application policy grants wildcard EFS or wildcard secret a
     /secretsmanager:GetSecretValue[^}]+\"Resource\":\"\\*\"/.test(
       policies,
     ),
+    false,
+  );
+});
+
+test("operator can run and describe only reviewed child task definitions", () => {
+  const resources = json().Resources as Record<
+    string,
+    {
+      Properties?: {
+        PolicyDocument?: {
+          Statement?: Array<{
+            Action?: string | string[];
+            Resource?: unknown;
+          }>;
+        };
+      };
+      Type: string;
+    }
+  >;
+  const entry = Object.entries(resources).find(
+    ([logicalId, resource]) =>
+      logicalId.startsWith(
+        "OperatorTaskRoleDefaultPolicy",
+      ) &&
+      resource.Type === "AWS::IAM::Policy",
+  );
+  assert.notEqual(entry, undefined);
+  const statements =
+    entry?.[1].Properties?.PolicyDocument
+      ?.Statement ?? [];
+  const actions = statements.flatMap(
+    (statement) =>
+      Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action],
+  );
+  assert.equal(actions.includes("ecs:RunTask"), true);
+  assert.equal(
+    actions.includes("ecs:DescribeTasks"),
+    true,
+  );
+  const serialized = JSON.stringify(entry);
+  for (const child of [
+    "AbortTunnelTask",
+    "BootstrapApprovalTask",
+    "CoordinatorTask",
+    "FundingTask",
+    "VerifierTask",
+  ]) {
+    assert.equal(
+      serialized.includes(child),
+      true,
+      child,
+    );
+  }
+  assert.equal(
+    serialized.includes("ClockchainToken"),
+    false,
+  );
+  assert.equal(
+    serialized.includes("TreasuryKeystore"),
+    false,
+  );
+  assert.equal(
+    serialized.includes("TreasuryPassword"),
     false,
   );
 });

@@ -13,6 +13,39 @@ import {
 const IMAGE =
   "123456789012.dkr.ecr.us-west-2.amazonaws.com/clockchain@sha256:" +
   "a".repeat(64);
+const STACK_PROPS = {
+  bootstrapBrokerCapabilityDigest:
+    "c".repeat(64),
+  controlPlaneImage: IMAGE,
+  operatorPublicKey:
+    "oIcoZqI/cqzG4UbXcaV+k1fxwt8EBb+9S+XNcb9pq3k=",
+  relayPublicHostname:
+    "relay.clockchain.net",
+  relayTlsCertificatePem: `-----BEGIN CERTIFICATE-----
+MIIBdDCCASagAwIBAgIUPrXOrIpEJb7MiFXU0DDWShb37kIwBQYDK2VwMB8xHTAb
+BgNVBAMMFHJlbGF5LmNsb2NrY2hhaW4ubmV0MB4XDTI2MDczMTIyNDIyN1oXDTI2
+MDgwMTIyNDIyN1owHzEdMBsGA1UEAwwUcmVsYXkuY2xvY2tjaGFpbi5uZXQwKjAF
+BgMrZXADIQDwMVNUm7k6YU4Ra2V4wCNd0g55HJvSHdDe25+8kjDieaN0MHIwHQYD
+VR0OBBYEFMWEqIIWZMtV/0sLBCI8b/LPLlxKMB8GA1UdIwQYMBaAFMWEqIIWZMtV
+/0sLBCI8b/LPLlxKMA8GA1UdEwEB/wQFMAMBAf8wHwYDVR0RBBgwFoIUcmVsYXku
+Y2xvY2tjaGFpbi5uZXQwBQYDK2VwA0EAaeNXc+Bk8jhlk7JOWlWPgajcq14EO03b
+GzRaxazJRJqgomGuhMdWNo8pqbWf9+sUnkkr9ZGuAGcK3zyS6UeHDA==
+-----END CERTIFICATE-----
+`,
+  relayTlsFingerprint:
+    "3dbe9d0ea7491d9d6e4586f978ddf2b67c4ac173780b3b8d5b86def84a0d73d9",
+  relayTlsSecretArn:
+    "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-relay-tls-AbCdEf",
+  repositorySha:
+    "abcdef0123456789abcdef0123456789abcdef01",
+  sessionId:
+    "11111111-1111-4111-8111-111111111111",
+  sourceTreeSha256: "e".repeat(64),
+  tunnelImage: IMAGE.replace(
+    /a+$/,
+    "b".repeat(64),
+  ),
+} as const;
 
 function template(): Record<string, unknown> {
   const app = new App();
@@ -21,17 +54,11 @@ function template(): Record<string, unknown> {
       app,
       "EfsBoundaryStack",
       {
-        controlPlaneImage: IMAGE,
+        ...STACK_PROPS,
         env: {
           account: "123456789012",
           region: "us-west-2",
         },
-        repositorySha:
-          "abcdef0123456789abcdef0123456789abcdef01",
-        tunnelImage: IMAGE.replace(
-          /a+$/,
-          "b".repeat(64),
-        ),
       },
     ),
   ).toJSON() as Record<string, unknown>;
@@ -133,5 +160,88 @@ test("access points use fixed non-root identities and isolated paths", () => {
     );
     paths.push(path);
   }
-  assert.equal(new Set(paths).size, 9);
+  assert.equal(new Set(paths).size, 10);
+});
+
+test("operator remains isolated while one-shot approval and abort tasks own bootstrap/tunnel state access", () => {
+  const resources = template().Resources as Record<
+    string,
+    {
+      Properties?: {
+        ContainerDefinitions?: Array<{
+          MountPoints?: Array<{
+            ContainerPath?: string;
+            ReadOnly?: boolean;
+          }>;
+        }>;
+      };
+      Type: string;
+    }
+  >;
+  const taskDefinitions = Object.entries(resources)
+    .filter(
+      ([, resource]) =>
+        resource.Type ===
+        "AWS::ECS::TaskDefinition",
+    )
+    .map(([logicalId, resource]) => [
+      logicalId.replace(/Task[0-9A-F]+$/, ""),
+      resource.Properties
+        ?.ContainerDefinitions?.[0]
+        ?.MountPoints ?? [],
+    ] as const);
+  const entry = taskDefinitions.find(
+    ([logicalId]) => logicalId === "Operator",
+  );
+  assert.notEqual(entry, undefined);
+  assert.deepEqual(
+    entry?.[1].map((mount) => [
+      mount.ContainerPath,
+      mount.ReadOnly,
+    ]),
+    [
+      ["/var/lib/clockchain/operator", false],
+      ["/var/lib/clockchain/bootstrap", true],
+      [
+        "/var/lib/clockchain/funding-result",
+        true,
+      ],
+    ],
+  );
+  const approval = taskDefinitions.find(
+    ([logicalId]) =>
+      logicalId === "BootstrapApproval",
+  );
+  assert.notEqual(approval, undefined);
+  assert.deepEqual(
+    approval?.[1].map((mount) => [
+      mount.ContainerPath,
+      mount.ReadOnly,
+    ]),
+    [
+      ["/var/lib/clockchain/bootstrap", false],
+      ["/var/lib/clockchain/operator", true],
+      ["/var/lib/clockchain/tunnel", false],
+    ],
+  );
+  const abort = taskDefinitions.find(
+    ([logicalId]) =>
+      logicalId === "AbortTunnel",
+  );
+  assert.notEqual(abort, undefined);
+  assert.deepEqual(
+    abort?.[1].map((mount) => [
+      mount.ContainerPath,
+      mount.ReadOnly,
+    ]),
+    [
+      ["/var/lib/clockchain/tunnel", false],
+    ],
+  );
+  assert.equal(
+    JSON.stringify(taskDefinitions).includes(
+      "\"ContainerPath\":\"/\"",
+    ),
+    false,
+  );
 });

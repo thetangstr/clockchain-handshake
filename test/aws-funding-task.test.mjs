@@ -9,6 +9,12 @@ const REPOSITORY_SHA =
   "abcdef0123456789abcdef0123456789abcdef01";
 const TREASURY =
   "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const RELEASE_ID = "release-bd7662a5eeb41614";
+const SESSION_ID =
+  "11111111-1111-4111-8111-111111111111";
+const ACTION_ID =
+  "22222222-2222-4222-8222-222222222222";
+const ACTION_AT_MS = 2_000_000_000_000;
 const RECIPIENTS = Object.freeze([
   "0x1111111111111111111111111111111111111111",
   "0x2222222222222222222222222222222222222222",
@@ -19,13 +25,19 @@ const TARGET_WEI = "10000000000000000";
 
 function input(overrides = {}) {
   return {
+    actionAtMs: ACTION_AT_MS,
+    actionId: ACTION_ID,
     expectedTreasuryAddress: TREASURY,
     fundingRecordPath: "/private/funding-addresses.json",
     journalDirectory: "/private/funding-journal",
     keystorePath: "/private/funding-wallet.json",
+    releaseId: RELEASE_ID,
     repositorySha: REPOSITORY_SHA,
+    resultPath:
+      `/var/lib/clockchain/funding-result/releases/${RELEASE_ID}/actions/${ACTION_ID}/funding-result.json`,
     rpcUrlFile: "/private/sepolia-rpc",
     secretId: "clockchain/demo/funding-password",
+    sessionId: SESSION_ID,
     ...overrides,
   };
 }
@@ -78,6 +90,35 @@ function fixture(result = summary()) {
         calls.push(["secret", secretId]);
         return "treasury-password-canary";
       },
+      readFundingResult: async (path, resultInput) => {
+        calls.push([
+          "read-result",
+          path,
+          resultInput,
+        ]);
+        return {
+          batchId: result.batchId,
+          paymentMoved: false,
+          status: "FUNDED",
+          transactionHashes:
+            result.transfers.map(
+              ({ transactionHash }) =>
+                transactionHash,
+            ),
+        };
+      },
+      writeFundingResult: async (
+        path,
+        value,
+        resultInput,
+      ) => {
+        calls.push([
+          "write-result",
+          path,
+          value,
+          resultInput,
+        ]);
+      },
     },
   };
 }
@@ -104,6 +145,26 @@ test("runs one four-address Sepolia batch with a Secrets Manager password and co
   assert.deepEqual(result, {
     batchId: "b".repeat(64),
     paymentMoved: false,
+    status: "FUNDED",
+    transactionHashes: summary().transfers.map(
+      ({ transactionHash }) => transactionHash,
+    ),
+  });
+  const durable = fx.calls.find(
+    ([name]) => name === "write-result",
+  )[2];
+  assert.deepEqual(durable, {
+    actionAtMs: ACTION_AT_MS,
+    actionId: ACTION_ID,
+    batchId: "b".repeat(64),
+    fundingRecordPath:
+      "/private/funding-addresses.json",
+    paymentMoved: false,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema:
+      "clockchain.aws-funding-task-result/v1",
+    sessionId: SESSION_ID,
     status: "FUNDED",
     transactionHashes: summary().transfers.map(
       ({ transactionHash }) => transactionHash,

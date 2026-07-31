@@ -12,6 +12,10 @@ import {
 import { dirname, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
+import {
+  createHash,
+  X509Certificate,
+} from "node:crypto";
 
 import {
   assertFrozenRelease,
@@ -23,6 +27,15 @@ const execFileAsync = promisify(execFile);
 const SHA40 = /^[0-9a-f]{40}$/;
 const IMAGE =
   /^[0-9]{12}\.dkr\.ecr\.[a-z]{2}-[a-z]+-[1-9]\.amazonaws\.com\/[a-z0-9][a-z0-9._/-]{0,254}@sha256:[0-9a-f]{64}$/;
+const SESSION =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SHA64 = /^[0-9a-f]{64}$/;
+const RAW_ED25519_PUBLIC_KEY =
+  /^[A-Za-z0-9+/]{43}=$/;
+const SECRET_ARN =
+  /^arn:aws(?:-[a-z]+)?:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]{1,512}$/;
+const PUBLIC_HOSTNAME =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 function required(value, pattern, label) {
   if (
@@ -34,11 +47,33 @@ function required(value, pattern, label) {
   return value;
 }
 
+function validOperatorPublicKey(value) {
+  if (
+    typeof value !== "string" ||
+    !RAW_ED25519_PUBLIC_KEY.test(value)
+  ) {
+    return false;
+  }
+  const decoded = Buffer.from(value, "base64");
+  return (
+    decoded.length === 32 &&
+    decoded.toString("base64") === value
+  );
+}
+
 export function createDeploymentPlan({
   account = DEFAULT_ACCOUNT,
+  bootstrapBrokerCapabilityDigest,
   controlPlaneImage,
+  operatorPublicKey,
   region = DEFAULT_REGION,
+  relayPublicHostname,
   repositorySha,
+  relayTlsCertificatePem,
+  relayTlsFingerprint,
+  relayTlsSecretArn,
+  sessionId,
+  sourceTreeSha256,
   tunnelImage,
 }) {
   required(account, /^[0-9]{12}$/, "AWS account");
@@ -62,15 +97,87 @@ export function createDeploymentPlan({
     IMAGE,
     "Tunnel image",
   );
+  required(
+    bootstrapBrokerCapabilityDigest,
+    SHA64,
+    "Bootstrap broker capability digest",
+  );
+  required(
+    relayPublicHostname,
+    PUBLIC_HOSTNAME,
+    "Relay public hostname",
+  );
+  required(
+    relayTlsFingerprint,
+    SHA64,
+    "Relay TLS fingerprint",
+  );
+  required(
+    relayTlsSecretArn,
+    SECRET_ARN,
+    "Relay TLS secret ARN",
+  );
+  required(
+    sessionId,
+    SESSION,
+    "Session ID",
+  );
+  if (!validOperatorPublicKey(operatorPublicKey)) {
+    throw new Error(
+      "Operator public key is invalid.",
+    );
+  }
+  required(
+    sourceTreeSha256,
+    SHA64,
+    "Source tree SHA-256",
+  );
+  let relayTlsCertificate;
+  try {
+    relayTlsCertificate = new X509Certificate(
+      relayTlsCertificatePem,
+    );
+  } catch {
+    throw new Error(
+      "Relay TLS certificate is invalid.",
+    );
+  }
+  if (
+    createHash("sha256")
+      .update(relayTlsCertificate.raw)
+      .digest("hex") !==
+    relayTlsFingerprint
+  ) {
+    throw new Error(
+      "Relay TLS certificate and fingerprint must match.",
+    );
+  }
+  if (
+    relayTlsCertificate.checkHost(
+      relayPublicHostname,
+      { subject: "never" },
+    ) === undefined
+  ) {
+    throw new Error(
+      "Relay TLS certificate must cover the public hostname.",
+    );
+  }
   return {
     account,
+    bootstrapBrokerCapabilityDigest,
     controlPlaneImage,
     legacyInfrastructure: {
       action: "preserve",
     },
     region,
+    relayPublicHostname,
     repositorySha,
+    relayTlsCertificatePem,
+    relayTlsFingerprint,
+    relayTlsSecretArn,
     schema: "clockchain.aws-deployment-plan/v1",
+    sessionId,
+    sourceTreeSha256,
     stacks: [
       "ClockchainHandshakeImages",
       "ClockchainHandshake",
@@ -156,6 +263,22 @@ async function main() {
     process.env.CONTROL_PLANE_IMAGE;
   const tunnelImage =
     process.env.TUNNEL_IMAGE;
+  const sessionId =
+    process.env.CLOCKCHAIN_SESSION_ID;
+  const bootstrapBrokerCapabilityDigest =
+    process.env.BOOTSTRAP_BROKER_CAPABILITY_DIGEST;
+  const relayTlsCertificatePem =
+    process.env.RELAY_TLS_CERTIFICATE_PEM;
+  const relayPublicHostname =
+    process.env.RELAY_PUBLIC_HOSTNAME;
+  const relayTlsFingerprint =
+    process.env.RELAY_TLS_FINGERPRINT;
+  const relayTlsSecretArn =
+    process.env.RELAY_TLS_SECRET_ARN;
+  const operatorPublicKey =
+    process.env.OPERATOR_PUBLIC_KEY;
+  const sourceTreeSha256 =
+    process.env.SOURCE_TREE_SHA256;
   if (
     typeof controlPlaneImage !== "string" ||
     typeof tunnelImage !== "string"
@@ -167,6 +290,14 @@ async function main() {
   const plan = createDeploymentPlan({
     controlPlaneImage,
     repositorySha,
+    bootstrapBrokerCapabilityDigest,
+    relayTlsCertificatePem,
+    relayPublicHostname,
+    relayTlsFingerprint,
+    relayTlsSecretArn,
+    sessionId,
+    operatorPublicKey,
+    sourceTreeSha256,
     tunnelImage,
   });
   const contexts = [
@@ -176,6 +307,22 @@ async function main() {
     `controlPlaneImage=${controlPlaneImage}`,
     "-c",
     `tunnelImage=${tunnelImage}`,
+    "-c",
+    `sessionId=${sessionId}`,
+    "-c",
+    `bootstrapBrokerCapabilityDigest=${bootstrapBrokerCapabilityDigest}`,
+    "-c",
+    `relayTlsCertificatePem=${relayTlsCertificatePem}`,
+    "-c",
+    `relayPublicHostname=${relayPublicHostname}`,
+    "-c",
+    `relayTlsFingerprint=${relayTlsFingerprint}`,
+    "-c",
+    `relayTlsSecretArn=${relayTlsSecretArn}`,
+    "-c",
+    `operatorPublicKey=${operatorPublicKey}`,
+    "-c",
+    `sourceTreeSha256=${sourceTreeSha256}`,
   ];
   if (process.argv.includes("--plan")) {
     const diff = await runCdk([

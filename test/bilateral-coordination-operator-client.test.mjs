@@ -6,11 +6,13 @@ import {
   X509Certificate,
 } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import https from "node:https";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { promisify } from "node:util";
 import { privateKeyToAccount } from "viem/accounts";
@@ -259,6 +261,14 @@ async function certificate(t) {
   return { fingerprint: sha256(new X509Certificate(pem).raw), key: await readFile(key, "utf8"), pem };
 }
 
+function stubHttpsRequest(t, implementation) {
+  const original = https.request;
+  https.request = implementation;
+  t.after(() => {
+    https.request = original;
+  });
+}
+
 test("operator client submits one canonical signed capability set and returns its exact receipt", async () => {
   const calls = [];
   let identity;
@@ -393,6 +403,75 @@ test("operator transport rejects plaintext and a certificate/fingerprint mismatc
   );
 });
 
+test("operator transport resolves public relay DNS and pins the accepted answers into requests", async (t) => {
+  const tls = await certificate(t);
+  const expectedAddress = "93.184.216.34";
+  const transport = createPinnedOperatorHttpsTransportForTesting({
+    expectedFingerprint: tls.fingerprint,
+    lookup: async (hostname) => {
+      assert.equal(hostname, "relay.example.com");
+      return [{ address: expectedAddress, family: 4 }];
+    },
+    relayUrl: "https://relay.example.com:9443",
+    requestTiming: { bodyMs: 25, connectMs: 25, headerMs: 25, totalMs: 100 },
+    tlsCertificatePem: tls.pem,
+  });
+  let requests = 0;
+  stubHttpsRequest(t, (options, callback) => {
+    requests += 1;
+    assert.equal(options.hostname, "relay.example.com");
+    assert.equal(options.port, 9443);
+    assert.equal(typeof options.lookup, "function");
+    options.lookup("relay.example.com", { all: true }, (error, addresses) => {
+      assert.ifError(error);
+      assert.deepEqual(addresses, [{ address: expectedAddress, family: 4 }]);
+    });
+    const handle = new EventEmitter();
+    handle.destroy = () => {};
+    handle.end = () => {
+      const socket = new EventEmitter();
+      queueMicrotask(() => {
+        handle.emit("socket", socket);
+        socket.emit("secureConnect");
+        const incoming = new PassThrough();
+        incoming.rawHeaders = ["content-length", "2", "content-type", "application/json"];
+        incoming.statusCode = 200;
+        incoming.complete = true;
+        callback(incoming);
+        incoming.end("{}");
+      });
+    };
+    return handle;
+  });
+  const result = await transport.request({ body: null, method: "GET", path: `/v1/sessions/${SESSION_ID}/view` });
+  assert.equal(requests, 1);
+  assert.equal(result.body.toString("utf8"), "{}");
+});
+
+test("operator transport rejects private relay DNS answers before dialing", async (t) => {
+  const tls = await certificate(t);
+  const transport = createPinnedOperatorHttpsTransportForTesting({
+    expectedFingerprint: tls.fingerprint,
+    lookup: async (hostname) => {
+      assert.equal(hostname, "relay.example.com");
+      return [{ address: "10.0.0.8", family: 4 }];
+    },
+    relayUrl: "https://relay.example.com:9443",
+    requestTiming: { bodyMs: 25, connectMs: 25, headerMs: 25, totalMs: 100 },
+    tlsCertificatePem: tls.pem,
+  });
+  let requests = 0;
+  stubHttpsRequest(t, () => {
+    requests += 1;
+    throw new Error("private DNS answer should fail before https.request");
+  });
+  await assert.rejects(
+    transport.request({ body: null, method: "GET", path: `/v1/sessions/${SESSION_ID}/view` }),
+    { code: "COORDINATION_OPERATOR_CLIENT_INVALID" },
+  );
+  assert.equal(requests, 0);
+});
+
 test("operator transport marks lost mutation responses ambiguous", async (t) => {
   const tls = await certificate(t);
   const https = await import("node:https");
@@ -403,7 +482,7 @@ test("operator transport marks lost mutation responses ambiguous", async (t) => 
   await new Promise((resolve, reject) => server.listen(0, "127.0.0.1", (error) => error ? reject(error) : resolve()));
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const { port } = server.address();
-  const transport = createPinnedOperatorHttpsTransport({ expectedFingerprint: tls.fingerprint, relayUrl: `https://127.0.0.1:${port}`, tlsCertificatePem: tls.pem });
+  const transport = testTransport(tls, port, { bodyMs: 5_000, connectMs: 5_000, headerMs: 5_000, totalMs: 45_000 });
   for (const path of ["/v1/capabilities", "/v1/events", "/v1/verified-events"]) {
     await assert.rejects(
       transport.request({ body: Buffer.from("{}", "utf8"), method: "POST", path }),

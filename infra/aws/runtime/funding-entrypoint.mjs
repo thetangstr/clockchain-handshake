@@ -33,14 +33,22 @@ import {
 } from "./runtime-input.mjs";
 
 const FUNDING_INPUT_KEYS = Object.freeze([
+  "actionAtMs",
+  "actionId",
   "createdAt",
   "expectedTreasuryAddress",
   "fundingRecordPath",
   "journalDirectory",
   "keystoreSecretArn",
   "passwordSecretArn",
+  "releaseIdentity",
   "repositorySha",
+  "resultPath",
   "rpcSecretArn",
+]);
+const RELEASE_IDENTITY_KEYS = Object.freeze([
+  "releaseId",
+  "sessionId",
 ]);
 const KEYSTORE_KEYS = Object.freeze([
   "version",
@@ -82,6 +90,10 @@ const RESERVED_DNS_SUFFIXES = Object.freeze([
 ]);
 const ZERO_ADDRESS =
   "0x0000000000000000000000000000000000000000";
+const RELEASE = /^release-[0-9a-f]{16}$/;
+const SESSION =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID = SESSION;
 
 class AwsFundingEntrypointError extends Error {
   constructor() {
@@ -167,7 +179,14 @@ function validateFundingInput(value) {
     value,
     FUNDING_INPUT_KEYS,
   );
+  const releaseIdentity = exact(
+    funding.releaseIdentity,
+    RELEASE_IDENTITY_KEYS,
+  );
   if (
+    !Number.isSafeInteger(funding.actionAtMs) ||
+    funding.actionAtMs < 0 ||
+    !UUID.test(funding.actionId) ||
     !ISO_INSTANT.test(funding.createdAt) ||
     Number.isNaN(
       Date.parse(funding.createdAt),
@@ -180,6 +199,8 @@ function validateFundingInput(value) {
     funding.expectedTreasuryAddress ===
       ZERO_ADDRESS ||
     !SHA40.test(funding.repositorySha) ||
+    !RELEASE.test(releaseIdentity.releaseId) ||
+    !SESSION.test(releaseIdentity.sessionId) ||
     !SECRET_ARN.test(
       funding.keystoreSecretArn,
     ) ||
@@ -192,7 +213,17 @@ function validateFundingInput(value) {
   }
   absolutePath(funding.fundingRecordPath);
   absolutePath(funding.journalDirectory);
-  return funding;
+  absolutePath(funding.resultPath);
+  if (
+    funding.resultPath !==
+    `/var/lib/clockchain/funding-result/releases/${releaseIdentity.releaseId}/actions/${funding.actionId}/funding-result.json`
+  ) {
+    fail();
+  }
+  return Object.freeze({
+    ...funding,
+    releaseIdentity,
+  });
 }
 
 function privateIpv4(hostname) {
@@ -434,6 +465,8 @@ export async function main({
     });
     result = await run(
       {
+        actionAtMs: funding.actionAtMs,
+        actionId: funding.actionId,
         expectedTreasuryAddress:
           funding.expectedTreasuryAddress,
         fundingRecordPath:
@@ -441,9 +474,14 @@ export async function main({
         journalDirectory:
           funding.journalDirectory,
         keystorePath,
+        releaseId:
+          funding.releaseIdentity.releaseId,
         repositorySha: funding.repositorySha,
+        resultPath: funding.resultPath,
         rpcUrlFile,
         secretId: funding.passwordSecretArn,
+        sessionId:
+          funding.releaseIdentity.sessionId,
       },
       {
         readSecret: (secretArn) =>

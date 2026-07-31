@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import {
+  execFile,
+  execFileSync,
+} from "node:child_process";
 import {
   createHash,
   generateKeyPairSync,
+  X509Certificate,
 } from "node:crypto";
 import {
   lstat,
@@ -11,6 +15,11 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -26,6 +35,9 @@ import {
 import {
   main as fundingEntrypoint,
 } from "../infra/aws/runtime/funding-entrypoint.mjs";
+import {
+  main as relayEntrypoint,
+} from "../infra/aws/runtime/relay-entrypoint.mjs";
 import {
   main as operatorWorkerEntrypoint,
 } from "../infra/aws/runtime/operator-worker-entrypoint.mjs";
@@ -46,6 +58,15 @@ const COORDINATOR_SESSION_ID =
 const COORDINATOR_RELEASE_ID = `release-${createHash("sha256").update(COORDINATOR_SESSION_ID, "utf8").digest("hex").slice(0, 16)}`;
 const COORDINATOR_RELEASE_ROOT =
   `/var/lib/clockchain/operator/releases/${COORDINATOR_RELEASE_ID}`;
+const RELAY_RELEASE_ID = "release-4444444444444444";
+const RELAY_REPOSITORY_SHA =
+  "abcdef0123456789abcdef0123456789abcdef01";
+const RELAY_CERTIFICATE_PATH =
+  "/var/lib/clockchain/relay/runtime/tls.crt";
+const RELAY_PRIVATE_KEY_PATH =
+  "/var/lib/clockchain/relay/runtime/tls.key";
+const RELAY_STATE_PATH =
+  `/var/lib/clockchain/relay/releases/${RELAY_RELEASE_ID}/relay-state.json`;
 const TREASURY_ADDRESS =
   "0x157a377e4181f3f87c7f6efed5ddc340ccc00dce";
 
@@ -56,6 +77,120 @@ function ed25519PrivateKeyPem() {
   return privateKey.export({
     format: "pem",
     type: "pkcs8",
+  });
+}
+
+function relayTlsMaterial() {
+  const root = mkdtempSync(
+    join(tmpdir(), "clockchain-relay-cert-"),
+  );
+  try {
+    const certificatePath = join(root, "relay.crt");
+    const privateKeyPath = join(root, "relay.key");
+    execFileSync("openssl", [
+      "req",
+      "-x509",
+      "-newkey",
+      "ed25519",
+      "-keyout",
+      privateKeyPath,
+      "-out",
+      certificatePath,
+      "-nodes",
+      "-days",
+      "1",
+      "-subj",
+      "/CN=relay.clockchain.network",
+      "-addext",
+      "subjectAltName=DNS:relay.clockchain.network",
+    ], { stdio: "ignore" });
+    return Object.freeze({
+      certificatePem:
+        readFileSync(certificatePath, "utf8"),
+      privateKeyPem:
+        readFileSync(privateKeyPath, "utf8"),
+    });
+  } finally {
+    rmSync(root, {
+      force: true,
+      recursive: true,
+    });
+  }
+}
+
+const RELAY_TLS_MATERIAL = relayTlsMaterial();
+const RELAY_TLS_CERTIFICATE_PEM =
+  RELAY_TLS_MATERIAL.certificatePem;
+const RELAY_TLS_PRIVATE_KEY_PEM =
+  RELAY_TLS_MATERIAL.privateKeyPem;
+const RELAY_TLS_FINGERPRINT = createHash("sha256")
+  .update(
+    new X509Certificate(
+      RELAY_TLS_CERTIFICATE_PEM,
+    ).raw,
+  )
+  .digest("hex");
+const RELAY_OPERATOR_PUBLIC_KEY =
+  Buffer.alloc(32, 7).toString("base64");
+
+function relayArgv(overrides = {}) {
+  const values = {
+    "--advertised-host": "relay.clockchain.network",
+    "--host": "0.0.0.0",
+    "--port": "8443",
+    "--repository-sha": RELAY_REPOSITORY_SHA,
+    "--state": RELAY_STATE_PATH,
+    "--tls-certificate": RELAY_CERTIFICATE_PATH,
+    "--tls-private-key": RELAY_PRIVATE_KEY_PATH,
+    ...overrides,
+  };
+  return [
+    "--advertised-host",
+    values["--advertised-host"],
+    "--host",
+    values["--host"],
+    "--port",
+    values["--port"],
+    "--repository-sha",
+    values["--repository-sha"],
+    "--state",
+    values["--state"],
+    "--tls-certificate",
+    values["--tls-certificate"],
+    "--tls-private-key",
+    values["--tls-private-key"],
+  ];
+}
+
+function relayRuntimeInput(overrides = {}) {
+  const relay = {
+    argv: relayArgv(),
+    certificatePath: RELAY_CERTIFICATE_PATH,
+    privateKeyPath: RELAY_PRIVATE_KEY_PATH,
+    provenance: {
+      imageDigest: `sha256:${"1".repeat(64)}`,
+      operatorKeyId: "clockchain-demo-2026",
+      operatorPublicKey: RELAY_OPERATOR_PUBLIC_KEY,
+      repositorySha: RELAY_REPOSITORY_SHA,
+      sourceTreeSha256: "2".repeat(64),
+    },
+    tlsFingerprint: RELAY_TLS_FINGERPRINT,
+    tlsSecretArn:
+      "arn:aws:secretsmanager:us-west-2:123456789012:secret:relay-tls",
+    ...overrides,
+  };
+  return JSON.stringify({
+    paymentMoved: false,
+    relay,
+    schema: "clockchain.aws-runtime-input/v1",
+  });
+}
+
+function relayTlsSecret(overrides = {}) {
+  return JSON.stringify({
+    certificatePem: RELAY_TLS_CERTIFICATE_PEM,
+    privateKeyPem: RELAY_TLS_PRIVATE_KEY_PEM,
+    ...overrides,
   });
 }
 
@@ -91,6 +226,9 @@ function mutateFundingKeystore(mutator) {
 
 function fundingRuntimeInput(overrides = {}) {
   const funding = {
+    actionAtMs: 2_000_000_000_000,
+    actionId:
+      "22222222-2222-4222-8222-222222222222",
     createdAt: "2026-07-31T00:00:00.000Z",
     expectedTreasuryAddress: TREASURY_ADDRESS,
     fundingRecordPath: "/operator/funding-record.json",
@@ -99,8 +237,14 @@ function fundingRuntimeInput(overrides = {}) {
       "arn:aws:secretsmanager:us-west-2:123456789012:secret:treasury-keystore",
     passwordSecretArn:
       "arn:aws:secretsmanager:us-west-2:123456789012:secret:treasury-password",
+    releaseIdentity: {
+      releaseId: OPERATOR_RELEASE_ID,
+      sessionId: OPERATOR_SESSION_ID,
+    },
     repositorySha:
       "abcdef0123456789abcdef0123456789abcdef01",
+    resultPath:
+      `/var/lib/clockchain/funding-result/releases/${OPERATOR_RELEASE_ID}/actions/22222222-2222-4222-8222-222222222222/funding-result.json`,
     rpcSecretArn:
       "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
     ...overrides,
@@ -118,6 +262,138 @@ function operatorRuntimeInput(overrides = {}) {
       "https://sqs.us-west-2.amazonaws.com/123456789012/clockchain-actions",
     actionTableName:
       "ClockchainHandshakeControl",
+    paymentMoved: false,
+    releaseId: OPERATOR_RELEASE_ID,
+    repositorySha:
+      "abcdef0123456789abcdef0123456789abcdef01",
+    schema:
+      "clockchain.aws-operator-runtime/v1",
+    sessionId: OPERATOR_SESSION_ID,
+    ...overrides,
+  };
+  return JSON.stringify({
+    operator,
+    paymentMoved: false,
+    schema: "clockchain.aws-runtime-input/v1",
+  });
+}
+
+function operatorProductionRuntimeInput(overrides = {}) {
+  const operator = {
+    actionQueueUrl:
+      "https://sqs.us-west-2.amazonaws.com/123456789012/clockchain-actions",
+    actionTableName:
+      "ClockchainHandshakeControl",
+    bootstrap: {
+      abortMarkerPath:
+        `/var/lib/clockchain/tunnel/grants/${OPERATOR_RELEASE_ID}/abort-marker.json`,
+      bootstrapBrokerCapabilitySecretArn:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:bootstrap-capability",
+      bootstrapBrokerUrl:
+        "https://bootstrap.clockchain.network/v1/",
+      bootstrapStatePath:
+        `/var/lib/clockchain/bootstrap/releases/${OPERATOR_RELEASE_ID}/bootstrap-state.json`,
+      operatorKeyId: "clockchain-demo-2026",
+      operatorKeySecretArn:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key",
+      payeeLaunchManifestPath:
+        `/var/lib/clockchain/operator/releases/${OPERATOR_RELEASE_ID}/requestor-launch-manifest.json`,
+      payerLaunchManifestPath:
+        `/var/lib/clockchain/operator/releases/${OPERATOR_RELEASE_ID}/payer-launch-manifest.json`,
+      publicMcpHostname:
+        "payer.clockchain.network",
+      tunnelGrantPath:
+        `/var/lib/clockchain/tunnel/grants/${OPERATOR_RELEASE_ID}/tunnel-grant.json`,
+    },
+    children: {
+      abort: {
+        containerName: "abort-tunnel",
+        securityGroupId:
+          "sg-0123456789abcdef0",
+        subnetIds: [
+          "subnet-0123456789abcdef0",
+          "subnet-11111111111111111",
+        ],
+        taskDefinitionArn:
+          "arn:aws:ecs:us-west-2:123456789012:task-definition/abort-tunnel:7",
+      },
+      bootstrapApproval: {
+        containerName: "bootstrap-approval",
+        securityGroupId:
+          "sg-0123456789abcdef0",
+        subnetIds: [
+          "subnet-0123456789abcdef0",
+          "subnet-11111111111111111",
+        ],
+        taskDefinitionArn:
+          "arn:aws:ecs:us-west-2:123456789012:task-definition/bootstrap-approval:7",
+      },
+      clusterArn:
+        "arn:aws:ecs:us-west-2:123456789012:cluster/clockchain",
+      funding: {
+        containerName: "funding",
+        createdAt:
+          "2026-07-31T00:00:00.000Z",
+        expectedTreasuryAddress:
+          TREASURY_ADDRESS,
+        fundingRecordPath:
+          `/var/lib/clockchain/funding-record/releases/${OPERATOR_RELEASE_ID}/funding-record.json`,
+        journalDirectory:
+          `/var/lib/clockchain/funding-journal/releases/${OPERATOR_RELEASE_ID}/journal`,
+        keystoreSecretArn:
+          "arn:aws:secretsmanager:us-west-2:123456789012:secret:treasury-keystore",
+        passwordSecretArn:
+          "arn:aws:secretsmanager:us-west-2:123456789012:secret:treasury-password",
+        securityGroupId:
+          "sg-0123456789abcdef0",
+        subnetIds: [
+          "subnet-0123456789abcdef0",
+          "subnet-11111111111111111",
+        ],
+        taskDefinitionArn:
+          "arn:aws:ecs:us-west-2:123456789012:task-definition/funding:7",
+      },
+      rpcSecretArn:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
+      verifier: {
+        clockchainTokenSecretArn:
+          "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-token",
+        containerName: "verifier",
+        securityGroupId:
+          "sg-0123456789abcdef0",
+        subnetIds: [
+          "subnet-0123456789abcdef0",
+          "subnet-11111111111111111",
+        ],
+        taskDefinitionArn:
+          "arn:aws:ecs:us-west-2:123456789012:task-definition/verifier:7",
+      },
+    },
+    coordinator: {
+      clockchainTokenSecretArn:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-token",
+      clusterArn:
+        "arn:aws:ecs:us-west-2:123456789012:cluster/clockchain",
+      containerName: "coordinator",
+      operatorKeyId: "clockchain-demo-2026",
+      operatorKeySecretArn:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key",
+      relayUrl:
+        "https://relay.clockchain.network:8443",
+      rpcSecretArn:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
+      securityGroupId:
+        "sg-0123456789abcdef0",
+      subnetIds: [
+        "subnet-0123456789abcdef0",
+        "subnet-11111111111111111",
+      ],
+      taskDefinitionArn:
+        "arn:aws:ecs:us-west-2:123456789012:task-definition/coordinator:7",
+      tlsCertificatePem:
+        RELAY_TLS_CERTIFICATE_PEM,
+      tlsFingerprint: RELAY_TLS_FINGERPRINT,
+    },
     paymentMoved: false,
     releaseId: OPERATOR_RELEASE_ID,
     repositorySha:
@@ -153,9 +429,9 @@ function coordinatorRuntimeInput(overrides = {}) {
       "abcdef0123456789abcdef0123456789abcdef01",
     rpcSecretArn:
       "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
-    tlsCertificatePath:
-      `${COORDINATOR_RELEASE_ROOT}/payer-mcp.crt`,
-    tlsFingerprint: "b".repeat(64),
+    tlsCertificatePem:
+      RELAY_TLS_CERTIFICATE_PEM,
+    tlsFingerprint: RELAY_TLS_FINGERPRINT,
     ...overrides,
   };
   return JSON.stringify({
@@ -202,6 +478,8 @@ test("every AWS task entrypoint is present and no production entrypoint is a pla
     "coordinator",
     "funding",
     "operator-worker",
+    "operator-abort",
+    "operator-bootstrap-approval",
     "publisher",
     "relay",
     "tunnel",
@@ -467,9 +745,9 @@ test("coordinator entrypoint materializes validated secrets into unique private 
     "--rpc-url-file",
     values["--rpc-url-file"],
     "--tls-certificate",
-    `${COORDINATOR_RELEASE_ROOT}/payer-mcp.crt`,
+    values["--tls-certificate"],
     "--tls-fingerprint",
-    "b".repeat(64),
+    RELAY_TLS_FINGERPRINT,
   ];
   for (const call of runCalls) {
     assert.deepEqual(
@@ -496,6 +774,12 @@ test("coordinator entrypoint materializes validated secrets into unique private 
     );
     await assert.rejects(
       lstat(call.values["--rpc-url-file"]),
+      { code: "ENOENT" },
+    );
+    await assert.rejects(
+      lstat(
+        call.values["--tls-certificate"],
+      ),
       { code: "ENOENT" },
     );
   }
@@ -526,16 +810,10 @@ test("coordinator entrypoint rejects malformed runtime input before secret reads
         "/var/lib/clockchain/operator/releases/release-0000000000000000",
     }),
     coordinatorRuntimeInput({
-      tlsCertificatePath:
-        "/var/lib/clockchain/operator/releases/release-0000000000000000/payer-mcp.crt",
+      tlsCertificatePem: "not-a-certificate",
     }),
     coordinatorRuntimeInput({
-      tlsCertificatePath:
-        COORDINATOR_RELEASE_ROOT,
-    }),
-    coordinatorRuntimeInput({
-      tlsCertificatePath:
-        "/var/lib/clockchain/operator/releases/release-0000000000000000/../payer-mcp.crt",
+      tlsFingerprint: "0".repeat(64),
     }),
     coordinatorRuntimeInput({
       relayUrl:
@@ -552,8 +830,8 @@ test("coordinator entrypoint rejects malformed runtime input before secret reads
       operatorKeyId: "-clockchain-demo-2026",
     }),
     coordinatorRuntimeInput({
-      tlsCertificatePath:
-        "/tmp/payer-mcp.crt",
+      tlsCertificatePem:
+        `${RELAY_TLS_CERTIFICATE_PEM}\nextra`,
     }),
     coordinatorRuntimeInput({
       tlsFingerprint: "B".repeat(64),
@@ -988,6 +1266,13 @@ test("coordinator entrypoint attempts all cleanup and fails closed when cleanup 
       "removeFile",
       join(scratchDir, "sepolia-rpc-url"),
     ],
+    [
+      "removeFile",
+      join(
+        scratchDir,
+        "relay-public-certificate.pem",
+      ),
+    ],
     ["removeDir", scratchDir],
   ]);
 });
@@ -1009,6 +1294,340 @@ test("coordinator production CLI fails closed without leaking runtime values", a
     "AWS_COORDINATOR_ENTRYPOINT_FAILED\n",
   );
   assert.equal(result.stdout, "");
+});
+
+test("relay entrypoint validates exact runtime input, installs TLS secrets, and runs canonical argv", async () => {
+  const calls = [];
+  let removed = [];
+  await relayEntrypoint({
+    client: {
+      async send(command) {
+        calls.push(["secret", command.input]);
+        return {
+          SecretString: relayTlsSecret(),
+        };
+      },
+    },
+    env: {
+      AWS_RUNTIME_INPUT: relayRuntimeInput(),
+    },
+    installFile: async (input) => {
+      calls.push(["install", input]);
+    },
+    removeFile: async (path) => {
+      removed.push(path);
+    },
+    run: async (argv, dependencies) => {
+      calls.push(["run", argv]);
+      assert.deepEqual(
+        await dependencies.provenanceProvider.assertRepository({
+          repositorySha: RELAY_REPOSITORY_SHA,
+        }),
+        {
+          imageDigest: `sha256:${"1".repeat(64)}`,
+          operatorPublicKey: RELAY_OPERATOR_PUBLIC_KEY,
+          repositorySha: RELAY_REPOSITORY_SHA,
+          sourceTreeSha256: "2".repeat(64),
+        },
+      );
+      assert.deepEqual(
+        await dependencies.provenanceProvider.verify({
+          operatorKeyId: "clockchain-demo-2026",
+          repositorySha: RELAY_REPOSITORY_SHA,
+        }),
+        {
+          imageDigest: `sha256:${"1".repeat(64)}`,
+          operatorPublicKey: RELAY_OPERATOR_PUBLIC_KEY,
+          repositorySha: RELAY_REPOSITORY_SHA,
+          sourceTreeSha256: "2".repeat(64),
+        },
+      );
+      return {
+        address: {
+          host: "0.0.0.0",
+          port: 8443,
+        },
+      };
+    },
+    stdout: {
+      write(value) {
+        calls.push(["stdout", value]);
+      },
+    },
+  });
+  assert.deepEqual(calls, [
+    [
+      "secret",
+      {
+        SecretId:
+          "arn:aws:secretsmanager:us-west-2:123456789012:secret:relay-tls",
+      },
+    ],
+    [
+      "install",
+      {
+        path: RELAY_CERTIFICATE_PATH,
+        value: RELAY_TLS_CERTIFICATE_PEM,
+      },
+    ],
+    [
+      "install",
+      {
+        path: RELAY_PRIVATE_KEY_PATH,
+        value: RELAY_TLS_PRIVATE_KEY_PEM,
+      },
+    ],
+    ["run", relayArgv()],
+    [
+      "stdout",
+      `{"host":"0.0.0.0","paymentMoved":false,"pid":${process.pid},"port":8443,"schema":"clockchain.bilateral-relay-ready/v1"}\n`,
+    ],
+  ]);
+  assert.deepEqual(removed.sort(), [
+    RELAY_CERTIFICATE_PATH,
+    RELAY_PRIVATE_KEY_PATH,
+  ].sort());
+});
+
+test("relay entrypoint rejects malformed runtime input before secret reads", async () => {
+  const valid = JSON.parse(relayRuntimeInput());
+  const reorderedRelay = {
+    paymentMoved: false,
+    relay: {
+      certificatePath: RELAY_CERTIFICATE_PATH,
+      argv: relayArgv(),
+      privateKeyPath: RELAY_PRIVATE_KEY_PATH,
+      provenance: valid.relay.provenance,
+      tlsFingerprint: RELAY_TLS_FINGERPRINT,
+      tlsSecretArn: valid.relay.tlsSecretArn,
+    },
+    schema: "clockchain.aws-runtime-input/v1",
+  };
+  const reorderedProvenance = {
+    ...valid,
+    relay: {
+      ...valid.relay,
+      provenance: {
+        operatorKeyId: "clockchain-demo-2026",
+        imageDigest: `sha256:${"1".repeat(64)}`,
+        operatorPublicKey: RELAY_OPERATOR_PUBLIC_KEY,
+        repositorySha: RELAY_REPOSITORY_SHA,
+        sourceTreeSha256: "2".repeat(64),
+      },
+    },
+  };
+  const cases = [
+    JSON.stringify({
+      relay: valid.relay,
+      paymentMoved: false,
+      schema:
+        "clockchain.aws-runtime-input/v1",
+    }),
+    JSON.stringify({
+      paymentMoved: true,
+      relay: valid.relay,
+      schema:
+        "clockchain.aws-runtime-input/v1",
+    }),
+    JSON.stringify({
+      paymentMoved: false,
+      relay: {
+        ...valid.relay,
+        extra: true,
+      },
+      schema:
+        "clockchain.aws-runtime-input/v1",
+    }),
+    JSON.stringify(reorderedRelay),
+    JSON.stringify(reorderedProvenance),
+    relayRuntimeInput({
+      argv: relayArgv({
+        "--repository-sha": "0".repeat(40),
+      }),
+    }),
+    relayRuntimeInput({
+      argv: [
+        "--host",
+        "0.0.0.0",
+        "--advertised-host",
+        "relay.clockchain.network",
+        ...relayArgv().slice(4),
+      ],
+    }),
+    relayRuntimeInput({
+      certificatePath: "/tmp/relay.crt",
+    }),
+    relayRuntimeInput({
+      privateKeyPath: "/tmp/relay.key",
+    }),
+    relayRuntimeInput({
+      tlsFingerprint: "B".repeat(64),
+    }),
+    relayRuntimeInput({
+      tlsSecretArn: "not-an-arn",
+    }),
+    relayRuntimeInput({
+      provenance: {
+        ...valid.relay.provenance,
+        operatorPublicKey: "not-base64",
+      },
+    }),
+    relayRuntimeInput({
+      provenance: {
+        ...valid.relay.provenance,
+        repositorySha: "0".repeat(40),
+      },
+    }),
+  ];
+  for (const runtimeInput of cases) {
+    let secretReads = 0;
+    let installs = 0;
+    await assert.rejects(
+      relayEntrypoint({
+        client: {
+          async send() {
+            secretReads += 1;
+            return { SecretString: relayTlsSecret() };
+          },
+        },
+        env: {
+          AWS_RUNTIME_INPUT: runtimeInput,
+        },
+        installFile: async () => {
+          installs += 1;
+        },
+        run: async () => {
+          assert.fail("run must not start");
+        },
+      }),
+      /AWS relay entrypoint failed safely|AWS runtime input failed safely/,
+    );
+    assert.equal(secretReads, 0, runtimeInput);
+    assert.equal(installs, 0, runtimeInput);
+  }
+});
+
+test("relay entrypoint rejects invalid TLS secrets before file install or run without leaking secret material", async () => {
+  const cases = [
+    {
+      input: relayRuntimeInput({
+        tlsFingerprint: "0".repeat(64),
+      }),
+      secret: relayTlsSecret(),
+    },
+    {
+      secret: relayTlsSecret({
+        certificatePem: `${RELAY_TLS_CERTIFICATE_PEM}\nextra`,
+      }),
+    },
+    {
+      secret: relayTlsSecret({
+        certificatePem: "not-a-certificate",
+      }),
+    },
+    {
+      secret: relayTlsSecret({
+        privateKeyPem: "not-a-private-key",
+      }),
+    },
+    {
+      secret: relayTlsSecret({
+        privateKeyPem: ed25519PrivateKeyPem(),
+      }),
+    },
+    {
+      secret: relayTlsSecret({
+        certificatePem: RELAY_TLS_CERTIFICATE_PEM,
+        extra: "unknown",
+      }),
+    },
+    {
+      secret: JSON.stringify({
+        privateKeyPem: RELAY_TLS_PRIVATE_KEY_PEM,
+        certificatePem: RELAY_TLS_CERTIFICATE_PEM,
+      }),
+    },
+    {
+      secret: JSON.stringify({
+        certificatePem: RELAY_TLS_CERTIFICATE_PEM,
+        privateKeyPem: "",
+      }),
+    },
+  ];
+  for (const { input, secret } of cases) {
+    const calls = [];
+    await assert.rejects(
+      relayEntrypoint({
+        client: {
+          async send(command) {
+            calls.push(["secret", command.input.SecretId]);
+            return { SecretString: secret };
+          },
+        },
+        env: {
+          AWS_RUNTIME_INPUT:
+            input ?? relayRuntimeInput(),
+        },
+        installFile: async () => {
+          calls.push(["install"]);
+        },
+        run: async () => {
+          calls.push(["run"]);
+        },
+      }),
+      (error) => {
+        assert.match(
+          error.message,
+          /AWS relay entrypoint failed safely|AWS runtime input failed safely/,
+        );
+        assert.doesNotMatch(
+          String(error),
+          /PRIVATE KEY|private-key-canary|not-a-certificate|BEGIN CERTIFICATE/,
+        );
+        return true;
+      },
+    );
+    assert.deepEqual(calls, [
+      [
+        "secret",
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:relay-tls",
+      ],
+    ]);
+  }
+});
+
+test("relay entrypoint removes partial TLS material when private-key installation fails", async () => {
+  const removed = [];
+  let installs = 0;
+  await assert.rejects(
+    relayEntrypoint({
+      client: {
+        async send() {
+          return { SecretString: relayTlsSecret() };
+        },
+      },
+      env: {
+        AWS_RUNTIME_INPUT: relayRuntimeInput(),
+      },
+      installFile: async () => {
+        installs += 1;
+        if (installs === 2) {
+          throw new Error("install canary");
+        }
+      },
+      removeFile: async (path) => {
+        removed.push(path);
+      },
+      run: async () => {
+        assert.fail("run must not start");
+      },
+    }),
+    /AWS relay entrypoint failed safely/,
+  );
+  assert.deepEqual(removed.sort(), [
+    RELAY_CERTIFICATE_PATH,
+    RELAY_PRIVATE_KEY_PATH,
+  ].sort());
 });
 
 test("operator worker entrypoint composes exact AWS clients and loop dependencies", async () => {
@@ -1089,6 +1708,7 @@ test("operator worker entrypoint provides default transition composition when no
   await operatorWorkerEntrypoint({
     createClients: async () => ({
       dynamodb: { send: async () => ({}) },
+      ecs: { send: async () => ({}) },
       sqs: { send: async () => ({}) },
     }),
     createDocumentClient: (client) => ({
@@ -1096,17 +1716,27 @@ test("operator worker entrypoint provides default transition composition when no
       send: async () => ({}),
     }),
     env: {
-      AWS_RUNTIME_INPUT: operatorRuntimeInput(),
+      AWS_RUNTIME_INPUT:
+        operatorProductionRuntimeInput(),
     },
     run: async (config, dependencies) => {
       calls.push([
         config.releaseId,
         typeof dependencies.buildTransitions,
       ]);
-      await assert.rejects(
-        dependencies.buildTransitions(config),
-        /AWS operator worker entrypoint failed safely/,
-      );
+      const transitions =
+        await dependencies.buildTransitions(config);
+      for (const name of [
+        "abortSession",
+        "approveBootstrapClaim",
+        "createSession",
+        "launchCoordinator",
+        "launchFundingTask",
+        "launchVerifierTask",
+        "readExpectedClaimFingerprint",
+      ]) {
+        assert.equal(typeof transitions[name], "function");
+      }
       return {
         paymentMoved: false,
         status: "IDLE",
@@ -1456,15 +2086,22 @@ test("funding entrypoint materializes keystore metadata and RPC secrets into pri
   );
   for (const runCall of runCalls) {
     assert.deepEqual(runCall, {
+      actionAtMs: 2_000_000_000_000,
+      actionId:
+        "22222222-2222-4222-8222-222222222222",
       expectedTreasuryAddress: TREASURY_ADDRESS,
       fundingRecordPath: "/operator/funding-record.json",
       journalDirectory: "/operator/funding-journal",
       keystorePath: runCall.keystorePath,
+      releaseId: OPERATOR_RELEASE_ID,
       repositorySha:
         "abcdef0123456789abcdef0123456789abcdef01",
+      resultPath:
+        `/var/lib/clockchain/funding-result/releases/${OPERATOR_RELEASE_ID}/actions/22222222-2222-4222-8222-222222222222/funding-result.json`,
       rpcUrlFile: runCall.rpcUrlFile,
       secretId:
         "arn:aws:secretsmanager:us-west-2:123456789012:secret:treasury-password",
+      sessionId: OPERATOR_SESSION_ID,
     });
     assert.notEqual(
       runCall.keystorePath,

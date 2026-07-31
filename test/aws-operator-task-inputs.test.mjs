@@ -1,4 +1,16 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import {
+  createHash,
+  X509Certificate,
+} from "node:crypto";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -19,6 +31,7 @@ const TREASURY_ADDRESS =
   "0x157a377e4181f3f87c7f6efed5ddc340ccc00dce";
 const ATTEMPT_ID =
   "22222222-2222-4222-8222-222222222222";
+const ACTION_AT_MS = 2_000_000_000_000;
 const OPERATOR_RELEASE_ROOT =
   `/var/lib/clockchain/operator/releases/${RELEASE_ID}`;
 const FUNDING_RECORD_ROOT =
@@ -29,6 +42,46 @@ const EVIDENCE_ROOT =
   `/var/lib/clockchain/evidence/releases/${RELEASE_ID}`;
 const VERIFIER_OUTPUT_ROOT =
   `/var/lib/clockchain/verifier-output/releases/${RELEASE_ID}`;
+
+function certificatePem() {
+  const root = mkdtempSync(
+    join(tmpdir(), "aws-task-input-relay-cert-"),
+  );
+  try {
+    const certificatePath = join(root, "relay.crt");
+    const privateKeyPath = join(root, "relay.key");
+    execFileSync("openssl", [
+      "req",
+      "-x509",
+      "-newkey",
+      "ed25519",
+      "-keyout",
+      privateKeyPath,
+      "-out",
+      certificatePath,
+      "-nodes",
+      "-days",
+      "1",
+      "-subj",
+      "/CN=relay.clockchain.net",
+      "-addext",
+      "subjectAltName=DNS:relay.clockchain.net",
+    ], { stdio: "ignore" });
+    return readFileSync(certificatePath, "utf8");
+  } finally {
+    rmSync(root, {
+      force: true,
+      recursive: true,
+    });
+  }
+}
+
+const RELAY_CERTIFICATE_PEM = certificatePem();
+const RELAY_FINGERPRINT = createHash("sha256")
+  .update(
+    new X509Certificate(RELAY_CERTIFICATE_PEM).raw,
+  )
+  .digest("hex");
 
 function coordinatorInput(overrides = {}) {
   return {
@@ -46,15 +99,16 @@ function coordinatorInput(overrides = {}) {
     rpcSecretArn:
       "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
     sessionId: SESSION_ID,
-    tlsCertificatePath:
-      `${OPERATOR_RELEASE_ROOT}/tls/relay-ca.pem`,
-    tlsFingerprint: "b".repeat(64),
+    tlsCertificatePem: RELAY_CERTIFICATE_PEM,
+    tlsFingerprint: RELAY_FINGERPRINT,
     ...overrides,
   };
 }
 
 function fundingInput(overrides = {}) {
   return {
+    actionAtMs: ACTION_AT_MS,
+    actionId: ATTEMPT_ID,
     createdAt: "2026-07-31T00:00:00.000Z",
     expectedTreasuryAddress: TREASURY_ADDRESS,
     fundingRecordPath:
@@ -67,6 +121,8 @@ function fundingInput(overrides = {}) {
       "arn:aws:secretsmanager:us-west-2:123456789012:secret:treasury-password",
     paymentMoved: false,
     releaseId: RELEASE_ID,
+    resultPath:
+      `/var/lib/clockchain/funding-result/releases/${RELEASE_ID}/actions/${ATTEMPT_ID}/funding-result.json`,
     repositorySha: REPOSITORY_SHA,
     rpcSecretArn:
       "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
@@ -196,9 +252,8 @@ test("builds exact canonical coordinator, funding, and verifier runtime inputs a
       repositorySha: REPOSITORY_SHA,
       rpcSecretArn:
         "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
-      tlsCertificatePath:
-        `${OPERATOR_RELEASE_ROOT}/tls/relay-ca.pem`,
-      tlsFingerprint: "b".repeat(64),
+      tlsCertificatePem: RELAY_CERTIFICATE_PEM,
+      tlsFingerprint: RELAY_FINGERPRINT,
     },
     paymentMoved: false,
     schema: "clockchain.aws-runtime-input/v1",
@@ -215,6 +270,8 @@ test("builds exact canonical coordinator, funding, and verifier runtime inputs a
   );
   assert.deepEqual(funding, {
     funding: {
+      actionAtMs: ACTION_AT_MS,
+      actionId: ATTEMPT_ID,
       createdAt: "2026-07-31T00:00:00.000Z",
       expectedTreasuryAddress:
         TREASURY_ADDRESS,
@@ -226,9 +283,15 @@ test("builds exact canonical coordinator, funding, and verifier runtime inputs a
         "arn:aws:secretsmanager:us-west-2:123456789012:secret:secret-canary-keystore",
       passwordSecretArn:
         "arn:aws:secretsmanager:us-west-2:123456789012:secret:secret-canary-password",
+      releaseIdentity: {
+        releaseId: RELEASE_ID,
+        sessionId: SESSION_ID,
+      },
       repositorySha: REPOSITORY_SHA,
       rpcSecretArn:
         "arn:aws:secretsmanager:us-west-2:123456789012:secret:rpc-url",
+      resultPath:
+        `/var/lib/clockchain/funding-result/releases/${RELEASE_ID}/actions/${ATTEMPT_ID}/funding-result.json`,
     },
     paymentMoved: false,
     schema: "clockchain.aws-runtime-input/v1",
@@ -514,14 +577,13 @@ test("builders reject traversal, non-normalized paths, and root-prefix sibling t
     {
       builder: buildCoordinatorRuntimeInput,
       input: coordinatorInput({
-        tlsCertificatePath: OPERATOR_RELEASE_ROOT,
+        tlsCertificatePem: "not-a-certificate",
       }),
     },
     {
       builder: buildCoordinatorRuntimeInput,
       input: coordinatorInput({
-        tlsCertificatePath:
-          `/var/lib/clockchain/operator/releases/${RELEASE_ID}-sibling/tls.pem`,
+        tlsFingerprint: "0".repeat(64),
       }),
     },
     {
@@ -536,6 +598,13 @@ test("builders reject traversal, non-normalized paths, and root-prefix sibling t
       input: fundingInput({
         journalDirectory:
           `/var/lib/clockchain/funding-journal/releases/${RELEASE_ID}/../${RELEASE_ID}/journal`,
+      }),
+    },
+    {
+      builder: buildFundingRuntimeInput,
+      input: fundingInput({
+        resultPath:
+          `${FUNDING_JOURNAL_ROOT}/journal/funding-result.json`,
       }),
     },
     {

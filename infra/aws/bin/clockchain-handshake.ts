@@ -56,6 +56,32 @@ const controlPlaneImage =
   );
 const repositorySha =
   app.node.tryGetContext("repositorySha");
+const sessionId =
+  app.node.tryGetContext("sessionId");
+const bootstrapBrokerCapabilityDigest =
+  app.node.tryGetContext(
+    "bootstrapBrokerCapabilityDigest",
+  );
+const relayTlsCertificatePem =
+  app.node.tryGetContext(
+    "relayTlsCertificatePem",
+  );
+const relayPublicHostname =
+  app.node.tryGetContext(
+    "relayPublicHostname",
+  );
+const relayTlsFingerprint =
+  app.node.tryGetContext(
+    "relayTlsFingerprint",
+  );
+const relayTlsSecretArn =
+  app.node.tryGetContext(
+    "relayTlsSecretArn",
+  );
+const operatorPublicKey =
+  app.node.tryGetContext("operatorPublicKey");
+const sourceTreeSha256 =
+  app.node.tryGetContext("sourceTreeSha256");
 const tunnelImage =
   app.node.tryGetContext("tunnelImage");
 
@@ -74,6 +100,11 @@ if (
         ),
         "activateServices",
       ),
+      bootstrapBrokerCapabilityDigest:
+        required(
+          bootstrapBrokerCapabilityDigest,
+          "bootstrapBrokerCapabilityDigest",
+        ),
       controlPlaneImage: required(
         controlPlaneImage,
         "controlPlaneImage",
@@ -85,6 +116,34 @@ if (
       repositorySha: required(
         repositorySha,
         "repositorySha",
+      ),
+      operatorPublicKey: required(
+        operatorPublicKey,
+        "operatorPublicKey",
+      ),
+      relayTlsCertificatePem: required(
+        relayTlsCertificatePem,
+        "relayTlsCertificatePem",
+      ),
+      relayPublicHostname: required(
+        relayPublicHostname,
+        "relayPublicHostname",
+      ),
+      relayTlsFingerprint: required(
+        relayTlsFingerprint,
+        "relayTlsFingerprint",
+      ),
+      relayTlsSecretArn: required(
+        relayTlsSecretArn,
+        "relayTlsSecretArn",
+      ),
+      sessionId: required(
+        sessionId,
+        "sessionId",
+      ),
+      sourceTreeSha256: required(
+        sourceTreeSha256,
+        "sourceTreeSha256",
       ),
       tunnelImage: required(
         tunnelImage,

@@ -28,21 +28,46 @@ import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as sqs from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
+import {
+  createHash,
+  X509Certificate,
+} from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const IMAGE =
   /^[0-9]{12}\.dkr\.ecr\.[a-z]{2}-[a-z]+-[1-9]\.amazonaws\.com\/[a-z0-9][a-z0-9._/-]{0,254}@sha256:[0-9a-f]{64}$/;
 const SHA40 = /^[0-9a-f]{40}$/;
+const SHA64 = /^[0-9a-f]{64}$/;
+const SESSION =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const RAW_ED25519_PUBLIC_KEY =
+  /^[A-Za-z0-9+/]{43}=$/;
+const SECRET_ARN =
+  /^arn:aws(?:-[a-z]+)?:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]{1,512}$/;
+const PUBLIC_HOSTNAME =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 export const CONTROL_REPOSITORY_NAME =
   "clockchain-handshake-control-plane";
 export const TUNNEL_REPOSITORY_NAME =
   "clockchain-handshake-tunnel";
 
+function validOperatorPublicKey(value: string): boolean {
+  if (!RAW_ED25519_PUBLIC_KEY.test(value)) {
+    return false;
+  }
+  const decoded = Buffer.from(value, "base64");
+  return (
+    decoded.length === 32 &&
+    decoded.toString("base64") === value
+  );
+}
+
 type AccessPointName =
   | "bootstrap"
   | "fundingJournal"
   | "fundingRecord"
+  | "fundingResult"
   | "operator"
   | "publisher"
   | "relay"
@@ -74,8 +99,16 @@ interface Workload {
 export interface ClockchainHandshakeStackProps
   extends StackProps {
   readonly activateServices?: boolean;
+  readonly bootstrapBrokerCapabilityDigest: string;
   readonly controlPlaneImage: string;
+  readonly operatorPublicKey: string;
+  readonly relayPublicHostname: string;
+  readonly relayTlsCertificatePem: string;
+  readonly relayTlsFingerprint: string;
+  readonly relayTlsSecretArn: string;
   readonly repositorySha: string;
+  readonly sessionId: string;
+  readonly sourceTreeSha256: string;
   readonly tunnelImage: string;
 }
 
@@ -154,12 +187,65 @@ export class ClockchainHandshakeStack extends Stack {
     if (
       !IMAGE.test(props.controlPlaneImage) ||
       !IMAGE.test(props.tunnelImage) ||
-      !SHA40.test(props.repositorySha)
+      !SHA40.test(props.repositorySha) ||
+      !SESSION.test(props.sessionId) ||
+      !SHA64.test(
+        props.bootstrapBrokerCapabilityDigest,
+      ) ||
+      !SHA64.test(
+        props.relayTlsFingerprint,
+      ) ||
+      !PUBLIC_HOSTNAME.test(
+        props.relayPublicHostname,
+      ) ||
+      !SECRET_ARN.test(
+        props.relayTlsSecretArn,
+      ) ||
+      !SHA64.test(props.sourceTreeSha256) ||
+      !validOperatorPublicKey(
+        props.operatorPublicKey,
+      )
     ) {
       throw new Error(
         "Container images and repository release must be immutable.",
       );
     }
+    const sessionId = props.sessionId;
+    let relayTlsCertificate: X509Certificate;
+    try {
+      relayTlsCertificate = new X509Certificate(
+        props.relayTlsCertificatePem,
+      );
+    } catch {
+      throw new Error(
+        "Relay TLS certificate is invalid.",
+      );
+    }
+    if (
+      createHash("sha256")
+        .update(relayTlsCertificate.raw)
+        .digest("hex") !==
+      props.relayTlsFingerprint
+    ) {
+      throw new Error(
+        "Relay TLS certificate and fingerprint must match.",
+      );
+    }
+    if (
+      relayTlsCertificate.checkHost(
+        props.relayPublicHostname,
+        { subject: "never" },
+      ) === undefined
+    ) {
+      throw new Error(
+        "Relay TLS certificate must cover the public hostname.",
+      );
+    }
+    const releaseId =
+      `release-${createHash("sha256")
+        .update(sessionId, "utf8")
+        .digest("hex")
+        .slice(0, 16)}`;
 
     const dataKey = new kms.Key(this, "DataKey", {
       enableKeyRotation: true,
@@ -262,10 +348,12 @@ export class ClockchainHandshakeStack extends Stack {
       "ClockchainToken",
       dataKey,
     );
-    const relayTls = this.secret(
-      "RelayTls",
-      dataKey,
-    );
+    const relayTls =
+      secretsmanager.Secret.fromSecretCompleteArn(
+        this,
+        "RelayTls",
+        props.relayTlsSecretArn,
+      );
     const sepoliaRpc = this.secret(
       "SepoliaRpc",
       dataKey,
@@ -282,6 +370,11 @@ export class ClockchainHandshakeStack extends Stack {
       "TunnelHostKey",
       dataKey,
     );
+    const bootstrapBrokerCapability =
+      this.secret(
+        "BootstrapBrokerCapability",
+        dataKey,
+      );
 
     const relay = this.workload({
       cluster,
@@ -331,12 +424,23 @@ export class ClockchainHandshakeStack extends Stack {
           "/var/lib/clockchain/operator",
           false,
         ),
+        this.mount(
+          "operator-bootstrap",
+          accessPoints.bootstrap,
+          "/var/lib/clockchain/bootstrap",
+          true,
+        ),
+        this.mount(
+          "operator-funding-result",
+          accessPoints.fundingResult,
+          "/var/lib/clockchain/funding-result",
+          true,
+        ),
       ],
       ports: [],
       service: true,
       vpc,
     });
-    operatorKey.grantRead(operator.role);
 
     const bootstrap = this.workload({
       cluster,
@@ -356,12 +460,6 @@ export class ClockchainHandshakeStack extends Stack {
           "/var/lib/clockchain/bootstrap",
           false,
         ),
-        this.mount(
-          "bootstrap-staging",
-          accessPoints.operator,
-          "/var/lib/clockchain/staging",
-          true,
-        ),
       ],
       ports: [
         {
@@ -372,7 +470,41 @@ export class ClockchainHandshakeStack extends Stack {
       service: true,
       vpc,
     });
-    operatorKey.grantRead(bootstrap.role);
+    bootstrap.container.addEnvironment(
+      "BILATERAL_RELEASE_ID",
+      releaseId,
+    );
+    bootstrap.container.addEnvironment(
+      "BILATERAL_REPOSITORY_SHA",
+      props.repositorySha,
+    );
+    bootstrap.container.addEnvironment(
+      "BILATERAL_SESSION_ID",
+      sessionId,
+    );
+    bootstrap.container.addEnvironment(
+      "AWS_BOOTSTRAP_STATE_PATH",
+      `/var/lib/clockchain/bootstrap/releases/${releaseId}/bootstrap-state.json`,
+    );
+    bootstrap.container.addEnvironment(
+      "AWS_BOOTSTRAP_BROKER_CAPABILITY_DIGEST",
+      props.bootstrapBrokerCapabilityDigest,
+    );
+    bootstrap.container.addEnvironment(
+      "AWS_BOOTSTRAP_CLAIM_EXPIRES_AFTER_MS",
+      "900000",
+    );
+    bootstrap.container.addEnvironment(
+      "AWS_BOOTSTRAP_BIND_HOST",
+      "0.0.0.0",
+    );
+    bootstrap.container.addEnvironment(
+      "AWS_BOOTSTRAP_PORT",
+      "9555",
+    );
+    bootstrapBrokerCapability.grantRead(
+      bootstrap.role,
+    );
 
     const tunnel = this.workload({
       cluster,
@@ -415,6 +547,82 @@ export class ClockchainHandshakeStack extends Stack {
       "TUNNEL_HOST_KEY_SECRET_ARN",
       tunnelHostKey.secretArn,
     );
+    tunnel.container.addEnvironment(
+      "AWS_TUNNEL_GRANT_PATH",
+      `/run/clockchain/grants/${releaseId}/tunnel-grant.json`,
+    );
+    tunnel.container.addEnvironment(
+      "AWS_TUNNEL_ABORT_MARKER_PATH",
+      `/run/clockchain/grants/${releaseId}/abort-marker.json`,
+    );
+    tunnel.container.addEnvironment(
+      "AWS_TUNNEL_STATE_ROOT",
+      "/run/clockchain/state",
+    );
+
+    const bootstrapApproval = this.workload({
+      cluster,
+      command: [
+        "node",
+        "infra/aws/runtime/operator-bootstrap-approval-entrypoint.mjs",
+      ],
+      desiredCount: 0,
+      fileSystem,
+      id: "BootstrapApproval",
+      image: controlImage,
+      mounts: [
+        this.mount(
+          "approval-bootstrap",
+          accessPoints.bootstrap,
+          "/var/lib/clockchain/bootstrap",
+          false,
+        ),
+        this.mount(
+          "approval-operator",
+          accessPoints.operator,
+          "/var/lib/clockchain/operator",
+          true,
+        ),
+        this.mount(
+          "approval-tunnel",
+          accessPoints.tunnel,
+          "/var/lib/clockchain/tunnel",
+          false,
+        ),
+      ],
+      ports: [],
+      service: false,
+      vpc,
+    });
+    operatorKey.grantRead(
+      bootstrapApproval.role,
+    );
+    bootstrapBrokerCapability.grantRead(
+      bootstrapApproval.role,
+    );
+
+    const abortTunnel = this.workload({
+      cluster,
+      command: [
+        "node",
+        "infra/aws/runtime/operator-abort-entrypoint.mjs",
+      ],
+      desiredCount: 0,
+      fileSystem,
+      id: "AbortTunnel",
+      image: controlImage,
+      mounts: [
+        this.mount(
+          "abort-tunnel",
+          accessPoints.tunnel,
+          "/var/lib/clockchain/tunnel",
+          false,
+        ),
+      ],
+      ports: [],
+      service: false,
+      vpc,
+    });
 
     const publicMonitorBucket =
       this.privateBucket(
@@ -510,6 +718,12 @@ export class ClockchainHandshakeStack extends Stack {
           "funding-journal",
           accessPoints.fundingJournal,
           "/var/lib/clockchain/funding-journal",
+          false,
+        ),
+        this.mount(
+          "funding-result",
+          accessPoints.fundingResult,
+          "/var/lib/clockchain/funding-result",
           false,
         ),
       ],
@@ -621,6 +835,50 @@ export class ClockchainHandshakeStack extends Stack {
           },
         },
       );
+    relay.container.addEnvironment(
+      "AWS_RUNTIME_INPUT",
+      JSON.stringify({
+        paymentMoved: false,
+        relay: {
+          argv: [
+            "--advertised-host",
+            props.relayPublicHostname,
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8443",
+            "--repository-sha",
+            props.repositorySha,
+            "--state",
+            `/var/lib/clockchain/relay/releases/${releaseId}/relay-state.json`,
+            "--tls-certificate",
+            "/var/lib/clockchain/relay/runtime/tls.crt",
+            "--tls-private-key",
+            "/var/lib/clockchain/relay/runtime/tls.key",
+          ],
+          certificatePath:
+            "/var/lib/clockchain/relay/runtime/tls.crt",
+          privateKeyPath:
+            "/var/lib/clockchain/relay/runtime/tls.key",
+          provenance: {
+            imageDigest:
+              props.controlPlaneImage.split("@")[1],
+            operatorKeyId:
+              "clockchain-demo-2026",
+            operatorPublicKey:
+              props.operatorPublicKey,
+            repositorySha: props.repositorySha,
+            sourceTreeSha256:
+              props.sourceTreeSha256,
+          },
+          tlsFingerprint:
+            props.relayTlsFingerprint,
+          tlsSecretArn: relayTls.secretArn,
+        },
+        schema:
+          "clockchain.aws-runtime-input/v1",
+      }),
+    );
     this.tunnelListener({
       containerPort: 2222,
       healthPort: "8080",
@@ -1012,13 +1270,167 @@ export class ClockchainHandshakeStack extends Stack {
     actionTable.grantReadWriteData(
       operator.role,
     );
+    operator.container.addEnvironment(
+      "AWS_RUNTIME_INPUT",
+      JSON.stringify({
+        operator: {
+          actionQueueUrl:
+            actionQueue.queueUrl,
+          actionTableName:
+            actionTable.tableName,
+          bootstrap: {
+            abortMarkerPath:
+              `/var/lib/clockchain/tunnel/grants/${releaseId}/abort-marker.json`,
+            bootstrapBrokerCapabilitySecretArn:
+              bootstrapBrokerCapability.secretArn,
+            bootstrapBrokerUrl:
+              `${bootstrapApi.url!}v1/`,
+            bootstrapStatePath:
+              `/var/lib/clockchain/bootstrap/releases/${releaseId}/bootstrap-state.json`,
+            operatorKeyId:
+              "clockchain-demo-2026",
+            operatorKeySecretArn:
+              operatorKey.secretArn,
+            payeeLaunchManifestPath:
+              `/var/lib/clockchain/operator/releases/${releaseId}/requestor-launch-manifest.json`,
+            payerLaunchManifestPath:
+              `/var/lib/clockchain/operator/releases/${releaseId}/payer-launch-manifest.json`,
+            publicMcpHostname:
+              props.relayPublicHostname,
+            tunnelGrantPath:
+              `/var/lib/clockchain/tunnel/grants/${releaseId}/tunnel-grant.json`,
+          },
+          children: {
+            abort: {
+              containerName: "aborttunnel",
+              securityGroupId:
+                abortTunnel.securityGroup
+                  .securityGroupId,
+              subnetIds: vpc.publicSubnets.map(
+                (subnet) => subnet.subnetId,
+              ),
+              taskDefinitionArn:
+                abortTunnel.task
+                  .taskDefinitionArn,
+            },
+            bootstrapApproval: {
+              containerName:
+                "bootstrapapproval",
+              securityGroupId:
+                bootstrapApproval.securityGroup
+                  .securityGroupId,
+              subnetIds: vpc.publicSubnets.map(
+                (subnet) => subnet.subnetId,
+              ),
+              taskDefinitionArn:
+                bootstrapApproval.task
+                  .taskDefinitionArn,
+            },
+            clusterArn: cluster.clusterArn,
+            funding: {
+              containerName: "funding",
+              createdAt:
+                "2026-07-31T00:00:00.000Z",
+              expectedTreasuryAddress:
+                "0x157a377e4181f3f87c7f6efed5ddc340ccc00dce",
+              fundingRecordPath:
+                `/var/lib/clockchain/funding-record/releases/${releaseId}/funding-record.json`,
+              journalDirectory:
+                `/var/lib/clockchain/funding-journal/releases/${releaseId}/journal`,
+              keystoreSecretArn:
+                treasuryKeystore.secretArn,
+              passwordSecretArn:
+                treasuryPassword.secretArn,
+              securityGroupId:
+                funding.securityGroup
+                  .securityGroupId,
+              subnetIds: vpc.publicSubnets.map(
+                (subnet) => subnet.subnetId,
+              ),
+              taskDefinitionArn:
+                funding.task
+                  .taskDefinitionArn,
+            },
+            rpcSecretArn: sepoliaRpc.secretArn,
+            verifier: {
+              clockchainTokenSecretArn:
+                clockchainToken.secretArn,
+              containerName: "verifier",
+              securityGroupId:
+                verifier.securityGroup
+                  .securityGroupId,
+              subnetIds: vpc.publicSubnets.map(
+                (subnet) => subnet.subnetId,
+              ),
+              taskDefinitionArn:
+                verifier.task
+                  .taskDefinitionArn,
+            },
+          },
+          coordinator: {
+            clockchainTokenSecretArn:
+              clockchainToken.secretArn,
+            clusterArn: cluster.clusterArn,
+            containerName: "coordinator",
+            operatorKeyId:
+              "clockchain-demo-2026",
+            operatorKeySecretArn:
+              operatorKey.secretArn,
+            relayUrl:
+              `https://${props.relayPublicHostname}:8443`,
+            rpcSecretArn: sepoliaRpc.secretArn,
+            securityGroupId:
+              coordinator.securityGroup
+                .securityGroupId,
+            subnetIds: vpc.publicSubnets.map(
+              (subnet) => subnet.subnetId,
+            ),
+            taskDefinitionArn:
+              coordinator.task.taskDefinitionArn,
+            tlsCertificatePem:
+              props.relayTlsCertificatePem,
+            tlsFingerprint:
+              props.relayTlsFingerprint,
+          },
+          paymentMoved: false,
+          releaseId,
+          repositorySha: props.repositorySha,
+          schema:
+            "clockchain.aws-operator-runtime/v1",
+          sessionId,
+        },
+        paymentMoved: false,
+        schema:
+          "clockchain.aws-runtime-input/v1",
+      }),
+    );
     operator.role.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ["ecs:RunTask"],
         resources: [
+          abortTunnel.task.taskDefinitionArn,
+          bootstrapApproval.task
+            .taskDefinitionArn,
           coordinator.task.taskDefinitionArn,
           funding.task.taskDefinitionArn,
           verifier.task.taskDefinitionArn,
+        ],
+      }),
+    );
+    operator.role.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["ecs:DescribeTasks"],
+        conditions: {
+          ArnEquals: {
+            "ecs:cluster": cluster.clusterArn,
+          },
+        },
+        resources: [
+          Stack.of(this).formatArn({
+            service: "ecs",
+            resource: "task",
+            resourceName: `${cluster.clusterName}/*`,
+          }),
         ],
       }),
     );
@@ -1032,9 +1444,15 @@ export class ClockchainHandshakeStack extends Stack {
           },
         },
         resources: [
+          abortTunnel.role.roleArn,
+          bootstrapApproval.role.roleArn,
           coordinator.role.roleArn,
           funding.role.roleArn,
           verifier.role.roleArn,
+          abortTunnel.task.executionRole!
+            .roleArn,
+          bootstrapApproval.task.executionRole!
+            .roleArn,
           coordinator.task.executionRole!
             .roleArn,
           funding.task.executionRole!.roleArn,
@@ -1114,16 +1532,21 @@ export class ClockchainHandshakeStack extends Stack {
       value: `https://${publicDistribution.distributionDomainName}`,
     });
     new CfnOutput(this, "RelayEndpoint", {
-      value: `${publicNlb.loadBalancerDnsName}:8443`,
+      value: `${props.relayPublicHostname}:8443`,
     });
     new CfnOutput(this, "PayerMcpEndpoint", {
-      value: `${publicNlb.loadBalancerDnsName}:9443`,
+      value: `${props.relayPublicHostname}:9443`,
+    });
+    new CfnOutput(this, "PublicNlbDnsName", {
+      value: publicNlb.loadBalancerDnsName,
     });
     new CfnOutput(this, "TaskDefinitions", {
       value: [
         relay,
         operator,
         bootstrap,
+        bootstrapApproval,
+        abortTunnel,
         tunnel,
         publisher,
         coordinator,
@@ -1138,6 +1561,7 @@ export class ClockchainHandshakeStack extends Stack {
     });
     new CfnOutput(this, "SecretArns", {
       value: [
+        bootstrapBrokerCapability,
         operatorKey,
         clockchainToken,
         relayTls,
@@ -1196,6 +1620,10 @@ export class ClockchainHandshakeStack extends Stack {
       fundingRecord: [
         "FundingRecord",
         "1103",
+      ],
+      fundingResult: [
+        "FundingResult",
+        "1110",
       ],
       operator: ["Operator", "1104"],
       publisher: ["Publisher", "1105"],
