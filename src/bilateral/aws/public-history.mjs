@@ -2,13 +2,14 @@ import { isIP } from "node:net";
 import { types } from "node:util";
 
 import {
+  PUBLIC_MONITOR_SCHEMA,
   observePublicMonitorSnapshot,
 } from "../coordination/public-monitor.mjs";
 
 export const AWS_PUBLIC_RUN_SUMMARY_SCHEMA =
-  "clockchain.aws-public-run-summary/v1";
+  "clockchain.aws-public-run-summary/v2";
 export const AWS_PUBLIC_RUN_INDEX_SCHEMA =
-  "clockchain.aws-public-run-index/v1";
+  "clockchain.aws-public-run-index/v2";
 
 const SUMMARY_KEYS = Object.freeze([
   "anchors",
@@ -184,13 +185,11 @@ function indexEntry(value) {
   if (
     !RUN_ID.test(entry.runId) ||
     !TERMINAL.has(entry.runStatus) ||
-    typeof entry.businessResult !== "string" ||
-    entry.businessResult.length === 0 ||
-    entry.businessResult.length > 240
+    entry.businessResult !== businessResult(entry.runStatus)
   ) {
     fail();
   }
-  decimal(entry.completedAtMs);
+  const completedAtMs = decimal(entry.completedAtMs);
   publicUrl(entry.summaryUrl);
   if (
     !Array.isArray(entry.anchors) ||
@@ -202,7 +201,29 @@ function indexEntry(value) {
   ) {
     fail();
   }
-  return entry;
+  const observed = observePublicMonitorSnapshot(
+    {
+      anchors: entry.anchors,
+      currentStep: entry.businessResult,
+      funding: { status: "READY" },
+      mcp: { status: "READY" },
+      paymentMoved: false,
+      payer: { status: "READY" },
+      publishedAtMs: entry.completedAtMs,
+      relay: { status: "READY" },
+      requestor: { status: "READY" },
+      runId: entry.runId,
+      runStatus: entry.runStatus,
+      schema: PUBLIC_MONITOR_SCHEMA,
+      staleAfterMs: 60_000,
+      verifier: { status: entry.runStatus },
+    },
+    { nowMs: completedAtMs },
+  );
+  return Object.freeze({
+    ...entry,
+    anchors: observed.anchors,
+  });
 }
 
 function validateIndex(value) {
@@ -308,6 +329,41 @@ export function createImmutableRunSummary({
   }
 }
 
+export function observeImmutableRunSummary(value) {
+  try {
+    const summary = exact(value, SUMMARY_KEYS);
+    if (
+      summary.schema !== AWS_PUBLIC_RUN_SUMMARY_SCHEMA ||
+      summary.paymentMoved !== false
+    ) {
+      fail();
+    }
+    const checked = indexEntry({
+      anchors: summary.anchors,
+      businessResult: summary.businessResult,
+      completedAtMs: summary.completedAtMs,
+      runId: summary.runId,
+      runStatus: summary.runStatus,
+      summaryUrl: summary.summaryUrl,
+    });
+    if (
+      checked.runStatus === "VERIFIED" &&
+      checked.anchors.length !== 3
+    ) {
+      fail();
+    }
+    return Object.freeze({
+      ...summary,
+      anchors: checked.anchors,
+    });
+  } catch (error) {
+    if (error instanceof AwsPublicHistoryError) {
+      throw error;
+    }
+    fail();
+  }
+}
+
 export function appendPublicRunIndex({
   index,
   summary,
@@ -325,17 +381,8 @@ export function appendPublicRunIndex({
             updatedAtMs: "0",
           }
         : validateIndex(index);
-    const candidate = exact(
-      summary,
-      SUMMARY_KEYS,
-    );
-    if (
-      candidate.schema !==
-        AWS_PUBLIC_RUN_SUMMARY_SCHEMA ||
-      candidate.paymentMoved !== false
-    ) {
-      fail();
-    }
+    const candidate =
+      observeImmutableRunSummary(summary);
     const entry = indexEntry({
       anchors: candidate.anchors,
       businessResult:

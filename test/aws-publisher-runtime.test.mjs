@@ -53,7 +53,7 @@ function publicationInput() {
       runId: "run-0123456789abcdef",
       runStatus: "WAITING_FOR_PARTICIPANTS",
       schema:
-        "clockchain.bilateral-public-monitor/v2",
+        "clockchain.bilateral-public-monitor/v3",
       staleAfterMs: 10_000,
       verifier: { status: "NOT_STARTED" },
     },

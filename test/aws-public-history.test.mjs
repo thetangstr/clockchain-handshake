@@ -4,35 +4,50 @@ import { test } from "node:test";
 import {
   appendPublicRunIndex,
   createImmutableRunSummary,
+  observeImmutableRunSummary,
   publicArtifactKeys,
 } from "../src/bilateral/aws/public-history.mjs";
 
 const RUN_ID = "run-0123456789abcdef";
 const COMPLETED_AT_MS = 2_000_000_000_500;
+const LEDGER_IDS = [
+  "00000000-0000-4000-8000-000000000001",
+  "00000000-0000-4000-8000-000000000002",
+  "00000000-0000-4000-8000-000000000003",
+];
 
 function projection(overrides = {}) {
   return {
     anchors: [
       {
         block: "101",
+        cardinality: "1",
         explorerUrl:
           "https://sepolia.etherscan.io/block/101",
         kind: "PROPOSED",
+        ledgerId: LEDGER_IDS[0],
         signerRole: "Payer",
+        verified: true,
       },
       {
         block: "102",
+        cardinality: "1",
         explorerUrl:
           "https://sepolia.etherscan.io/block/102",
         kind: "ACCEPTED",
+        ledgerId: LEDGER_IDS[1],
         signerRole: "Requestor",
+        verified: true,
       },
       {
         block: "103",
+        cardinality: "1",
         explorerUrl:
           "https://sepolia.etherscan.io/block/103",
         kind: "ACKNOWLEDGED",
+        ledgerId: LEDGER_IDS[2],
         signerRole: "Payer",
+        verified: true,
       },
     ],
     currentStep: "Fresh verification passed.",
@@ -46,7 +61,7 @@ function projection(overrides = {}) {
     runId: RUN_ID,
     runStatus: "VERIFIED",
     schema:
-      "clockchain.bilateral-public-monitor/v2",
+      "clockchain.bilateral-public-monitor/v3",
     staleAfterMs: 10_000,
     verifier: { status: "VERIFIED" },
     ...overrides,
@@ -71,7 +86,7 @@ test("creates an immutable business summary only from a terminal validated proje
     runId: RUN_ID,
     runStatus: "VERIFIED",
     schema:
-      "clockchain.aws-public-run-summary/v1",
+      "clockchain.aws-public-run-summary/v2",
     summaryUrl:
       `https://monitor.example/runs/${RUN_ID}.json`,
   });
@@ -92,6 +107,37 @@ test("creates an immutable business summary only from a terminal validated proje
       summary: `runs/${RUN_ID}.json`,
     },
   );
+});
+
+test("observes only exact receipt-complete immutable summaries", () => {
+  const summary = createImmutableRunSummary({
+    completedAtMs: COMPLETED_AT_MS,
+    projection: projection(),
+    secretCanaries: [],
+    summaryUrl:
+      `https://monitor.example/runs/${RUN_ID}.json`,
+    verifierPublicationValidated: true,
+  });
+  assert.deepEqual(
+    observeImmutableRunSummary(summary),
+    summary,
+  );
+  for (const malformed of [
+    { ...summary, schema: "clockchain.aws-public-run-summary/v1" },
+    { ...summary, paymentMoved: true },
+    { ...summary, anchors: summary.anchors.slice(0, 2) },
+    {
+      ...summary,
+      anchors: summary.anchors.map((anchor, index) =>
+        index === 1 ? { ...anchor, ledgerId: LEDGER_IDS[0] } : anchor),
+    },
+    { ...summary, receiptHtml: "not-public" },
+  ]) {
+    assert.throws(
+      () => observeImmutableRunSummary(malformed),
+      /AWS public history failed safely/,
+    );
+  }
 });
 
 test("keeps failed and expired summaries non-green and preserves only the authenticated prefix", () => {
@@ -192,6 +238,7 @@ test("maintains a bounded newest-first unique run index", () => {
   });
   assert.equal(index.entries.length, 1);
   assert.equal(index.entries[0].runId, RUN_ID);
+  assert.equal(index.schema, "clockchain.aws-public-run-index/v2");
 
   const secondRun = "run-fedcba9876543210";
   const second = createImmutableRunSummary({

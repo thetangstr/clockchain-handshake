@@ -143,7 +143,7 @@ function waitingSnapshot(publishedAtMs = 1_785_000_000_000) {
     requestor: { status: "WAITING" },
     runId: `run-${RELEASE_ID.slice("release-".length)}`,
     runStatus: "WAITING",
-    schema: "clockchain.bilateral-public-monitor/v2",
+    schema: "clockchain.bilateral-public-monitor/v3",
     staleAfterMs: 10_000,
     verifier: { status: "NOT_STARTED" },
   };

@@ -29,7 +29,7 @@ function snapshot(overrides = {}) {
     runId: RUN_ID,
     runStatus: "WAITING",
     schema:
-      "clockchain.bilateral-public-monitor/v2",
+      "clockchain.bilateral-public-monitor/v3",
     staleAfterMs: 10_000,
     verifier: { status: "NOT_STARTED" },
     ...overrides,
@@ -278,24 +278,33 @@ test("uses an immutable summary and conditional newest-first index only for a va
     anchors: [
       {
         block: "101",
+        cardinality: "1",
         explorerUrl:
           "https://sepolia.etherscan.io/block/101",
         kind: "PROPOSED",
+        ledgerId: "00000000-0000-4000-8000-000000000001",
         signerRole: "Payer",
+        verified: true,
       },
       {
         block: "102",
+        cardinality: "1",
         explorerUrl:
           "https://sepolia.etherscan.io/block/102",
         kind: "ACCEPTED",
+        ledgerId: "00000000-0000-4000-8000-000000000002",
         signerRole: "Requestor",
+        verified: true,
       },
       {
         block: "103",
+        cardinality: "1",
         explorerUrl:
           "https://sepolia.etherscan.io/block/103",
         kind: "ACKNOWLEDGED",
+        ledgerId: "00000000-0000-4000-8000-000000000003",
         signerRole: "Payer",
+        verified: true,
       },
     ],
     currentStep:
@@ -384,24 +393,33 @@ test("rejects a changed immutable summary, any secret canary, and unvalidated gr
           anchors: [
             {
               block: "101",
+              cardinality: "1",
               explorerUrl:
                 "https://sepolia.etherscan.io/block/101",
               kind: "PROPOSED",
+              ledgerId: "00000000-0000-4000-8000-000000000001",
               signerRole: "Payer",
+              verified: true,
             },
             {
               block: "102",
+              cardinality: "1",
               explorerUrl:
                 "https://sepolia.etherscan.io/block/102",
               kind: "ACCEPTED",
+              ledgerId: "00000000-0000-4000-8000-000000000002",
               signerRole: "Requestor",
+              verified: true,
             },
             {
               block: "103",
+              cardinality: "1",
               explorerUrl:
                 "https://sepolia.etherscan.io/block/103",
               kind: "ACKNOWLEDGED",
+              ledgerId: "00000000-0000-4000-8000-000000000003",
               signerRole: "Payer",
+              verified: true,
             },
           ],
           runStatus: "VERIFIED",
