@@ -55,6 +55,19 @@ function groups(value) {
   } catch {
     // Cognito may serialize one group as a string.
   }
+  const bracketed =
+    /^\[([A-Za-z0-9+=,.@_-]+(?:[,\s]+[A-Za-z0-9+=,.@_-]+)*)\]$/u.exec(
+      value,
+    );
+  if (bracketed !== null) {
+    return bracketed[1].split(/[,\s]+/u);
+  }
+  if (
+    value.startsWith("[") ||
+    value.endsWith("]")
+  ) {
+    return [];
+  }
   return [value];
 }
 
