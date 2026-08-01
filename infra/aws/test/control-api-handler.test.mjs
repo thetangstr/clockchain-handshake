@@ -17,7 +17,7 @@ function configureEnvironment() {
   process.env.OPERATOR_GROUP = OPERATOR_GROUP;
 }
 
-test("accepts API Gateway JWT-authorized events when authorization header is not forwarded", async () => {
+test("rejects API Gateway events when the authorization header is not forwarded", async () => {
   configureEnvironment();
   const { handler } = await import(
     `../lambda/handler.mjs?jwt-authorizer-event=${Date.now()}`
@@ -46,7 +46,7 @@ test("accepts API Gateway JWT-authorized events when authorization header is not
       },
     },
   });
-  assert.equal(response.statusCode, 400);
+  assert.equal(response.statusCode, 401);
 });
 
 test("accepts API Gateway bracket-serialized Cognito groups", async () => {

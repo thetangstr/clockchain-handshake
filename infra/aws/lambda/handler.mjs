@@ -67,52 +67,6 @@ function groups(value, exactBracketGroup) {
   return [value];
 }
 
-function hasAuthorizationHeader(headers) {
-  try {
-    if (
-      headers === null ||
-      typeof headers !== "object" ||
-      Array.isArray(headers)
-    ) {
-      return false;
-    }
-    return Object.entries(headers).some(
-      ([key, value]) =>
-        typeof key === "string" &&
-        key.toLowerCase() ===
-          "authorization" &&
-        typeof value === "string" &&
-        value.length > 0,
-    );
-  } catch {
-    return false;
-  }
-}
-
-function controlHeaders(event, jwt) {
-  const headers = event?.headers;
-  if (
-    jwt === null ||
-    typeof jwt !== "object" ||
-    Array.isArray(jwt) ||
-    hasAuthorizationHeader(headers)
-  ) {
-    return headers;
-  }
-  if (
-    headers === null ||
-    typeof headers !== "object" ||
-    Array.isArray(headers)
-  ) {
-    return headers;
-  }
-  return {
-    ...headers,
-    authorization:
-      "Bearer api-gateway-jwt-authorizer",
-  };
-}
-
 async function readSessionState({
   releaseId,
   sessionId,
@@ -215,7 +169,7 @@ export async function handler(event) {
   });
   return runtime({
     body: event?.body,
-    headers: controlHeaders(event, jwt),
+    headers: event?.headers,
     httpMethod:
       event?.requestContext?.http?.method,
     path:
