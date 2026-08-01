@@ -19,6 +19,7 @@ import { createRecovery, createRegistrationIntent, withMetadataTransaction } fro
 import { createRoleSupervisor } from "../../src/bilateral/coordination/supervisor.mjs";
 import { createGitInspector, createProductionSupervisorDependencies } from "../../src/bilateral/coordination/supervisor-runtime.mjs";
 import { createCoordinatorRuntimeDependencies, loadOrCreateCoordinatorRelease, parseCoordinatorArguments, readCoordinatorRuntimeConfig } from "../../src/bilateral/coordination/coordinator-runtime.mjs";
+import { createPinnedOperatorHttpsTransportForTesting } from "../../src/bilateral/coordination/operator-client.mjs";
 import { runCoordinator as runProductionCoordinator } from "../../src/bilateral/coordination/coordinator.mjs";
 import {
   createLaunchManifest,
@@ -55,6 +56,12 @@ const STOP_GRACE_MS = 1_000;
 const BARRIER_DEADLINE_MS = 90_000;
 const ROLE_SCHEMA = "clockchain.bilateral-coordination-process-supervisor/v1";
 const COORDINATOR_SCHEMA = "clockchain.bilateral-coordination-process-coordinator/v1";
+const LOCAL_OPERATOR_REQUEST_TIMING = Object.freeze({
+  bodyMs: 5_000,
+  connectMs: 5_000,
+  headerMs: 5_000,
+  totalMs: 45_000,
+});
 const PROCESS_SCENARIOS = new Set([
   "success",
   "missing-mandate",
@@ -79,6 +86,31 @@ let failurePhase = "dispatch";
 
 function fail() {
   throw new Error("process child rejected its configuration");
+}
+
+function createLocalOperatorTransport(config) {
+  let endpoint;
+  try {
+    endpoint = new URL(config.relayUrl);
+  } catch {
+    fail();
+  }
+  if (
+    endpoint.protocol !== "https:" ||
+    endpoint.hostname !== "127.0.0.1" ||
+    endpoint.pathname !== "/" ||
+    endpoint.search !== "" ||
+    endpoint.hash !== "" ||
+    !/^[1-9][0-9]*$/.test(endpoint.port)
+  ) {
+    fail();
+  }
+  return createPinnedOperatorHttpsTransportForTesting({
+    expectedFingerprint: config.tlsFingerprint,
+    relayUrl: config.relayUrl,
+    requestTiming: LOCAL_OPERATOR_REQUEST_TIMING,
+    tlsCertificatePem: config.tlsCertificatePem,
+  });
 }
 
 function exact(value, keys) {
@@ -1359,6 +1391,7 @@ async function runProductionCoordinatorChild(input) {
             undefined,
             { allowTestAddresses: true },
           ),
+      createTransport: () => createLocalOperatorTransport(config),
       createFundingAdmissionClient,
       repositoryRoot: value.repositoryRoot,
       now: () => value.clockMs + (
@@ -1597,6 +1630,7 @@ async function runProductionCoordinatorChild(input) {
         ? { createWatcherClient: () => createFakeBilateralClockchainHttpClient(value.fake) }
         : { watchBilateralSession: boundedWatcher }),
       createFundingAdmissionClient,
+      createTransport: () => createLocalOperatorTransport(config),
       repositoryRoot: value.repositoryRoot,
       now: base.now,
       sleeper: (delay) => guardRoleExits(base.sleeper(delay)),

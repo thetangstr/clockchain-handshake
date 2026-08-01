@@ -31,7 +31,7 @@
     "invitations:check": "node scripts/check-invitations.mjs",
     "results:verify": "node scripts/verify-live-results.mjs",
     "acceptance:clients": "node scripts/run-clean-clients.mjs",
-    "test": "node --test --test-concurrency=4",
+    "test": "node --test --test-concurrency=4 test/*.test.mjs infra/aws/test/*.test.mjs && npm --prefix infra/aws test",
     "test:unit": "node --test test/*.test.mjs",
     "verify": "npm test && npm run docs:check",
     "docs:check": "node scripts/check-docs.mjs"

@@ -137,6 +137,8 @@ async function runFunding() {
   const summary = fundingSummary();
   const result = await runAwsFundingTask(
     {
+      actionAtMs: NOW_MS,
+      actionId: ACTION_IDS[3],
       expectedTreasuryAddress:
         summary.fundingAddress,
       fundingRecordPath:
@@ -144,15 +146,30 @@ async function runFunding() {
       journalDirectory: "/funding/journal",
       keystorePath:
         "/secrets/treasury-keystore.json",
+      releaseId: RELEASE_ID,
       repositorySha: REPOSITORY_SHA,
+      resultPath:
+        `/var/lib/clockchain/funding-result/releases/${RELEASE_ID}/actions/${ACTION_IDS[3]}/funding-result.json`,
       rpcUrlFile: "/secrets/sepolia-rpc",
       secretId: "treasury-password",
+      sessionId: SESSION_ID,
     },
     {
       fundingMain: async () => summary,
       openFundingWallet: async () => ({}),
+      readFundingResult: async () => ({
+        batchId: summary.batchId,
+        paymentMoved: false,
+        status: "FUNDED",
+        transactionHashes:
+          summary.transfers.map(
+            ({ transactionHash }) =>
+              transactionHash,
+          ),
+      }),
       readSecret:
         async () => "not-returned",
+      writeFundingResult: async () => {},
     },
   );
   return {
@@ -433,21 +450,21 @@ async function fullScenario() {
     {
       block: "1001",
       explorerUrl:
-        "https://sepolia.etherscan.io/tx/0xproposed",
+        "https://sepolia.etherscan.io/block/1001",
       kind: "PROPOSED",
       signerRole: "payer",
     },
     {
       block: "1002",
       explorerUrl:
-        "https://sepolia.etherscan.io/tx/0xaccepted",
+        "https://sepolia.etherscan.io/block/1002",
       kind: "ACCEPTED",
       signerRole: "payee",
     },
     {
       block: "1003",
       explorerUrl:
-        "https://sepolia.etherscan.io/tx/0xacknowledged",
+        "https://sepolia.etherscan.io/block/1003",
       kind: "ACKNOWLEDGED",
       signerRole: "payer",
     },
@@ -643,6 +660,8 @@ async function hostileScenario(canaries) {
     () =>
       runAwsFundingTask(
         {
+          actionAtMs: NOW_MS,
+          actionId: ACTION_IDS[3],
           expectedTreasuryAddress:
             "0x1111111111111111111111111111111111111111",
           fundingRecordPath:
@@ -651,10 +670,14 @@ async function hostileScenario(canaries) {
             "/funding/journal",
           keystorePath:
             "/secrets/treasury-keystore.json",
+          releaseId: RELEASE_ID,
           repositorySha: REPOSITORY_SHA,
+          resultPath:
+            `/var/lib/clockchain/funding-result/releases/${RELEASE_ID}/actions/${ACTION_IDS[3]}/funding-result.json`,
           rpcUrlFile:
             "/secrets/sepolia-rpc",
           secretId: "treasury-password",
+          sessionId: SESSION_ID,
         },
         {
           fundingMain: async () => ({

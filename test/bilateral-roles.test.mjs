@@ -254,7 +254,7 @@ test("actual mapped role prompts are canonical Payer and Requestor surfaces", as
   ]);
   assert.match(
     payer,
-    /You are Stakeholder 1, Payer, the mandate-owning payer\./,
+    /You are the Payer\./,
   );
   assert.match(payer, /\bPROPOSED\b/);
   assert.match(payer, /\bACKNOWLEDGED\b/);
@@ -263,11 +263,12 @@ test("actual mapped role prompts are canonical Payer and Requestor surfaces", as
 
   assert.match(
     payee,
-    /You are Stakeholder 2, Requestor, the payment requestor\./,
+    /You are the Requestor\./,
   );
   assert.match(payee, /\brequestor\b/i);
   assert.match(payee, /\bACCEPTED\b/);
-  assert.match(payee, /\bfollowed Payer's signed mandate\b/i);
+  assert.match(payee, /\bPayer-owned MCP\b/);
+  assert.match(payee, /\bHANDSHAKE_REQUIRED\b/);
   assert.doesNotMatch(payee, /\bPayer\b[^.\n]*\bpayee\b/i);
   assert.doesNotMatch(payee, /\bRequestor\b[^.\n]*\banchors `PROPOSED`\b/i);
 

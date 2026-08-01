@@ -59,7 +59,7 @@ test("tunnel image is Node 22, non-root, nologin, fixed-port, and read-only-root
   assert.equal(/COPY .*?(?:\.key|secret|token|keystore)/i.test(dockerfile), false);
 });
 
-test("both images generate exact immutable release provenance and reject dirty or mismatched source", () => {
+test("both images rely on prevalidated source provenance and never require Git metadata", () => {
   for (const path of [
     "infra/aws/docker/control-plane.Dockerfile",
     "infra/aws/docker/tunnel.Dockerfile",
@@ -70,19 +70,19 @@ test("both images generate exact immutable release provenance and reject dirty o
       /^ARG REPOSITORY_SHA$/m,
       path,
     );
-    assert.match(
+    assert.doesNotMatch(
       dockerfile,
-      /git diff --quiet/,
-      path,
-    );
-    assert.match(
-      dockerfile,
-      /git rev-parse HEAD/,
+      /\bgit\b/,
       path,
     );
     assert.match(
       dockerfile,
       /\/opt\/clockchain\/release\.json/,
+      path,
+    );
+    assert.match(
+      dockerfile,
+      /const sha=process\.env\.REPOSITORY_SHA; if \(!\/\^\[0-9a-f\]\{40\}\$\/\.test\(sha\)\) process\.exit\(1\); fs\.writeFileSync\("\/opt\/clockchain\/release\.json", JSON\.stringify\(\{repositorySha:sha,schema:"clockchain\.container-release\/v1"\}\)\+"\\\\n",\{mode:0o444\}\)/,
       path,
     );
     assert.equal(
