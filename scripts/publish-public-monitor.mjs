@@ -123,12 +123,15 @@ function uploadSnapshot(snapshot, options) {
   });
 }
 
-async function publishOnce(options) {
-  const payerMcpReady = await probeTcp({
+export async function publishOnce(options, dependencies = {}) {
+  const probe = dependencies.probeTcp ?? probeTcp;
+  const fetchConsole = dependencies.fetch ?? fetch;
+  const now = dependencies.now ?? Date.now;
+  const upload = dependencies.uploadSnapshot ?? uploadSnapshot;
+  const payerMcpReady = await probe({
     host: options.payerMcpHost,
     port: options.payerMcpPort,
   });
-  const publishedAtMs = Date.now();
   const waitingRunId =
     `run-${createHash("sha256")
       .update(options.bucket)
@@ -136,12 +139,13 @@ async function publishOnce(options) {
       .slice(0, 16)}`;
   let snapshot;
   try {
-    const response = await fetch(options.consoleUrl, {
+    const response = await fetchConsole(options.consoleUrl, {
       cache: "no-store",
       signal: AbortSignal.timeout(1_500),
     });
     if (!response.ok) throw new Error(`Console returned ${response.status}.`);
     const projection = await response.json();
+    const publishedAtMs = now();
     const runId =
       `run-${createHash("sha256")
         .update(
@@ -170,16 +174,18 @@ async function publishOnce(options) {
           "VERIFICATION_PASSED",
     });
   } catch {
+    const publishedAtMs = now();
     snapshot = buildUnavailablePublicMonitorSnapshot({
       publishedAtMs,
       runId: waitingRunId,
       staleAfterMs: 10_000,
     });
   }
-  await uploadSnapshot(snapshot, options);
+  await upload(snapshot, options);
   process.stdout.write(
     `PUBLIC_MONITOR_UPDATED ${snapshot.publishedAtMs} ${snapshot.runStatus}\n`,
   );
+  return snapshot;
 }
 
 async function main() {

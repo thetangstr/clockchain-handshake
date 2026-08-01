@@ -7,6 +7,7 @@ import {
   buildUnavailablePublicMonitorSnapshot,
   observePublicMonitorSnapshot,
 } from "../src/bilateral/coordination/public-monitor.mjs";
+import { publishOnce } from "../scripts/publish-public-monitor.mjs";
 
 const RUN_ID = "run-0123456789abcdef";
 const PUBLISHED_AT_MS = 2_000_000_000_000;
@@ -233,6 +234,45 @@ test("builds one exact secret-free business monitor with three independently ver
       new RegExp(forbidden),
     );
   }
+});
+
+test("publisher timestamps a verified snapshot after the console observation", async () => {
+  const source = projection();
+  source.deadline.nowMs = PUBLISHED_AT_MS + 100;
+  let consoleObserved = false;
+  const uploads = [];
+
+  const snapshot = await publishOnce(
+    {
+      bucket: "clockchain-public-monitor",
+      consoleUrl: "http://127.0.0.1:8788/v1/console/session",
+      intervalMs: 2_000,
+      payerMcpHost: "127.0.0.1",
+      payerMcpPort: 9_443,
+      region: "us-west-2",
+    },
+    {
+      fetch: async () => {
+        consoleObserved = true;
+        return {
+          json: async () => source,
+          ok: true,
+        };
+      },
+      now: () => {
+        assert.equal(consoleObserved, true);
+        return PUBLISHED_AT_MS + 200;
+      },
+      probeTcp: async () => false,
+      uploadSnapshot: async (value) => uploads.push(value),
+    },
+  );
+
+  assert.equal(snapshot.runStatus, "VERIFIED");
+  assert.equal(snapshot.publishedAtMs, String(PUBLISHED_AT_MS + 200));
+  assert.equal(snapshot.anchors.length, 3);
+  assert.equal(snapshot.verifier.status, "VERIFIED");
+  assert.deepEqual(uploads, [snapshot]);
 });
 
 test("publishes only the authenticated Payer-Requestor-Payer prefix", () => {
