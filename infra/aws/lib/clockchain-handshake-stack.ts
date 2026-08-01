@@ -1307,7 +1307,6 @@ export class ClockchainHandshakeStack extends Stack {
           handler: "handler",
           logGroup: receiptEmailLog,
           memorySize: 256,
-          reservedConcurrentExecutions: 5,
           runtime: lambda.Runtime.NODEJS_22_X,
           timeout: Duration.seconds(10),
         },

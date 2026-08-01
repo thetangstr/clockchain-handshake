@@ -431,10 +431,36 @@ test("creates the bounded public receipt-email delivery boundary", () => {
         }),
       },
       MemorySize: 256,
-      ReservedConcurrentExecutions: 5,
       Runtime: "nodejs22.x",
       Timeout: 10,
     },
+  );
+  const receiptFunctions = output.findResources(
+    "AWS::Lambda::Function",
+    {
+      Properties: {
+        Environment: {
+          Variables: Match.objectLike({
+            RECEIPT_DELIVERY_TABLE_NAME:
+              Match.anyValue(),
+          }),
+        },
+      },
+    },
+  );
+  assert.equal(
+    Object.values(receiptFunctions).length,
+    1,
+  );
+  const [receiptFunction] =
+    Object.values(receiptFunctions);
+  assert.ok(receiptFunction);
+  assert.equal(
+    Object.hasOwn(
+      receiptFunction.Properties,
+      "ReservedConcurrentExecutions",
+    ),
+    false,
   );
   output.hasResourceProperties(
     "AWS::DynamoDB::Table",
