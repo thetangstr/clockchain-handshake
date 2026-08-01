@@ -229,6 +229,68 @@ test("task secret permissions are resource-scoped and absent from API, console, 
   );
 });
 
+test("relay can decrypt the imported TLS secret only through Secrets Manager", () => {
+  const resources = json().Resources as Record<
+    string,
+    {
+      Properties?: {
+        KeyPolicy?: {
+          Statement?: Array<{
+            Action?: string | string[];
+            Condition?: unknown;
+            Principal?: unknown;
+            Resource?: unknown;
+          }>;
+        };
+        PolicyDocument?: {
+          Statement?: Array<{
+            Action?: string | string[];
+            Resource?: unknown;
+          }>;
+        };
+      };
+      Type: string;
+    }
+  >;
+  const keyEntry = Object.entries(resources).find(
+    ([logicalId, resource]) =>
+      logicalId.startsWith("DataKey") &&
+      resource.Type === "AWS::KMS::Key",
+  );
+  assert.notEqual(keyEntry, undefined);
+  const statements =
+    keyEntry?.[1].Properties?.KeyPolicy
+      ?.Statement ?? [];
+  const relayDecryptStatements = statements.filter(
+    (statement) => {
+      const actions = Array.isArray(
+        statement.Action,
+      )
+        ? statement.Action
+        : [statement.Action];
+      const serialized = JSON.stringify(statement);
+      return (
+        actions.includes("kms:Decrypt") &&
+        serialized.includes("RelayTaskRole")
+      );
+    },
+  );
+  assert.equal(relayDecryptStatements.length, 1);
+  assert.deepEqual(
+    relayDecryptStatements[0]?.Condition,
+    {
+      StringEquals: {
+        "kms:ViaService":
+          "secretsmanager.us-west-2.amazonaws.com",
+      },
+    },
+  );
+  assert.equal(
+    relayDecryptStatements[0]?.Resource,
+    "*",
+  );
+});
+
 test("no synthesized application policy grants wildcard EFS or wildcard secret authority", () => {
   const policies = serializedPolicies(json());
   assert.equal(

@@ -349,10 +349,14 @@ export class ClockchainHandshakeStack extends Stack {
       dataKey,
     );
     const relayTls =
-      secretsmanager.Secret.fromSecretCompleteArn(
+      secretsmanager.Secret.fromSecretAttributes(
         this,
         "RelayTls",
-        props.relayTlsSecretArn,
+        {
+          encryptionKey: dataKey,
+          secretCompleteArn:
+            props.relayTlsSecretArn,
+        },
       );
     const sepoliaRpc = this.secret(
       "SepoliaRpc",
