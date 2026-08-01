@@ -230,6 +230,16 @@ test("stays attached and waits safely until an operator grant exists", async (t)
   await fx.service.start();
   t.after(() => fx.service.stop());
 
+  const readiness = await fetch(fx.service.healthUrl);
+  assert.equal(readiness.status, 503);
+  const host = await fetch(
+    new URL("host", fx.service.healthUrl),
+  );
+  assert.equal(host.status, 200);
+  assert.deepEqual(await host.json(), {
+    paymentMoved: false,
+    status: "HOST_READY",
+  });
   assert.deepEqual(fx.service.health(), {
     paymentMoved: false,
     status: "UNHEALTHY",

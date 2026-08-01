@@ -35,6 +35,10 @@ const HEALTHY = Object.freeze({
   paymentMoved: false,
   status: "READY",
 });
+const HOST_READY = Object.freeze({
+  paymentMoved: false,
+  status: "HOST_READY",
+});
 const UNHEALTHY = Object.freeze({
   paymentMoved: false,
   status: "UNHEALTHY",
@@ -212,6 +216,19 @@ export async function probeTunnelTls({
 
 function healthServer({ host, port, readHealth }) {
   const server = createServer((request, response) => {
+    if (
+      request.method === "GET" &&
+      request.url === "/host"
+    ) {
+      response.writeHead(200, {
+        "cache-control": "no-store",
+        "content-type": "application/json",
+      });
+      response.end(
+        `${JSON.stringify(HOST_READY)}\n`,
+      );
+      return;
+    }
     if (
       request.method !== "GET" ||
       request.url !== "/"

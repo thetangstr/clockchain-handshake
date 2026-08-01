@@ -1818,7 +1818,7 @@ export class ClockchainHandshakeStack extends Stack {
                 healthyHttpCodes: "200",
                 interval:
                   Duration.seconds(10),
-                path: "/",
+                path: "/host",
                 port: healthPort,
                 protocol:
                   elbv2.Protocol.HTTP,

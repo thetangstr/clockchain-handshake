@@ -255,6 +255,7 @@ test("exposes only the fixed raw TCP and private bootstrap listener topology", (
     "AWS::ElasticLoadBalancingV2::TargetGroup",
     {
       HealthCheckPort: "8080",
+      HealthCheckPath: "/host",
       HealthCheckProtocol: "HTTP",
       Port: 2222,
       Protocol: "TCP",
@@ -265,6 +266,7 @@ test("exposes only the fixed raw TCP and private bootstrap listener topology", (
     "AWS::ElasticLoadBalancingV2::TargetGroup",
     {
       HealthCheckPort: "8080",
+      HealthCheckPath: "/host",
       HealthCheckProtocol: "HTTP",
       Port: 9443,
       Protocol: "TCP",
