@@ -13,6 +13,7 @@ import {
   rm,
 } from "node:fs/promises";
 import {
+  dirname,
   isAbsolute,
 } from "node:path";
 import { types } from "node:util";
@@ -21,6 +22,9 @@ import {
   main as relayMain,
   relayReadinessLine,
 } from "../../../bin/handshake-relay.mjs";
+import {
+  preparePrivateDirectory,
+} from "../../../src/bilateral/private-path.mjs";
 import {
   installPrivateFile,
   parseRuntimeInput,
@@ -281,10 +285,29 @@ function exactRelaySecret(text, fingerprint) {
   }
 }
 
+export async function prepareRelayStateRoot(
+  path,
+  prepareDirectory = preparePrivateDirectory,
+) {
+  if (typeof prepareDirectory !== "function") {
+    fail();
+  }
+  const releaseRoot = dirname(path);
+  const releasesRoot = dirname(releaseRoot);
+  await prepareDirectory({
+    path: releasesRoot,
+  });
+  await prepareDirectory({
+    path: releaseRoot,
+  });
+  await prepareDirectory({ path });
+}
+
 export async function main({
   client = new SecretsManagerClient({}),
   env = process.env,
   installFile = installPrivateFile,
+  prepareStateRoot = prepareRelayStateRoot,
   removeFile = (path) => rm(path, { force: true }),
   run = relayMain,
   stdout = process.stdout,
@@ -296,6 +319,7 @@ export async function main({
   const relay = validateRelayInput(input.relay);
   if (
     typeof installFile !== "function" ||
+    typeof prepareStateRoot !== "function" ||
     typeof removeFile !== "function" ||
     typeof run !== "function" ||
     typeof stdout?.write !== "function"
@@ -316,6 +340,7 @@ export async function main({
   const tls = JSON.parse(secret);
   let running;
   try {
+    await prepareStateRoot(relay.argv[9]);
     await installFile({
       path: relay.certificatePath,
       value: tls.certificatePem,

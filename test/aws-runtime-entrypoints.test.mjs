@@ -38,6 +38,7 @@ import {
 } from "../infra/aws/runtime/funding-entrypoint.mjs";
 import {
   main as relayEntrypoint,
+  prepareRelayStateRoot,
 } from "../infra/aws/runtime/relay-entrypoint.mjs";
 import {
   main as operatorWorkerEntrypoint,
@@ -1337,6 +1338,9 @@ test("relay entrypoint validates exact runtime input, installs TLS secrets, and 
     installFile: async (input) => {
       calls.push(["install", input]);
     },
+    prepareStateRoot: async (path) => {
+      calls.push(["prepare-state", path]);
+    },
     removeFile: async (path) => {
       removed.push(path);
     },
@@ -1386,6 +1390,7 @@ test("relay entrypoint validates exact runtime input, installs TLS secrets, and 
           "arn:aws:secretsmanager:us-west-2:123456789012:secret:relay-tls",
       },
     ],
+    ["prepare-state", RELAY_STATE_PATH],
     [
       "install",
       {
@@ -1410,6 +1415,21 @@ test("relay entrypoint validates exact runtime input, installs TLS secrets, and 
     RELAY_CERTIFICATE_PATH,
     RELAY_PRIVATE_KEY_PATH,
   ].sort());
+});
+
+test("relay state root preparation creates the private release hierarchy in order", async () => {
+  const prepared = [];
+  await prepareRelayStateRoot(
+    RELAY_STATE_PATH,
+    async ({ path }) => {
+      prepared.push(path);
+    },
+  );
+  assert.deepEqual(prepared, [
+    "/var/lib/clockchain/relay/releases",
+    `/var/lib/clockchain/relay/releases/${RELAY_RELEASE_ID}`,
+    RELAY_STATE_PATH,
+  ]);
 });
 
 test("relay entrypoint rejects malformed runtime input before secret reads", async () => {
@@ -1638,6 +1658,7 @@ test("relay entrypoint removes partial TLS material when private-key installatio
           throw new Error("install canary");
         }
       },
+      prepareStateRoot: async () => {},
       removeFile: async (path) => {
         removed.push(path);
       },
