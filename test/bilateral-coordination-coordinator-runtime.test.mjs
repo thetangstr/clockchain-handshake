@@ -313,6 +313,41 @@ test("production runtime exposes real bridges and relay START remains the role a
   await bridges.startRole({ role: "payee", subjectRun: "rehearsal" });
 });
 
+test("runtime omits undefined abort signal from raw event polling", async () => {
+  const calls = [];
+  const runtime = createCoordinatorRuntimeDependencies(Object.freeze({
+    clockchainToken: "token",
+    operatorIdentity: Object.freeze({ keyId: "clockchain-demo-2026", privateKeyPem: "private", publicKey: "public" }),
+    operatorPublicKey: "public",
+    releaseRoot: Object.freeze({ path: "/release" }),
+    repositorySha: "a".repeat(40),
+    relayUrl: "https://127.0.0.1:8443",
+    rpcUrl: "https://127.0.0.1/",
+    tlsCertificatePem: "certificate",
+    tlsFingerprint: "b".repeat(64),
+  }), {
+    createClient: () => ({
+      readEvents: async (input) => {
+        assert.equal(Object.hasOwn(input, "signal"), false);
+        calls.push(input);
+        return [
+          { artifactDigest: "c".repeat(64), kind: "IDENTITY_PACKAGE_READY", role: "payer", subjectRun: "release" },
+          { artifactDigest: "d".repeat(64), kind: "IDENTITY_PACKAGE_READY", role: "payee", subjectRun: "release" },
+        ];
+      },
+    }),
+    createTransport: () => ({}),
+    now: () => 0,
+    sleeper: async () => {},
+  });
+
+  await runtime.runDependencies({ releaseId: "release-a", sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" }).waitForIdentityPackage({ subjectRun: "release" });
+  assert.deepEqual(calls, [
+    { after: null, waitMs: 30_000 },
+    { after: null, waitMs: 30_000 },
+  ]);
+});
+
 test("runtime publishes one canonical private funding address file and validates it on restart", async (t) => {
   const rootPath = await mkdtemp(join(tmpdir(), "coordinator-runtime-funding-"));
   await chmod(rootPath, 0o700);

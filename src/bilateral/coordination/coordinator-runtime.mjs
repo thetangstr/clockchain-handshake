@@ -659,12 +659,13 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
   const sleep = (delay) => abortSignal === undefined
     ? sleeper(delay)
     : abortableSleep(delay, abortSignal);
+  const eventReadInput = (input) => abortSignal === undefined ? input : { ...input, signal: abortSignal };
   const waitForRawEvent = async (client, release, { artifactDigest, kinds, role, subjectRun }) => {
     if (!Array.isArray(kinds) || kinds.length === 0 || !["payer", "payee"].includes(role) || !["release", "rehearsal", "stakeholder"].includes(subjectRun)) fail();
     const deadline = now() + COORDINATOR_FUNDING_DEADLINE_MS;
     for (;;) {
       abortIfRequested(abortSignal);
-      const events = await client.readEvents({ after: null, signal: abortSignal, waitMs: 30_000 });
+      const events = await client.readEvents(eventReadInput({ after: null, waitMs: 30_000 }));
       abortIfRequested(abortSignal);
       const matched = events.filter((event) => event.role === role && event.subjectRun === subjectRun && kinds.includes(event.kind) && (artifactDigest === undefined || event.artifactDigest === artifactDigest));
       if (matched.length === 1) return Object.freeze(matched[0]);
@@ -869,7 +870,7 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
         });
       };
       const runtimeDependencies = Object.freeze({
-        appendOperatorEvent: client.appendOperatorEvent, appendVerifiedEvent: client.appendVerifiedEvent, createVerifiedEvent: client.createVerifiedEvent, getArtifact: client.getArtifact, putArtifact: client.putArtifact, readEnrollmentSet: client.readEnrollmentSet, readEvents: (input) => client.readEvents(abortSignal === undefined ? input : { ...input, signal: abortSignal }), readSessionView: (input) => client.readSessionView(abortSignal === undefined ? input : { ...(input ?? {}), signal: abortSignal }), readVerifierPublication: client.readVerifierPublication,
+        appendOperatorEvent: client.appendOperatorEvent, appendVerifiedEvent: client.appendVerifiedEvent, createVerifiedEvent: client.createVerifiedEvent, getArtifact: client.getArtifact, putArtifact: client.putArtifact, readEnrollmentSet: client.readEnrollmentSet, readEvents: (input) => client.readEvents(eventReadInput(input)), readSessionView: (input) => client.readSessionView(abortSignal === undefined ? input : { ...(input ?? {}), signal: abortSignal }), readVerifierPublication: client.readVerifierPublication,
         readState: state.readState, writeState: state.writeState, resolveOperatorPublicKey: async () => config.operatorPublicKey, waitForFunding: dependencies.waitForFunding ?? createProductionFundingWaiter({ now, rpcUrl: config.rpcUrl, sleeper: sleep }), now, sleeper: sleep, displayAddresses: async (addresses) => { if (displayedFunding) fail(); displayedFunding = true; const bytes = await publishFundingAddresses(config.releaseRoot, addresses, { fs: fundingFileSystem(dependencies.fundingFileSystem), inspectAdmission: (publishedAddresses) => createFundingAdmissionInspector({ createClient: dependencies.createFundingAdmissionClient, rpcUrl: config.rpcUrl })(publishedAddresses) }); (dependencies.output ?? ((line) => process.stdout.write(line)))(bytes.toString("utf8")); }, createTransport: () => transport,
         launcher: async () => fail(), verifyMarkerCompleteVerdict: async () => fail(),
         // The coordinator owns lifecycle ordering; this runtime only validates a
@@ -1122,7 +1123,7 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
           if (!Buffer.isBuffer(verdictBytes) || verdictBytes.length > 1_048_576) fail();
           let verdict; try { verdict = JSON.parse(verdictBytes.toString("utf8")); } catch { fail(); }
           if (verdict?.paymentMoved !== false || !Array.isArray(verdict.transitions) || verdict.transitions.length !== 3) fail();
-          const events = await client.readEvents({ after: null, signal: abortSignal, waitMs: 0 });
+          const events = await client.readEvents(eventReadInput({ after: null, waitMs: 0 }));
           const fact = (kind) => events.filter((event) => event.kind === kind && event.subjectRun === subjectRun).length === 1;
           if (!fact("PAYER_MANDATE_READY") || !fact("PAYMENT_REQUEST_READY") || !fact("PAYMENT_REQUEST_MATCHED")) fail();
           let watcher = watcherSnapshots.get(subjectRun);
