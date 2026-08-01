@@ -163,6 +163,32 @@ test("access points use fixed non-root identities and isolated paths", () => {
   assert.equal(new Set(paths).size, 10);
 });
 
+test("relay container identity matches its dedicated EFS access point", () => {
+  const resources = template().Resources as Record<
+    string,
+    {
+      Properties?: {
+        ContainerDefinitions?: Array<{
+          User?: string;
+        }>;
+      };
+      Type: string;
+    }
+  >;
+  const relay = Object.entries(resources).find(
+    ([logicalId, resource]) =>
+      logicalId.startsWith("RelayTask") &&
+      resource.Type ===
+        "AWS::ECS::TaskDefinition",
+  )?.[1];
+  assert.notEqual(relay, undefined);
+  assert.equal(
+    relay?.Properties?.ContainerDefinitions?.[0]
+      ?.User,
+    "1106:1106",
+  );
+});
+
 test("operator remains isolated while one-shot approval and abort tasks own bootstrap/tunnel state access", () => {
   const resources = template().Resources as Record<
     string,

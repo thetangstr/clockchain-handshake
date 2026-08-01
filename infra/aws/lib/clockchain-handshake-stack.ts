@@ -406,6 +406,7 @@ export class ClockchainHandshakeStack extends Stack {
         },
       ],
       service: true,
+      user: "1106:1106",
       vpc,
     });
     relayTls.grantRead(relay.role);
@@ -1862,6 +1863,7 @@ export class ClockchainHandshakeStack extends Stack {
     mounts,
     ports,
     service,
+    user,
     vpc,
   }: {
     readonly cluster: ecs.Cluster;
@@ -1873,6 +1875,7 @@ export class ClockchainHandshakeStack extends Stack {
     readonly mounts: readonly Mount[];
     readonly ports: readonly Port[];
     readonly service: boolean;
+    readonly user?: string;
     readonly vpc: ec2.Vpc;
   }): Workload {
     const role = new iam.Role(
@@ -1923,6 +1926,7 @@ export class ClockchainHandshakeStack extends Stack {
         }),
         readonlyRootFilesystem: true,
         stopTimeout: Duration.seconds(60),
+        user,
       },
     );
     if (ports.length > 0) {
