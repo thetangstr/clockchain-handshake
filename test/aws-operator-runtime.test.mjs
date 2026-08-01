@@ -538,6 +538,86 @@ test("rejects a non-enumerable required field in a DynamoDB-reordered control st
   );
 });
 
+test("rejects a self-replacing history getter without invoking it", async () => {
+  let getterCalls = 0;
+  const historyEntry = {
+    actionDigest: "b".repeat(64),
+    actionId:
+      "33333333-3333-4333-8333-333333333333",
+  };
+  Object.defineProperty(historyEntry, "type", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      Object.defineProperty(historyEntry, "type", {
+        enumerable: true,
+        value: "START_RUN",
+      });
+      return "START_RUN";
+    },
+  });
+  let thrown;
+  try {
+    await runAwsOperatorOnce(CONFIG, {
+      buildTransitions: () => runtimeTransitions(),
+      documentClient: {
+        async send(command) {
+          if (
+            command.constructor.name ===
+            "GetCommand"
+          ) {
+            return {
+              Item: {
+                controlContext: {
+                  expectedClaimFingerprint: null,
+                  state: {
+                    actionHistory: [historyEntry],
+                    schema:
+                      "clockchain.aws-control-state/v1",
+                    releaseId: CONFIG.releaseId,
+                    repositorySha:
+                      CONFIG.repositorySha,
+                    sessionId: CONFIG.sessionId,
+                    paymentMoved: false,
+                    revision: 1,
+                    status: "RUN_STARTED",
+                  },
+                },
+              },
+            };
+          }
+          return {};
+        },
+      },
+      s3: {
+        async send() {
+          return {};
+        },
+      },
+      sqs: {
+        async send() {
+          return { Messages: [] };
+        },
+      },
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.deepEqual(
+    {
+      code: thrown?.code ?? null,
+      getterCalls,
+      message: thrown?.message ?? null,
+    },
+    {
+      code: "AWS_OPERATOR_RUNTIME_INVALID",
+      getterCalls: 0,
+      message: "AWS operator runtime failed safely.",
+    },
+  );
+});
+
 test("accepts only ConditionalCheckFailedException as startup seed race", async () => {
   for (const [name, shouldReject] of [
     ["ConditionalCheckFailedException", false],

@@ -8,6 +8,7 @@ import {
 import {
   createHash,
 } from "node:crypto";
+import { types } from "node:util";
 import {
   GetCommand,
   PutCommand,
@@ -144,12 +145,71 @@ function initialControlContext() {
   });
 }
 
+function canonicalStoredActionHistory(value) {
+  try {
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      types.isProxy(value) ||
+      !Array.isArray(value) ||
+      Object.getPrototypeOf(value) !==
+        Array.prototype
+    ) {
+      fail();
+    }
+    const lengthDescriptor =
+      Object.getOwnPropertyDescriptor(
+        value,
+        "length",
+      );
+    if (
+      lengthDescriptor === undefined ||
+      !("value" in lengthDescriptor) ||
+      lengthDescriptor.enumerable !== false
+    ) {
+      fail();
+    }
+    const length = lengthDescriptor.value;
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.length !== length + 1 ||
+      keys[length] !== "length" ||
+      keys.slice(0, length).some(
+        (key, index) => key !== String(index),
+      )
+    ) {
+      fail();
+    }
+    const history = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor =
+        Object.getOwnPropertyDescriptor(
+          value,
+          String(index),
+        );
+      if (
+        descriptor === undefined ||
+        !("value" in descriptor) ||
+        descriptor.enumerable !== true ||
+        types.isProxy(descriptor.value)
+      ) {
+        fail();
+      }
+      history.push(descriptor.value);
+    }
+    return history;
+  } catch {
+    fail();
+  }
+}
+
 function canonicalStoredControlState(value) {
   let keys;
   try {
     if (
       value === null ||
       typeof value !== "object" ||
+      types.isProxy(value) ||
       Array.isArray(value) ||
       Object.getPrototypeOf(value) !==
         Object.prototype
@@ -177,9 +237,13 @@ function canonicalStoredControlState(value) {
       ) {
         fail();
       }
-      state[key] = descriptor.value;
+      state[key] =
+        key === "actionHistory"
+          ? canonicalStoredActionHistory(
+              descriptor.value,
+            )
+          : descriptor.value;
     }
-    structuredClone(value);
     return state;
   } catch {
     fail();
