@@ -2,6 +2,7 @@ import { types } from "node:util";
 
 import {
   applyControlAction,
+  AWS_CONTROL_STATE_SCHEMA,
   controlActionBytes,
   controlActionDigest,
   validateControlAction,
@@ -12,6 +13,21 @@ export const CONTROL_API_BODY_LOGGING = false;
 const MAX_BODY_BYTES = 16_384;
 const SESSION_PLACEHOLDER =
   "00000000-0000-4000-8000-000000000000";
+const STATE_KEYS = Object.freeze([
+  "actionHistory",
+  "paymentMoved",
+  "releaseId",
+  "repositorySha",
+  "revision",
+  "schema",
+  "sessionId",
+  "status",
+]);
+const HISTORY_KEYS = Object.freeze([
+  "actionDigest",
+  "actionId",
+  "type",
+]);
 
 function plain(value) {
   return (
@@ -133,6 +149,106 @@ function parseCanonicalAction(body) {
     return null;
   }
   return action;
+}
+
+function exactDataRecord(value, keys) {
+  if (!plain(value)) return null;
+  const descriptors =
+    Object.getOwnPropertyDescriptors(value);
+  const names = Object.keys(descriptors);
+  if (
+    Reflect.ownKeys(value).length !==
+      keys.length ||
+    names.length !== keys.length ||
+    !keys.every((key) =>
+      Object.hasOwn(descriptors, key))
+  ) {
+    return null;
+  }
+  const record = {};
+  for (const key of keys) {
+    const descriptor = descriptors[key];
+    if (
+      descriptor.enumerable !== true ||
+      !Object.hasOwn(descriptor, "value")
+    ) {
+      return null;
+    }
+    record[key] = descriptor.value;
+  }
+  return record;
+}
+
+function exactDenseDataArray(value) {
+  if (
+    !Array.isArray(value) ||
+    types.isProxy(value)
+  ) {
+    return null;
+  }
+  const descriptors =
+    Object.getOwnPropertyDescriptors(value);
+  const expectedKeys = [
+    ...Array.from(
+      { length: value.length },
+      (_, index) => String(index),
+    ),
+    "length",
+  ];
+  const ownKeys = Reflect.ownKeys(value);
+  if (
+    ownKeys.length !== expectedKeys.length ||
+    !expectedKeys.every(
+      (key, index) => ownKeys[index] === key,
+    )
+  ) {
+    return null;
+  }
+  const lengthDescriptor = descriptors.length;
+  if (
+    lengthDescriptor?.value !== value.length ||
+    lengthDescriptor.enumerable !== false ||
+    !Object.hasOwn(lengthDescriptor, "value")
+  ) {
+    return null;
+  }
+  const entries = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (
+      descriptor?.enumerable !== true ||
+      !Object.hasOwn(descriptor, "value")
+    ) {
+      return null;
+    }
+    entries.push(descriptor.value);
+  }
+  return entries;
+}
+
+function canonicalStoredControlState(value) {
+  const state = exactDataRecord(value, STATE_KEYS);
+  if (state === null) return null;
+  if (state.schema !== AWS_CONTROL_STATE_SCHEMA) {
+    return null;
+  }
+  const history = exactDenseDataArray(
+    state.actionHistory,
+  );
+  if (history === null) return null;
+  const actionHistory = [];
+  for (const entry of history) {
+    const record = exactDataRecord(
+      entry,
+      HISTORY_KEYS,
+    );
+    if (record === null) return null;
+    actionHistory.push(record);
+  }
+  return {
+    ...state,
+    actionHistory,
+  };
 }
 
 export function createControlApiHandler({
@@ -271,6 +387,7 @@ export function createControlApiHandler({
       return reject(500);
     }
     let lookupValid = false;
+    let state;
     try {
       lookupValid =
         plain(lookup) &&
@@ -281,6 +398,12 @@ export function createControlApiHandler({
         ) &&
         Object.hasOwn(lookup, "state") &&
         plain(lookup.state);
+      if (lookupValid) {
+        state = canonicalStoredControlState(
+          lookup.state,
+        );
+        lookupValid = state !== null;
+      }
     } catch {
       // Fixed server response below.
     }
@@ -296,7 +419,7 @@ export function createControlApiHandler({
             : undefined,
         expectedClaimFingerprint:
           lookup.expectedClaimFingerprint,
-        state: lookup.state,
+        state,
       });
     } catch {
       return reject(409);

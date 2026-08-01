@@ -121,6 +121,59 @@ test("accepts one canonical allowlisted action and returns only redacted queue s
   );
 });
 
+test("accepts a valid persisted initial state returned in DynamoDB map order", async () => {
+  const dynamoOrderedInitialState = {
+    status: "EMPTY",
+    sessionId: null,
+    schema: "clockchain.aws-control-state/v1",
+    revision: 0,
+    repositorySha: null,
+    releaseId: null,
+    paymentMoved: false,
+    actionHistory: [],
+  };
+  const { handler } = fixture({
+    state: dynamoOrderedInitialState,
+  });
+  const response = await handler(event());
+  assert.equal(response.statusCode, 202);
+  assert.deepEqual(JSON.parse(response.body), {
+    actionId: ACTION_ID,
+    revision: 1,
+    status: "QUEUED",
+  });
+});
+
+test("rejects hostile persisted state without invoking nested accessors", async () => {
+  let getterInvoked = false;
+  const hostileState = {
+    status: "EMPTY",
+    sessionId: null,
+    schema: "clockchain.aws-control-state/v1",
+    revision: 0,
+    repositorySha: null,
+    releaseId: null,
+    paymentMoved: false,
+  };
+  Object.defineProperty(hostileState, "actionHistory", {
+    enumerable: true,
+    get() {
+      getterInvoked = true;
+      return [];
+    },
+  });
+  const { calls, handler } = fixture({
+    state: hostileState,
+  });
+  const response = await handler(event());
+  assert.equal(response.statusCode, 500);
+  assert.equal(getterInvoked, false);
+  assert.equal(
+    calls.some(([name]) => name === "send"),
+    false,
+  );
+});
+
 test("serves only a same-origin bounded CORS preflight", async () => {
   const { calls, handler } = fixture();
   const response = await handler({
