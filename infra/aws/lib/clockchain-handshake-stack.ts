@@ -492,7 +492,7 @@ export class ClockchainHandshakeStack extends Stack {
     );
     bootstrap.container.addEnvironment(
       "AWS_BOOTSTRAP_CLAIM_EXPIRES_AFTER_MS",
-      "900000",
+      "600000",
     );
     bootstrap.container.addEnvironment(
       "AWS_BOOTSTRAP_BIND_HOST",
@@ -1097,6 +1097,35 @@ export class ClockchainHandshakeStack extends Stack {
         "PublicMonitorDistribution",
         publicMonitorBucket,
       );
+    publisher.container.addEnvironment(
+      "AWS_RUNTIME_INPUT",
+      JSON.stringify({
+        paymentMoved: false,
+        publisher: {
+          bucketName:
+            publicMonitorBucket.bucketName,
+          paymentMoved: false,
+          publicBaseUrl:
+            `https://${publicDistribution.distributionDomainName}`,
+          publicationInputPath:
+            "/var/lib/clockchain/public/publisher-input.json",
+          schema:
+            "clockchain.aws-publisher-runtime/v1",
+          stagedPaths: {
+            certificate:
+              "/var/lib/clockchain/public/payer-mcp.crt",
+            payerDiscovery:
+              "/var/lib/clockchain/public/payer.json",
+            publicationGate:
+              "/var/lib/clockchain/public/publication-gate.json",
+            requestorDiscovery:
+              "/var/lib/clockchain/public/requestor.json",
+          },
+        },
+        schema:
+          "clockchain.aws-runtime-input/v1",
+      }),
+    );
     const operatorUrl =
       `https://${operatorDistribution.distributionDomainName}`;
     const userPoolClient =

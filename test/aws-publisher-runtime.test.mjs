@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  runAwsPublisherLoop,
   runAwsPublisherOnce,
 } from "../infra/aws/runtime/publisher-runtime.mjs";
 
@@ -59,6 +60,23 @@ function publicationInput() {
     verifierPublicationValidated: false,
   };
 }
+
+test("publisher loop waits safely while staged public input is absent", async () => {
+  const controller = new AbortController();
+  let reads = 0;
+  await runAwsPublisherLoop(INPUT, {
+    intervalMs: 250,
+    readFile: async () => {
+      reads += 1;
+      controller.abort();
+      const error = new Error("missing");
+      error.code = "ENOENT";
+      throw error;
+    },
+    signal: controller.signal,
+  });
+  assert.equal(reads, 1);
+});
 
 test("publishes one sanitized projection to the exact private S3 bucket", async () => {
   const calls = [];

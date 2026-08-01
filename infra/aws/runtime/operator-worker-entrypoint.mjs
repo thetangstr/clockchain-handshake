@@ -842,6 +842,15 @@ export async function main({
             input.operator,
           )
         : validateOperator(input.operator);
+    const runtimeOperator = validateOperator({
+      actionQueueUrl: operator.actionQueueUrl,
+      actionTableName: operator.actionTableName,
+      paymentMoved: operator.paymentMoved,
+      releaseId: operator.releaseId,
+      repositorySha: operator.repositorySha,
+      schema: operator.schema,
+      sessionId: operator.sessionId,
+    });
     if (
       typeof createClients !== "function" ||
       typeof createDocumentClient !==
@@ -869,7 +878,7 @@ export async function main({
         documentClient,
         operator,
       });
-    return await run(operator, {
+    return await run(runtimeOperator, {
       buildTransitions:
         activeBuildTransitions,
       documentClient,

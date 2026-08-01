@@ -26,6 +26,7 @@ import { test } from "node:test";
 import { promisify } from "node:util";
 
 import {
+  installPrivateFile,
   installSecretFile,
   parseRuntimeInput,
 } from "../infra/aws/runtime/runtime-input.mjs";
@@ -69,6 +70,28 @@ const RELAY_STATE_PATH =
   `/var/lib/clockchain/relay/releases/${RELAY_RELEASE_ID}/relay-state.json`;
 const TREASURY_ADDRESS =
   "0x157a377e4181f3f87c7f6efed5ddc340ccc00dce";
+
+test("private runtime installation creates a strict missing parent directory", async (t) => {
+  const root = await mkdtemp(
+    join(tmpdir(), "clockchain-runtime-input-"),
+  );
+  t.after(() =>
+    rm(root, { force: true, recursive: true }));
+  const path = join(root, "runtime", "secret");
+  await installPrivateFile({
+    path,
+    value: "secret-canary",
+  });
+  assert.equal(await readFile(path, "utf8"), "secret-canary");
+  assert.equal(
+    (await lstat(dirname(path))).mode & 0o777,
+    0o700,
+  );
+  assert.equal(
+    (await lstat(path)).mode & 0o777,
+    0o600,
+  );
+});
 
 function ed25519PrivateKeyPem() {
   const { privateKey } = generateKeyPairSync(
@@ -1663,6 +1686,15 @@ test("operator worker entrypoint composes exact AWS clients and loop dependencie
       AWS_RUNTIME_INPUT: operatorRuntimeInput(),
     },
     run: async (config, dependencies) => {
+      assert.deepEqual(Object.keys(config), [
+        "actionQueueUrl",
+        "actionTableName",
+        "paymentMoved",
+        "releaseId",
+        "repositorySha",
+        "schema",
+        "sessionId",
+      ]);
       calls.push([
         "run",
         config,
@@ -1720,6 +1752,15 @@ test("operator worker entrypoint provides default transition composition when no
         operatorProductionRuntimeInput(),
     },
     run: async (config, dependencies) => {
+      assert.deepEqual(Object.keys(config), [
+        "actionQueueUrl",
+        "actionTableName",
+        "paymentMoved",
+        "releaseId",
+        "repositorySha",
+        "schema",
+        "sessionId",
+      ]);
       calls.push([
         config.releaseId,
         typeof dependencies.buildTransitions,

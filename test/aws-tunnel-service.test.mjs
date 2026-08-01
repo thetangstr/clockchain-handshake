@@ -225,6 +225,37 @@ test("reports ready only after pinned TLS succeeds through local 9443", async (t
   });
 });
 
+test("stays attached and waits safely until an operator grant exists", async (t) => {
+  const fx = fixture(t, null);
+  await fx.service.start();
+  t.after(() => fx.service.stop());
+
+  assert.deepEqual(fx.service.health(), {
+    paymentMoved: false,
+    status: "UNHEALTHY",
+  });
+  assert.deepEqual(fx.calls, []);
+  assert.deepEqual(fx.logs, [
+    {
+      paymentMoved: false,
+      status: "WAITING",
+    },
+  ]);
+
+  fx.setGrant(activeGrant());
+  await fx.service.reconcile();
+  assert.equal(fx.service.health().status, "READY");
+
+  fx.setGrant(null);
+  await fx.service.reconcile();
+  assert.equal(fx.service.health().status, "UNHEALTHY");
+  assert.equal(
+    fx.calls.filter(([kind]) => kind === "stop")
+      .length,
+    1,
+  );
+});
+
 test("same-key reconnect reloads while key drift and malformed records fail closed", async (t) => {
   const fx = fixture(t);
   await fx.service.start();

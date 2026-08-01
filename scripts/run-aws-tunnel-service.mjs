@@ -359,9 +359,13 @@ export function createAwsTunnelService({
         fixedLog(logger, "ABORTED");
         return UNHEALTHY;
       }
-      const grant = validateGrant(
-        await readGrant(),
-      );
+      const candidate = await readGrant();
+      if (candidate === null) {
+        await stopProcess();
+        fixedLog(logger, "WAITING");
+        return UNHEALTHY;
+      }
+      const grant = validateGrant(candidate);
       if (grant.schema === TOMBSTONE_SCHEMA) {
         await stopProcess();
         fixedLog(logger, "TOMBSTONED");
@@ -555,7 +559,8 @@ export async function main(env = process.env) {
   const service = createAwsTunnelService({
     readAbortMarker: () =>
       readOptionalJson(abortMarkerPath),
-    readGrant: () => readJson(grantPath),
+    readGrant: () =>
+      readOptionalJson(grantPath),
     stateRoot: required(
       env,
       "AWS_TUNNEL_STATE_ROOT",

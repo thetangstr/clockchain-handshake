@@ -538,3 +538,51 @@ test("emits relay runtime keys in the entrypoint's exact canonical order", () =>
     /relay\.clockchain\.net/,
   );
 });
+
+test("configures long-lived bootstrap and publisher startup inputs", () => {
+  const resources = template().toJSON()
+    .Resources as Record<
+    string,
+    {
+      Properties?: {
+        ContainerDefinitions?: Array<{
+          Environment?: Array<{
+            Name?: string;
+            Value?: unknown;
+          }>;
+        }>;
+      };
+      Type: string;
+    }
+  >;
+  const environment = (prefix: string) =>
+    Object.entries(resources).find(
+      ([logicalId, resource]) =>
+        logicalId.startsWith(prefix) &&
+        resource.Type ===
+          "AWS::ECS::TaskDefinition",
+    )?.[1].Properties?.ContainerDefinitions?.[0]
+      ?.Environment ?? [];
+  const bootstrap = environment("BootstrapTask");
+  assert.deepEqual(
+    bootstrap.find(
+      (item) =>
+        item.Name ===
+        "AWS_BOOTSTRAP_CLAIM_EXPIRES_AFTER_MS",
+    ),
+    {
+      Name:
+        "AWS_BOOTSTRAP_CLAIM_EXPIRES_AFTER_MS",
+      Value: "600000",
+    },
+  );
+  const publisher = environment("PublisherTask");
+  const runtimeInput = publisher.find(
+    (item) => item.Name === "AWS_RUNTIME_INPUT",
+  );
+  assert.notEqual(runtimeInput, undefined);
+  assert.match(
+    JSON.stringify(runtimeInput?.Value),
+    /clockchain\.aws-publisher-runtime\/v1/,
+  );
+});

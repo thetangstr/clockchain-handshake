@@ -341,9 +341,18 @@ export async function runAwsPublisherLoop(
   const input = config(value);
   let priorDigest = null;
   while (signal?.aborted !== true) {
-    const bytes = await readFile(
-      input.publicationInputPath,
-    );
+    let bytes;
+    try {
+      bytes = await readFile(
+        input.publicationInputPath,
+      );
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        fail();
+      }
+      await waitForNext(intervalMs, signal);
+      continue;
+    }
     if (
       !Buffer.isBuffer(bytes) ||
       bytes.length === 0 ||
@@ -361,21 +370,32 @@ export async function runAwsPublisherLoop(
       });
       priorDigest = digest;
     }
-    await new Promise((resolvePromise) => {
-      const timer = setTimeout(
-        resolvePromise,
-        intervalMs,
-      );
-      if (signal !== undefined) {
-        signal.addEventListener(
-          "abort",
-          () => {
-            clearTimeout(timer);
-            resolvePromise();
-          },
-          { once: true },
-        );
-      }
-    });
+    await waitForNext(intervalMs, signal);
   }
+}
+
+function waitForNext(intervalMs, signal) {
+  return new Promise((resolvePromise) => {
+    if (signal?.aborted === true) {
+      resolvePromise();
+      return;
+    }
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener(
+        "abort",
+        finish,
+      );
+      resolvePromise();
+    };
+    const timer = setTimeout(finish, intervalMs);
+    signal?.addEventListener(
+      "abort",
+      finish,
+      { once: true },
+    );
+  });
 }

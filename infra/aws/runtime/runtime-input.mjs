@@ -7,10 +7,12 @@ import {
 import {
   chmod,
   link,
+  mkdir,
   open,
   rm,
 } from "node:fs/promises";
 import {
+  dirname,
   isAbsolute,
 } from "node:path";
 
@@ -138,6 +140,12 @@ export async function installPrivateFile({
     ) {
       fail();
     }
+    const parent = dirname(path);
+    await mkdir(parent, {
+      mode: 0o700,
+      recursive: true,
+    });
+    await chmod(parent, 0o700);
     temporary = `${path}.${randomUUID()}.next`;
     handle = await open(
       temporary,
