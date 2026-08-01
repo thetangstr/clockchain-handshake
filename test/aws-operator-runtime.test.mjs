@@ -384,6 +384,99 @@ test("seeds release control context and publishes a strict start-run snapshot be
   );
 });
 
+test("normalizes a DynamoDB-reordered empty control state before validating and publishing", async () => {
+  const calls = [];
+  const result = await runAwsOperatorOnce(CONFIG, {
+    buildTransitions: () => runtimeTransitions(),
+    documentClient: {
+      async send(command) {
+        calls.push([
+          "dynamo",
+          command.constructor.name,
+          command.input,
+        ]);
+        if (
+          command.constructor.name ===
+          "GetCommand"
+        ) {
+          return {
+            Item: {
+              controlContext: {
+                expectedClaimFingerprint: null,
+                state: {
+                  actionHistory: [],
+                  schema:
+                    "clockchain.aws-control-state/v1",
+                  releaseId: null,
+                  repositorySha: null,
+                  sessionId: null,
+                  paymentMoved: false,
+                  revision: 0,
+                  status: "EMPTY",
+                },
+              },
+            },
+          };
+        }
+        return {};
+      },
+    },
+    s3: {
+      async send(command) {
+        calls.push([
+          "s3",
+          command.constructor.name,
+          command.input,
+        ]);
+        return {};
+      },
+    },
+    sqs: {
+      async send() {
+        return { Messages: [] };
+      },
+    },
+  });
+  assert.deepEqual(result, {
+    paymentMoved: false,
+    status: "IDLE",
+  });
+  assert.equal(
+    calls.some(
+      ([kind, name]) =>
+        kind === "dynamo" &&
+        name === "PutCommand",
+    ),
+    false,
+  );
+  const publish = calls.find(
+    ([kind, name]) =>
+      kind === "s3" &&
+      name === "PutObjectCommand",
+  )[2];
+  const snapshot = JSON.parse(
+    Buffer.from(publish.Body).toString("utf8"),
+  );
+  assert.deepEqual(snapshot.control, {
+    allowedActions: ["START_RUN"],
+    claims: {
+      payer: {
+        fingerprint: null,
+        status: "WAITING",
+      },
+      requestor: {
+        fingerprint: null,
+        status: "WAITING",
+      },
+    },
+    releaseId: CONFIG.releaseId,
+    repositorySha: CONFIG.repositorySha,
+    revision: 0,
+    sessionId: CONFIG.sessionId,
+  });
+  assert.equal(snapshot.paymentMoved, false);
+});
+
 test("accepts only ConditionalCheckFailedException as startup seed race", async () => {
   for (const [name, shouldReject] of [
     ["ConditionalCheckFailedException", false],

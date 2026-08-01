@@ -52,6 +52,16 @@ const TRANSITION_NAMES = Object.freeze([
   "launchVerifierTask",
   "readExpectedClaimFingerprint",
 ]);
+const CONTROL_STATE_KEYS = Object.freeze([
+  "actionHistory",
+  "paymentMoved",
+  "releaseId",
+  "repositorySha",
+  "revision",
+  "schema",
+  "sessionId",
+  "status",
+]);
 
 export class AwsOperatorRuntimeError extends Error {
   constructor() {
@@ -134,6 +144,47 @@ function initialControlContext() {
   });
 }
 
+function canonicalStoredControlState(value) {
+  let keys;
+  try {
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      Object.getPrototypeOf(value) !==
+        Object.prototype
+    ) {
+      fail();
+    }
+    keys = Reflect.ownKeys(value);
+    if (
+      keys.length !== CONTROL_STATE_KEYS.length ||
+      keys.some((key) => typeof key !== "string") ||
+      CONTROL_STATE_KEYS.some(
+        (key) => !keys.includes(key),
+      )
+    ) {
+      fail();
+    }
+    const state = {};
+    for (const key of CONTROL_STATE_KEYS) {
+      const descriptor =
+        Object.getOwnPropertyDescriptor(value, key);
+      if (
+        descriptor === undefined ||
+        !("value" in descriptor)
+      ) {
+        fail();
+      }
+      state[key] = descriptor.value;
+    }
+    structuredClone(value);
+    return state;
+  } catch {
+    fail();
+  }
+}
+
 function validateStoredControlContext({
   input,
   stored,
@@ -164,7 +215,9 @@ function validateStoredControlContext({
   let state;
   try {
     state = validateControlState(
-      stored.state,
+      canonicalStoredControlState(
+        stored.state,
+      ),
     );
   } catch {
     fail();
