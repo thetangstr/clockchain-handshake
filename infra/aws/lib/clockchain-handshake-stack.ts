@@ -1097,10 +1097,33 @@ export class ClockchainHandshakeStack extends Stack {
         "OperatorConsoleDistribution",
         operatorConsoleBucket,
       );
+    const publicMonitorCorsPolicy =
+      new cloudfront.ResponseHeadersPolicy(
+        this,
+        "PublicMonitorCorsPolicy",
+        {
+          corsBehavior: {
+            accessControlAllowCredentials:
+              false,
+            accessControlAllowHeaders: ["*"],
+            accessControlAllowMethods: [
+              "GET",
+              "HEAD",
+              "OPTIONS",
+            ],
+            accessControlAllowOrigins: [
+              `https://${operatorDistribution.distributionDomainName}`,
+              "https://clockchain-research.vercel.app",
+            ],
+            originOverride: true,
+          },
+        },
+      );
     const publicDistribution =
       this.distribution(
         "PublicMonitorDistribution",
         publicMonitorBucket,
+        publicMonitorCorsPolicy,
       );
     publisher.container.addEnvironment(
       "AWS_RUNTIME_INPUT",
@@ -1427,6 +1450,10 @@ export class ClockchainHandshakeStack extends Stack {
               props.relayTlsFingerprint,
           },
           paymentMoved: false,
+          publicMonitorBucketName:
+            publicMonitorBucket.bucketName,
+          publicMonitorControlKey:
+            "control.json",
           releaseId,
           repositorySha: props.repositorySha,
           schema:
@@ -1436,6 +1463,16 @@ export class ClockchainHandshakeStack extends Stack {
         paymentMoved: false,
         schema:
           "clockchain.aws-runtime-input/v1",
+      }),
+    );
+    operator.role.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:PutObject"],
+        resources: [
+          publicMonitorBucket.arnForObjects(
+            "control.json",
+          ),
+        ],
       }),
     );
     operator.role.addToPrincipalPolicy(
@@ -1710,6 +1747,7 @@ export class ClockchainHandshakeStack extends Stack {
   private distribution(
     id: string,
     bucket: s3.Bucket,
+    responseHeadersPolicy?: cloudfront.ResponseHeadersPolicy,
   ): cloudfront.Distribution {
     return new cloudfront.Distribution(
       this,
@@ -1726,6 +1764,7 @@ export class ClockchainHandshakeStack extends Stack {
             origins.S3BucketOrigin.withOriginAccessControl(
               bucket,
             ),
+          responseHeadersPolicy,
           viewerProtocolPolicy:
             cloudfront.ViewerProtocolPolicy
               .REDIRECT_TO_HTTPS,

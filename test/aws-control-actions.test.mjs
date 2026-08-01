@@ -6,6 +6,7 @@ import {
   applyControlAction,
   createInitialControlState,
   validateControlAction,
+  validateControlState,
 } from "../src/bilateral/aws/control-actions.mjs";
 
 const REPOSITORY_SHA =
@@ -327,6 +328,73 @@ test("ABORT is terminal and no new action follows a verification request", () =>
   ]) {
     assert.throws(
       () => apply(verified, action),
+      /AWS control action failed safely/,
+    );
+  }
+});
+
+test("validates canonical control states and rejects forged history", () => {
+  let valid = apply(
+    createInitialControlState(),
+    start(),
+    { createdSessionId: SESSION_ID },
+  );
+  valid = apply(
+    valid,
+    approval(
+      "APPROVE_PAYER",
+      1,
+      IDS[1],
+      PAYER_FINGERPRINT,
+    ),
+    { expectedClaimFingerprint: PAYER_FINGERPRINT },
+  );
+  assert.deepEqual(
+    validateControlState(valid),
+    valid,
+  );
+  const cases = [
+    {
+      ...valid,
+      status: "VERIFY_REQUESTED",
+    },
+    {
+      ...valid,
+      status: "AUTHORIZED",
+    },
+    {
+      ...valid,
+      actionHistory: [
+        ...valid.actionHistory,
+        {
+          actionDigest: "c".repeat(64),
+          actionId: IDS[2],
+        },
+      ],
+      revision: 3,
+    },
+    {
+      ...valid,
+      actionHistory: [
+        valid.actionHistory[0],
+        {
+          ...valid.actionHistory[1],
+          actionId:
+            valid.actionHistory[0].actionId,
+        },
+      ],
+    },
+    {
+      ...valid,
+      actionHistory: [
+        valid.actionHistory[1],
+        valid.actionHistory[0],
+      ],
+    },
+  ];
+  for (const forged of cases) {
+    assert.throws(
+      () => validateControlState(forged),
       /AWS control action failed safely/,
     );
   }

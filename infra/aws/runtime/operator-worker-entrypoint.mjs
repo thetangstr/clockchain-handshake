@@ -60,6 +60,8 @@ const OPERATOR_KEYS = Object.freeze([
   "actionQueueUrl",
   "actionTableName",
   "paymentMoved",
+  "publicMonitorBucketName",
+  "publicMonitorControlKey",
   "releaseId",
   "repositorySha",
   "schema",
@@ -72,6 +74,8 @@ const PRODUCTION_OPERATOR_KEYS = Object.freeze([
   "children",
   "coordinator",
   "paymentMoved",
+  "publicMonitorBucketName",
+  "publicMonitorControlKey",
   "releaseId",
   "repositorySha",
   "schema",
@@ -97,6 +101,8 @@ const SESSION =
 const SQS_QUEUE_PATH =
   /^\/[0-9]{12}\/(?:[A-Za-z0-9_-]{1,80}|[A-Za-z0-9_-]{1,75}\.fifo)$/;
 const TABLE = /^[A-Za-z0-9_.-]{3,255}$/;
+const BUCKET =
+  /^(?!\d+\.\d+\.\d+\.\d+$)(?=.{3,63}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])$/;
 const SECRET_ARN =
   /^arn:aws(?:-[a-z]+)?:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]{1,512}$/;
 const CLUSTER_ARN =
@@ -189,6 +195,11 @@ function validateOperator(value) {
   if (
     !validateQueueUrl(operator.actionQueueUrl) ||
     !TABLE.test(operator.actionTableName) ||
+    !BUCKET.test(
+      operator.publicMonitorBucketName,
+    ) ||
+    operator.publicMonitorControlKey !==
+      "control.json" ||
     operator.paymentMoved !== false ||
     !RELEASE.test(operator.releaseId) ||
     !SHA40.test(operator.repositorySha) ||
@@ -204,6 +215,10 @@ function validateOperator(value) {
     actionQueueUrl: operator.actionQueueUrl,
     actionTableName: operator.actionTableName,
     paymentMoved: false,
+    publicMonitorBucketName:
+      operator.publicMonitorBucketName,
+    publicMonitorControlKey:
+      "control.json",
     releaseId: operator.releaseId,
     repositorySha: operator.repositorySha,
     schema:
@@ -302,6 +317,10 @@ function validateProductionOperator(value) {
     actionQueueUrl: operator.actionQueueUrl,
     actionTableName: operator.actionTableName,
     paymentMoved: operator.paymentMoved,
+    publicMonitorBucketName:
+      operator.publicMonitorBucketName,
+    publicMonitorControlKey:
+      operator.publicMonitorControlKey,
     releaseId: operator.releaseId,
     repositorySha: operator.repositorySha,
     schema: operator.schema,
@@ -476,6 +495,9 @@ function validateClients(value) {
     value.dynamodb === null ||
     typeof value.dynamodb !== "object" ||
     typeof value.dynamodb.send !== "function" ||
+    value.s3 === null ||
+    typeof value.s3 !== "object" ||
+    typeof value.s3.send !== "function" ||
     value.sqs === null ||
     typeof value.sqs !== "object" ||
     typeof value.sqs.send !== "function"
@@ -846,6 +868,10 @@ export async function main({
       actionQueueUrl: operator.actionQueueUrl,
       actionTableName: operator.actionTableName,
       paymentMoved: operator.paymentMoved,
+      publicMonitorBucketName:
+        operator.publicMonitorBucketName,
+      publicMonitorControlKey:
+        operator.publicMonitorControlKey,
       releaseId: operator.releaseId,
       repositorySha: operator.repositorySha,
       schema: operator.schema,
@@ -882,6 +908,7 @@ export async function main({
       buildTransitions:
         activeBuildTransitions,
       documentClient,
+      s3: clients.s3,
       signal,
       sqs: clients.sqs,
     });

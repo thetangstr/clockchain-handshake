@@ -287,6 +287,9 @@ function operatorRuntimeInput(overrides = {}) {
     actionTableName:
       "ClockchainHandshakeControl",
     paymentMoved: false,
+    publicMonitorBucketName:
+      "clockchain-public-monitor",
+    publicMonitorControlKey: "control.json",
     releaseId: OPERATOR_RELEASE_ID,
     repositorySha:
       "abcdef0123456789abcdef0123456789abcdef01",
@@ -419,6 +422,9 @@ function operatorProductionRuntimeInput(overrides = {}) {
       tlsFingerprint: RELAY_TLS_FINGERPRINT,
     },
     paymentMoved: false,
+    publicMonitorBucketName:
+      "clockchain-public-monitor",
+    publicMonitorControlKey: "control.json",
     releaseId: OPERATOR_RELEASE_ID,
     repositorySha:
       "abcdef0123456789abcdef0123456789abcdef01",
@@ -1680,6 +1686,7 @@ test("operator worker entrypoint composes exact AWS clients and loop dependencie
     name: "dynamodb",
     send: async () => ({}),
   };
+  const s3 = { send: async () => ({}) };
   const documentClient = { send: async () => ({}) };
   const buildTransitions = async () => ({});
   const signal = AbortSignal.abort();
@@ -1691,7 +1698,7 @@ test("operator worker entrypoint composes exact AWS clients and loop dependencie
       return {
         dynamodb,
         ecs: { send: async () => ({}) },
-        s3: { send: async () => ({}) },
+        s3,
         secrets: { send: async () => ({}) },
         sqs,
       };
@@ -1711,6 +1718,8 @@ test("operator worker entrypoint composes exact AWS clients and loop dependencie
         "actionQueueUrl",
         "actionTableName",
         "paymentMoved",
+        "publicMonitorBucketName",
+        "publicMonitorControlKey",
         "releaseId",
         "repositorySha",
         "schema",
@@ -1739,6 +1748,10 @@ test("operator worker entrypoint composes exact AWS clients and loop dependencie
         actionTableName:
           "ClockchainHandshakeControl",
         paymentMoved: false,
+        publicMonitorBucketName:
+          "clockchain-public-monitor",
+        publicMonitorControlKey:
+          "control.json",
         releaseId: OPERATOR_RELEASE_ID,
         repositorySha:
           "abcdef0123456789abcdef0123456789abcdef01",
@@ -1749,6 +1762,7 @@ test("operator worker entrypoint composes exact AWS clients and loop dependencie
       {
         buildTransitions,
         documentClient,
+        s3,
         signal,
         sqs,
       },
@@ -1762,6 +1776,7 @@ test("operator worker entrypoint provides default transition composition when no
     createClients: async () => ({
       dynamodb: { send: async () => ({}) },
       ecs: { send: async () => ({}) },
+      s3: { send: async () => ({}) },
       sqs: { send: async () => ({}) },
     }),
     createDocumentClient: (client) => ({
@@ -1777,6 +1792,8 @@ test("operator worker entrypoint provides default transition composition when no
         "actionQueueUrl",
         "actionTableName",
         "paymentMoved",
+        "publicMonitorBucketName",
+        "publicMonitorControlKey",
         "releaseId",
         "repositorySha",
         "schema",
@@ -1815,6 +1832,7 @@ test("operator worker entrypoint accepts the default operator loop with an abort
     buildTransitions: async () => ({}),
     createClients: async () => ({
       dynamodb: { send: async () => ({}) },
+      s3: { send: async () => ({}) },
       sqs: { send: async () => ({}) },
     }),
     createDocumentClient: (client) => ({
@@ -1839,6 +1857,7 @@ test("operator worker entrypoint accepts SQS queue names at the standard and FIF
       buildTransitions: async () => ({}),
       createClients: async () => ({
         dynamodb: { send: async () => ({}) },
+        s3: { send: async () => ({}) },
         sqs: { send: async () => ({}) },
       }),
       createDocumentClient: (client) => ({

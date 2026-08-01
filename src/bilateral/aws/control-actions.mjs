@@ -341,6 +341,20 @@ function validateState(value) {
   return state;
 }
 
+export function validateControlState(value) {
+  try {
+    const state = validateState(value);
+    return freeze({
+      ...state,
+      actionHistory: state.actionHistory.map(
+        (entry) => freeze({ ...entry }),
+      ),
+    });
+  } catch (error) {
+    sanitize(error);
+  }
+}
+
 export function applyControlAction({
   action: candidate,
   createdSessionId,

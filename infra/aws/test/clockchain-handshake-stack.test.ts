@@ -587,4 +587,173 @@ test("configures long-lived bootstrap and publisher startup inputs", () => {
     JSON.stringify(runtimeInput?.Value),
     /clockchain\.aws-publisher-runtime\/v1/,
   );
+  const operator = environment("OperatorTask");
+  const operatorRuntimeInput = operator.find(
+    (item) => item.Name === "AWS_RUNTIME_INPUT",
+  );
+  assert.notEqual(
+    operatorRuntimeInput,
+    undefined,
+  );
+  const operatorRuntime = JSON.stringify(
+    operatorRuntimeInput?.Value,
+  );
+  assert.match(
+    operatorRuntime,
+    /\\"publicMonitorBucketName\\"/,
+  );
+  assert.match(
+    operatorRuntime,
+    /\\"publicMonitorControlKey\\":\\"control\.json\\"/,
+  );
+});
+
+test("grants operator only control snapshot publication and enables narrow public monitor CORS", () => {
+  const resources = template().toJSON()
+    .Resources as Record<
+    string,
+    {
+      Properties?: Record<string, unknown>;
+      Type: string;
+    }
+  >;
+  const policies = Object.values(
+    resources,
+  ).filter(
+    (resource) =>
+      resource.Type === "AWS::IAM::Policy",
+  );
+  const putObjectStatements = policies.flatMap(
+    (policy) => {
+      const document = policy.Properties
+        ?.PolicyDocument as
+        | {
+            Statement?: Array<
+              Record<string, unknown>
+            >;
+          }
+        | undefined;
+      return (
+        document?.Statement?.filter(
+          (statement) =>
+            JSON.stringify(
+              statement.Action,
+            ).includes("s3:PutObject") &&
+            JSON.stringify(
+              statement.Resource,
+            ).includes("control.json"),
+        ) ?? []
+      );
+    },
+  );
+  assert.equal(putObjectStatements.length, 1);
+  assert.deepEqual(
+    putObjectStatements[0]?.Action,
+    "s3:PutObject",
+  );
+  assert.equal(
+    JSON.stringify(
+      putObjectStatements[0]?.Resource,
+    ).includes("/*"),
+    false,
+  );
+
+  const corsPolicies = Object.entries(
+    resources,
+  ).filter(
+    ([logicalId, resource]) =>
+      logicalId.startsWith(
+        "PublicMonitorCorsPolicy",
+      ) &&
+      resource.Type ===
+        "AWS::CloudFront::ResponseHeadersPolicy",
+  );
+  assert.equal(corsPolicies.length, 1);
+  const operatorDistributionEntry =
+    Object.entries(resources).find(
+      ([logicalId, resource]) =>
+        logicalId.startsWith(
+          "OperatorConsoleDistribution",
+        ) &&
+        resource.Type ===
+          "AWS::CloudFront::Distribution",
+    );
+  assert.notEqual(
+    operatorDistributionEntry,
+    undefined,
+  );
+  const corsConfig = corsPolicies[0]?.[1]
+    .Properties
+    ?.ResponseHeadersPolicyConfig as {
+    CorsConfig?: {
+      AccessControlAllowCredentials?: boolean;
+      AccessControlAllowMethods?: {
+        Items?: string[];
+      };
+      AccessControlAllowOrigins?: {
+        Items?: unknown[];
+      };
+      OriginOverride?: boolean;
+    };
+  };
+  assert.equal(
+    corsConfig.CorsConfig
+      ?.AccessControlAllowCredentials,
+    false,
+  );
+  assert.deepEqual(
+    corsConfig.CorsConfig
+      ?.AccessControlAllowMethods?.Items,
+    ["GET", "HEAD", "OPTIONS"],
+  );
+  assert.equal(
+    corsConfig.CorsConfig?.OriginOverride,
+    true,
+  );
+  assert.deepEqual(
+    corsConfig.CorsConfig
+      ?.AccessControlAllowOrigins?.Items,
+    [
+      {
+        "Fn::Join": [
+          "",
+          [
+            "https://",
+            {
+              "Fn::GetAtt": [
+                operatorDistributionEntry?.[0],
+                "DomainName",
+              ],
+            },
+          ],
+        ],
+      },
+      "https://clockchain-research.vercel.app",
+    ],
+  );
+
+  const publicDistribution = Object.entries(
+    resources,
+  ).find(
+    ([logicalId, resource]) =>
+      logicalId.startsWith(
+        "PublicMonitorDistribution",
+      ) &&
+      resource.Type ===
+        "AWS::CloudFront::Distribution",
+  )?.[1];
+  const operatorDistribution =
+    operatorDistributionEntry?.[1];
+  assert.equal(
+    JSON.stringify(publicDistribution).includes(
+      "ResponseHeadersPolicyId",
+    ),
+    true,
+  );
+  assert.equal(
+    JSON.stringify(operatorDistribution).includes(
+      "ResponseHeadersPolicyId",
+    ),
+    false,
+  );
 });

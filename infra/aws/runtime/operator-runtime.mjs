@@ -3,6 +3,9 @@ import {
   ReceiveMessageCommand,
 } from "@aws-sdk/client-sqs";
 import {
+  PutObjectCommand,
+} from "@aws-sdk/client-s3";
+import {
   createHash,
 } from "node:crypto";
 import {
@@ -14,11 +17,17 @@ import {
 import {
   processAwsOperatorMessage,
 } from "../../../scripts/run-aws-operator-worker.mjs";
+import {
+  createInitialControlState,
+  validateControlState,
+} from "../../../src/bilateral/aws/control-actions.mjs";
 
 const CONFIG_KEYS = Object.freeze([
   "actionQueueUrl",
   "actionTableName",
   "paymentMoved",
+  "publicMonitorBucketName",
+  "publicMonitorControlKey",
   "releaseId",
   "repositorySha",
   "schema",
@@ -31,6 +40,9 @@ const SESSION =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TABLE =
   /^[A-Za-z0-9_.-]{3,255}$/;
+const BUCKET =
+  /^(?!\d+\.\d+\.\d+\.\d+$)(?=.{3,63}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])$/;
+const SHA64 = /^[0-9a-f]{64}$/;
 const TRANSITION_NAMES = Object.freeze([
   "abortSession",
   "approveBootstrapClaim",
@@ -91,6 +103,9 @@ function runtimeConfig(value) {
       queue.hostname,
     ) ||
     !TABLE.test(input.actionTableName) ||
+    !BUCKET.test(input.publicMonitorBucketName) ||
+    input.publicMonitorControlKey !==
+      "control.json" ||
     input.paymentMoved !== false ||
     !SHA40.test(input.repositorySha) ||
     !RELEASE.test(input.releaseId) ||
@@ -103,6 +118,454 @@ function runtimeConfig(value) {
     fail();
   }
   return input;
+}
+
+function controlContextKey(input) {
+  return contextKey({
+    releaseId: input.releaseId,
+    sessionId: null,
+  });
+}
+
+function initialControlContext() {
+  return Object.freeze({
+    expectedClaimFingerprint: null,
+    state: createInitialControlState(),
+  });
+}
+
+function validateStoredControlContext({
+  input,
+  stored,
+}) {
+  if (
+    stored === null ||
+    typeof stored !== "object" ||
+    Array.isArray(stored) ||
+    stored.state === null ||
+    typeof stored.state !== "object" ||
+    Array.isArray(stored.state) ||
+    !(
+      stored.expectedClaimFingerprint ===
+        null ||
+      typeof stored.expectedClaimFingerprint ===
+        "string"
+    ) ||
+    (
+      typeof stored.expectedClaimFingerprint ===
+        "string" &&
+      !SHA64.test(
+        stored.expectedClaimFingerprint,
+      )
+    )
+  ) {
+    fail();
+  }
+  let state;
+  try {
+    state = validateControlState(
+      stored.state,
+    );
+  } catch {
+    fail();
+  }
+  if (state.status === "EMPTY") {
+    if (
+      state.revision !== 0 ||
+      state.releaseId !== null ||
+      state.repositorySha !== null ||
+      state.sessionId !== null
+    ) {
+      fail();
+    }
+  } else if (
+    state.releaseId !== input.releaseId ||
+    state.repositorySha !==
+      input.repositorySha ||
+    state.sessionId !== input.sessionId
+  ) {
+    fail();
+  }
+  return Object.freeze({
+    expectedClaimFingerprint:
+      stored.expectedClaimFingerprint,
+    state,
+  });
+}
+
+async function readRawControlContext({
+  documentClient,
+  input,
+}) {
+  const result = await documentClient.send(
+    new GetCommand({
+      ConsistentRead: true,
+      Key: {
+        actionId: controlContextKey(input),
+      },
+      TableName: input.actionTableName,
+    }),
+  );
+  if (result.Item === undefined) {
+    return null;
+  }
+  return validateStoredControlContext({
+    input,
+    stored: result.Item.controlContext,
+  });
+}
+
+async function seedInitialControlContext({
+  documentClient,
+  input,
+}) {
+  const controlContext =
+    initialControlContext();
+  await documentClient.send(
+    new PutCommand({
+      ConditionExpression:
+        "attribute_not_exists(actionId)",
+      Item: {
+        actionId:
+          controlContextKey(input),
+        controlContext,
+        recordType: "CONTROL_CONTEXT",
+      },
+      TableName: input.actionTableName,
+    }),
+  );
+}
+
+function isConditionalCheckFailed(error) {
+  return (
+    error?.name ===
+      "ConditionalCheckFailedException" ||
+    error?.code ===
+      "ConditionalCheckFailedException"
+  );
+}
+
+function allowedActionsFor({
+  expectedClaimFingerprint,
+  status,
+}) {
+  if (status === "EMPTY") {
+    return Object.freeze(["START_RUN"]);
+  }
+  if (status === "RUN_STARTED") {
+    return Object.freeze([
+      ...(SHA64.test(
+        expectedClaimFingerprint ?? "",
+      )
+        ? ["APPROVE_PAYER"]
+        : []),
+      "ABORT",
+    ]);
+  }
+  if (status === "PAYER_APPROVED") {
+    return Object.freeze([
+      ...(SHA64.test(
+        expectedClaimFingerprint ?? "",
+      )
+        ? ["APPROVE_REQUESTOR"]
+        : []),
+      "ABORT",
+    ]);
+  }
+  if (status === "REQUESTOR_APPROVED") {
+    return Object.freeze(["FUND", "ABORT"]);
+  }
+  if (status === "FUND_REQUESTED") {
+    return Object.freeze(["VERIFY", "ABORT"]);
+  }
+  return Object.freeze([]);
+}
+
+function claimViews({
+  actionHistory,
+  expectedClaimFingerprint,
+  status,
+}) {
+  const exactClaim = SHA64.test(
+    expectedClaimFingerprint ?? "",
+  )
+    ? expectedClaimFingerprint
+    : null;
+  const payerApproved = actionHistory.some(
+    (entry) => entry?.type === "APPROVE_PAYER",
+  );
+  const requestorApproved = actionHistory.some(
+    (entry) =>
+      entry?.type === "APPROVE_REQUESTOR",
+  );
+  const payerStatus = payerApproved
+    ? "APPROVED"
+    : status === "RUN_STARTED" &&
+        exactClaim !== null
+      ? "PENDING"
+      : "WAITING";
+  const requestorStatus = requestorApproved
+    ? "APPROVED"
+    : status === "PAYER_APPROVED" &&
+        exactClaim !== null
+      ? "PENDING"
+      : "WAITING";
+  return Object.freeze({
+    payer: Object.freeze({
+      fingerprint:
+        status === "RUN_STARTED"
+          ? exactClaim
+          : null,
+      status: payerStatus,
+    }),
+    requestor: Object.freeze({
+      fingerprint:
+        status === "PAYER_APPROVED"
+          ? exactClaim
+          : null,
+      status: requestorStatus,
+    }),
+  });
+}
+
+function currentStepFor(status) {
+  if (status === "EMPTY") {
+    return "Waiting for the operator to start the hosted run.";
+  }
+  if (status === "RUN_STARTED") {
+    return "Waiting for the Payer claim fingerprint.";
+  }
+  if (status === "PAYER_APPROVED") {
+    return "Waiting for the Requestor claim fingerprint.";
+  }
+  if (status === "REQUESTOR_APPROVED") {
+    return "Waiting for funding.";
+  }
+  if (status === "FUND_REQUESTED") {
+    return "Waiting for verification.";
+  }
+  if (status === "VERIFY_REQUESTED") {
+    return "Verification completed.";
+  }
+  if (status === "ABORTED") {
+    return "Run aborted.";
+  }
+  fail();
+}
+
+function runStatusFor(status) {
+  if (status === "VERIFY_REQUESTED") {
+    return "VERIFIED";
+  }
+  if (status === "ABORTED") return "FAILED";
+  if (status === "EMPTY") return "WAITING";
+  return "RUNNING";
+}
+
+function runIdFor(releaseId) {
+  return `run-${releaseId.slice("release-".length)}`;
+}
+
+function controlSnapshot({
+  context,
+  input,
+  nowMs = Date.now(),
+}) {
+  const state = context.state;
+  if (
+    state === null ||
+    typeof state !== "object" ||
+    state.paymentMoved !== false ||
+    !Number.isSafeInteger(state.revision) ||
+    typeof state.status !== "string"
+  ) {
+    fail();
+  }
+  return Object.freeze({
+    control: Object.freeze({
+      allowedActions: allowedActionsFor({
+        expectedClaimFingerprint:
+          context.expectedClaimFingerprint,
+        status: state.status,
+      }),
+      claims: claimViews({
+        actionHistory: state.actionHistory,
+        expectedClaimFingerprint:
+          context.expectedClaimFingerprint,
+        status: state.status,
+      }),
+      releaseId: input.releaseId,
+      repositorySha: input.repositorySha,
+      revision: state.revision,
+      sessionId: input.sessionId,
+    }),
+    currentStep: currentStepFor(
+      state.status,
+    ),
+    paymentMoved: false,
+    publishedAtMs: nowMs,
+    runId: runIdFor(input.releaseId),
+    runStatus: runStatusFor(state.status),
+    staleAfterMs: 120_000,
+  });
+}
+
+async function publishControlSnapshot({
+  context,
+  input,
+  s3,
+}) {
+  await s3.send(
+    new PutObjectCommand({
+      Body: Buffer.from(
+        `${JSON.stringify(
+          controlSnapshot({
+            context,
+            input,
+          }),
+        )}\n`,
+        "utf8",
+      ),
+      Bucket:
+        input.publicMonitorBucketName,
+      CacheControl: "no-store",
+      ContentType:
+        "application/json; charset=utf-8",
+      Key: input.publicMonitorControlKey,
+    }),
+  );
+}
+
+async function readStoredControlContext({
+  documentClient,
+  input,
+  releaseId,
+  sessionId,
+  transitions,
+}) {
+  if (releaseId !== input.releaseId) {
+    fail();
+  }
+  if (sessionId !== null) {
+    const result = await documentClient.send(
+      new GetCommand({
+        ConsistentRead: true,
+        Key: {
+          actionId: contextKey({
+            releaseId,
+            sessionId,
+          }),
+        },
+        TableName: input.actionTableName,
+      }),
+    );
+    if (result.Item === undefined) {
+      fail();
+    }
+    const stored =
+      validateStoredControlContext({
+        input,
+        stored: result.Item.controlContext,
+      });
+    const expectedClaimFingerprint =
+      await transitions
+        .readExpectedClaimFingerprint({
+          releaseId,
+          sessionId,
+          state: stored.state,
+        });
+    return {
+      expectedClaimFingerprint,
+      state: stored.state,
+    };
+  }
+  const stored = await readRawControlContext({
+    documentClient,
+    input,
+  });
+  if (stored === null) {
+    fail();
+  }
+  if (stored.state.status === "EMPTY") {
+    return {
+      expectedClaimFingerprint: null,
+      state: stored.state,
+    };
+  }
+  const effectiveSessionId =
+    stored.state.sessionId;
+  const expectedClaimFingerprint =
+    await transitions
+      .readExpectedClaimFingerprint({
+        releaseId,
+        sessionId: effectiveSessionId,
+        state: stored.state,
+      });
+  return {
+    expectedClaimFingerprint,
+    state: stored.state,
+  };
+}
+
+async function resolveReleaseControlContext({
+  documentClient,
+  input,
+  transitions,
+}) {
+  return await readStoredControlContext({
+    documentClient,
+    input,
+    releaseId: input.releaseId,
+    sessionId: null,
+    transitions,
+  });
+}
+
+async function initializeReleaseControlContext({
+  documentClient,
+  input,
+  transitions,
+}) {
+  const existing =
+    await readRawControlContext({
+      documentClient,
+      input,
+    });
+  if (existing !== null) {
+    if (existing.state.status === "EMPTY") {
+      return {
+        expectedClaimFingerprint: null,
+        state: existing.state,
+      };
+    }
+    const expectedClaimFingerprint =
+      await transitions
+        .readExpectedClaimFingerprint({
+          releaseId: input.releaseId,
+          sessionId: existing.state.sessionId,
+          state: existing.state,
+        });
+    return {
+      expectedClaimFingerprint,
+      state: existing.state,
+    };
+  }
+  try {
+    await seedInitialControlContext({
+      documentClient,
+      input,
+    });
+  } catch (error) {
+    if (!isConditionalCheckFailed(error)) {
+      throw error;
+    }
+    // Another operator may have won the startup race; the reread below decides.
+  }
+  return await resolveReleaseControlContext({
+    documentClient,
+    input,
+    transitions,
+  });
 }
 
 function transitionSet(value) {
@@ -162,6 +625,7 @@ export async function runAwsOperatorOnce(
   try {
     const input = runtimeConfig(value);
     const sqs = dependencies.sqs;
+    const s3 = dependencies.s3;
     const documentClient =
       dependencies.documentClient;
     const buildTransitions =
@@ -173,6 +637,9 @@ export async function runAwsOperatorOnce(
       sqs === null ||
       typeof sqs !== "object" ||
       typeof sqs.send !== "function" ||
+      s3 === null ||
+      typeof s3 !== "object" ||
+      typeof s3.send !== "function" ||
       documentClient === null ||
       typeof documentClient !== "object" ||
       typeof documentClient.send !==
@@ -182,6 +649,25 @@ export async function runAwsOperatorOnce(
       typeof processMessage !== "function"
     ) {
       fail();
+    }
+    const transitions = transitionSet(
+      await buildTransitions(input),
+    );
+    const startupContext =
+      dependencies.initializeControlContext ===
+      false
+        ? null
+        : await initializeReleaseControlContext({
+            documentClient,
+            input,
+            transitions,
+          });
+    if (startupContext !== null) {
+      await publishControlSnapshot({
+        context: startupContext,
+        input,
+        s3,
+      });
     }
     const response = await sqs.send(
       new ReceiveMessageCommand({
@@ -202,6 +688,24 @@ export async function runAwsOperatorOnce(
       fail();
     }
     if (messages.length === 0) {
+      if (startupContext !== null) {
+        return Object.freeze({
+          paymentMoved: false,
+          status: "IDLE",
+        });
+      } else {
+        const context =
+          await resolveReleaseControlContext({
+            documentClient,
+            input,
+            transitions,
+          });
+        await publishControlSnapshot({
+          context,
+          input,
+          s3,
+        });
+      }
       return Object.freeze({
         paymentMoved: false,
         status: "IDLE",
@@ -209,9 +713,17 @@ export async function runAwsOperatorOnce(
     }
     const activeMessage =
       queueMessage(messages[0]);
-    const transitions = transitionSet(
-      await buildTransitions(input),
-    );
+    const readControlContext = async ({
+      releaseId,
+      sessionId,
+    }) =>
+      await readStoredControlContext({
+        documentClient,
+        input,
+        releaseId,
+        sessionId,
+        transitions,
+      });
     const authorityDependencies = {
       ...Object.fromEntries(
         TRANSITION_NAMES
@@ -324,45 +836,10 @@ export async function runAwsOperatorOnce(
         releaseId,
         sessionId,
       }) {
-        if (releaseId !== input.releaseId) {
-          fail();
-        }
-        const result =
-          await documentClient.send(
-            new GetCommand({
-              ConsistentRead: true,
-              Key: {
-                actionId: contextKey({
-                  releaseId,
-                  sessionId,
-                }),
-              },
-              TableName:
-                input.actionTableName,
-            }),
-          );
-        const stored =
-          result.Item?.controlContext;
-        if (
-          stored === null ||
-          typeof stored !== "object" ||
-          Array.isArray(stored) ||
-          stored.state === null ||
-          typeof stored.state !== "object"
-        ) {
-          fail();
-        }
-        const expectedClaimFingerprint =
-          await transitions
-            .readExpectedClaimFingerprint({
-              releaseId,
-              sessionId,
-              state: stored.state,
-            });
-        return {
-          expectedClaimFingerprint,
-          state: stored.state,
-        };
+        return await readControlContext({
+          releaseId,
+          sessionId,
+        });
       },
       async recordRejection(record) {
         await documentClient.send(
@@ -381,10 +858,21 @@ export async function runAwsOperatorOnce(
         );
       },
     };
-    return await processMessage(
+    const result = await processMessage(
       activeMessage,
       authorityDependencies,
     );
+    const refreshedContext =
+      await readControlContext({
+        releaseId: input.releaseId,
+        sessionId: null,
+      });
+    await publishControlSnapshot({
+      context: refreshedContext,
+      input,
+      s3,
+    });
+    return result;
   } catch (error) {
     if (
       error instanceof
@@ -404,10 +892,15 @@ export async function runAwsOperatorLoop(
   } = {},
 ) {
   runtimeConfig(value);
+  let initializeControlContext = true;
   while (signal?.aborted !== true) {
     await runAwsOperatorOnce(
       value,
-      dependencies,
+      {
+        ...dependencies,
+        initializeControlContext,
+      },
     );
+    initializeControlContext = false;
   }
 }
