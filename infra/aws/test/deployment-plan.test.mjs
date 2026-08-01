@@ -150,6 +150,8 @@ test("deployment plan uses image digests and fixed account without deleting lega
       "3dbe9d0ea7491d9d6e4586f978ddf2b67c4ac173780b3b8d5b86def84a0d73d9",
     relayTlsSecretArn:
       "arn:aws:secretsmanager:us-west-2:570035913370:secret:clockchain-relay-tls-AbCdEf",
+    receiptSenderEmail:
+      "receipts@clockchain.network",
     repositorySha: SHA,
     sessionId:
       "11111111-1111-4111-8111-111111111111",
@@ -177,6 +179,10 @@ test("deployment plan uses image digests and fixed account without deleting lega
   assert.equal(
     plan.relayTlsSecretArn,
     "arn:aws:secretsmanager:us-west-2:570035913370:secret:clockchain-relay-tls-AbCdEf",
+  );
+  assert.equal(
+    plan.receiptSenderEmail,
+    "receipts@clockchain.network",
   );
   assert.equal(
     plan.sessionId,
@@ -222,6 +228,8 @@ test("deployment plan rejects a relay certificate hostname mismatch", () => {
           "3dbe9d0ea7491d9d6e4586f978ddf2b67c4ac173780b3b8d5b86def84a0d73d9",
         relayTlsSecretArn:
           "arn:aws:secretsmanager:us-west-2:570035913370:secret:clockchain-relay-tls-AbCdEf",
+        receiptSenderEmail:
+          "receipts@clockchain.network",
         repositorySha: SHA,
         sessionId:
           "11111111-1111-4111-8111-111111111111",
@@ -254,8 +262,10 @@ test("deployment contexts encode the public TLS certificate without multiline ar
       RELAY_TLS_CERTIFICATE_PEM,
     relayTlsFingerprint:
       "3dbe9d0ea7491d9d6e4586f978ddf2b67c4ac173780b3b8d5b86def84a0d73d9",
-    relayTlsSecretArn:
-      "arn:aws:secretsmanager:us-west-2:570035913370:secret:clockchain-relay-tls-AbCdEf",
+        relayTlsSecretArn:
+          "arn:aws:secretsmanager:us-west-2:570035913370:secret:clockchain-relay-tls-AbCdEf",
+        receiptSenderEmail:
+          "receipts@clockchain.network",
     repositorySha: SHA,
     sessionId:
       "11111111-1111-4111-8111-111111111111",
@@ -287,6 +297,12 @@ test("deployment contexts encode the public TLS certificate without multiline ar
   assert.equal(
     contexts.includes(
       `tunnelHostKeyFingerprint=${TUNNEL_HOST_KEY_FINGERPRINT}`,
+    ),
+    true,
+  );
+  assert.equal(
+    contexts.includes(
+      "receiptSenderEmail=receipts@clockchain.network",
     ),
     true,
   );
@@ -330,8 +346,10 @@ test("deployment plan rejects a tunnel host public key that does not match its f
           RELAY_TLS_CERTIFICATE_PEM,
         relayTlsFingerprint:
           "3dbe9d0ea7491d9d6e4586f978ddf2b67c4ac173780b3b8d5b86def84a0d73d9",
-        relayTlsSecretArn:
-          "arn:aws:secretsmanager:us-west-2:570035913370:secret:clockchain-relay-tls-AbCdEf",
+    relayTlsSecretArn:
+      "arn:aws:secretsmanager:us-west-2:570035913370:secret:clockchain-relay-tls-AbCdEf",
+    receiptSenderEmail:
+      "receipts@clockchain.network",
         repositorySha: SHA,
         sessionId:
           "11111111-1111-4111-8111-111111111111",

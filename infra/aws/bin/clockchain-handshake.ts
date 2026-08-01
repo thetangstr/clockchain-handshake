@@ -107,6 +107,10 @@ const relayTlsSecretArn =
   app.node.tryGetContext(
     "relayTlsSecretArn",
   );
+const receiptSenderEmail =
+  app.node.tryGetContext(
+    "receiptSenderEmail",
+  );
 const operatorPublicKey =
   app.node.tryGetContext("operatorPublicKey");
 const sourceTreeSha256 =
@@ -176,6 +180,10 @@ if (
       relayTlsSecretArn: required(
         relayTlsSecretArn,
         "relayTlsSecretArn",
+      ),
+      receiptSenderEmail: required(
+        receiptSenderEmail,
+        "receiptSenderEmail",
       ),
       sessionId: required(
         sessionId,

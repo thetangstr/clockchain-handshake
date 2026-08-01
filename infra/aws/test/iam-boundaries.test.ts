@@ -38,6 +38,8 @@ GzRaxazJRJqgomGuhMdWNo8pqbWf9+sUnkkr9ZGuAGcK3zyS6UeHDA==
     "3dbe9d0ea7491d9d6e4586f978ddf2b67c4ac173780b3b8d5b86def84a0d73d9",
   relayTlsSecretArn:
     RELAY_TLS_SECRET_ARN,
+  receiptSenderEmail:
+    "receipts@clockchain.network",
   repositorySha:
     "abcdef0123456789abcdef0123456789abcdef01",
   sessionId:
@@ -308,6 +310,63 @@ test("no synthesized application policy grants wildcard EFS or wildcard secret a
       policies,
     ),
     false,
+  );
+});
+
+test("receipt email can read public summaries, update only its table, and send email", () => {
+  const resources = json().Resources as Record<
+    string,
+    {
+      Properties?: {
+        PolicyDocument?: {
+          Statement?: Array<{
+            Action?: string | string[];
+            Resource?: unknown;
+          }>;
+        };
+      };
+      Type: string;
+    }
+  >;
+  const entry = Object.entries(resources).find(
+    ([logicalId, resource]) =>
+      logicalId.startsWith(
+        "ReceiptEmailFunctionServiceRoleDefaultPolicy",
+      ) &&
+      resource.Type === "AWS::IAM::Policy",
+  );
+  assert.notEqual(entry, undefined);
+  const serialized = JSON.stringify(entry);
+  for (const allowed of [
+    "s3:GetObject",
+    "dynamodb:GetItem",
+    "dynamodb:UpdateItem",
+    "ses:SendEmail",
+  ]) {
+    assert.equal(
+      serialized.includes(allowed),
+      true,
+      allowed,
+    );
+  }
+  for (const forbidden of [
+    "s3:PutObject",
+    "secretsmanager:GetSecretValue",
+    "ses:SendRawEmail",
+  ]) {
+    assert.equal(
+      serialized.includes(forbidden),
+      false,
+      forbidden,
+    );
+  }
+  assert.equal(
+    serialized.includes("ReceiptDeliveryTable"),
+    true,
+  );
+  assert.equal(
+    serialized.includes("PublicMonitorBucket"),
+    true,
   );
 });
 

@@ -5,7 +5,10 @@ import { test } from "node:test";
 import {
   App,
 } from "aws-cdk-lib";
-import { Template } from "aws-cdk-lib/assertions";
+import {
+  Match,
+  Template,
+} from "aws-cdk-lib/assertions";
 
 const { buildCoordinatorRuntimeInput } =
   (await import(
@@ -60,6 +63,8 @@ const STACK_PROPS = {
   relayPublicHostname:
     "relay.clockchain.net",
   relayTlsSecretArn: RELAY_TLS_SECRET_ARN,
+  receiptSenderEmail:
+    "receipts@clockchain.network",
   repositorySha:
     "abcdef0123456789abcdef0123456789abcdef01",
   sessionId: SESSION_ID,
@@ -400,7 +405,55 @@ test("creates the exact bootstrap routes and a separate Cognito-authorized opera
   );
   output.resourceCountIs(
     "AWS::DynamoDB::Table",
-    1,
+    2,
+  );
+});
+
+test("creates the bounded public receipt-email delivery boundary", () => {
+  const output = template();
+  output.hasResourceProperties(
+    "AWS::ApiGatewayV2::Route",
+    { RouteKey: "POST /v1/receipt-email" },
+  );
+  output.hasResourceProperties(
+    "AWS::Lambda::Function",
+    {
+      Environment: {
+        Variables: Match.objectLike({
+          ALLOWED_ORIGIN:
+            "https://clockchain-research.vercel.app",
+          PUBLIC_BUCKET_NAME:
+            Match.anyValue(),
+          RECEIPT_DELIVERY_TABLE_NAME:
+            Match.anyValue(),
+          RECEIPT_SENDER_EMAIL:
+            "receipts@clockchain.network",
+        }),
+      },
+      MemorySize: 256,
+      ReservedConcurrentExecutions: 5,
+      Runtime: "nodejs22.x",
+      Timeout: 10,
+    },
+  );
+  output.hasResourceProperties(
+    "AWS::DynamoDB::Table",
+    {
+      BillingMode: "PAY_PER_REQUEST",
+      TimeToLiveSpecification: {
+        AttributeName: "ttl",
+        Enabled: true,
+      },
+    },
+  );
+  output.hasResourceProperties(
+    "AWS::ApiGatewayV2::Stage",
+    {
+      DefaultRouteSettings: {
+        ThrottlingBurstLimit: 4,
+        ThrottlingRateLimit: 2,
+      },
+    },
   );
 });
 
@@ -464,11 +517,11 @@ test("creates private console and monitor distributions, immutable images, logs,
   }
   output.resourceCountIs(
     "AWS::Logs::LogGroup",
-    11,
+    12,
   );
   output.resourceCountIs(
     "AWS::CloudWatch::Alarm",
-    5,
+    6,
   );
   output.resourceCountIs(
     "AWS::CloudWatch::Dashboard",
@@ -484,6 +537,8 @@ test("creates private console and monitor distributions, immutable images, logs,
     "PublicMonitorUrl",
     "RelayEndpoint",
     "PayerMcpEndpoint",
+    "ReceiptEmailApiUrl",
+    "ReceiptSenderEmail",
     "TaskDefinitions",
     "SecretArns",
   ]) {

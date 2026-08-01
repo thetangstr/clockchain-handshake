@@ -36,6 +36,8 @@ GzRaxazJRJqgomGuhMdWNo8pqbWf9+sUnkkr9ZGuAGcK3zyS6UeHDA==
     "3dbe9d0ea7491d9d6e4586f978ddf2b67c4ac173780b3b8d5b86def84a0d73d9",
   relayTlsSecretArn:
     "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-relay-tls-AbCdEf",
+  receiptSenderEmail:
+    "receipts@clockchain.network",
   repositorySha:
     "abcdef0123456789abcdef0123456789abcdef01",
   sessionId:

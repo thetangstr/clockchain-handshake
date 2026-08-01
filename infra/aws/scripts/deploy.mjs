@@ -36,6 +36,8 @@ const SECRET_ARN =
   /^arn:aws(?:-[a-z]+)?:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]{1,512}$/;
 const PUBLIC_HOSTNAME =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const EMAIL =
+  /^(?=.{3,254}$)[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 const SSH_ED25519_PUBLIC_KEY =
   /^ssh-ed25519 ([A-Za-z0-9+/]+={0,2})$/;
 const SSH_SHA256_FINGERPRINT =
@@ -121,6 +123,7 @@ export function createDeploymentPlan({
   relayTlsCertificatePem,
   relayTlsFingerprint,
   relayTlsSecretArn,
+  receiptSenderEmail,
   sessionId,
   sourceTreeSha256,
   tunnelHostKeyFingerprint,
@@ -172,6 +175,11 @@ export function createDeploymentPlan({
     relayTlsSecretArn,
     SECRET_ARN,
     "Relay TLS secret ARN",
+  );
+  required(
+    receiptSenderEmail,
+    EMAIL,
+    "Receipt sender email",
   );
   required(
     sessionId,
@@ -243,6 +251,7 @@ export function createDeploymentPlan({
     relayTlsCertificatePem,
     relayTlsFingerprint,
     relayTlsSecretArn,
+    receiptSenderEmail,
     schema: "clockchain.aws-deployment-plan/v1",
     sessionId,
     sourceTreeSha256,
@@ -282,6 +291,8 @@ export function createDeploymentContexts(plan) {
     `relayTlsFingerprint=${plan.relayTlsFingerprint}`,
     "-c",
     `relayTlsSecretArn=${plan.relayTlsSecretArn}`,
+    "-c",
+    `receiptSenderEmail=${plan.receiptSenderEmail}`,
     "-c",
     `operatorPublicKey=${plan.operatorPublicKey}`,
     "-c",
@@ -382,6 +393,8 @@ async function main() {
     process.env.RELAY_TLS_FINGERPRINT;
   const relayTlsSecretArn =
     process.env.RELAY_TLS_SECRET_ARN;
+  const receiptSenderEmail =
+    process.env.RECEIPT_SENDER_EMAIL;
   const operatorPublicKey =
     process.env.OPERATOR_PUBLIC_KEY;
   const sourceTreeSha256 =
@@ -419,6 +432,7 @@ async function main() {
     relayPublicHostname,
     relayTlsFingerprint,
     relayTlsSecretArn,
+    receiptSenderEmail,
     sessionId,
     operatorPublicKey,
     sourceTreeSha256,

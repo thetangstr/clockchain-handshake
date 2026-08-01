@@ -47,6 +47,8 @@ const SECRET_ARN =
   /^arn:aws(?:-[a-z]+)?:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]{1,512}$/;
 const PUBLIC_HOSTNAME =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const EMAIL =
+  /^(?=.{3,254}$)[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 const SSH_ED25519_PUBLIC_KEY =
   /^ssh-ed25519 ([A-Za-z0-9+/]+={0,2})$/;
 const SSH_SHA256_FINGERPRINT =
@@ -157,6 +159,7 @@ export interface ClockchainHandshakeStackProps
   readonly relayTlsCertificatePem: string;
   readonly relayTlsFingerprint: string;
   readonly relayTlsSecretArn: string;
+  readonly receiptSenderEmail: string;
   readonly repositorySha: string;
   readonly sessionId: string;
   readonly sourceTreeSha256: string;
@@ -253,6 +256,9 @@ export class ClockchainHandshakeStack extends Stack {
       ) ||
       !SECRET_ARN.test(
         props.relayTlsSecretArn,
+      ) ||
+      !EMAIL.test(
+        props.receiptSenderEmail,
       ) ||
       !SHA64.test(props.sourceTreeSha256) ||
       !validOperatorPublicKey(
@@ -1235,6 +1241,149 @@ export class ClockchainHandshakeStack extends Stack {
         publicMonitorBucket,
         publicMonitorCorsPolicy,
       );
+    const receiptDeliveryTable =
+      new dynamodb.Table(
+        this,
+        "ReceiptDeliveryTable",
+        {
+          billingMode:
+            dynamodb.BillingMode.PAY_PER_REQUEST,
+          encryption:
+            dynamodb.TableEncryption.CUSTOMER_MANAGED,
+          encryptionKey: dataKey,
+          partitionKey: {
+            name: "pk",
+            type: dynamodb.AttributeType.STRING,
+          },
+          pointInTimeRecoverySpecification: {
+            pointInTimeRecoveryEnabled: true,
+          },
+          removalPolicy: RemovalPolicy.RETAIN,
+          timeToLiveAttribute: "ttl",
+        },
+      );
+    const receiptEmailLog =
+      new logs.LogGroup(
+        this,
+        "ReceiptEmailLog",
+        {
+          encryptionKey: dataKey,
+          retention:
+            logs.RetentionDays.ONE_MONTH,
+          removalPolicy: RemovalPolicy.RETAIN,
+        },
+      );
+    const receiptEmailFunction =
+      new lambdaNode.NodejsFunction(
+        this,
+        "ReceiptEmailFunction",
+        {
+          bundling: {
+            format:
+              lambdaNode.OutputFormat.ESM,
+            minify: true,
+            sourceMap: false,
+            target: "node22",
+          },
+          entry: join(
+            join(
+              dirname(
+                fileURLToPath(import.meta.url),
+              ),
+              "../lambda",
+            ),
+            "receipt-email-handler.mjs",
+          ),
+          environment: {
+            ALLOWED_ORIGIN:
+              "https://clockchain-research.vercel.app",
+            PUBLIC_BUCKET_NAME:
+              publicMonitorBucket.bucketName,
+            RECEIPT_DELIVERY_TABLE_NAME:
+              receiptDeliveryTable.tableName,
+            RECEIPT_SENDER_EMAIL:
+              props.receiptSenderEmail,
+          },
+          handler: "handler",
+          logGroup: receiptEmailLog,
+          memorySize: 256,
+          reservedConcurrentExecutions: 5,
+          runtime: lambda.Runtime.NODEJS_22_X,
+          timeout: Duration.seconds(10),
+        },
+      );
+    publicMonitorBucket.grantRead(
+      receiptEmailFunction,
+    );
+    receiptDeliveryTable.grantReadWriteData(
+      receiptEmailFunction,
+    );
+    receiptEmailFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ses:SendEmail"],
+        resources: ["*"],
+      }),
+    );
+    const receiptEmailApi =
+      new apigwv2.HttpApi(
+        this,
+        "ReceiptEmailApi",
+        {
+          corsPreflight: {
+            allowHeaders: ["content-type"],
+            allowMethods: [
+              apigwv2.CorsHttpMethod.POST,
+              apigwv2.CorsHttpMethod.OPTIONS,
+            ],
+            allowOrigins: [
+              "https://clockchain-research.vercel.app",
+            ],
+          },
+          createDefaultStage: true,
+        },
+      );
+    receiptEmailApi.addRoutes({
+      integration:
+        new integrations.HttpLambdaIntegration(
+          "ReceiptEmailIntegration",
+          receiptEmailFunction,
+        ),
+      methods: [apigwv2.HttpMethod.POST],
+      path: "/v1/receipt-email",
+    });
+    const receiptEmailStage =
+      receiptEmailApi.defaultStage?.node
+        .defaultChild as
+        | apigwv2.CfnStage
+        | undefined;
+    if (receiptEmailStage === undefined) {
+      throw new Error(
+        "Receipt email API default stage missing.",
+      );
+    }
+    receiptEmailStage.defaultRouteSettings = {
+      throttlingBurstLimit: 4,
+      throttlingRateLimit: 2,
+    };
+    new cloudwatch.Alarm(
+      this,
+      "ReceiptEmailErrorAlarm",
+      {
+        comparisonOperator:
+          cloudwatch.ComparisonOperator
+            .GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        evaluationPeriods: 1,
+        metric:
+          receiptEmailFunction.metricErrors({
+            period: Duration.minutes(1),
+            statistic: "Sum",
+          }),
+        threshold: 1,
+        treatMissingData:
+          cloudwatch.TreatMissingData
+            .NOT_BREACHING,
+      },
+    );
     publisher.container.addEnvironment(
       "AWS_RUNTIME_INPUT",
       JSON.stringify({
@@ -1782,6 +1931,13 @@ export class ClockchainHandshakeStack extends Stack {
     );
     new CfnOutput(this, "PublicMonitorUrl", {
       value: `https://${publicDistribution.distributionDomainName}`,
+    });
+    new CfnOutput(this, "ReceiptEmailApiUrl", {
+      value:
+        `${receiptEmailApi.url!}v1/receipt-email`,
+    });
+    new CfnOutput(this, "ReceiptSenderEmail", {
+      value: props.receiptSenderEmail,
     });
     new CfnOutput(this, "RelayEndpoint", {
       value: `${props.relayPublicHostname}:8443`,
