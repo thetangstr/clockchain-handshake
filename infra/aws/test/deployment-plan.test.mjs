@@ -102,6 +102,17 @@ test("docker build always runs from the reviewed repository root", () => {
   );
 });
 
+test("docker build context excludes synthesized infrastructure output", async () => {
+  const ignore = await readFile(
+    new URL("../../../.dockerignore", import.meta.url),
+    "utf8",
+  );
+  assert.equal(
+    ignore.split(/\r?\n/u).includes("infra/aws/cdk.out"),
+    true,
+  );
+});
+
 test("container release metadata uses the prevalidated SHA without requiring copied Git metadata", async () => {
   for (const dockerfile of [
     "control-plane.Dockerfile",
