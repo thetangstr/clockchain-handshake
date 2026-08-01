@@ -41,6 +41,43 @@ function runtimeTransitions(
   };
 }
 
+async function runWithStoredControlState(state) {
+  const publications = [];
+  const result = await runAwsOperatorOnce(CONFIG, {
+    buildTransitions: () => runtimeTransitions(),
+    documentClient: {
+      async send(command) {
+        if (
+          command.constructor.name ===
+          "GetCommand"
+        ) {
+          return {
+            Item: {
+              controlContext: {
+                expectedClaimFingerprint: null,
+                state,
+              },
+            },
+          };
+        }
+        return {};
+      },
+    },
+    s3: {
+      async send(command) {
+        publications.push(command.input);
+        return {};
+      },
+    },
+    sqs: {
+      async send() {
+        return { Messages: [] };
+      },
+    },
+  });
+  return { publications, result };
+}
+
 test("long-polls one exact FIFO action and passes only bounded dependencies to the authority adapter", async () => {
   const calls = [];
   const result = await runAwsOperatorOnce(
@@ -477,6 +514,40 @@ test("normalizes a DynamoDB-reordered empty control state before validating and 
   assert.equal(snapshot.paymentMoved, false);
 });
 
+test("normalizes DynamoDB-reordered active state and history maps before publishing", async () => {
+  const { publications, result } =
+    await runWithStoredControlState({
+      actionHistory: [
+        {
+          type: "START_RUN",
+          actionId:
+            "33333333-3333-4333-8333-333333333333",
+          actionDigest: "b".repeat(64),
+        },
+      ],
+      schema: "clockchain.aws-control-state/v1",
+      releaseId: CONFIG.releaseId,
+      repositorySha: CONFIG.repositorySha,
+      sessionId: CONFIG.sessionId,
+      paymentMoved: false,
+      revision: 1,
+      status: "RUN_STARTED",
+    });
+  assert.deepEqual(result, {
+    paymentMoved: false,
+    status: "IDLE",
+  });
+  assert.equal(publications.length, 1);
+  const snapshot = JSON.parse(
+    Buffer.from(publications[0].Body).toString(
+      "utf8",
+    ),
+  );
+  assert.equal(snapshot.paymentMoved, false);
+  assert.equal(snapshot.control.revision, 1);
+  assert.equal(snapshot.runStatus, "RUNNING");
+});
+
 test("rejects a non-enumerable required field in a DynamoDB-reordered control state", async () => {
   const state = {
     actionHistory: [],
@@ -493,37 +564,7 @@ test("rejects a non-enumerable required field in a DynamoDB-reordered control st
     value: 0,
   });
   await assert.rejects(
-    runAwsOperatorOnce(CONFIG, {
-      buildTransitions: () => runtimeTransitions(),
-      documentClient: {
-        async send(command) {
-          if (
-            command.constructor.name ===
-            "GetCommand"
-          ) {
-            return {
-              Item: {
-                controlContext: {
-                  expectedClaimFingerprint: null,
-                  state,
-                },
-              },
-            };
-          }
-          return {};
-        },
-      },
-      s3: {
-        async send() {
-          return {};
-        },
-      },
-      sqs: {
-        async send() {
-          return { Messages: [] };
-        },
-      },
-    }),
+    runWithStoredControlState(state),
     (error) => {
       assert.equal(
         error.code,
@@ -559,47 +600,15 @@ test("rejects a self-replacing history getter without invoking it", async () => 
   });
   let thrown;
   try {
-    await runAwsOperatorOnce(CONFIG, {
-      buildTransitions: () => runtimeTransitions(),
-      documentClient: {
-        async send(command) {
-          if (
-            command.constructor.name ===
-            "GetCommand"
-          ) {
-            return {
-              Item: {
-                controlContext: {
-                  expectedClaimFingerprint: null,
-                  state: {
-                    actionHistory: [historyEntry],
-                    schema:
-                      "clockchain.aws-control-state/v1",
-                    releaseId: CONFIG.releaseId,
-                    repositorySha:
-                      CONFIG.repositorySha,
-                    sessionId: CONFIG.sessionId,
-                    paymentMoved: false,
-                    revision: 1,
-                    status: "RUN_STARTED",
-                  },
-                },
-              },
-            };
-          }
-          return {};
-        },
-      },
-      s3: {
-        async send() {
-          return {};
-        },
-      },
-      sqs: {
-        async send() {
-          return { Messages: [] };
-        },
-      },
+    await runWithStoredControlState({
+      actionHistory: [historyEntry],
+      schema: "clockchain.aws-control-state/v1",
+      releaseId: CONFIG.releaseId,
+      repositorySha: CONFIG.repositorySha,
+      sessionId: CONFIG.sessionId,
+      paymentMoved: false,
+      revision: 1,
+      status: "RUN_STARTED",
     });
   } catch (error) {
     thrown = error;

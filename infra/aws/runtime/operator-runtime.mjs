@@ -63,6 +63,11 @@ const CONTROL_STATE_KEYS = Object.freeze([
   "sessionId",
   "status",
 ]);
+const CONTROL_HISTORY_KEYS = Object.freeze([
+  "actionDigest",
+  "actionId",
+  "type",
+]);
 
 export class AwsOperatorRuntimeError extends Error {
   constructor() {
@@ -145,6 +150,47 @@ function initialControlContext() {
   });
 }
 
+function canonicalStoredActionHistoryEntry(value) {
+  try {
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      types.isProxy(value) ||
+      Object.getPrototypeOf(value) !==
+        Object.prototype
+    ) {
+      fail();
+    }
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.length !== CONTROL_HISTORY_KEYS.length ||
+      keys.some((key) => typeof key !== "string") ||
+      CONTROL_HISTORY_KEYS.some(
+        (key) => !keys.includes(key),
+      )
+    ) {
+      fail();
+    }
+    const entry = {};
+    for (const key of CONTROL_HISTORY_KEYS) {
+      const descriptor =
+        Object.getOwnPropertyDescriptor(value, key);
+      if (
+        descriptor === undefined ||
+        !("value" in descriptor) ||
+        descriptor.enumerable !== true
+      ) {
+        fail();
+      }
+      entry[key] = descriptor.value;
+    }
+    return entry;
+  } catch {
+    fail();
+  }
+}
+
 function canonicalStoredActionHistory(value) {
   try {
     if (
@@ -190,12 +236,15 @@ function canonicalStoredActionHistory(value) {
       if (
         descriptor === undefined ||
         !("value" in descriptor) ||
-        descriptor.enumerable !== true ||
-        types.isProxy(descriptor.value)
+        descriptor.enumerable !== true
       ) {
         fail();
       }
-      history.push(descriptor.value);
+      history.push(
+        canonicalStoredActionHistoryEntry(
+          descriptor.value,
+        ),
+      );
     }
     return history;
   } catch {
