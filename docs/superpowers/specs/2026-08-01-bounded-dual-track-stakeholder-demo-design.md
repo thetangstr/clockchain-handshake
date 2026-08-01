@@ -1,6 +1,6 @@
 # Bounded dual-track stakeholder demo design
 
-**Status:** Approved direction, pending written review
+**Status:** Approved
 
 **Date:** 2026-08-01
 
