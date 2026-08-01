@@ -273,14 +273,17 @@ async function runVerifier(
 function publicMonitor(receipts) {
   const snapshot = {
     anchors: receipts.map(
-      ({ block, explorerUrl, kind, signerRole }) => ({
+      ({ block, cardinality, explorerUrl, kind, ledgerId, signerRole, verified }) => ({
         block,
+        cardinality,
         explorerUrl,
         kind,
+        ledgerId,
         signerRole:
           signerRole === "payer"
             ? "Payer"
             : "Requestor",
+        verified,
       }),
     ),
     currentStep:
@@ -295,7 +298,7 @@ function publicMonitor(receipts) {
     runId: "run-0123456789abcdef",
     runStatus: "VERIFIED",
     schema:
-      "clockchain.bilateral-public-monitor/v2",
+      "clockchain.bilateral-public-monitor/v3",
     staleAfterMs: 10_000,
     verifier: { status: "VERIFIED" },
   };
@@ -449,24 +452,33 @@ async function fullScenario() {
   const receipts = [
     {
       block: "1001",
+      cardinality: "1",
       explorerUrl:
         "https://sepolia.etherscan.io/block/1001",
       kind: "PROPOSED",
+      ledgerId: "00000000-0000-4000-8000-000000000001",
       signerRole: "payer",
+      verified: true,
     },
     {
       block: "1002",
+      cardinality: "1",
       explorerUrl:
         "https://sepolia.etherscan.io/block/1002",
       kind: "ACCEPTED",
+      ledgerId: "00000000-0000-4000-8000-000000000002",
       signerRole: "payee",
+      verified: true,
     },
     {
       block: "1003",
+      cardinality: "1",
       explorerUrl:
         "https://sepolia.etherscan.io/block/1003",
       kind: "ACKNOWLEDGED",
+      ledgerId: "00000000-0000-4000-8000-000000000003",
       signerRole: "payer",
+      verified: true,
     },
   ];
   sequence.push(

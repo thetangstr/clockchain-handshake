@@ -1139,7 +1139,7 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
           const anchors = verdict.transitions.map((transition, index) => {
             const observed = watcher.transitions[index];
             if (observed?.verified !== true || observed.slot !== ["proposal", "acceptance", "acknowledgment"][index] || observed.cardinality !== "1" || observed.blockHeight !== transition.blockHeight || observed.ledgerId !== transition.ledgerId) fail();
-            return Object.freeze({ block: transition.blockHeight, digest: transition.digest, kind: ["PROPOSED", "ACCEPTED", "ACKNOWLEDGED"][index], verified: true });
+            return Object.freeze({ block: transition.blockHeight, cardinality: observed.cardinality, digest: transition.digest, kind: ["PROPOSED", "ACCEPTED", "ACKNOWLEDGED"][index], ledgerId: observed.ledgerId, verified: true });
           });
           if (anchors.some((anchor) => !SHA64.test(anchor.digest) || !/^(?:0|[1-9][0-9]*)$/.test(anchor.block))) fail();
           const healthExpiry = Math.min(nowMs + 60_000, mandateExpiry, requestExpiry);

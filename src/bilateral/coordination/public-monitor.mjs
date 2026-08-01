@@ -2,7 +2,7 @@ import { isIP } from "node:net";
 import { types } from "node:util";
 
 export const PUBLIC_MONITOR_SCHEMA =
-  "clockchain.bilateral-public-monitor/v2";
+  "clockchain.bilateral-public-monitor/v3";
 
 const SOURCE_HEALTH = new Set([
   "READY",
@@ -77,9 +77,12 @@ const PUBLIC_KEYS = Object.freeze([
 ]);
 const PUBLIC_ANCHOR_KEYS = Object.freeze([
   "block",
+  "cardinality",
   "explorerUrl",
   "kind",
+  "ledgerId",
   "signerRole",
+  "verified",
 ]);
 const SOURCE_KEYS = Object.freeze([
   "actors",
@@ -400,6 +403,9 @@ function validateSourceAnchors(
     fail();
   }
   const anchors = [];
+  const blockHeights = new Set();
+  const ledgerIds = new Set();
+  let previousBlock = null;
   let sawUnverified = false;
   for (
     let index = 0;
@@ -410,8 +416,10 @@ function validateSourceAnchors(
     const source = exact(value[index], [
       "actor",
       "block",
+      "cardinality",
       "digest",
       "kind",
+      "ledgerId",
       "sequence",
       "stage",
       "verified",
@@ -431,6 +439,8 @@ function validateSourceAnchors(
       sawUnverified = true;
       if (
         source.block !== null ||
+        source.cardinality !== "0" ||
+        source.ledgerId !== null ||
         explorerUrls[index] !== null
       ) {
         fail();
@@ -439,19 +449,37 @@ function validateSourceAnchors(
     }
     if (
       sawUnverified ||
+      source.cardinality !== "1" ||
       typeof source.block !== "string" ||
       !DECIMAL.test(source.block) ||
+      typeof source.ledgerId !== "string" ||
+      !LEDGER_ID.test(source.ledgerId) ||
       typeof explorerUrls[index] !==
         "string"
     ) {
       fail();
     }
+    positiveDecimal(source.block);
+    const block = BigInt(source.block);
+    if (
+      (previousBlock !== null && block <= previousBlock) ||
+      blockHeights.has(source.block) ||
+      ledgerIds.has(source.ledgerId)
+    ) {
+      fail();
+    }
+    previousBlock = block;
+    blockHeights.add(source.block);
+    ledgerIds.add(source.ledgerId);
     anchors.push(Object.freeze({
       block: source.block,
+      cardinality: source.cardinality,
       explorerUrl:
         publicUrl(explorerUrls[index]),
       kind: expected.kind,
+      ledgerId: source.ledgerId,
       signerRole: expected.signerRole,
+      verified: true,
     }));
   }
   return Object.freeze(anchors);
@@ -787,9 +815,12 @@ function validateAwsWatcherTransitions(value) {
       ledgerIds.add(transition.ledgerId);
       anchors.push(Object.freeze({
         block: transition.blockHeight,
+        cardinality: transition.cardinality,
         explorerUrl: `https://sepolia.etherscan.io/block/${transition.blockHeight}`,
         kind: expected.kind,
+        ledgerId: transition.ledgerId,
         signerRole: expected.signerRole,
+        verified: true,
       }));
       continue;
     }
@@ -918,11 +949,16 @@ function validatePublicAnchor(value, index) {
     anchor.kind !== expected.kind ||
     anchor.signerRole !==
       expected.signerRole ||
+    anchor.cardinality !== "1" ||
+    anchor.verified !== true ||
     typeof anchor.block !== "string" ||
-    !DECIMAL.test(anchor.block)
+    !DECIMAL.test(anchor.block) ||
+    typeof anchor.ledgerId !== "string" ||
+    !LEDGER_ID.test(anchor.ledgerId)
   ) {
     fail();
   }
+  positiveDecimal(anchor.block);
   publicUrl(anchor.explorerUrl);
   return Object.freeze({ ...anchor });
 }
@@ -945,6 +981,16 @@ function validatePublicSnapshot(value) {
       validatePublicAnchor,
     ),
   );
+  const blockHeights = anchors.map(({ block }) => BigInt(block));
+  if (
+    new Set(anchors.map(({ block }) => block)).size !== anchors.length ||
+    new Set(anchors.map(({ ledgerId }) => ledgerId)).size !== anchors.length ||
+    blockHeights.some(
+      (block, index) => index > 0 && block <= blockHeights[index - 1],
+    )
+  ) {
+    fail();
+  }
   const verifier = statusObject(
     snapshot.verifier,
     VERIFIER_STATUS,

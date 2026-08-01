@@ -3,6 +3,7 @@ import { RELEASE_STATES } from "./lifecycle.mjs";
 const SHA64 = /^[0-9a-f]{64}$/;
 const SHA40 = /^[0-9a-f]{40}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const LEDGER_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const ANCHORS = ["PROPOSED", "ACCEPTED", "ACKNOWLEDGED"];
 const PHASES = new Set([...RELEASE_STATES, "UNAVAILABLE"]);
 const FAILURE_CODES = new Set(["RECOVERY_REQUIRED", "TERMINAL_FAILURE", "ABORTED"]);
@@ -80,9 +81,9 @@ function healthSnapshot(value, now) {
 }
 function anchor(value, index) {
   const item = object(value);
-  if (item.kind !== ANCHORS[index] || item.verified !== true || digest(item.digest) === null || timestamp(item.block) === null) return null;
+  if (item.kind !== ANCHORS[index] || item.verified !== true || item.cardinality !== "1" || typeof item.ledgerId !== "string" || !LEDGER_ID.test(item.ledgerId) || digest(item.digest) === null || timestamp(item.block) === null) return null;
   const details = ANCHOR_DETAILS[index];
-  return Object.freeze({ actor: details.actor, block: String(item.block), digest: item.digest, kind: item.kind, sequence: details.sequence, stage: details.stage, verified: true });
+  return Object.freeze({ actor: details.actor, block: String(item.block), cardinality: item.cardinality, digest: item.digest, kind: item.kind, ledgerId: item.ledgerId, sequence: details.sequence, stage: details.stage, verified: true });
 }
 function publicationMatches(publication, session, mandateDigest, requestDigest, anchors, watcher, run) {
   const value = object(publication);
@@ -104,7 +105,7 @@ export function buildConsoleProjection(input) {
   const sessionId = typeof lifecycle.sessionId === "string" && UUID.test(lifecycle.sessionId) ? lifecycle.sessionId : null;
   const watcher = object(value.watcherSnapshot); const rawAnchors = Array.isArray(watcher.anchors) ? watcher.anchors : [];
   const anchors = Object.freeze(rawAnchors.length === 3 ? rawAnchors.map(anchor) : []);
-  const distinct = anchors.length === 3 && anchors.every(Boolean) && new Set(anchors.map((item) => item.digest)).size === 3;
+  const distinct = anchors.length === 3 && anchors.every(Boolean) && new Set(anchors.map((item) => item.digest)).size === 3 && new Set(anchors.map((item) => item.ledgerId)).size === 3;
   const ordered = distinct && anchors.every((item, index) => index === 0 || BigInt(item.block) > BigInt(anchors[index - 1].block));
   const mandateDigest = digest(mandateValue.mandateDigest); const requestDigest = digest(requestValue.requestDigest);
   const sessionBound = releaseId !== null && repositorySha !== null && sessionId !== null;

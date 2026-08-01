@@ -345,11 +345,21 @@ test("AWS watcher projection maps fake Clockchain UUID ledgers into public monit
   assert.equal(publicSnapshot.verifier.status, "RUNNING");
   assert.deepEqual(
     publicSnapshot.anchors.map(
-      ({ explorerUrl }) => explorerUrl,
+      ({ cardinality, explorerUrl, ledgerId, verified }) => ({
+        cardinality,
+        explorerUrl,
+        ledgerId,
+        verified,
+      }),
     ),
     projection.transitions.map(
-      ({ blockHeight }) =>
-        `https://sepolia.etherscan.io/block/${blockHeight}`,
+      ({ blockHeight, ledgerId }) => ({
+        cardinality: "1",
+        explorerUrl:
+          `https://sepolia.etherscan.io/block/${blockHeight}`,
+        ledgerId,
+        verified: true,
+      }),
     ),
   );
 });

@@ -45,8 +45,10 @@ function projection() {
       {
         actor: "Payer",
         block: "101",
+        cardinality: "1",
         digest: "d".repeat(64),
         kind: "PROPOSED",
+        ledgerId: LEDGER_IDS[0],
         sequence: 1,
         stage: "proposal",
         verified: true,
@@ -54,8 +56,10 @@ function projection() {
       {
         actor: "Requestor",
         block: "102",
+        cardinality: "1",
         digest: "e".repeat(64),
         kind: "ACCEPTED",
+        ledgerId: LEDGER_IDS[1],
         sequence: 2,
         stage: "acceptance",
         verified: true,
@@ -63,8 +67,10 @@ function projection() {
       {
         actor: "Payer",
         block: "103",
+        cardinality: "1",
         digest: "f".repeat(64),
         kind: "ACKNOWLEDGED",
+        ledgerId: LEDGER_IDS[2],
         sequence: 3,
         stage: "acknowledgment",
         verified: true,
@@ -186,21 +192,30 @@ test("builds one exact secret-free business monitor with three independently ver
     anchors: [
       {
         block: "101",
+        cardinality: "1",
         explorerUrl: EXPLORER_URLS[0],
         kind: "PROPOSED",
+        ledgerId: LEDGER_IDS[0],
         signerRole: "Payer",
+        verified: true,
       },
       {
         block: "102",
+        cardinality: "1",
         explorerUrl: EXPLORER_URLS[1],
         kind: "ACCEPTED",
+        ledgerId: LEDGER_IDS[1],
         signerRole: "Requestor",
+        verified: true,
       },
       {
         block: "103",
+        cardinality: "1",
         explorerUrl: EXPLORER_URLS[2],
         kind: "ACKNOWLEDGED",
+        ledgerId: LEDGER_IDS[2],
         signerRole: "Payer",
+        verified: true,
       },
     ],
     currentStep:
@@ -215,7 +230,7 @@ test("builds one exact secret-free business monitor with three independently ver
     runId: RUN_ID,
     runStatus: "VERIFIED",
     schema:
-      "clockchain.bilateral-public-monitor/v2",
+      "clockchain.bilateral-public-monitor/v3",
     staleAfterMs: 10_000,
     verifier: { status: "VERIFIED" },
   });
@@ -288,6 +303,10 @@ test("publishes only the authenticated Payer-Requestor-Payer prefix", () => {
         ...anchor,
         block:
           index < length ? anchor.block : null,
+        cardinality:
+          index < length ? "1" : "0",
+        ledgerId:
+          index < length ? anchor.ledgerId : null,
         verified: index < length,
       }),
     );
@@ -362,6 +381,66 @@ test("rejects extra, reordered, role-mismatched, unlinked, stale, private, and n
               ? { ...anchor, actor: "Payer" }
               : anchor,
         ),
+      },
+      options(),
+    ],
+    [
+      {
+        ...projection(),
+        anchors: projection().anchors.map(
+          (anchor, index) => {
+            if (index !== 0) return anchor;
+            const { ledgerId: _ledgerId, ...withoutLedgerId } = anchor;
+            return withoutLedgerId;
+          },
+        ),
+      },
+      options(),
+    ],
+    [
+      {
+        ...projection(),
+        anchors: projection().anchors.map(
+          (anchor, index) => index === 0 ? { ...anchor, cardinality: "2" } : anchor,
+        ),
+      },
+      options(),
+    ],
+    [
+      {
+        ...projection(),
+        anchors: projection().anchors.map(
+          (anchor, index) => index === 0 ? { ...anchor, verified: false } : anchor,
+        ),
+      },
+      options(),
+    ],
+    [
+      {
+        ...projection(),
+        anchors: projection().anchors.map(
+          (anchor, index) => index === 1 ? { ...anchor, ledgerId: LEDGER_IDS[0] } : anchor,
+        ),
+      },
+      options(),
+    ],
+    [
+      {
+        ...projection(),
+        anchors: projection().anchors.map(
+          (anchor, index) => index === 0 ? { ...anchor, extra: "not-public" } : anchor,
+        ),
+      },
+      options(),
+    ],
+    [
+      {
+        ...projection(),
+        anchors: [
+          projection().anchors[1],
+          projection().anchors[0],
+          projection().anchors[2],
+        ],
       },
       options(),
     ],
@@ -456,15 +535,21 @@ test("maps exact aws watcher projection into a running public monitor without pr
     anchors: [
       {
         block: "101",
+        cardinality: "1",
         explorerUrl: "https://sepolia.etherscan.io/block/101",
         kind: "PROPOSED",
+        ledgerId: LEDGER_IDS[0],
         signerRole: "Payer",
+        verified: true,
       },
       {
         block: "102",
+        cardinality: "1",
         explorerUrl: "https://sepolia.etherscan.io/block/102",
         kind: "ACCEPTED",
+        ledgerId: LEDGER_IDS[1],
         signerRole: "Requestor",
+        verified: true,
       },
     ],
     currentStep:
@@ -478,7 +563,7 @@ test("maps exact aws watcher projection into a running public monitor without pr
     requestor: { status: "READY" },
     runId: "run-0123456789abcdef",
     runStatus: "RUNNING",
-    schema: "clockchain.bilateral-public-monitor/v2",
+    schema: "clockchain.bilateral-public-monitor/v3",
     staleAfterMs: 60_000,
     verifier: { status: "NOT_STARTED" },
   });
@@ -753,7 +838,7 @@ test("builds a safe empty waiting snapshot", () => {
       runId: RUN_ID,
       runStatus: "WAITING",
       schema:
-        "clockchain.bilateral-public-monitor/v2",
+        "clockchain.bilateral-public-monitor/v3",
       staleAfterMs: 10_000,
       verifier: { status: "NOT_STARTED" },
     },
