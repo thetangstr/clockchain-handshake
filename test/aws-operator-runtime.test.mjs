@@ -477,6 +477,67 @@ test("normalizes a DynamoDB-reordered empty control state before validating and 
   assert.equal(snapshot.paymentMoved, false);
 });
 
+test("rejects a non-enumerable required field in a DynamoDB-reordered control state", async () => {
+  const state = {
+    actionHistory: [],
+    schema: "clockchain.aws-control-state/v1",
+    releaseId: null,
+    repositorySha: null,
+    sessionId: null,
+    paymentMoved: false,
+    revision: 0,
+    status: "EMPTY",
+  };
+  Object.defineProperty(state, "revision", {
+    enumerable: false,
+    value: 0,
+  });
+  await assert.rejects(
+    runAwsOperatorOnce(CONFIG, {
+      buildTransitions: () => runtimeTransitions(),
+      documentClient: {
+        async send(command) {
+          if (
+            command.constructor.name ===
+            "GetCommand"
+          ) {
+            return {
+              Item: {
+                controlContext: {
+                  expectedClaimFingerprint: null,
+                  state,
+                },
+              },
+            };
+          }
+          return {};
+        },
+      },
+      s3: {
+        async send() {
+          return {};
+        },
+      },
+      sqs: {
+        async send() {
+          return { Messages: [] };
+        },
+      },
+    }),
+    (error) => {
+      assert.equal(
+        error.code,
+        "AWS_OPERATOR_RUNTIME_INVALID",
+      );
+      assert.match(
+        error.message,
+        /AWS operator runtime failed safely/,
+      );
+      return true;
+    },
+  );
+});
+
 test("accepts only ConditionalCheckFailedException as startup seed race", async () => {
   for (const [name, shouldReject] of [
     ["ConditionalCheckFailedException", false],

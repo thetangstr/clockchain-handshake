@@ -172,7 +172,8 @@ function canonicalStoredControlState(value) {
         Object.getOwnPropertyDescriptor(value, key);
       if (
         descriptor === undefined ||
-        !("value" in descriptor)
+        !("value" in descriptor) ||
+        descriptor.enumerable !== true
       ) {
         fail();
       }
