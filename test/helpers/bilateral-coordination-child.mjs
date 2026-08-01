@@ -1477,6 +1477,7 @@ async function runProductionCoordinatorChild(input) {
         certificateUrl: requestorCertificateUrl,
         certificateFingerprint: value.payerMcp.fingerprint,
         operatorKeyId: config.operatorIdentity.keyId,
+        runMode: "local-two-run",
         expiresAtMs: String(value.clockMs + 300_000),
         operatorPrivateKey: createPrivateKey(config.operatorIdentity.privateKeyPem),
       });

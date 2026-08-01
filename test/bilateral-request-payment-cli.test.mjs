@@ -42,7 +42,7 @@ function rawEd25519PublicKey(pair) {
   return pair.publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64");
 }
 
-function signedDiscovery({ certificateFingerprint, certificateUrl, expiresAtMs, operator, publicUrl }) {
+function signedDiscovery({ certificateFingerprint, certificateUrl, expiresAtMs, operator, publicUrl, runMode = "aws-stakeholder-only" }) {
   return createSignedRequestorDiscovery({
     schema: REQUESTOR_DISCOVERY_SCHEMA,
     paymentMoved: false,
@@ -54,6 +54,7 @@ function signedDiscovery({ certificateFingerprint, certificateUrl, expiresAtMs, 
     certificateUrl,
     certificateFingerprint,
     operatorKeyId: OPERATOR_KEY_ID,
+    runMode,
     expiresAtMs,
     operatorPrivateKey: operator.privateKey,
   });
@@ -92,6 +93,7 @@ async function fixture(t) {
     expiresAtMs: String(Date.now() + 60_000),
     operator,
     publicUrl: "https://127.0.0.1:9443/mcp",
+    runMode: "local-two-run",
   });
   const { manifest } = createLaunchManifest({
     expectedTlsFingerprint: certificateFingerprint,
@@ -209,7 +211,7 @@ test("Requestor CLI exposes only one-shot discovery flags and completes bootstra
       calls.push(["runSupervisor", input.launchManifestPath, input.stateRoot]);
       assert.equal(input.stateRoot, fx.stateRoot);
       assert.equal(input.launchManifestPath.endsWith("requestor-state.bootstrap/payee.launch.json"), true);
-      assert.equal(input.runMode, "aws-stakeholder-only");
+      assert.equal(input.runMode, "local-two-run");
       const manifestStats = await lstat(input.launchManifestPath);
       assert.equal(manifestStats.mode & 0o777, 0o600);
       assert.equal((await readFile(input.launchManifestPath)).equals(fx.manifestBytes), true);

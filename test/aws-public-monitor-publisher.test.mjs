@@ -58,7 +58,7 @@ function fixture({
       contentType: "application/json",
     },
     requestorDiscovery: {
-      body: "{\"paymentMoved\":false,\"schema\":\"clockchain.requestor-discovery/v2\"}\n",
+      body: "{\"paymentMoved\":false,\"runMode\":\"aws-stakeholder-only\",\"schema\":\"clockchain.requestor-discovery/v3\"}\n",
       contentType: "application/json",
     },
   };
@@ -97,7 +97,7 @@ function fixture({
         async ({ body }) => {
           assert.match(
             body,
-            /requestor-discovery\/v2/,
+            /requestor-discovery\/v3/,
           );
         },
       writePublicationRecord:
@@ -122,6 +122,28 @@ function input(overrides = {}) {
     verifierPublicationValidated: false,
     ...overrides,
   };
+}
+
+function requestorDiscoveryBody({ runMode }) {
+  return `${JSON.stringify({
+    schema: "clockchain.requestor-discovery/v3",
+    paymentMoved: false,
+    imageDigest: input().imageDigest,
+    releaseId: input().releaseId,
+    sessionId: input().sessionId,
+    repositorySha: input().repositorySha,
+    publicUrl: "https://32.186.198.119:9443/mcp",
+    certificateUrl: "https://public.example.test/payer-mcp.crt",
+    certificateFingerprint: CERTIFICATE_FINGERPRINT,
+    operatorKeyId: "operator",
+    runMode,
+    expiresAtMs: "2000000600000",
+    signature: {
+      algorithm: "ed25519",
+      keyId: "operator",
+      value: Buffer.alloc(64).toString("base64"),
+    },
+  })}\n`;
 }
 
 test("publishes latest plus staged Payer and gated Requestor artifacts without signer, port probe, or raw evidence access", async () => {
@@ -171,6 +193,29 @@ test("publishes latest plus staged Payer and gated Requestor artifacts without s
       "private-canary",
     ),
     false,
+  );
+});
+
+test("default Requestor discovery validator rejects v3 non-AWS run mode", async () => {
+  const fx = fixture();
+  delete fx.dependencies.validateStagedRequestorDiscovery;
+  const originalRead = fx.dependencies.readStagedPublicObject;
+  fx.dependencies.readStagedPublicObject = async (name) => {
+    if (name === "requestorDiscovery") {
+      return {
+        body: requestorDiscoveryBody({ runMode: "local-two-run" }),
+        contentType: "application/json",
+      };
+    }
+    return originalRead(name);
+  };
+
+  await assert.rejects(
+    publishAwsPublicMonitor(
+      input(),
+      fx.dependencies,
+    ),
+    /AWS public monitor publication failed safely/,
   );
 });
 

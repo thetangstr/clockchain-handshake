@@ -19,6 +19,7 @@ import {
 } from "./publish-payer-bootstrap-discovery.mjs";
 import {
   parseRequestorDiscoveryWire,
+  REQUESTOR_DISCOVERY_SCHEMA,
 } from "./publish-requestor-discovery.mjs";
 
 const INPUT_KEYS = Object.freeze([
@@ -241,7 +242,7 @@ async function defaultValidateRequestor({
     parseRequestorDiscoveryWire(body);
   if (
     discovery.schema !==
-      "clockchain.requestor-discovery/v2" ||
+      REQUESTOR_DISCOVERY_SCHEMA ||
     discovery.paymentMoved !== false ||
     discovery.imageDigest !==
       input.imageDigest ||
@@ -252,7 +253,9 @@ async function defaultValidateRequestor({
     discovery.sessionId !==
       input.sessionId ||
     discovery.certificateFingerprint !==
-      input.certificateFingerprint
+      input.certificateFingerprint ||
+    discovery.runMode !==
+      "aws-stakeholder-only"
   ) {
     fail();
   }

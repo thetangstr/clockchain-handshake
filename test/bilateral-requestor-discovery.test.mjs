@@ -60,7 +60,60 @@ async function certificateFixture(t) {
   };
 }
 
-test("creates and verifies exact signed Requestor discovery without private fields", async (t) => {
+test("creates and verifies exact v3 signed Requestor discovery with run mode and without private fields", async (t) => {
+  const cert = await certificateFixture(t);
+  const operator = generateKeyPairSync("ed25519");
+  const discovery = createSignedRequestorDiscovery({
+    schema: "clockchain.requestor-discovery/v3",
+    paymentMoved: false,
+    imageDigest: IMAGE_DIGEST,
+    releaseId: RELEASE_ID,
+    sessionId: SESSION_ID,
+    repositorySha: REPOSITORY_SHA,
+    operatorPrivateKey: operator.privateKey,
+    publicUrl: "https://127.0.0.1:9443/mcp",
+    certificateUrl: "https://payer.example.test/payer-mcp.crt",
+    certificateFingerprint: cert.certificateFingerprint,
+    operatorKeyId: OPERATOR_KEY_ID,
+    runMode: "local-two-run",
+    expiresAtMs: String(Date.now() + 60_000),
+  });
+
+  assert.deepEqual(Object.keys(discovery), [
+    "schema",
+    "paymentMoved",
+    "imageDigest",
+    "releaseId",
+    "sessionId",
+    "repositorySha",
+    "publicUrl",
+    "certificateUrl",
+    "certificateFingerprint",
+    "operatorKeyId",
+    "runMode",
+    "expiresAtMs",
+    "signature",
+  ]);
+  assert.equal(discovery.runMode, "local-two-run");
+  assert.equal(JSON.stringify(discovery).includes("PRIVATE KEY"), false);
+  assert.deepEqual(
+    verifySignedRequestorDiscovery({
+      discovery,
+      nowMs: Date.now(),
+      operatorPublicKey: rawEd25519PublicKey(operator),
+      repositorySha: REPOSITORY_SHA,
+    }),
+    discovery,
+  );
+
+  const { signature: _signature, ...unsigned } = discovery;
+  assert.equal(
+    sign(null, canonicalBytes(unsigned), operator.privateKey).toString("base64"),
+    discovery.signature.value,
+  );
+});
+
+test("verifier accepts legacy v2 discovery as aws-stakeholder-only without changing signed bytes", async (t) => {
   const cert = await certificateFixture(t);
   const operator = generateKeyPairSync("ed25519");
   const discovery = createSignedRequestorDiscovery({
@@ -78,36 +131,15 @@ test("creates and verifies exact signed Requestor discovery without private fiel
     expiresAtMs: String(Date.now() + 60_000),
   });
 
-  assert.deepEqual(Object.keys(discovery), [
-    "schema",
-    "paymentMoved",
-    "imageDigest",
-    "releaseId",
-    "sessionId",
-    "repositorySha",
-    "publicUrl",
-    "certificateUrl",
-    "certificateFingerprint",
-    "operatorKeyId",
-    "expiresAtMs",
-    "signature",
-  ]);
-  assert.equal(JSON.stringify(discovery).includes("PRIVATE KEY"), false);
-  assert.deepEqual(
-    verifySignedRequestorDiscovery({
-      discovery,
-      nowMs: Date.now(),
-      operatorPublicKey: rawEd25519PublicKey(operator),
-      repositorySha: REPOSITORY_SHA,
-    }),
+  assert.equal(Object.hasOwn(discovery, "runMode"), false);
+  const verified = verifySignedRequestorDiscovery({
     discovery,
-  );
-
-  const { signature: _signature, ...unsigned } = discovery;
-  assert.equal(
-    sign(null, canonicalBytes(unsigned), operator.privateKey).toString("base64"),
-    discovery.signature.value,
-  );
+    nowMs: Date.now(),
+    operatorPublicKey: rawEd25519PublicKey(operator),
+    repositorySha: REPOSITORY_SHA,
+  });
+  assert.equal(verified.runMode, "aws-stakeholder-only");
+  assert.equal(Object.hasOwn(verified, "runMode"), true);
 });
 
 test("publisher uploads public certificate and signed discovery without opening TLS private key", async (t) => {
@@ -225,6 +257,8 @@ process.stdin.on("end", () => {
   const discovery = JSON.parse(uploads[1].body);
   assert.equal(discovery.certificateUrl, "https://clockchain-demo.s3.us-west-2.amazonaws.com/demo/payer-mcp.crt");
   assert.equal(discovery.publicUrl, "https://32.186.198.119:9443/mcp");
+  assert.equal(discovery.schema, "clockchain.requestor-discovery/v3");
+  assert.equal(discovery.runMode, "aws-stakeholder-only");
 });
 
 test("publisher CLI rejects bad bucket region object keys and duplicate flags before upload", async (t) => {
@@ -258,6 +292,7 @@ require("node:fs").appendFileSync(process.env.AWS_UPLOAD_LOG, "called\\n");
     (args) => ["--bucket", "192.168.0.1", ...args.slice(2)],
     (args) => [...args.slice(0, 2), "--region", "us-west-2-extra", ...args.slice(4)],
     (args) => [...args.slice(0, 4), "--certificate-key", "demo/../payer-mcp.crt", ...args.slice(6)],
+    (args) => [...args, "--run-mode", "aws"],
     (args) => [...args, "--bucket", "clockchain-demo"],
   ]) {
     const { stdout, stderr } = await execFileAsync(

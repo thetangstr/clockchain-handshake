@@ -26,6 +26,7 @@ import {
 } from "../../../scripts/publish-payer-bootstrap-discovery.mjs";
 import {
   createSignedRequestorDiscovery,
+  REQUESTOR_DISCOVERY_SCHEMA,
 } from "../../../scripts/publish-requestor-discovery.mjs";
 import {
   observePublicMonitorSnapshot,
@@ -611,7 +612,7 @@ export function createAwsPublicStager(value, dependencies = {}) {
           active.publicBaseUrl,
         ).href;
         const requestor = createSignedRequestorDiscovery({
-          schema: "clockchain.requestor-discovery/v2",
+          schema: REQUESTOR_DISCOVERY_SCHEMA,
           paymentMoved: false,
           imageDigest: active.imageDigest,
           releaseId: active.releaseId,
@@ -621,6 +622,7 @@ export function createAwsPublicStager(value, dependencies = {}) {
           certificateUrl,
           certificateFingerprint: approved.certificateFingerprint,
           operatorKeyId: active.operatorKeyId,
+          runMode: "aws-stakeholder-only",
           expiresAtMs: approved.expiresAtMs,
           operatorPrivateKey: active.operatorPrivateKey,
         });

@@ -9,9 +9,16 @@ import { pathToFileURL } from "node:url";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 
 export const REQUESTOR_DISCOVERY_SCHEMA =
+  "clockchain.requestor-discovery/v3";
+const LEGACY_REQUESTOR_DISCOVERY_SCHEMA =
   "clockchain.requestor-discovery/v2";
+const DEFAULT_RUN_MODE = "aws-stakeholder-only";
+const RUN_MODES = Object.freeze(new Set([
+  "aws-stakeholder-only",
+  "local-two-run",
+]));
 
-const DISCOVERY_KEYS = Object.freeze([
+const DISCOVERY_KEYS_V2 = Object.freeze([
   "schema",
   "paymentMoved",
   "imageDigest",
@@ -25,7 +32,23 @@ const DISCOVERY_KEYS = Object.freeze([
   "expiresAtMs",
   "signature",
 ]);
-const UNSIGNED_DISCOVERY_KEYS = DISCOVERY_KEYS.slice(0, -1);
+const DISCOVERY_KEYS_V3 = Object.freeze([
+  "schema",
+  "paymentMoved",
+  "imageDigest",
+  "releaseId",
+  "sessionId",
+  "repositorySha",
+  "publicUrl",
+  "certificateUrl",
+  "certificateFingerprint",
+  "operatorKeyId",
+  "runMode",
+  "expiresAtMs",
+  "signature",
+]);
+const UNSIGNED_DISCOVERY_KEYS_V2 = DISCOVERY_KEYS_V2.slice(0, -1);
+const UNSIGNED_DISCOVERY_KEYS_V3 = DISCOVERY_KEYS_V3.slice(0, -1);
 const SIGNATURE_KEYS = Object.freeze(["algorithm", "keyId", "value"]);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const SHA40_PATTERN = /^[0-9a-f]{40}$/;
@@ -53,6 +76,7 @@ const CLI_FLAGS = Object.freeze([
   "--repository-sha",
   "--session-id",
 ]);
+const OPTIONAL_CLI_FLAGS = Object.freeze(["--run-mode"]);
 
 class RequestorDiscoveryError extends Error {
   constructor() {
@@ -68,6 +92,17 @@ function exactObject(value, keys) {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) fail();
   const ownKeys = Reflect.ownKeys(value);
   if (ownKeys.length !== keys.length || keys.some((key, index) => ownKeys[index] !== key)) fail();
+  return value;
+}
+
+function discoveryKeysForSchema(schema, { signed = true } = {}) {
+  if (schema === REQUESTOR_DISCOVERY_SCHEMA) return signed ? DISCOVERY_KEYS_V3 : UNSIGNED_DISCOVERY_KEYS_V3;
+  if (schema === LEGACY_REQUESTOR_DISCOVERY_SCHEMA) return signed ? DISCOVERY_KEYS_V2 : UNSIGNED_DISCOVERY_KEYS_V2;
+  fail();
+}
+
+function runMode(value) {
+  if (typeof value !== "string" || !RUN_MODES.has(value)) fail();
   return value;
 }
 
@@ -206,7 +241,7 @@ export function parseRequestorDiscoveryWire(text) {
     fail();
   }
   if (`${JSON.stringify(parsed)}\n` !== text) fail();
-  return exactObject(parsed, DISCOVERY_KEYS);
+  return exactObject(parsed, discoveryKeysForSchema(parsed?.schema));
 }
 
 function httpsUrl(value, path = null) {
@@ -223,9 +258,9 @@ function httpsUrl(value, path = null) {
 }
 
 function unsignedDiscovery(input) {
-  const data = exactObject(input, UNSIGNED_DISCOVERY_KEYS);
+  const data = exactObject(input, discoveryKeysForSchema(input?.schema, { signed: false }));
   if (
-    data.schema !== REQUESTOR_DISCOVERY_SCHEMA ||
+    ![REQUESTOR_DISCOVERY_SCHEMA, LEGACY_REQUESTOR_DISCOVERY_SCHEMA].includes(data.schema) ||
     data.paymentMoved !== false ||
     typeof data.imageDigest !== "string" ||
     !IMAGE_DIGEST_PATTERN.test(data.imageDigest) ||
@@ -245,6 +280,7 @@ function unsignedDiscovery(input) {
   ) {
     fail();
   }
+  if (data.schema === REQUESTOR_DISCOVERY_SCHEMA) runMode(data.runMode);
   httpsUrl(data.certificateUrl);
   httpsUrl(data.publicUrl, "/mcp");
   return Object.freeze({ ...data });
@@ -273,7 +309,7 @@ function signatureObject(value, keyId) {
 }
 
 export function validateRequestorDiscoveryCandidate({ discovery, nowMs = Date.now(), repositorySha } = {}) {
-  const value = exactObject(discovery, DISCOVERY_KEYS);
+  const value = exactObject(discovery, discoveryKeysForSchema(discovery?.schema));
   const { signature, ...unsignedRaw } = value;
   const unsigned = unsignedDiscovery(unsignedRaw);
   if (unsigned.repositorySha !== repositorySha || Number(unsigned.expiresAtMs) <= nowMs) fail();
@@ -301,7 +337,11 @@ export function verifySignedRequestorDiscovery({ discovery, nowMs = Date.now(), 
   const publicKey = typeof operatorPublicKey === "string" ? ed25519PublicKeyFromRawBase64(operatorPublicKey) : operatorPublicKey;
   if (!publicKey || publicKey.asymmetricKeyType !== "ed25519") fail();
   if (!verify(null, canonicalBytes(unsigned), publicKey, Buffer.from(verifiedSignature.value, "base64"))) fail();
-  return Object.freeze({ ...unsigned, signature: Object.freeze({ ...verifiedSignature }) });
+  return Object.freeze({
+    ...unsigned,
+    runMode: unsigned.runMode ?? DEFAULT_RUN_MODE,
+    signature: Object.freeze({ ...verifiedSignature }),
+  });
 }
 
 function safeObjectKey(value) {
@@ -387,6 +427,7 @@ export async function publishRequestorDiscovery({
   putObject,
   releaseId,
   repositorySha,
+  runMode: requestedRunMode = DEFAULT_RUN_MODE,
   sessionId,
 } = {}) {
   if (typeof putObject !== "function") fail();
@@ -419,6 +460,7 @@ export async function publishRequestorDiscovery({
     certificateUrl,
     certificateFingerprint,
     operatorKeyId,
+    runMode: requestedRunMode,
     expiresAtMs,
   });
   await putObject({ body: certificatePem, bucket: safeBucketName, cacheControl: "no-store,max-age=0", contentType: "application/x-pem-file", key: safeCertificateKey });
@@ -427,9 +469,9 @@ export async function publishRequestorDiscovery({
 }
 
 function parseCliArguments(argv) {
-  if (!Array.isArray(argv) || argv.length !== CLI_FLAGS.length * 2) fail();
+  if (!Array.isArray(argv) || argv.length < CLI_FLAGS.length * 2 || argv.length > (CLI_FLAGS.length + OPTIONAL_CLI_FLAGS.length) * 2 || argv.length % 2 !== 0) fail();
   const values = Object.create(null);
-  const allowed = new Set(CLI_FLAGS);
+  const allowed = new Set([...CLI_FLAGS, ...OPTIONAL_CLI_FLAGS]);
   for (let index = 0; index < argv.length; index += 2) {
     const flag = argv[index];
     const value = argv[index + 1];
@@ -467,6 +509,7 @@ function parseCliArguments(argv) {
     region,
     releaseId: values["--release-id"],
     repositorySha: values["--repository-sha"],
+    runMode: Object.hasOwn(values, "--run-mode") ? runMode(values["--run-mode"]) : DEFAULT_RUN_MODE,
     sessionId: values["--session-id"],
   });
 }
@@ -532,6 +575,7 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
     paymentMoved: false,
     releaseId: options.releaseId,
     repositorySha: options.repositorySha,
+    runMode: options.runMode,
     sessionId: options.sessionId,
     status: "REQUESTOR_DISCOVERY_PUBLISHED",
   });

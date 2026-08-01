@@ -509,7 +509,7 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
     }));
     return await supervisor({
       launchManifestPath: manifestPath,
-      runMode: "aws-stakeholder-only",
+      runMode: discovery.runMode,
       stateRoot: parsed.stateRoot,
     });
   } catch (error) {
