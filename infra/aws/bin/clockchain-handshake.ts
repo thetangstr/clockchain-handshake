@@ -111,6 +111,14 @@ const operatorPublicKey =
   app.node.tryGetContext("operatorPublicKey");
 const sourceTreeSha256 =
   app.node.tryGetContext("sourceTreeSha256");
+const tunnelHostKeyFingerprint =
+  app.node.tryGetContext(
+    "tunnelHostKeyFingerprint",
+  );
+const tunnelHostPublicKey =
+  app.node.tryGetContext(
+    "tunnelHostPublicKey",
+  );
 const tunnelImage =
   app.node.tryGetContext("tunnelImage");
 
@@ -176,6 +184,15 @@ if (
       sourceTreeSha256: required(
         sourceTreeSha256,
         "sourceTreeSha256",
+      ),
+      tunnelHostKeyFingerprint:
+        required(
+          tunnelHostKeyFingerprint,
+          "tunnelHostKeyFingerprint",
+        ),
+      tunnelHostPublicKey: required(
+        tunnelHostPublicKey,
+        "tunnelHostPublicKey",
       ),
       tunnelImage: required(
         tunnelImage,

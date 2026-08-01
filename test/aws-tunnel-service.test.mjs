@@ -4,6 +4,7 @@ import {
   generateKeyPairSync,
 } from "node:crypto";
 import {
+  lstatSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -49,6 +50,11 @@ function activeGrant(overrides = {}) {
       mcpTlsFingerprint: createHash("sha256")
         .update("certificate")
         .digest("hex"),
+      releaseId: "release-payer-bootstrap",
+      repositorySha:
+        "abcdef0123456789abcdef0123456789abcdef01",
+      sessionId:
+        "22222222-2222-4222-8222-222222222222",
       sshPublicKey: key,
       sshPublicKeyFingerprint:
         sshEd25519Fingerprint(key),
@@ -89,7 +95,7 @@ function tombstone(grant, reason = "ABORT") {
   };
 }
 
-function fixture(t, grant = activeGrant()) {
+function fixture(t, grant = activeGrant(), overrides = {}) {
   const stateRoot = mkdtempSync(
     join(tmpdir(), "aws-tunnel-service-"),
   );
@@ -156,6 +162,7 @@ function fixture(t, grant = activeGrant()) {
       current = value;
       calls.push(["tombstone", value]);
     },
+    ...overrides,
   });
   return {
     calls,
@@ -223,6 +230,118 @@ test("reports ready only after pinned TLS succeeds through local 9443", async (t
     paymentMoved: false,
     status: "READY",
   });
+});
+
+test("persists exact READY health projection after connected grant and pinned TLS proof", async (t) => {
+  const stateRoot = mkdtempSync(
+    join(tmpdir(), "aws-tunnel-health-path-"),
+  );
+  t.after(() =>
+    rmSync(stateRoot, {
+      force: true,
+      recursive: true,
+    }));
+  const healthProjectionPath = join(
+    stateRoot,
+    "payer-mcp-ready.json",
+  );
+  const fx = fixture(t, activeGrant(), {
+    healthProjectionPath,
+  });
+
+  await fx.service.start();
+  t.after(() => fx.service.stop());
+
+  const projection = JSON.parse(
+    readFileSync(healthProjectionPath, "utf8"),
+  );
+  assert.deepEqual(Object.keys(projection), [
+    "schema",
+    "releaseId",
+    "repositorySha",
+    "sessionId",
+    "claimFingerprint",
+    "mcpTlsFingerprint",
+    "observedAtMs",
+    "expiresAtMs",
+    "paymentMoved",
+    "status",
+  ]);
+  assert.deepEqual(projection, {
+    schema: "clockchain.payer-tunnel-health/v1",
+    releaseId: "release-payer-bootstrap",
+    repositorySha:
+      "abcdef0123456789abcdef0123456789abcdef01",
+    sessionId:
+      "22222222-2222-4222-8222-222222222222",
+    claimFingerprint: fx.grant.claimFingerprint,
+    mcpTlsFingerprint:
+      fx.grant.claim.mcpTlsFingerprint,
+    observedAtMs: String(NOW),
+    expiresAtMs: fx.grant.expiresAtMs,
+    paymentMoved: false,
+    status: "READY",
+  });
+  assert.equal(
+    lstatSync(healthProjectionPath).mode & 0o777,
+    0o600,
+  );
+  const serialized = JSON.stringify(projection);
+  for (const forbidden of [
+    fx.grant.claim.sshPublicKey,
+    fx.stateRoot,
+    "capability",
+    "certificate",
+    "private",
+    "advisory",
+  ]) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+});
+
+test("persists exact non-READY health projection on TLS failure and expiry", async (t) => {
+  const healthRoot = mkdtempSync(
+    join(tmpdir(), "aws-tunnel-health-path-"),
+  );
+  t.after(() =>
+    rmSync(healthRoot, {
+      force: true,
+      recursive: true,
+    }));
+  const healthProjectionPath = join(
+    healthRoot,
+    "payer-mcp-ready.json",
+  );
+  const fx = fixture(t, activeGrant(), {
+    healthProjectionPath,
+    probePinnedTls: async () => false,
+  });
+
+  await fx.service.start();
+  t.after(() => fx.service.stop());
+
+  let projection = JSON.parse(
+    readFileSync(healthProjectionPath, "utf8"),
+  );
+  assert.equal(projection.status, "UNHEALTHY");
+  assert.equal(projection.paymentMoved, false);
+  assert.equal(
+    projection.claimFingerprint,
+    fx.grant.claimFingerprint,
+  );
+
+  fx.setGrant(
+    activeGrant({
+      expiresAtMs: String(NOW),
+    }),
+  );
+  await fx.service.reconcile();
+  projection = JSON.parse(
+    readFileSync(healthProjectionPath, "utf8"),
+  );
+  assert.equal(projection.status, "EXPIRED");
+  assert.equal(projection.paymentMoved, false);
+  assert.equal(projection.expiresAtMs, String(NOW));
 });
 
 test("stays attached and waits safely until an operator grant exists", async (t) => {

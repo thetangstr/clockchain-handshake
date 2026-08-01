@@ -43,6 +43,10 @@ GzRaxazJRJqgomGuhMdWNo8pqbWf9+sUnkkr9ZGuAGcK3zyS6UeHDA==
   sessionId:
     "11111111-1111-4111-8111-111111111111",
   sourceTreeSha256: "e".repeat(64),
+  tunnelHostKeyFingerprint:
+    "SHA256:UgP8WeC7EtU7Ik6LFbMNeUckAOfLBKJvnaP1ez/1MwU",
+  tunnelHostPublicKey:
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILzWMEVEge8QmmJQH5at7CDm9iuX7O4hop0rjeJ95xnC",
   tunnelImage: IMAGE.replace(
     /a+$/,
     "b".repeat(64),

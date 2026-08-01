@@ -44,6 +44,9 @@ import {
   runCli,
   watchBilateralSession,
 } from "../scripts/watch-bilateral-session.mjs";
+import {
+  buildAwsWatcherPublicMonitorSnapshot,
+} from "../src/bilateral/coordination/public-monitor.mjs";
 
 const DESCRIPTOR = Object.freeze({
   amountOptions: [
@@ -288,6 +291,66 @@ test("AWS watcher projection exposes only strict business-safe chain facts", asy
   assert.equal(
     JSON.stringify(projection).includes("/mnt/"),
     false,
+  );
+});
+
+test("AWS watcher projection maps fake Clockchain UUID ledgers into public monitor anchors", async () => {
+  const { fake } = await seedFake(3);
+  const snapshot = await observeBilateralSession({
+    advisory: { health: null, status: null },
+    canaries: [],
+    client: fake,
+    descriptor: DESCRIPTOR,
+    now: () => 1_784_923_300_000,
+  });
+  const projection = createAwsWatcherProjection(
+    snapshot,
+    {
+      observedAtMs: 1_784_923_300_001,
+      releaseId: "release-0123456789abcdef",
+      repositorySha: DESCRIPTOR.repositorySha,
+      sessionId:
+        "11111111-2222-4333-8444-555555555555",
+      subjectRun: "stakeholder",
+    },
+  );
+
+  const publicSnapshot =
+    buildAwsWatcherPublicMonitorSnapshot(
+      projection,
+      {
+        nowMs: 1_784_923_300_001,
+        publishedAtMs: 1_784_923_300_001,
+        releaseId: "release-0123456789abcdef",
+        repositorySha: DESCRIPTOR.repositorySha,
+        runId: "run-0123456789abcdef",
+        sessionId:
+          "11111111-2222-4333-8444-555555555555",
+        staleAfterMs: 60_000,
+        subjectRun: "stakeholder",
+      },
+    );
+
+  assert.deepEqual(
+    projection.transitions.map(
+      ({ ledgerId }) => ledgerId,
+    ),
+    [
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000002",
+      "00000000-0000-4000-8000-000000000003",
+    ],
+  );
+  assert.equal(publicSnapshot.runStatus, "RUNNING");
+  assert.equal(publicSnapshot.verifier.status, "RUNNING");
+  assert.deepEqual(
+    publicSnapshot.anchors.map(
+      ({ explorerUrl }) => explorerUrl,
+    ),
+    projection.transitions.map(
+      ({ blockHeight }) =>
+        `https://sepolia.etherscan.io/block/${blockHeight}`,
+    ),
   );
 });
 

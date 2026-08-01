@@ -22,6 +22,7 @@ const COORDINATOR_KEYS = Object.freeze([
   "operatorKeyId",
   "operatorKeySecretArn",
   "paymentMoved",
+  "publicStaging",
   "releaseId",
   "releaseRoot",
   "relayUrl",
@@ -83,6 +84,8 @@ const SESSION =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA40 = /^[0-9a-f]{40}$/;
 const SHA64 = /^[0-9a-f]{64}$/;
+const IMAGE =
+  /^[0-9]{12}\.dkr\.ecr\.[a-z]{2}-[a-z]+-[1-9]\.amazonaws\.com\/[a-z0-9][a-z0-9._/-]{0,254}@sha256:[0-9a-f]{64}$/;
 const ISO_INSTANT =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const ZERO_ADDRESS =
@@ -94,6 +97,29 @@ const RESERVED_DNS_SUFFIXES = Object.freeze([
   "localhost",
   "local",
 ]);
+const PUBLIC_STAGING_KEYS = Object.freeze([
+  "approvedPayerPublicPath",
+  "bootstrapPayerClaimUrl",
+  "imageDigest",
+  "paths",
+  "publicBaseUrl",
+  "publicMcpHostname",
+  "publicMcpUrl",
+  "tunnelHealthPath",
+  "tunnelHostKeyFingerprint",
+  "tunnelHostPublicKey",
+]);
+const PUBLIC_STAGING_PATH_KEYS = Object.freeze([
+  "certificate",
+  "gate",
+  "input",
+  "payer",
+  "requestor",
+]);
+const SSH_ED25519_PUBLIC_KEY =
+  /^ssh-ed25519 ([A-Za-z0-9+/]+={0,2})$/;
+const SSH_SHA256_FINGERPRINT =
+  /^SHA256:[A-Za-z0-9+/]{43}$/;
 
 export class AwsOperatorTaskInputError extends Error {
   constructor() {
@@ -301,6 +327,170 @@ function sha64(value) {
   return stringMatching(value, SHA64);
 }
 
+function validHostname(value) {
+  return (
+    typeof value === "string" &&
+    /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value) &&
+    !reservedHostname(value)
+  );
+}
+
+function httpsUrl(value, expectedPath) {
+  try {
+    if (
+      typeof value !== "string" ||
+      CONTROL.test(value)
+    ) {
+      fail();
+    }
+    const url = new URL(value);
+    if (
+      url.href !== value ||
+      url.protocol !== "https:" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.pathname !== expectedPath ||
+      url.search !== "" ||
+      url.hash !== "" ||
+      !validHostname(url.hostname)
+    ) {
+      fail();
+    }
+    return url;
+  } catch (error) {
+    if (error instanceof AwsOperatorTaskInputError) {
+      throw error;
+    }
+    fail();
+  }
+}
+
+function validTunnelHostKey(publicKey, fingerprint) {
+  if (
+    typeof publicKey !== "string" ||
+    typeof fingerprint !== "string" ||
+    !SSH_SHA256_FINGERPRINT.test(fingerprint)
+  ) {
+    return false;
+  }
+  const match =
+    SSH_ED25519_PUBLIC_KEY.exec(publicKey);
+  if (match === null) return false;
+  const blob = Buffer.from(match[1], "base64");
+  if (blob.toString("base64") !== match[1]) {
+    return false;
+  }
+  let offset = 0;
+  const readString = () => {
+    if (offset + 4 > blob.length) return null;
+    const length = blob.readUInt32BE(offset);
+    offset += 4;
+    if (offset + length > blob.length) {
+      return null;
+    }
+    const value = blob.subarray(
+      offset,
+      offset + length,
+    );
+    offset += length;
+    return value;
+  };
+  const algorithm = readString();
+  const key = readString();
+  return (
+    algorithm?.toString("ascii") ===
+      "ssh-ed25519" &&
+    key?.length === 32 &&
+    offset === blob.length &&
+    `SHA256:${createHash("sha256")
+      .update(blob)
+      .digest("base64")
+      .replace(/=+$/u, "")}` === fingerprint
+  );
+}
+
+function publicStaging(value, scope) {
+  const input = exact(
+    value,
+    PUBLIC_STAGING_KEYS,
+  );
+  const paths = exact(
+    input.paths,
+    PUBLIC_STAGING_PATH_KEYS,
+  );
+  const publicRoot =
+    `/var/lib/clockchain/public/releases/${scope.releaseId}`;
+  const bootstrapPayerClaimUrl = httpsUrl(
+    input.bootstrapPayerClaimUrl,
+    "/v1/payer-claims",
+  );
+  const publicBaseUrl = httpsUrl(
+    input.publicBaseUrl,
+    "/",
+  );
+  const publicMcpUrl = httpsUrl(
+    input.publicMcpUrl,
+    "/mcp",
+  );
+  if (
+    bootstrapPayerClaimUrl.port !== "" ||
+    publicMcpUrl.port !== "9443" ||
+    input.publicMcpHostname !==
+      publicMcpUrl.hostname ||
+    !validHostname(input.publicMcpHostname) ||
+    !IMAGE.test(input.imageDigest) ||
+    !validTunnelHostKey(
+      input.tunnelHostPublicKey,
+      input.tunnelHostKeyFingerprint,
+    )
+  ) {
+    fail();
+  }
+  return Object.freeze({
+    approvedPayerPublicPath: exactPath(
+      input.approvedPayerPublicPath,
+      `/var/lib/clockchain/approved-payer/releases/${scope.releaseId}/approved-payer.json`,
+    ),
+    bootstrapPayerClaimUrl:
+      bootstrapPayerClaimUrl.href,
+    imageDigest: input.imageDigest,
+    paths: Object.freeze({
+      certificate: exactPath(
+        paths.certificate,
+        `${publicRoot}/payer-mcp.crt`,
+      ),
+      gate: exactPath(
+        paths.gate,
+        `${publicRoot}/publication-gate.json`,
+      ),
+      input: exactPath(
+        paths.input,
+        `${publicRoot}/publisher-input.json`,
+      ),
+      payer: exactPath(
+        paths.payer,
+        `${publicRoot}/payer.json`,
+      ),
+      requestor: exactPath(
+        paths.requestor,
+        `${publicRoot}/requestor.json`,
+      ),
+    }),
+    publicBaseUrl: publicBaseUrl.href,
+    publicMcpHostname:
+      input.publicMcpHostname,
+    publicMcpUrl: publicMcpUrl.href,
+    tunnelHealthPath: exactPath(
+      input.tunnelHealthPath,
+      `/var/lib/clockchain/tunnel-health/releases/${scope.releaseId}/tunnel-health.json`,
+    ),
+    tunnelHostKeyFingerprint:
+      input.tunnelHostKeyFingerprint,
+    tunnelHostPublicKey:
+      input.tunnelHostPublicKey,
+  });
+}
+
 function certificatePem(value, fingerprint) {
   try {
     if (
@@ -367,6 +557,10 @@ export function buildCoordinatorRuntimeInput(
       ),
       operatorKeySecretArn: secretArn(
         input.operatorKeySecretArn,
+      ),
+      publicStaging: publicStaging(
+        input.publicStaging,
+        scope,
       ),
       releaseIdentity: Object.freeze({
         releaseId: scope.releaseId,

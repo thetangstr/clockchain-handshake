@@ -174,6 +174,29 @@ test("publishes latest plus staged Payer and gated Requestor artifacts without s
   );
 });
 
+test("publishes an initial live snapshot and Payer discovery before a Payer certificate exists", async () => {
+  const fx = fixture({
+    gate: {
+      payerClaimApproved: false,
+      payerDiscoveryReady: true,
+      payerMcpReady: false,
+      requestorDiscoveryReady: false,
+      runStarted: true,
+      tunnelTlsHealthy: false,
+    },
+  });
+  await publishAwsPublicMonitor(
+    input({ certificateFingerprint: null }),
+    fx.dependencies,
+  );
+  assert.deepEqual(
+    fx.calls
+      .filter(([name]) => name === "put")
+      .map(([, value]) => value.key),
+    ["latest.json", "discoveries/payer.json"],
+  );
+});
+
 test("withholds Requestor discovery and certificate until every Payer readiness gate is true", async () => {
   for (const field of [
     "payerClaimApproved",

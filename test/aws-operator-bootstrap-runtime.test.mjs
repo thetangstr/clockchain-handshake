@@ -23,6 +23,7 @@ function state(status, revision) {
         claim: { paymentMoved: false },
         claimFingerprint:
           INPUT.claimFingerprint,
+        expiresAtMs: "2000000600000",
         paymentMoved: false,
         releaseId: INPUT.releaseId,
         role: INPUT.role,
@@ -78,6 +79,16 @@ test("approves, persists the exact Payer grant, and seals one bootstrap response
         persistTunnelGrant: async () => {
           calls.push("grant");
         },
+        publishApprovedPayer: async ({
+          claim,
+          claimFingerprint,
+          expiresAtMs,
+        }) => {
+          assert.deepEqual(claim, { paymentMoved: false });
+          assert.equal(claimFingerprint, INPUT.claimFingerprint);
+          assert.equal(expiresAtMs, "2000000600000");
+          calls.push("public");
+        },
       },
     );
   assert.deepEqual(result, {
@@ -89,6 +100,7 @@ test("approves, persists the exact Payer grant, and seals one bootstrap response
     "build",
     "grant",
     "seal",
+    "public",
   ]);
 });
 

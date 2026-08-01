@@ -17,6 +17,10 @@ import {
 
 const SHA = "a".repeat(40);
 const DIGEST = `sha256:${"b".repeat(64)}`;
+const TUNNEL_HOST_PUBLIC_KEY =
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILzWMEVEge8QmmJQH5at7CDm9iuX7O4hop0rjeJ95xnC";
+const TUNNEL_HOST_KEY_FINGERPRINT =
+  "SHA256:UgP8WeC7EtU7Ik6LFbMNeUckAOfLBKJvnaP1ez/1MwU";
 const RELAY_TLS_CERTIFICATE_PEM = `-----BEGIN CERTIFICATE-----
 MIIBdDCCASagAwIBAgIUPrXOrIpEJb7MiFXU0DDWShb37kIwBQYDK2VwMB8xHTAb
 BgNVBAMMFHJlbGF5LmNsb2NrY2hhaW4ubmV0MB4XDTI2MDczMTIyNDIyN1oXDTI2
@@ -150,6 +154,10 @@ test("deployment plan uses image digests and fixed account without deleting lega
     sessionId:
       "11111111-1111-4111-8111-111111111111",
     sourceTreeSha256: "e".repeat(64),
+    tunnelHostKeyFingerprint:
+      TUNNEL_HOST_KEY_FINGERPRINT,
+    tunnelHostPublicKey:
+      TUNNEL_HOST_PUBLIC_KEY,
     tunnelImage:
       `570035913370.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake-tunnel@${DIGEST}`,
   });
@@ -173,6 +181,14 @@ test("deployment plan uses image digests and fixed account without deleting lega
   assert.equal(
     plan.sessionId,
     "11111111-1111-4111-8111-111111111111",
+  );
+  assert.equal(
+    plan.tunnelHostPublicKey,
+    TUNNEL_HOST_PUBLIC_KEY,
+  );
+  assert.equal(
+    plan.tunnelHostKeyFingerprint,
+    TUNNEL_HOST_KEY_FINGERPRINT,
   );
   assert.deepEqual(plan.stacks, [
     "ClockchainHandshakeImages",
@@ -210,6 +226,10 @@ test("deployment plan rejects a relay certificate hostname mismatch", () => {
         sessionId:
           "11111111-1111-4111-8111-111111111111",
         sourceTreeSha256: "e".repeat(64),
+        tunnelHostKeyFingerprint:
+          TUNNEL_HOST_KEY_FINGERPRINT,
+        tunnelHostPublicKey:
+          TUNNEL_HOST_PUBLIC_KEY,
         tunnelImage:
           `570035913370.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake-tunnel@${DIGEST}`,
       }),
@@ -240,6 +260,10 @@ test("deployment contexts encode the public TLS certificate without multiline ar
     sessionId:
       "11111111-1111-4111-8111-111111111111",
     sourceTreeSha256: "e".repeat(64),
+    tunnelHostKeyFingerprint:
+      TUNNEL_HOST_KEY_FINGERPRINT,
+    tunnelHostPublicKey:
+      TUNNEL_HOST_PUBLIC_KEY,
     tunnelImage:
       `570035913370.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake-tunnel@${DIGEST}`,
   });
@@ -251,6 +275,18 @@ test("deployment contexts encode the public TLS certificate without multiline ar
   assert.equal(
     contexts.includes(
       "operatorPublicKey=oIcoZqI/cqzG4UbXcaV+k1fxwt8EBb+9S+XNcb9pq3k=",
+    ),
+    true,
+  );
+  assert.equal(
+    contexts.includes(
+      `tunnelHostPublicKey=${TUNNEL_HOST_PUBLIC_KEY}`,
+    ),
+    true,
+  );
+  assert.equal(
+    contexts.includes(
+      `tunnelHostKeyFingerprint=${TUNNEL_HOST_KEY_FINGERPRINT}`,
     ),
     true,
   );
@@ -273,6 +309,41 @@ test("deployment contexts encode the public TLS certificate without multiline ar
     contexts.some((value) =>
       value.includes("BEGIN CERTIFICATE")),
     false,
+  );
+});
+
+test("deployment plan rejects a tunnel host public key that does not match its fingerprint", () => {
+  assert.throws(
+    () =>
+      createDeploymentPlan({
+        account: "570035913370",
+        bootstrapBrokerCapabilityDigest:
+          "c".repeat(64),
+        controlPlaneImage:
+          `570035913370.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake-control-plane@${DIGEST}`,
+        operatorPublicKey:
+          "oIcoZqI/cqzG4UbXcaV+k1fxwt8EBb+9S+XNcb9pq3k=",
+        region: "us-west-2",
+        relayPublicHostname:
+          "relay.clockchain.net",
+        relayTlsCertificatePem:
+          RELAY_TLS_CERTIFICATE_PEM,
+        relayTlsFingerprint:
+          "3dbe9d0ea7491d9d6e4586f978ddf2b67c4ac173780b3b8d5b86def84a0d73d9",
+        relayTlsSecretArn:
+          "arn:aws:secretsmanager:us-west-2:570035913370:secret:clockchain-relay-tls-AbCdEf",
+        repositorySha: SHA,
+        sessionId:
+          "11111111-1111-4111-8111-111111111111",
+        sourceTreeSha256: "e".repeat(64),
+        tunnelHostKeyFingerprint:
+          "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        tunnelHostPublicKey:
+          TUNNEL_HOST_PUBLIC_KEY,
+        tunnelImage:
+          `570035913370.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake-tunnel@${DIGEST}`,
+      }),
+    /tunnel host/i,
   );
 });
 

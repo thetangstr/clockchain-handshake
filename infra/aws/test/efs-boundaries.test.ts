@@ -41,6 +41,10 @@ GzRaxazJRJqgomGuhMdWNo8pqbWf9+sUnkkr9ZGuAGcK3zyS6UeHDA==
   sessionId:
     "11111111-1111-4111-8111-111111111111",
   sourceTreeSha256: "e".repeat(64),
+  tunnelHostKeyFingerprint:
+    "SHA256:UgP8WeC7EtU7Ik6LFbMNeUckAOfLBKJvnaP1ez/1MwU",
+  tunnelHostPublicKey:
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILzWMEVEge8QmmJQH5at7CDm9iuX7O4hop0rjeJ95xnC",
   tunnelImage: IMAGE.replace(
     /a+$/,
     "b".repeat(64),
@@ -160,7 +164,7 @@ test("access points use fixed non-root identities and isolated paths", () => {
     );
     paths.push(path);
   }
-  assert.equal(new Set(paths).size, 10);
+  assert.equal(new Set(paths).size, 12);
 });
 
 test("relay container identity matches its dedicated EFS access point", () => {
@@ -248,6 +252,7 @@ test("operator remains isolated while one-shot approval and abort tasks own boot
       ["/var/lib/clockchain/bootstrap", false],
       ["/var/lib/clockchain/operator", true],
       ["/var/lib/clockchain/tunnel", false],
+      ["/var/lib/clockchain/approved-payer", false],
     ],
   );
   const abort = taskDefinitions.find(
@@ -263,6 +268,45 @@ test("operator remains isolated while one-shot approval and abort tasks own boot
     [
       ["/var/lib/clockchain/tunnel", false],
     ],
+  );
+  const tunnel = taskDefinitions.find(
+    ([logicalId]) => logicalId === "Tunnel",
+  );
+  assert.deepEqual(
+    tunnel?.[1].map((mount) => [
+      mount.ContainerPath,
+      mount.ReadOnly,
+    ]),
+    [
+      ["/run/clockchain", false],
+      ["/var/lib/clockchain/health", false],
+    ],
+  );
+  const coordinator = taskDefinitions.find(
+    ([logicalId]) => logicalId === "Coordinator",
+  );
+  assert.deepEqual(
+    coordinator?.[1].map((mount) => [
+      mount.ContainerPath,
+      mount.ReadOnly,
+    ]),
+    [
+      ["/var/lib/clockchain/operator", false],
+      ["/var/lib/clockchain/verifier-output", true],
+      ["/var/lib/clockchain/approved-payer", true],
+      ["/var/lib/clockchain/tunnel-health", true],
+      ["/var/lib/clockchain/public", false],
+    ],
+  );
+  const publisher = taskDefinitions.find(
+    ([logicalId]) => logicalId === "Publisher",
+  );
+  assert.deepEqual(
+    publisher?.[1].map((mount) => [
+      mount.ContainerPath,
+      mount.ReadOnly,
+    ]),
+    [["/var/lib/clockchain/public", true]],
   );
   assert.equal(
     JSON.stringify(taskDefinitions).includes(

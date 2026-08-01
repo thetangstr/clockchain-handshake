@@ -94,9 +94,42 @@ const SOURCE_KEYS = Object.freeze([
   "session",
   "verifier",
 ]);
+const AWS_WATCHER_KEYS = Object.freeze([
+  "observedAtMs",
+  "paymentMoved",
+  "releaseId",
+  "repositorySha",
+  "schema",
+  "sessionId",
+  "state",
+  "subjectRun",
+  "terminal",
+  "transitions",
+]);
+const AWS_WATCHER_TRANSITION_KEYS = Object.freeze([
+  "blockHeight",
+  "cardinality",
+  "ledgerId",
+  "slot",
+  "verified",
+]);
+const AWS_WATCHER_STATES = Object.freeze([
+  "UNSTARTED",
+  "PROPOSED",
+  "ACCEPTED",
+  "ACKNOWLEDGED",
+]);
+const AWS_WATCHER_SLOTS = Object.freeze([
+  "proposal",
+  "acceptance",
+  "acknowledgment",
+]);
 const SHA64 = /^[0-9a-f]{64}$/;
+const SHA40 = /^[0-9a-f]{40}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const RUN_ID = /^run-[0-9a-f]{16}$/;
 const DECIMAL = /^(?:0|[1-9][0-9]*)$/;
+const LEDGER_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
 function fail() {
   throw new Error(
@@ -137,6 +170,15 @@ function exact(value, keys) {
   return value;
 }
 
+function exactOrdered(value, keys) {
+  const object = exact(value, keys);
+  const ownKeys = Reflect.ownKeys(object);
+  for (let index = 0; index < keys.length; index += 1) {
+    if (ownKeys[index] !== keys[index]) fail();
+  }
+  return object;
+}
+
 function safeInteger(value) {
   if (
     !Number.isSafeInteger(value) ||
@@ -158,6 +200,12 @@ function decimal(value) {
     fail();
   }
   return Number(value);
+}
+
+function positiveDecimal(value) {
+  const number = decimal(value);
+  if (number <= 0) fail();
+  return number;
 }
 
 function boundedText(value) {
@@ -592,7 +640,7 @@ export function buildPublicMonitorSnapshot(
     projection,
     SOURCE_KEYS,
   );
-  const input = exact(options, [
+  const input = exactOrdered(options, [
     "anchorExplorerUrls",
     "nowMs",
     "payerMcpReady",
@@ -691,6 +739,149 @@ export function buildPublicMonitorSnapshot(
     staleAfterMs,
     verifierStatus:
       state.verifierStatus,
+  });
+}
+
+function validateAwsWatcherTransitions(value) {
+  if (!Array.isArray(value) || value.length !== SOURCE_ANCHORS.length) {
+    fail();
+  }
+  const anchors = [];
+  const blockHeights = new Set();
+  const ledgerIds = new Set();
+  let previousBlock = null;
+  let sawUnverified = false;
+  for (let index = 0; index < SOURCE_ANCHORS.length; index += 1) {
+    const transition = exactOrdered(
+      value[index],
+      AWS_WATCHER_TRANSITION_KEYS,
+    );
+    const expected = SOURCE_ANCHORS[index];
+    if (
+      transition.slot !== AWS_WATCHER_SLOTS[index] ||
+      typeof transition.verified !== "boolean"
+    ) {
+      fail();
+    }
+    if (transition.verified) {
+      if (
+        sawUnverified ||
+        transition.cardinality !== "1" ||
+        typeof transition.ledgerId !== "string" ||
+        !LEDGER_ID.test(transition.ledgerId) ||
+        typeof transition.blockHeight !== "string"
+      ) {
+        fail();
+      }
+      positiveDecimal(transition.blockHeight);
+      const block = BigInt(transition.blockHeight);
+      if (
+        (previousBlock !== null && block <= previousBlock) ||
+        blockHeights.has(transition.blockHeight) ||
+        ledgerIds.has(transition.ledgerId)
+      ) {
+        fail();
+      }
+      previousBlock = block;
+      blockHeights.add(transition.blockHeight);
+      ledgerIds.add(transition.ledgerId);
+      anchors.push(Object.freeze({
+        block: transition.blockHeight,
+        explorerUrl: `https://sepolia.etherscan.io/block/${transition.blockHeight}`,
+        kind: expected.kind,
+        signerRole: expected.signerRole,
+      }));
+      continue;
+    }
+    sawUnverified = true;
+    if (
+      transition.cardinality !== "0" ||
+      transition.blockHeight !== null ||
+      transition.ledgerId !== null
+    ) {
+      fail();
+    }
+  }
+  return Object.freeze(anchors);
+}
+
+export function buildAwsWatcherPublicMonitorSnapshot(
+  projection,
+  options,
+) {
+  const value = exactOrdered(
+    projection,
+    AWS_WATCHER_KEYS,
+  );
+  const input = exactOrdered(options, [
+    "nowMs",
+    "publishedAtMs",
+    "releaseId",
+    "repositorySha",
+    "runId",
+    "sessionId",
+    "staleAfterMs",
+    "subjectRun",
+  ]);
+  if (
+    value.schema !== "clockchain.aws-watcher-projection/v1" ||
+    value.paymentMoved !== false ||
+    value.subjectRun !== "stakeholder" ||
+    value.terminal !== null ||
+    !/^release-[0-9a-f]{16}$/.test(value.releaseId) ||
+    !SHA40.test(value.repositorySha) ||
+    !UUID.test(value.sessionId) ||
+    !RUN_ID.test(input.runId) ||
+    input.releaseId !== value.releaseId ||
+    input.repositorySha !== value.repositorySha ||
+    input.sessionId !== value.sessionId ||
+    input.subjectRun !== value.subjectRun ||
+    input.runId !== `run-${value.releaseId.slice("release-".length)}`
+  ) {
+    fail();
+  }
+  const nowMs = safeInteger(input.nowMs);
+  const observedAtMs = decimal(value.observedAtMs);
+  const publishedAtMs = safeInteger(input.publishedAtMs);
+  const staleAfterMs = safeInteger(input.staleAfterMs);
+  if (
+    staleAfterMs < 1_000 ||
+    staleAfterMs > 60_000 ||
+    publishedAtMs > nowMs ||
+    observedAtMs > nowMs ||
+    nowMs - observedAtMs > staleAfterMs
+  ) {
+    fail();
+  }
+  const anchors = validateAwsWatcherTransitions(value.transitions);
+  if (value.state !== AWS_WATCHER_STATES[anchors.length]) {
+    fail();
+  }
+  const runStatus = anchors.length === 0 ? "WAITING" : "RUNNING";
+  return createSnapshot({
+    anchors,
+    currentStep: stepFor(
+      runStatus,
+      anchors,
+      {
+        mandate: {
+          received: true,
+        },
+        request: {
+          received: anchors.length > 0,
+        },
+      },
+    ),
+    fundingStatus: anchors.length === 0 ? "WAITING" : "READY",
+    mcpStatus: "READY",
+    payerStatus: "READY",
+    publishedAtMs,
+    relayStatus: "READY",
+    requestorStatus: "READY",
+    runId: input.runId,
+    runStatus,
+    staleAfterMs,
+    verifierStatus: anchors.length === 3 ? "RUNNING" : "NOT_STARTED",
   });
 }
 

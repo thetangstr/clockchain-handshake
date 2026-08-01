@@ -47,6 +47,10 @@ const SECRET_ARN =
   /^arn:aws(?:-[a-z]+)?:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]{1,512}$/;
 const PUBLIC_HOSTNAME =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const SSH_ED25519_PUBLIC_KEY =
+  /^ssh-ed25519 ([A-Za-z0-9+/]+={0,2})$/;
+const SSH_SHA256_FINGERPRINT =
+  /^SHA256:[A-Za-z0-9+/]{43}$/;
 export const CONTROL_REPOSITORY_NAME =
   "clockchain-handshake-control-plane";
 export const TUNNEL_REPOSITORY_NAME =
@@ -63,7 +67,53 @@ function validOperatorPublicKey(value: string): boolean {
   );
 }
 
+function validTunnelHostKey(
+  publicKey: string,
+  fingerprint: string,
+): boolean {
+  if (
+    !SSH_SHA256_FINGERPRINT.test(fingerprint)
+  ) {
+    return false;
+  }
+  const match =
+    SSH_ED25519_PUBLIC_KEY.exec(publicKey);
+  if (match === null) return false;
+  const blob = Buffer.from(match[1]!, "base64");
+  if (blob.toString("base64") !== match[1]) {
+    return false;
+  }
+  let offset = 0;
+  const readString = (): Buffer | null => {
+    if (offset + 4 > blob.length) return null;
+    const length = blob.readUInt32BE(offset);
+    offset += 4;
+    if (offset + length > blob.length) {
+      return null;
+    }
+    const value = blob.subarray(
+      offset,
+      offset + length,
+    );
+    offset += length;
+    return value;
+  };
+  const algorithm = readString();
+  const key = readString();
+  return (
+    algorithm?.toString("ascii") ===
+      "ssh-ed25519" &&
+    key?.length === 32 &&
+    offset === blob.length &&
+    `SHA256:${createHash("sha256")
+      .update(blob)
+      .digest("base64")
+      .replace(/=+$/u, "")}` === fingerprint
+  );
+}
+
 type AccessPointName =
+  | "approvedPayer"
   | "bootstrap"
   | "fundingJournal"
   | "fundingRecord"
@@ -71,6 +121,7 @@ type AccessPointName =
   | "operator"
   | "publisher"
   | "relay"
+  | "tunnelHealth"
   | "tunnel"
   | "verifierEvidence"
   | "verifierOutput";
@@ -109,6 +160,8 @@ export interface ClockchainHandshakeStackProps
   readonly repositorySha: string;
   readonly sessionId: string;
   readonly sourceTreeSha256: string;
+  readonly tunnelHostKeyFingerprint: string;
+  readonly tunnelHostPublicKey: string;
   readonly tunnelImage: string;
 }
 
@@ -210,6 +263,16 @@ export class ClockchainHandshakeStack extends Stack {
         "Container images and repository release must be immutable.",
       );
     }
+    if (
+      !validTunnelHostKey(
+        props.tunnelHostPublicKey,
+        props.tunnelHostKeyFingerprint,
+      )
+    ) {
+      throw new Error(
+        "Tunnel host public key and fingerprint must match.",
+      );
+    }
     const sessionId = props.sessionId;
     let relayTlsCertificate: X509Certificate;
     try {
@@ -246,6 +309,25 @@ export class ClockchainHandshakeStack extends Stack {
         .update(sessionId, "utf8")
         .digest("hex")
         .slice(0, 16)}`;
+    const approvedPayerPublicPath =
+      `/var/lib/clockchain/approved-payer/releases/${releaseId}/approved-payer.json`;
+    const publicReleaseRoot =
+      `/var/lib/clockchain/public/releases/${releaseId}`;
+    const publicStagingPaths = {
+      certificate:
+        `${publicReleaseRoot}/payer-mcp.crt`,
+      gate:
+        `${publicReleaseRoot}/publication-gate.json`,
+      input:
+        `${publicReleaseRoot}/publisher-input.json`,
+      payer: `${publicReleaseRoot}/payer.json`,
+      requestor:
+        `${publicReleaseRoot}/requestor.json`,
+    };
+    const tunnelHealthPath =
+      `/var/lib/clockchain/health/releases/${releaseId}/tunnel-health.json`;
+    const coordinatorTunnelHealthPath =
+      `/var/lib/clockchain/tunnel-health/releases/${releaseId}/tunnel-health.json`;
 
     const dataKey = new kms.Key(this, "DataKey", {
       enableKeyRotation: true,
@@ -529,6 +611,12 @@ export class ClockchainHandshakeStack extends Stack {
           "/run/clockchain",
           false,
         ),
+        this.mount(
+          "tunnel-health",
+          accessPoints.tunnelHealth,
+          "/var/lib/clockchain/health",
+          false,
+        ),
       ],
       ports: [
         {
@@ -564,6 +652,10 @@ export class ClockchainHandshakeStack extends Stack {
       "AWS_TUNNEL_STATE_ROOT",
       "/run/clockchain/state",
     );
+    tunnel.container.addEnvironment(
+      "AWS_TUNNEL_HEALTH_PATH",
+      tunnelHealthPath,
+    );
 
     const bootstrapApproval = this.workload({
       cluster,
@@ -592,6 +684,12 @@ export class ClockchainHandshakeStack extends Stack {
           "approval-tunnel",
           accessPoints.tunnel,
           "/var/lib/clockchain/tunnel",
+          false,
+        ),
+        this.mount(
+          "approval-approved-payer",
+          accessPoints.approvedPayer,
+          "/var/lib/clockchain/approved-payer",
           false,
         ),
       ],
@@ -651,12 +749,6 @@ export class ClockchainHandshakeStack extends Stack {
           "/var/lib/clockchain/public",
           true,
         ),
-        this.mount(
-          "publisher-verifier",
-          accessPoints.verifierOutput,
-          "/var/lib/clockchain/verifier-public",
-          true,
-        ),
       ],
       ports: [],
       service: true,
@@ -688,6 +780,24 @@ export class ClockchainHandshakeStack extends Stack {
           accessPoints.verifierOutput,
           "/var/lib/clockchain/verifier-output",
           true,
+        ),
+        this.mount(
+          "coordinator-approved-payer",
+          accessPoints.approvedPayer,
+          "/var/lib/clockchain/approved-payer",
+          true,
+        ),
+        this.mount(
+          "coordinator-tunnel-health",
+          accessPoints.tunnelHealth,
+          "/var/lib/clockchain/tunnel-health",
+          true,
+        ),
+        this.mount(
+          "coordinator-public",
+          accessPoints.publisher,
+          "/var/lib/clockchain/public",
+          false,
         ),
       ],
       ports: [],
@@ -1136,20 +1246,70 @@ export class ClockchainHandshakeStack extends Stack {
           publicBaseUrl:
             `https://${publicDistribution.distributionDomainName}`,
           publicationInputPath:
-            "/var/lib/clockchain/public/publisher-input.json",
+            publicStagingPaths.input,
           schema:
             "clockchain.aws-publisher-runtime/v1",
           stagedPaths: {
             certificate:
-              "/var/lib/clockchain/public/payer-mcp.crt",
+              publicStagingPaths.certificate,
             payerDiscovery:
-              "/var/lib/clockchain/public/payer.json",
+              publicStagingPaths.payer,
             publicationGate:
-              "/var/lib/clockchain/public/publication-gate.json",
+              publicStagingPaths.gate,
             requestorDiscovery:
-              "/var/lib/clockchain/public/requestor.json",
+              publicStagingPaths.requestor,
           },
         },
+        schema:
+          "clockchain.aws-runtime-input/v1",
+      }),
+    );
+    coordinator.container.addEnvironment(
+      "AWS_RUNTIME_INPUT",
+      JSON.stringify({
+        coordinator: {
+          clockchainTokenSecretArn:
+            clockchainToken.secretArn,
+          operatorKeyId:
+            "clockchain-demo-2026",
+          operatorKeySecretArn:
+            operatorKey.secretArn,
+          publicStaging: {
+            approvedPayerPublicPath,
+            bootstrapPayerClaimUrl:
+              `${bootstrapApi.url!}v1/payer-claims`,
+            imageDigest:
+              props.controlPlaneImage,
+            paths: publicStagingPaths,
+            publicBaseUrl:
+              `https://${publicDistribution.distributionDomainName}/`,
+            publicMcpHostname:
+              props.relayPublicHostname,
+            publicMcpUrl:
+              `https://${props.relayPublicHostname}:9443/mcp`,
+            tunnelHealthPath:
+              coordinatorTunnelHealthPath,
+            tunnelHostKeyFingerprint:
+              props.tunnelHostKeyFingerprint,
+            tunnelHostPublicKey:
+              props.tunnelHostPublicKey,
+          },
+          releaseIdentity: {
+            releaseId,
+            sessionId,
+          },
+          releaseRoot:
+            `/var/lib/clockchain/operator/releases/${releaseId}`,
+          relayUrl:
+            `https://${props.relayPublicHostname}:8443`,
+          repositorySha: props.repositorySha,
+          rpcSecretArn: sepoliaRpc.secretArn,
+          tlsCertificatePem:
+            props.relayTlsCertificatePem,
+          tlsFingerprint:
+            props.relayTlsFingerprint,
+        },
+        paymentMoved: false,
         schema:
           "clockchain.aws-runtime-input/v1",
       }),
@@ -1338,6 +1498,7 @@ export class ClockchainHandshakeStack extends Stack {
           bootstrap: {
             abortMarkerPath:
               `/var/lib/clockchain/tunnel/grants/${releaseId}/abort-marker.json`,
+            approvedPayerPublicPath,
             bootstrapBrokerCapabilitySecretArn:
               bootstrapBrokerCapability.secretArn,
             bootstrapBrokerUrl:
@@ -1433,6 +1594,26 @@ export class ClockchainHandshakeStack extends Stack {
               "clockchain-demo-2026",
             operatorKeySecretArn:
               operatorKey.secretArn,
+            publicStaging: {
+              approvedPayerPublicPath,
+              bootstrapPayerClaimUrl:
+                `${bootstrapApi.url!}v1/payer-claims`,
+              imageDigest:
+                props.controlPlaneImage,
+              paths: publicStagingPaths,
+              publicBaseUrl:
+                `https://${publicDistribution.distributionDomainName}/`,
+              publicMcpHostname:
+                props.relayPublicHostname,
+              publicMcpUrl:
+                `https://${props.relayPublicHostname}:9443/mcp`,
+              tunnelHealthPath:
+                coordinatorTunnelHealthPath,
+              tunnelHostKeyFingerprint:
+                props.tunnelHostKeyFingerprint,
+              tunnelHostPublicKey:
+                props.tunnelHostPublicKey,
+            },
             relayUrl:
               `https://${props.relayPublicHostname}:8443`,
             rpcSecretArn: sepoliaRpc.secretArn,
@@ -1683,6 +1864,10 @@ export class ClockchainHandshakeStack extends Stack {
     efs.AccessPoint
   > {
     const definitions = {
+      approvedPayer: [
+        "ApprovedPayer",
+        "1111",
+      ],
       bootstrap: ["Bootstrap", "1101"],
       fundingJournal: [
         "FundingJournal",
@@ -1700,6 +1885,10 @@ export class ClockchainHandshakeStack extends Stack {
       publisher: ["Publisher", "1105"],
       relay: ["Relay", "1106"],
       tunnel: ["Tunnel", "1107"],
+      tunnelHealth: [
+        "TunnelHealth",
+        "1112",
+      ],
       verifierEvidence: [
         "VerifierEvidence",
         "1108",

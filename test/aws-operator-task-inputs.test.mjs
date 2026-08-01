@@ -42,6 +42,16 @@ const EVIDENCE_ROOT =
   `/var/lib/clockchain/evidence/releases/${RELEASE_ID}`;
 const VERIFIER_OUTPUT_ROOT =
   `/var/lib/clockchain/verifier-output/releases/${RELEASE_ID}`;
+const PUBLIC_RELEASE_ROOT =
+  `/var/lib/clockchain/public/releases/${RELEASE_ID}`;
+const APPROVED_PAYER_PUBLIC_PATH =
+  `/var/lib/clockchain/approved-payer/releases/${RELEASE_ID}/approved-payer.json`;
+const TUNNEL_HEALTH_PATH =
+  `/var/lib/clockchain/tunnel-health/releases/${RELEASE_ID}/tunnel-health.json`;
+const TUNNEL_HOST_PUBLIC_KEY =
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILzWMEVEge8QmmJQH5at7CDm9iuX7O4hop0rjeJ95xnC";
+const TUNNEL_HOST_KEY_FINGERPRINT =
+  "SHA256:UgP8WeC7EtU7Ik6LFbMNeUckAOfLBKJvnaP1ez/1MwU";
 
 function certificatePem() {
   const root = mkdtempSync(
@@ -92,6 +102,7 @@ function coordinatorInput(overrides = {}) {
     operatorKeySecretArn:
       "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key",
     paymentMoved: false,
+    publicStaging: publicStaging(),
     releaseId: RELEASE_ID,
     releaseRoot: OPERATOR_RELEASE_ROOT,
     relayUrl: "https://relay.clockchain.net:8443",
@@ -101,6 +112,39 @@ function coordinatorInput(overrides = {}) {
     sessionId: SESSION_ID,
     tlsCertificatePem: RELAY_CERTIFICATE_PEM,
     tlsFingerprint: RELAY_FINGERPRINT,
+    ...overrides,
+  };
+}
+
+function publicStaging(overrides = {}) {
+  return {
+    approvedPayerPublicPath:
+      APPROVED_PAYER_PUBLIC_PATH,
+    bootstrapPayerClaimUrl:
+      "https://bootstrap.clockchain.net/v1/payer-claims",
+    imageDigest:
+      `123456789012.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake-control-plane@sha256:${"a".repeat(64)}`,
+    paths: {
+      certificate:
+        `${PUBLIC_RELEASE_ROOT}/payer-mcp.crt`,
+      gate:
+        `${PUBLIC_RELEASE_ROOT}/publication-gate.json`,
+      input:
+        `${PUBLIC_RELEASE_ROOT}/publisher-input.json`,
+      payer: `${PUBLIC_RELEASE_ROOT}/payer.json`,
+      requestor:
+        `${PUBLIC_RELEASE_ROOT}/requestor.json`,
+    },
+    publicBaseUrl:
+      "https://public.clockchain.net/",
+    publicMcpHostname: "relay.clockchain.net",
+    publicMcpUrl:
+      "https://relay.clockchain.net:9443/mcp",
+    tunnelHealthPath: TUNNEL_HEALTH_PATH,
+    tunnelHostKeyFingerprint:
+      TUNNEL_HOST_KEY_FINGERPRINT,
+    tunnelHostPublicKey:
+      TUNNEL_HOST_PUBLIC_KEY,
     ...overrides,
   };
 }
@@ -243,6 +287,7 @@ test("builds exact canonical coordinator, funding, and verifier runtime inputs a
         "operator-key-release-bd7662a5eeb41614",
       operatorKeySecretArn:
         "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key",
+      publicStaging: publicStaging(),
       releaseIdentity: {
         releaseId: RELEASE_ID,
         sessionId: SESSION_ID,
@@ -339,6 +384,22 @@ test("builds exact canonical coordinator, funding, and verifier runtime inputs a
   assertCanonicalRuntimeInput(verifier);
 });
 
+test("coordinator builder emits the exact validated public staging contract", () => {
+  const runtime =
+    buildCoordinatorRuntimeInput(
+      coordinatorInput(),
+    );
+  assert.deepEqual(
+    runtime.coordinator.publicStaging,
+    publicStaging(),
+  );
+  assertCanonicalRuntimeInput(runtime);
+  assert.doesNotMatch(
+    JSON.stringify(runtime.coordinator.publicStaging),
+    /TUNNEL_HOST_KEY_SECRET_ARN|privateKey/i,
+  );
+});
+
 test("rejects unknown, reordered, accessor, proxy, sensitive, and scope-mismatched task inputs", () => {
   for (const [builder, input] of [
     [
@@ -388,6 +449,65 @@ test("rejects unknown, reordered, accessor, proxy, sensitive, and scope-mismatch
         /AWS operator task input failed safely/,
       );
     }
+  }
+});
+
+test("coordinator builder rejects malformed public staging inputs", () => {
+  for (const publicStagingOverride of [
+    {
+      approvedPayerPublicPath:
+        `/var/lib/clockchain/approved-payer/releases/${RELEASE_ID}/wrong.json`,
+    },
+    {
+      bootstrapPayerClaimUrl:
+        "https://bootstrap.clockchain.net/v1/requestor-claims",
+    },
+    {
+      imageDigest:
+        `123456789012.dkr.ecr.us-west-2.amazonaws.com/clockchain:latest`,
+    },
+    {
+      paths: {
+        ...publicStaging().paths,
+        payer:
+          `${PUBLIC_RELEASE_ROOT}-sibling/payer.json`,
+      },
+    },
+    {
+      publicBaseUrl:
+        "https://public.clockchain.net/handshake",
+    },
+    {
+      publicMcpHostname:
+        "relay.clockchain.test",
+    },
+    {
+      publicMcpUrl:
+        "https://relay.clockchain.net/mcp",
+    },
+    {
+      tunnelHealthPath:
+        `/var/lib/clockchain/tunnel-health/releases/${RELEASE_ID}/wrong.json`,
+    },
+    {
+      tunnelHostKeyFingerprint:
+        "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    },
+    {
+      tunnelHostPrivateKey: "private-key-canary",
+    },
+  ]) {
+    assert.throws(
+      () =>
+        buildCoordinatorRuntimeInput(
+          coordinatorInput({
+            publicStaging: publicStaging(
+              publicStagingOverride,
+            ),
+          }),
+        ),
+      /AWS operator task input failed safely/,
+    );
   }
 });
 

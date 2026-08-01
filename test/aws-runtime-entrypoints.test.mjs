@@ -46,6 +46,9 @@ import {
 import {
   main as verifierEntrypoint,
 } from "../infra/aws/runtime/verifier-entrypoint.mjs";
+import {
+  validateTunnelRuntimeConfiguration,
+} from "../infra/aws/runtime/tunnel-entrypoint.mjs";
 
 const execFileAsync = promisify(execFile);
 const VERIFIER_ATTEMPT_ID =
@@ -55,6 +58,16 @@ const VERIFIER_TASK_ARN =
 const OPERATOR_SESSION_ID =
   "22222222-2222-4222-8222-222222222222";
 const OPERATOR_RELEASE_ID = `release-${createHash("sha256").update(OPERATOR_SESSION_ID, "utf8").digest("hex").slice(0, 16)}`;
+const OPERATOR_PUBLIC_ROOT =
+  `/var/lib/clockchain/public/releases/${OPERATOR_RELEASE_ID}`;
+const OPERATOR_APPROVED_PAYER_PUBLIC_PATH =
+  `/var/lib/clockchain/approved-payer/releases/${OPERATOR_RELEASE_ID}/approved-payer.json`;
+const OPERATOR_TUNNEL_HEALTH_PATH =
+  `/var/lib/clockchain/tunnel-health/releases/${OPERATOR_RELEASE_ID}/tunnel-health.json`;
+const TUNNEL_HOST_PUBLIC_KEY =
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILzWMEVEge8QmmJQH5at7CDm9iuX7O4hop0rjeJ95xnC";
+const TUNNEL_HOST_KEY_FINGERPRINT =
+  "SHA256:UgP8WeC7EtU7Ik6LFbMNeUckAOfLBKJvnaP1ez/1MwU";
 const COORDINATOR_SESSION_ID =
   "33333333-3333-4333-8333-333333333333";
 const COORDINATOR_RELEASE_ID = `release-${createHash("sha256").update(COORDINATOR_SESSION_ID, "utf8").digest("hex").slice(0, 16)}`;
@@ -314,6 +327,8 @@ function operatorProductionRuntimeInput(overrides = {}) {
     bootstrap: {
       abortMarkerPath:
         `/var/lib/clockchain/tunnel/grants/${OPERATOR_RELEASE_ID}/abort-marker.json`,
+      approvedPayerPublicPath:
+        OPERATOR_APPROVED_PAYER_PUBLIC_PATH,
       bootstrapBrokerCapabilitySecretArn:
         "arn:aws:secretsmanager:us-west-2:123456789012:secret:bootstrap-capability",
       bootstrapBrokerUrl:
@@ -405,6 +420,8 @@ function operatorProductionRuntimeInput(overrides = {}) {
       operatorKeyId: "clockchain-demo-2026",
       operatorKeySecretArn:
         "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key",
+      publicStaging:
+        operatorPublicStaging(),
       relayUrl:
         "https://relay.clockchain.network:8443",
       rpcSecretArn:
@@ -440,6 +457,42 @@ function operatorProductionRuntimeInput(overrides = {}) {
   });
 }
 
+function operatorPublicStaging(overrides = {}) {
+  return {
+    approvedPayerPublicPath:
+      OPERATOR_APPROVED_PAYER_PUBLIC_PATH,
+    bootstrapPayerClaimUrl:
+      "https://bootstrap.clockchain.network/v1/payer-claims",
+    imageDigest:
+      `123456789012.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake-control-plane@sha256:${"a".repeat(64)}`,
+    paths: {
+      certificate:
+        `${OPERATOR_PUBLIC_ROOT}/payer-mcp.crt`,
+      gate:
+        `${OPERATOR_PUBLIC_ROOT}/publication-gate.json`,
+      input:
+        `${OPERATOR_PUBLIC_ROOT}/publisher-input.json`,
+      payer:
+        `${OPERATOR_PUBLIC_ROOT}/payer.json`,
+      requestor:
+        `${OPERATOR_PUBLIC_ROOT}/requestor.json`,
+    },
+    publicBaseUrl:
+      "https://public.clockchain.network/",
+    publicMcpHostname:
+      "relay.clockchain.network",
+    publicMcpUrl:
+      "https://relay.clockchain.network:9443/mcp",
+    tunnelHealthPath:
+      OPERATOR_TUNNEL_HEALTH_PATH,
+    tunnelHostKeyFingerprint:
+      TUNNEL_HOST_KEY_FINGERPRINT,
+    tunnelHostPublicKey:
+      TUNNEL_HOST_PUBLIC_KEY,
+    ...overrides,
+  };
+}
+
 function coordinatorRuntimeInput(overrides = {}) {
   const coordinator = {
     clockchainTokenSecretArn:
@@ -447,6 +500,7 @@ function coordinatorRuntimeInput(overrides = {}) {
     operatorKeyId: "clockchain-demo-2026",
     operatorKeySecretArn:
       "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key",
+    publicStaging: coordinatorPublicStaging(),
     releaseIdentity: {
       releaseId: COORDINATOR_RELEASE_ID,
       sessionId: COORDINATOR_SESSION_ID,
@@ -469,6 +523,103 @@ function coordinatorRuntimeInput(overrides = {}) {
     paymentMoved: false,
     schema: "clockchain.aws-runtime-input/v1",
   });
+}
+
+function coordinatorPublicStaging(overrides = {}) {
+  const publicRoot =
+    `/var/lib/clockchain/public/releases/${COORDINATOR_RELEASE_ID}`;
+  return {
+    approvedPayerPublicPath:
+      `/var/lib/clockchain/approved-payer/releases/${COORDINATOR_RELEASE_ID}/approved-payer.json`,
+    bootstrapPayerClaimUrl:
+      "https://bootstrap.clockchain.network/v1/payer-claims",
+    imageDigest:
+      `123456789012.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake-control-plane@sha256:${"a".repeat(64)}`,
+    paths: {
+      certificate:
+        `${publicRoot}/payer-mcp.crt`,
+      gate: `${publicRoot}/publication-gate.json`,
+      input: `${publicRoot}/publisher-input.json`,
+      payer: `${publicRoot}/payer.json`,
+      requestor: `${publicRoot}/requestor.json`,
+    },
+    publicBaseUrl:
+      "https://public.clockchain.network/",
+    publicMcpHostname: "relay.clockchain.network",
+    publicMcpUrl:
+      "https://relay.clockchain.network:9443/mcp",
+    tunnelHealthPath:
+      `/var/lib/clockchain/tunnel-health/releases/${COORDINATOR_RELEASE_ID}/tunnel-health.json`,
+    tunnelHostKeyFingerprint:
+      TUNNEL_HOST_KEY_FINGERPRINT,
+    tunnelHostPublicKey:
+      TUNNEL_HOST_PUBLIC_KEY,
+    ...overrides,
+  };
+}
+
+function coordinatorRuntimeInputWithPublicStaging(
+  publicStaging = coordinatorPublicStaging(),
+  overrides = {},
+) {
+  return coordinatorRuntimeInput({
+    publicStaging,
+    ...overrides,
+  });
+}
+
+function publicBootstrapTestDependencies(overrides = {}) {
+  const stager = {
+    async close() {},
+    async stagePayerReady() {},
+    async stageStart() {},
+    async stageTerminalFailure() {},
+  };
+  return {
+    approvedPayerReader: async () =>
+      approvedCoordinatorPayerProjection(),
+    createPublicReleaseRoot: async () => {},
+    now: () => 2_000_000_000_000,
+    publicStagerFactory: () => stager,
+    sleeper: async () => {},
+    tunnelHealthReader: async () =>
+      readyCoordinatorTunnelHealth(),
+    ...overrides,
+  };
+}
+
+function approvedCoordinatorPayerProjection(overrides = {}) {
+  return {
+    certificateFingerprint: RELAY_TLS_FINGERPRINT,
+    certificatePem: RELAY_TLS_CERTIFICATE_PEM,
+    claimFingerprint: "c".repeat(64),
+    expiresAtMs: "2000000600000",
+    paymentMoved: false,
+    releaseId: COORDINATOR_RELEASE_ID,
+    repositorySha:
+      "abcdef0123456789abcdef0123456789abcdef01",
+    schema: "clockchain.aws-approved-payer-public/v1",
+    sessionId: COORDINATOR_SESSION_ID,
+    status: "APPROVED",
+    ...overrides,
+  };
+}
+
+function readyCoordinatorTunnelHealth(overrides = {}) {
+  return {
+    schema: "clockchain.payer-tunnel-health/v1",
+    releaseId: COORDINATOR_RELEASE_ID,
+    repositorySha:
+      "abcdef0123456789abcdef0123456789abcdef01",
+    sessionId: COORDINATOR_SESSION_ID,
+    claimFingerprint: "c".repeat(64),
+    mcpTlsFingerprint: RELAY_TLS_FINGERPRINT,
+    observedAtMs: "2000000000000",
+    expiresAtMs: "2000000600000",
+    paymentMoved: false,
+    status: "READY",
+    ...overrides,
+  };
 }
 
 function verifierRuntimeInput(overrides = {}) {
@@ -562,6 +713,39 @@ test("runtime input accepts one exact canonical JSON object and rejects ambiguou
   }
 });
 
+test("tunnel entrypoint requires an absolute runtime health projection path", () => {
+  assert.deepEqual(
+    validateTunnelRuntimeConfiguration({
+      AWS_TUNNEL_HEALTH_PATH:
+        "/var/lib/clockchain/tunnel/health/payer-mcp-ready.json",
+      TUNNEL_HOST_KEY_SECRET_ARN:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:tunnel-host-key",
+    }),
+    {
+      healthPath:
+        "/var/lib/clockchain/tunnel/health/payer-mcp-ready.json",
+      hostKeySecretArn:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:tunnel-host-key",
+    },
+  );
+  for (const value of [
+    "",
+    "relative/health.json",
+    "/tmp/health.json ",
+    "/tmp/health.json\0",
+  ]) {
+    assert.throws(
+      () =>
+        validateTunnelRuntimeConfiguration({
+          AWS_TUNNEL_HEALTH_PATH: value,
+          TUNNEL_HOST_KEY_SECRET_ARN:
+            "arn:aws:secretsmanager:us-west-2:123456789012:secret:tunnel-host-key",
+        }),
+      /AWS tunnel entrypoint configuration invalid/,
+    );
+  }
+});
+
 test("secret material is installed atomically with mode 0600 and never returned", async () => {
   const root = await mkdtemp(
     join(tmpdir(), "clockchain-runtime-"),
@@ -633,6 +817,7 @@ test("coordinator entrypoint materializes validated secrets into unique private 
   const runCalls = [];
   for (let index = 0; index < 2; index += 1) {
     await coordinatorEntrypoint({
+      ...publicBootstrapTestDependencies(),
       client: {
         async send(command) {
           secretReads.push(command.input);
@@ -784,12 +969,18 @@ test("coordinator entrypoint materializes validated secrets into unique private 
       call.argv,
       expectedPublicArgv(call.values),
     );
-    assert.deepEqual(call.dependencies, {
-      releaseIdentity: {
-        releaseId: COORDINATOR_RELEASE_ID,
-        sessionId: COORDINATOR_SESSION_ID,
-      },
+    assert.deepEqual(call.dependencies.releaseIdentity, {
+      releaseId: COORDINATOR_RELEASE_ID,
+      sessionId: COORDINATOR_SESSION_ID,
     });
+    assert.equal(
+      call.dependencies.abortSignal instanceof AbortSignal,
+      true,
+    );
+    assert.equal(
+      typeof call.dependencies.publicStager.stageStart,
+      "function",
+    );
     await assert.rejects(
       lstat(
         call.values["--clockchain-token-file"],
@@ -824,6 +1015,369 @@ test("coordinator entrypoint materializes validated secrets into unique private 
         "--clockchain-token-file"
       ],
     ),
+  );
+});
+
+test("coordinator entrypoint stages initial public monitor and opens Requestor discovery only after exact Payer evidence", async () => {
+  const operatorKey = ed25519PrivateKeyPem();
+  const calls = [];
+  const stager = {
+    async close() {
+      calls.push(["close"]);
+    },
+    async stagePayerReady(value) {
+      calls.push(["stagePayerReady", value]);
+    },
+    async stageStart(value) {
+      calls.push(["stageStart", value]);
+    },
+    async stageTerminalFailure() {
+      calls.push(["stageTerminalFailure"]);
+    },
+  };
+  let approvedReads = 0;
+  let tunnelReads = 0;
+
+  const result = await coordinatorEntrypoint({
+    approvedPayerReader: async (path) => {
+      calls.push(["approvedReader", path]);
+      approvedReads += 1;
+      return approvedReads === 1
+        ? null
+        : approvedCoordinatorPayerProjection();
+    },
+    client: {
+      async send(command) {
+        if (
+          command.input.SecretId.endsWith(
+            "clockchain-token",
+          )
+        ) {
+          return {
+            SecretString: "clockchain-token",
+          };
+        }
+        if (
+          command.input.SecretId.endsWith(
+            "operator-key",
+          )
+        ) {
+          return { SecretString: operatorKey };
+        }
+        return {
+          SecretString:
+            "https://ethereum-rpc.publicnode.com/",
+        };
+      },
+    },
+    createPublicReleaseRoot: async (path) => {
+      calls.push(["createPublicReleaseRoot", path]);
+    },
+    env: {
+      AWS_RUNTIME_INPUT:
+        coordinatorRuntimeInputWithPublicStaging(),
+    },
+    now: () => 2_000_000_000_000,
+    publicStagerFactory: (config) => {
+      calls.push(["publicStagerFactory", {
+        operatorKeyType:
+          config.operatorPrivateKey.asymmetricKeyType,
+        payerClaimUrl: config.payerClaimUrl,
+        tunnelHost: config.tunnelHost,
+      }]);
+      return stager;
+    },
+    run: async (argv, dependencies) => {
+      calls.push([
+        "run",
+        dependencies.releaseIdentity,
+        dependencies.publicStager === stager,
+        argv.includes("--release-root"),
+      ]);
+      return 0;
+    },
+    sleeper: async () => {
+      calls.push(["sleep"]);
+    },
+    tunnelHealthReader: async (path) => {
+      calls.push(["tunnelReader", path]);
+      tunnelReads += 1;
+      return tunnelReads === 1
+        ? null
+        : readyCoordinatorTunnelHealth();
+    },
+  });
+
+  assert.equal(result, 0);
+  assert.deepEqual(calls[0], [
+    "createPublicReleaseRoot",
+    `/var/lib/clockchain/public/releases/${COORDINATOR_RELEASE_ID}`,
+  ]);
+  assert.deepEqual(calls[1], ["publicStagerFactory", {
+    operatorKeyType: "ed25519",
+    payerClaimUrl:
+      "https://bootstrap.clockchain.network/v1/payer-claims",
+    tunnelHost: "relay.clockchain.network",
+  }]);
+  assert.equal(calls[2][0], "stageStart");
+  assert.equal(
+    calls[2][1].snapshot.currentStep,
+    "Waiting for the Payer and Requestor to join the run.",
+  );
+  assert.equal(calls[2][1].expiresAtMs, "2000000600000");
+  assert.equal(
+    calls.some((call) => call[0] === "run"),
+    true,
+  );
+  const readyCall = calls.find(
+    (call) => call[0] === "stagePayerReady",
+  );
+  assert.equal(readyCall[1].approvedPayer.claimFingerprint, "c".repeat(64));
+  assert.equal(readyCall[1].tunnelHealth.mcpTlsFingerprint, RELAY_TLS_FINGERPRINT);
+  assert.deepEqual(calls.at(-1), ["close"]);
+});
+
+test("coordinator entrypoint terminal-stages public failure when Payer evidence is mismatched", async () => {
+  const calls = [];
+  await assert.rejects(
+    coordinatorEntrypoint({
+      approvedPayerReader: async () =>
+        approvedCoordinatorPayerProjection(),
+      client: {
+        async send(command) {
+          if (
+            command.input.SecretId.endsWith(
+              "clockchain-token",
+            )
+          ) {
+            return {
+              SecretString: "clockchain-token",
+            };
+          }
+          if (
+            command.input.SecretId.endsWith(
+              "operator-key",
+            )
+          ) {
+            return {
+              SecretString: ed25519PrivateKeyPem(),
+            };
+          }
+          return {
+            SecretString:
+              "https://ethereum-rpc.publicnode.com/",
+          };
+        },
+      },
+      createPublicReleaseRoot: async () => {},
+      env: {
+        AWS_RUNTIME_INPUT:
+          coordinatorRuntimeInputWithPublicStaging(),
+      },
+      now: () => 2_000_000_000_000,
+      publicStagerFactory: () => ({
+        async close() {
+          calls.push(["close"]);
+        },
+        async stagePayerReady() {
+          calls.push(["stagePayerReady"]);
+        },
+        async stageStart() {
+          calls.push(["stageStart"]);
+        },
+        async stageTerminalFailure(value) {
+          calls.push(["stageTerminalFailure", value]);
+        },
+      }),
+      run: async () => {
+        calls.push(["run"]);
+        return 0;
+      },
+      sleeper: async () => {},
+      tunnelHealthReader: async () =>
+        readyCoordinatorTunnelHealth({
+          claimFingerprint: "d".repeat(64),
+        }),
+    }),
+    (error) => {
+      assert.match(
+        error.message,
+        /AWS coordinator entrypoint failed safely/,
+      );
+      assert.doesNotMatch(
+        String(error),
+        /clockchain-token|ethereum-rpc|PRIVATE KEY|AUTHORIZED/,
+      );
+      return true;
+    },
+  );
+  assert.deepEqual(
+    calls.map((call) => call[0]),
+    ["stageStart", "run", "stageTerminalFailure", "close"],
+  );
+});
+
+test("coordinator entrypoint drains an aborted readiness poll before cleanup after run failure", async () => {
+  const calls = [];
+  await assert.rejects(
+    coordinatorEntrypoint({
+      ...publicBootstrapTestDependencies({
+        approvedPayerReader: async () => null,
+        publicStagerFactory: () => ({
+          async close() {
+            calls.push(["close"]);
+          },
+          async stagePayerReady() {
+            calls.push(["stagePayerReady"]);
+          },
+          async stageStart() {
+            calls.push(["stageStart"]);
+          },
+          async stageTerminalFailure() {
+            calls.push(["stageTerminalFailure"]);
+          },
+        }),
+        sleeper: async (_ms, { signal }) =>
+          new Promise((resolve, reject) => {
+            signal.addEventListener("abort", () => {
+              calls.push(["pollAbort"]);
+              reject(new Error("poll abort canary"));
+            }, { once: true });
+          }),
+        tunnelHealthReader: async () => null,
+      }),
+      client: {
+        async send(command) {
+          if (
+            command.input.SecretId.endsWith(
+              "clockchain-token",
+            )
+          ) {
+            return {
+              SecretString: "clockchain-token",
+            };
+          }
+          if (
+            command.input.SecretId.endsWith(
+              "operator-key",
+            )
+          ) {
+            return {
+              SecretString: ed25519PrivateKeyPem(),
+            };
+          }
+          return {
+            SecretString:
+              "https://ethereum-rpc.publicnode.com/",
+          };
+        },
+      },
+      env: {
+        AWS_RUNTIME_INPUT:
+          coordinatorRuntimeInput(),
+      },
+      run: async () => {
+        calls.push(["run"]);
+        return 1;
+      },
+    }),
+    /AWS coordinator entrypoint failed safely/,
+  );
+  assert.deepEqual(
+    calls.map((call) => call[0]),
+    [
+      "stageStart",
+      "run",
+      "pollAbort",
+      "stageTerminalFailure",
+      "close",
+    ],
+  );
+});
+
+test("coordinator entrypoint aborts and drains a long-lived run before terminal staging after poll failure", async () => {
+  const calls = [];
+  await assert.rejects(
+    coordinatorEntrypoint({
+      ...publicBootstrapTestDependencies({
+        approvedPayerReader: async () =>
+          approvedCoordinatorPayerProjection(),
+        publicStagerFactory: () => ({
+          async close() {
+            calls.push(["close"]);
+          },
+          async stagePayerReady() {
+            calls.push(["stagePayerReady"]);
+          },
+          async stageStart() {
+            calls.push(["stageStart"]);
+          },
+          async stageTerminalFailure() {
+            calls.push(["stageTerminalFailure"]);
+          },
+        }),
+        tunnelHealthReader: async () =>
+          readyCoordinatorTunnelHealth({
+            claimFingerprint: "d".repeat(64),
+          }),
+      }),
+      client: {
+        async send(command) {
+          if (
+            command.input.SecretId.endsWith(
+              "clockchain-token",
+            )
+          ) {
+            return {
+              SecretString: "clockchain-token",
+            };
+          }
+          if (
+            command.input.SecretId.endsWith(
+              "operator-key",
+            )
+          ) {
+            return {
+              SecretString: ed25519PrivateKeyPem(),
+            };
+          }
+          return {
+            SecretString:
+              "https://ethereum-rpc.publicnode.com/",
+          };
+        },
+      },
+      env: {
+        AWS_RUNTIME_INPUT:
+          coordinatorRuntimeInput(),
+      },
+      run: async (_argv, { abortSignal }) => {
+        assert.equal(abortSignal instanceof AbortSignal, true);
+        assert.equal(Object.getPrototypeOf(abortSignal), AbortSignal.prototype);
+        calls.push(["run"]);
+        return new Promise((_resolve, reject) => {
+          abortSignal.addEventListener("abort", () => {
+            calls.push(["runAbort"]);
+            reject(new Error("coordinator run aborted"));
+          }, { once: true });
+        });
+      },
+    }),
+    (error) => {
+      assert.match(
+        error.message,
+        /AWS coordinator entrypoint failed safely/,
+      );
+      assert.doesNotMatch(
+        String(error),
+        /clockchain-token|ethereum-rpc|PRIVATE KEY|AUTHORIZED/,
+      );
+      return true;
+    },
+  );
+  assert.deepEqual(
+    calls.map((call) => call[0]),
+    ["stageStart", "run", "runAbort", "stageTerminalFailure", "close"],
   );
 });
 
@@ -883,6 +1437,7 @@ test("coordinator entrypoint rejects malformed runtime input before secret reads
     let secretReads = 0;
     await assert.rejects(
       coordinatorEntrypoint({
+        ...publicBootstrapTestDependencies(),
         client: {
           async send() {
             secretReads += 1;
@@ -941,6 +1496,7 @@ test("coordinator entrypoint rejects invalid secrets before scratch creation or 
     const calls = [];
     await assert.rejects(
       coordinatorEntrypoint({
+        ...publicBootstrapTestDependencies(),
         client: {
           async send(command) {
             calls.push(command.input.SecretId);
@@ -1077,6 +1633,7 @@ test("coordinator entrypoint accepts known public IPv4 and IPv6 RPC literals", a
     "https://[2606:4700:4700::1111]/",
   ]) {
     await coordinatorEntrypoint({
+      ...publicBootstrapTestDependencies(),
       client: {
         async send(command) {
           if (
@@ -1132,6 +1689,7 @@ test("coordinator entrypoint accepts a known public IPv6 RPC literal", async () 
   const operatorKey = ed25519PrivateKeyPem();
   const calls = [];
   await coordinatorEntrypoint({
+    ...publicBootstrapTestDependencies(),
     client: {
       async send(command) {
         if (
@@ -1198,6 +1756,7 @@ test("coordinator entrypoint attempts all cleanup and fails closed when cleanup 
   try {
     await assert.rejects(
       coordinatorEntrypoint({
+        ...publicBootstrapTestDependencies(),
         client: {
           async send(command) {
             if (
@@ -1825,6 +2384,123 @@ test("operator worker entrypoint provides default transition composition when no
   assert.deepEqual(calls, [
     [OPERATOR_RELEASE_ID, "function"],
   ]);
+});
+
+test("operator worker default transitions launch approval and coordinator with public staging overrides", async () => {
+  const launched = [];
+  await operatorWorkerEntrypoint({
+    createClients: async () => ({
+      dynamodb: { send: async () => ({}) },
+      ecs: {
+        async send(command) {
+          if (
+            Object.hasOwn(
+              command.input,
+              "taskDefinition",
+            )
+          ) {
+            const runtimeInput = JSON.parse(
+              command.input.overrides.containerOverrides[0]
+                .environment[0].value,
+            );
+            launched.push({
+              container:
+                command.input.overrides.containerOverrides[0]
+                  .name,
+              runtimeInput,
+            });
+            return {
+              failures: [],
+              tasks: [
+                {
+                  taskArn:
+                    "arn:aws:ecs:us-west-2:123456789012:task/clockchain/11111111111111111111111111111111",
+                },
+              ],
+            };
+          }
+          if (
+            Object.hasOwn(command.input, "tasks")
+          ) {
+            return {
+              failures: [],
+              tasks: [
+                {
+                  containers: [
+                    {
+                      exitCode: 0,
+                      name: "bootstrap-approval",
+                    },
+                  ],
+                  lastStatus: "STOPPED",
+                  taskArn:
+                    "arn:aws:ecs:us-west-2:123456789012:task/clockchain/11111111111111111111111111111111",
+                },
+              ],
+            };
+          }
+          assert.fail(
+            `unexpected ECS command ${command.constructor.name}`,
+          );
+        },
+      },
+      s3: { send: async () => ({}) },
+      sqs: { send: async () => ({}) },
+    }),
+    createDocumentClient: (client) => ({
+      client,
+      send: async () => ({}),
+    }),
+    env: {
+      AWS_RUNTIME_INPUT:
+        operatorProductionRuntimeInput(),
+    },
+    run: async (config, dependencies) => {
+      const transitions =
+        await dependencies.buildTransitions(config);
+      const common = {
+        expectedRevision: 7,
+        paymentMoved: false,
+        releaseId: OPERATOR_RELEASE_ID,
+        repositorySha:
+          "abcdef0123456789abcdef0123456789abcdef01",
+        sessionId: OPERATOR_SESSION_ID,
+      };
+      await transitions.approveBootstrapClaim({
+        ...common,
+        claimFingerprint: "b".repeat(64),
+        role: "payee",
+      });
+      await transitions.launchCoordinator({
+        ...common,
+        actionId:
+          "55555555-5555-4555-8555-555555555555",
+      });
+      return {
+        paymentMoved: false,
+        status: "IDLE",
+      };
+    },
+  });
+
+  assert.deepEqual(
+    launched.map((item) => item.container),
+    ["bootstrap-approval", "coordinator"],
+  );
+  assert.equal(
+    launched[0].runtimeInput.bootstrapApproval
+      .approvedPayerPublicPath,
+    OPERATOR_APPROVED_PAYER_PUBLIC_PATH,
+  );
+  assert.deepEqual(
+    launched[1].runtimeInput.coordinator
+      .publicStaging,
+    operatorPublicStaging(),
+  );
+  assert.doesNotMatch(
+    JSON.stringify(launched),
+    /TUNNEL_HOST_KEY_SECRET_ARN|privateKey/i,
+  );
 });
 
 test("operator worker entrypoint accepts the default operator loop with an aborted signal", async () => {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  buildAwsWatcherPublicMonitorSnapshot,
   buildPublicMonitorSnapshot,
   buildUnavailablePublicMonitorSnapshot,
   observePublicMonitorSnapshot,
@@ -13,6 +14,11 @@ const EXPLORER_URLS = Object.freeze([
   "https://sepolia.etherscan.io/block/101",
   "https://sepolia.etherscan.io/block/102",
   "https://sepolia.etherscan.io/block/103",
+]);
+const LEDGER_IDS = Object.freeze([
+  "00000000-0000-4000-8000-000000000001",
+  "00000000-0000-4000-8000-000000000002",
+  "00000000-0000-4000-8000-000000000003",
 ]);
 
 function projection() {
@@ -128,6 +134,44 @@ function options(overrides = {}) {
     sourceObservedAtMs: PUBLISHED_AT_MS - 100,
     staleAfterMs: 10_000,
     verifierPublicationValidated: true,
+    ...overrides,
+  };
+}
+
+function awsWatcherProjection(overrides = {}) {
+  return {
+    observedAtMs: String(PUBLISHED_AT_MS - 100),
+    paymentMoved: false,
+    releaseId: "release-0123456789abcdef",
+    repositorySha: "a".repeat(40),
+    schema: "clockchain.aws-watcher-projection/v1",
+    sessionId: "11111111-2222-4333-8444-555555555555",
+    state: "ACCEPTED",
+    subjectRun: "stakeholder",
+    terminal: null,
+    transitions: [
+      {
+        blockHeight: "101",
+        cardinality: "1",
+        ledgerId: LEDGER_IDS[0],
+        slot: "proposal",
+        verified: true,
+      },
+      {
+        blockHeight: "102",
+        cardinality: "1",
+        ledgerId: LEDGER_IDS[1],
+        slot: "acceptance",
+        verified: true,
+      },
+      {
+        blockHeight: null,
+        cardinality: "0",
+        ledgerId: null,
+        slot: "acknowledgment",
+        verified: false,
+      },
+    ],
     ...overrides,
   };
 }
@@ -351,6 +395,301 @@ test("turns a previously verified snapshot visibly stale after its freshness win
   );
   assert.match(stale.currentStep, /expired/i);
   assert.deepEqual(stale.anchors, fresh.anchors);
+});
+
+test("maps exact aws watcher projection into a running public monitor without private evidence", () => {
+  const snapshot = buildAwsWatcherPublicMonitorSnapshot(
+    awsWatcherProjection(),
+    {
+      nowMs: PUBLISHED_AT_MS,
+      publishedAtMs: PUBLISHED_AT_MS,
+      releaseId: "release-0123456789abcdef",
+      repositorySha: "a".repeat(40),
+      runId: "run-0123456789abcdef",
+      sessionId: "11111111-2222-4333-8444-555555555555",
+      staleAfterMs: 60_000,
+      subjectRun: "stakeholder",
+    },
+  );
+
+  assert.deepEqual(snapshot, {
+    anchors: [
+      {
+        block: "101",
+        explorerUrl: "https://sepolia.etherscan.io/block/101",
+        kind: "PROPOSED",
+        signerRole: "Payer",
+      },
+      {
+        block: "102",
+        explorerUrl: "https://sepolia.etherscan.io/block/102",
+        kind: "ACCEPTED",
+        signerRole: "Requestor",
+      },
+    ],
+    currentStep:
+      "The Payer is reviewing the Requestor acceptance before acknowledgment.",
+    funding: { status: "READY" },
+    mcp: { status: "READY" },
+    paymentMoved: false,
+    payer: { status: "READY" },
+    publishedAtMs: String(PUBLISHED_AT_MS),
+    relay: { status: "READY" },
+    requestor: { status: "READY" },
+    runId: "run-0123456789abcdef",
+    runStatus: "RUNNING",
+    schema: "clockchain.bilateral-public-monitor/v2",
+    staleAfterMs: 60_000,
+    verifier: { status: "NOT_STARTED" },
+  });
+
+  const serialized = JSON.stringify(snapshot);
+  for (const forbidden of [
+    "11111111-2222-4333-8444-555555555555",
+    "aaaaaaaa",
+    "release-0123456789abcdef",
+    "AUTHORIZED",
+  ]) {
+    assert.doesNotMatch(serialized, new RegExp(forbidden, "i"));
+  }
+});
+
+test("keeps aws watcher three-anchor progress non-authorizing until the fresh verifier publishes", () => {
+  const snapshot = buildAwsWatcherPublicMonitorSnapshot(
+    awsWatcherProjection({
+      state: "ACKNOWLEDGED",
+      transitions: [
+        {
+          blockHeight: "101",
+          cardinality: "1",
+          ledgerId: LEDGER_IDS[0],
+          slot: "proposal",
+          verified: true,
+        },
+        {
+          blockHeight: "102",
+          cardinality: "1",
+          ledgerId: LEDGER_IDS[1],
+          slot: "acceptance",
+          verified: true,
+        },
+        {
+          blockHeight: "103",
+          cardinality: "1",
+          ledgerId: LEDGER_IDS[2],
+          slot: "acknowledgment",
+          verified: true,
+        },
+      ],
+    }),
+    {
+      nowMs: PUBLISHED_AT_MS,
+      publishedAtMs: PUBLISHED_AT_MS,
+      releaseId: "release-0123456789abcdef",
+      repositorySha: "a".repeat(40),
+      runId: "run-0123456789abcdef",
+      sessionId: "11111111-2222-4333-8444-555555555555",
+      staleAfterMs: 60_000,
+      subjectRun: "stakeholder",
+    },
+  );
+
+  assert.equal(snapshot.runStatus, "RUNNING");
+  assert.equal(snapshot.verifier.status, "RUNNING");
+  assert.equal(snapshot.anchors.length, 3);
+});
+
+test("rejects unsafe aws watcher projections and mismatched run scope", () => {
+  const cases = [
+    {
+      ...awsWatcherProjection(),
+      paymentMoved: true,
+    },
+    {
+      ...awsWatcherProjection(),
+      subjectRun: "rehearsal",
+    },
+    {
+      ...awsWatcherProjection(),
+      terminal: "FAILED",
+    },
+    {
+      ...awsWatcherProjection(),
+      state: "ACKNOWLEDGED",
+    },
+    {
+      ...awsWatcherProjection(),
+      transitions: awsWatcherProjection().transitions.map((transition, index) =>
+        index === 1
+          ? { ...transition, slot: "acknowledgment" }
+          : transition,
+      ),
+    },
+    {
+      ...awsWatcherProjection(),
+      transitions: awsWatcherProjection().transitions.map((transition, index) =>
+        index === 2
+          ? {
+              ...transition,
+              blockHeight: "103",
+              cardinality: "1",
+              ledgerId: LEDGER_IDS[2],
+              verified: true,
+            }
+          : transition,
+      ),
+    },
+    {
+      ...awsWatcherProjection(),
+      transitions: awsWatcherProjection().transitions.map((transition, index) =>
+        index === 1
+          ? { ...transition, cardinality: "2" }
+          : transition,
+      ),
+    },
+    {
+      ...awsWatcherProjection(),
+      transitions: awsWatcherProjection().transitions.map((transition, index) =>
+        index === 1
+          ? { ...transition, blockHeight: "0" }
+          : transition,
+      ),
+    },
+    {
+      ...awsWatcherProjection({
+        state: "ACKNOWLEDGED",
+        transitions: [
+          {
+            blockHeight: "101",
+            cardinality: "1",
+            ledgerId: LEDGER_IDS[0],
+            slot: "proposal",
+            verified: true,
+          },
+          {
+            blockHeight: "101",
+            cardinality: "1",
+            ledgerId: LEDGER_IDS[1],
+            slot: "acceptance",
+            verified: true,
+          },
+          {
+            blockHeight: "103",
+            cardinality: "1",
+            ledgerId: LEDGER_IDS[2],
+            slot: "acknowledgment",
+            verified: true,
+          },
+        ],
+      }),
+    },
+    {
+      ...awsWatcherProjection({
+        state: "ACKNOWLEDGED",
+        transitions: [
+          {
+            blockHeight: "101",
+            cardinality: "1",
+            ledgerId: LEDGER_IDS[0],
+            slot: "proposal",
+            verified: true,
+          },
+          {
+            blockHeight: "102",
+            cardinality: "1",
+            ledgerId: LEDGER_IDS[0],
+            slot: "acceptance",
+            verified: true,
+          },
+          {
+            blockHeight: "103",
+            cardinality: "1",
+            ledgerId: LEDGER_IDS[2],
+            slot: "acknowledgment",
+            verified: true,
+          },
+        ],
+      }),
+    },
+    Object.fromEntries(
+      Object.entries(awsWatcherProjection()).reverse(),
+    ),
+  ];
+
+  for (const source of cases) {
+    assert.throws(
+      () =>
+        buildAwsWatcherPublicMonitorSnapshot(source, {
+          nowMs: PUBLISHED_AT_MS,
+          publishedAtMs: PUBLISHED_AT_MS,
+          releaseId: "release-0123456789abcdef",
+          repositorySha: "a".repeat(40),
+          runId: "run-0123456789abcdef",
+          sessionId: "11111111-2222-4333-8444-555555555555",
+          staleAfterMs: 60_000,
+          subjectRun: "stakeholder",
+        }),
+      /Public monitor projection failed safely/,
+    );
+  }
+
+  assert.throws(
+    () =>
+      buildAwsWatcherPublicMonitorSnapshot(
+        awsWatcherProjection(),
+        {
+          nowMs: PUBLISHED_AT_MS,
+          publishedAtMs: PUBLISHED_AT_MS,
+          releaseId: "release-0123456789abcdef",
+          repositorySha: "a".repeat(40),
+          runId: "run-fedcba9876543210",
+          sessionId: "11111111-2222-4333-8444-555555555555",
+          staleAfterMs: 60_000,
+          subjectRun: "stakeholder",
+        },
+      ),
+    /Public monitor projection failed safely/,
+  );
+});
+
+test("binds aws watcher mapping to exact expected release, repository, session, and subject", () => {
+  const source = awsWatcherProjection();
+  for (const override of [
+    { releaseId: "release-fedcba9876543210" },
+    { repositorySha: "b".repeat(40) },
+    { sessionId: "22222222-3333-4444-8555-666666666666" },
+    { subjectRun: "rehearsal" },
+  ]) {
+    assert.throws(
+      () =>
+        buildAwsWatcherPublicMonitorSnapshot(source, {
+          nowMs: PUBLISHED_AT_MS,
+          publishedAtMs: PUBLISHED_AT_MS,
+          releaseId: "release-0123456789abcdef",
+          repositorySha: "a".repeat(40),
+          runId: "run-0123456789abcdef",
+          sessionId: "11111111-2222-4333-8444-555555555555",
+          staleAfterMs: 60_000,
+          subjectRun: "stakeholder",
+          ...override,
+        }),
+      /Public monitor projection failed safely/,
+    );
+  }
+  assert.throws(
+    () =>
+      buildAwsWatcherPublicMonitorSnapshot(source, {
+        subjectRun: "stakeholder",
+        staleAfterMs: 60_000,
+        sessionId: "11111111-2222-4333-8444-555555555555",
+        runId: "run-0123456789abcdef",
+        repositorySha: "a".repeat(40),
+        releaseId: "release-0123456789abcdef",
+        publishedAtMs: PUBLISHED_AT_MS,
+        nowMs: PUBLISHED_AT_MS,
+      }),
+    /Public monitor projection failed safely/,
+  );
 });
 
 test("builds a safe empty waiting snapshot", () => {

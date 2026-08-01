@@ -79,10 +79,16 @@ export async function approveAndSealAwsBootstrapClaim(
       dependencies.buildSealedResponse;
     const persistTunnelGrant =
       dependencies.persistTunnelGrant;
+    const publishApprovedPayer =
+      dependencies.publishApprovedPayer;
     if (
       typeof openBootstrap !== "function" ||
       typeof buildSealedResponse !== "function" ||
-      typeof persistTunnelGrant !== "function"
+      typeof persistTunnelGrant !== "function" ||
+      !(
+        publishApprovedPayer === undefined ||
+        typeof publishApprovedPayer === "function"
+      )
     ) {
       fail();
     }
@@ -110,6 +116,15 @@ export async function approveAndSealAwsBootstrapClaim(
           fail();
         }
         await dependencies.assertTunnelGrant(expected);
+        if (publishApprovedPayer !== undefined) {
+          await publishApprovedPayer({
+            claim: current.entry.claim,
+            claimFingerprint:
+              expected.claimFingerprint,
+            expiresAtMs:
+              current.entry.expiresAtMs,
+          });
+        }
       }
       return Object.freeze({
         paymentMoved: false,
@@ -157,6 +172,18 @@ export async function approveAndSealAwsBootstrapClaim(
       expected,
     );
     if (sealed.entry.status !== "SEALED") fail();
+    if (
+      expected.role === "payer" &&
+      publishApprovedPayer !== undefined
+    ) {
+      await publishApprovedPayer({
+        claim: sealed.entry.claim,
+        claimFingerprint:
+          expected.claimFingerprint,
+        expiresAtMs:
+          sealed.entry.expiresAtMs,
+      });
+    }
     return Object.freeze({
       paymentMoved: false,
       status: "APPROVED",

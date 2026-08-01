@@ -27,7 +27,7 @@ import { createOperatorRelayClient, createPinnedOperatorHttpsTransport } from ".
 import { deriveDescriptorSessionId } from "./run-session.mjs";
 import { main as preflightMain, verifyCoordinationPreparationSet } from "../../../scripts/probe-bilateral-rendezvous.mjs";
 import { computeBilateralPromptHash } from "../../../scripts/hash-bilateral-prompts.mjs";
-import { watchBilateralSession } from "../../../scripts/watch-bilateral-session.mjs";
+import { createAwsWatcherProjection, watchBilateralSession } from "../../../scripts/watch-bilateral-session.mjs";
 import { validatePublishedBilateralVerdict as validateVerdictPublication } from "../verdict.mjs";
 import { createMcpClient } from "../../mcp.mjs";
 import { assertSecretFree } from "../../redact.mjs";
@@ -35,6 +35,11 @@ import { validateFundingRecord } from "../funding/record.mjs";
 import {
   validatePublicEndpoint,
 } from "../network-endpoint.mjs";
+import {
+  buildAwsWatcherPublicMonitorSnapshot,
+  buildPublicMonitorSnapshot,
+} from "./public-monitor.mjs";
+import { buildConsoleProjection } from "./console-projection.mjs";
 
 export const COORDINATOR_CLI_FLAGS = Object.freeze([
   "--clockchain-token-file", "--operator-key-id", "--operator-private-key",
@@ -123,6 +128,34 @@ function abortableSleep(delay, signal) {
     signal?.addEventListener("abort", done, { once: true });
     if (signal?.aborted) done();
   });
+}
+
+function validateAbortSignal(value) {
+  if (value === undefined) return undefined;
+  if (
+    !(value instanceof AbortSignal) ||
+    Object.getPrototypeOf(value) !== AbortSignal.prototype
+  ) {
+    fail();
+  }
+  try {
+    const noop = () => {};
+    AbortSignal.prototype.addEventListener.call(value, "abort", noop);
+    AbortSignal.prototype.removeEventListener.call(value, "abort", noop);
+  } catch {
+    fail();
+  }
+  return value;
+}
+
+function abortIfRequested(signal) {
+  if (signal?.aborted) fail();
+}
+
+function combinedAbortSignal(first, second) {
+  if (first === undefined) return second;
+  if (second === undefined) return first;
+  return AbortSignal.any([first, second]);
 }
 
 async function writePrivate(path, bytes) {
@@ -558,6 +591,7 @@ export function createProductionFundingWaiter({ createClient = createPublicClien
 
 export function createCoordinatorRuntimeDependencies(config, dependencies = {}) {
   if (!config || typeof config !== "object" || !config.releaseRoot?.path || !config.operatorIdentity || !SHA40.test(config.repositorySha)) fail();
+  const abortSignal = validateAbortSignal(dependencies.abortSignal);
   const releaseIdentity =
     dependencies.releaseIdentity;
   if (
@@ -600,6 +634,16 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
     dependencies.writeLaunchManifest !== undefined &&
     typeof dependencies.writeLaunchManifest !== "function"
   ) fail();
+  const publicStager = dependencies.publicStager;
+  if (
+    publicStager !== undefined &&
+    (
+      publicStager === null ||
+      typeof publicStager !== "object" ||
+      Array.isArray(publicStager) ||
+      typeof publicStager.stageSnapshot !== "function"
+    )
+  ) fail();
   const transport = (dependencies.createTransport ?? createPinnedOperatorHttpsTransport)({ expectedFingerprint: config.tlsFingerprint, relayUrl: config.relayUrl, tlsCertificatePem: config.tlsCertificatePem });
   const artifactValidator = dependencies.validateArtifactWithFacts ?? validateRelayArtifactWithFacts;
   const verdictPublicationValidator = dependencies.validateVerdictPublication ?? validateVerdictPublication;
@@ -612,15 +656,20 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
   const now = dependencies.now ?? Date.now;
   const sleeper = dependencies.sleeper ?? ((ms) => new Promise((resolve_) => setTimeout(resolve_, ms)));
   if (typeof now !== "function" || typeof sleeper !== "function") fail();
+  const sleep = (delay) => abortSignal === undefined
+    ? sleeper(delay)
+    : abortableSleep(delay, abortSignal);
   const waitForRawEvent = async (client, release, { artifactDigest, kinds, role, subjectRun }) => {
     if (!Array.isArray(kinds) || kinds.length === 0 || !["payer", "payee"].includes(role) || !["release", "rehearsal", "stakeholder"].includes(subjectRun)) fail();
     const deadline = now() + COORDINATOR_FUNDING_DEADLINE_MS;
     for (;;) {
-      const events = await client.readEvents({ after: null, waitMs: 30_000 });
+      abortIfRequested(abortSignal);
+      const events = await client.readEvents({ after: null, signal: abortSignal, waitMs: 30_000 });
+      abortIfRequested(abortSignal);
       const matched = events.filter((event) => event.role === role && event.subjectRun === subjectRun && kinds.includes(event.kind) && (artifactDigest === undefined || event.artifactDigest === artifactDigest));
       if (matched.length === 1) return Object.freeze(matched[0]);
       if (matched.length > 1 || now() >= deadline) fail();
-      await sleeper(Math.min(COORDINATOR_FUNDING_INTERVAL_MS, Math.max(1, deadline - now())));
+      await sleep(Math.min(COORDINATOR_FUNDING_INTERVAL_MS, Math.max(1, deadline - now())));
     }
   };
   const immutable = async () => {
@@ -673,14 +722,46 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
       if (runDependencyCache.has(key)) return runDependencyCache.get(key);
       const client = clientFor(release); const watcherDescriptors = new Map(); const watcherControllers = new Map(); const watcherTasks = new Map(); const cached = new Map(); const verifierContexts = new Map(); let displayedFunding = false;
       const watcherOutput = dependencies.watcherOutput ?? ((line) => process.stdout.write(line));
+      const publicRunId = `run-${release.releaseId.slice("release-".length)}`;
+      const stagePublicWatcherSnapshot = async (subjectRun, snapshot) => {
+        if (publicStager === undefined || subjectRun !== "stakeholder") return;
+        const observedAtMs = now();
+        const projection = createAwsWatcherProjection(snapshot, {
+          observedAtMs,
+          releaseId: release.releaseId,
+          repositorySha: config.repositorySha,
+          sessionId: release.sessionId,
+          subjectRun,
+        });
+        const publicSnapshot = buildAwsWatcherPublicMonitorSnapshot(
+          projection,
+          {
+            nowMs: observedAtMs,
+            publishedAtMs: observedAtMs,
+            releaseId: release.releaseId,
+            repositorySha: config.repositorySha,
+            runId: publicRunId,
+            sessionId: release.sessionId,
+            staleAfterMs: 60_000,
+            subjectRun,
+          },
+        );
+        await publicStager.stageSnapshot({
+          completedAtMs: null,
+          nowMs: observedAtMs,
+          snapshot: publicSnapshot,
+          verifierPublicationValidated: false,
+        });
+      };
       const watcherLifecycle = createWatcherLifecycle({
         run: async (subjectRun, signal) => {
           const descriptor = watcherDescriptors.get(subjectRun); if (!descriptor) fail();
+          const combinedSignal = combinedAbortSignal(abortSignal, signal);
           let startedAt;
-          const watcherNow = () => { const value = now(); if (startedAt === undefined) startedAt = value; return signal?.aborted ? startedAt + COORDINATOR_FUNDING_DEADLINE_MS : value; };
-          const watcherSleep = (delay) => abortableSleep(delay, signal);
-          const client = (dependencies.createWatcherClient ?? (({ signal: externalSignal, token }) => createMcpClient({ fetchImpl: (url, init = {}) => { const signals = [externalSignal, init.signal].filter((value) => value !== undefined); return (dependencies.watcherFetch ?? globalThis.fetch)(url, { ...init, signal: signals.length === 1 ? signals[0] : AbortSignal.any(signals) }); }, maxAttempts: 1, token })))({ signal, token: config.clockchainToken });
-          return await (dependencies.watchBilateralSession ?? watchBilateralSession)({ advisory: { health: null, status: null }, canaries: [config.clockchainToken], client, descriptor, now: watcherNow, output: (snapshot) => { const line = watcherLine(snapshot, config.clockchainToken); watcherSnapshots.set(subjectRun, structuredClone(snapshot)); watcherOutput(line); }, signal, sleeper: watcherSleep, windowMs: COORDINATOR_FUNDING_DEADLINE_MS });
+          const watcherNow = () => { const value = now(); if (startedAt === undefined) startedAt = value; return combinedSignal?.aborted ? startedAt + COORDINATOR_FUNDING_DEADLINE_MS : value; };
+          const watcherSleep = (delay) => abortableSleep(delay, combinedSignal);
+          const client = (dependencies.createWatcherClient ?? (({ signal: externalSignal, token }) => createMcpClient({ fetchImpl: (url, init = {}) => { const signals = [externalSignal, init.signal].filter((value) => value !== undefined); return (dependencies.watcherFetch ?? globalThis.fetch)(url, { ...init, signal: signals.length === 1 ? signals[0] : AbortSignal.any(signals) }); }, maxAttempts: 1, token })))({ signal: combinedSignal, token: config.clockchainToken });
+          return await (dependencies.watchBilateralSession ?? watchBilateralSession)({ advisory: { health: null, status: null }, canaries: [config.clockchainToken], client, descriptor, now: watcherNow, output: async (snapshot) => { await stagePublicWatcherSnapshot(subjectRun, snapshot); const line = watcherLine(snapshot, config.clockchainToken); watcherSnapshots.set(subjectRun, structuredClone(snapshot)); watcherOutput(line); }, signal: combinedSignal, sleeper: watcherSleep, windowMs: COORDINATOR_FUNDING_DEADLINE_MS });
         },
       });
       const freshArtifact = async ({ artifactType, kinds, role, subjectRun }) => {
@@ -788,8 +869,8 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
         });
       };
       const runtimeDependencies = Object.freeze({
-        appendOperatorEvent: client.appendOperatorEvent, appendVerifiedEvent: client.appendVerifiedEvent, createVerifiedEvent: client.createVerifiedEvent, getArtifact: client.getArtifact, putArtifact: client.putArtifact, readEnrollmentSet: client.readEnrollmentSet, readEvents: client.readEvents, readSessionView: client.readSessionView, readVerifierPublication: client.readVerifierPublication,
-        readState: state.readState, writeState: state.writeState, resolveOperatorPublicKey: async () => config.operatorPublicKey, waitForFunding: dependencies.waitForFunding ?? createProductionFundingWaiter({ now, rpcUrl: config.rpcUrl, sleeper }), now, sleeper, displayAddresses: async (addresses) => { if (displayedFunding) fail(); displayedFunding = true; const bytes = await publishFundingAddresses(config.releaseRoot, addresses, { fs: fundingFileSystem(dependencies.fundingFileSystem), inspectAdmission: (publishedAddresses) => createFundingAdmissionInspector({ createClient: dependencies.createFundingAdmissionClient, rpcUrl: config.rpcUrl })(publishedAddresses) }); (dependencies.output ?? ((line) => process.stdout.write(line)))(bytes.toString("utf8")); }, createTransport: () => transport,
+        appendOperatorEvent: client.appendOperatorEvent, appendVerifiedEvent: client.appendVerifiedEvent, createVerifiedEvent: client.createVerifiedEvent, getArtifact: client.getArtifact, putArtifact: client.putArtifact, readEnrollmentSet: client.readEnrollmentSet, readEvents: (input) => client.readEvents(abortSignal === undefined ? input : { ...input, signal: abortSignal }), readSessionView: (input) => client.readSessionView(abortSignal === undefined ? input : { ...(input ?? {}), signal: abortSignal }), readVerifierPublication: client.readVerifierPublication,
+        readState: state.readState, writeState: state.writeState, resolveOperatorPublicKey: async () => config.operatorPublicKey, waitForFunding: dependencies.waitForFunding ?? createProductionFundingWaiter({ now, rpcUrl: config.rpcUrl, sleeper: sleep }), now, sleeper: sleep, displayAddresses: async (addresses) => { if (displayedFunding) fail(); displayedFunding = true; const bytes = await publishFundingAddresses(config.releaseRoot, addresses, { fs: fundingFileSystem(dependencies.fundingFileSystem), inspectAdmission: (publishedAddresses) => createFundingAdmissionInspector({ createClient: dependencies.createFundingAdmissionClient, rpcUrl: config.rpcUrl })(publishedAddresses) }); (dependencies.output ?? ((line) => process.stdout.write(line)))(bytes.toString("utf8")); }, createTransport: () => transport,
         launcher: async () => fail(), verifyMarkerCompleteVerdict: async () => fail(),
         // The coordinator owns lifecycle ordering; this runtime only validates a
         // bounded artifact snapshot and observes authenticated relay effects.
@@ -1041,13 +1122,13 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
           if (!Buffer.isBuffer(verdictBytes) || verdictBytes.length > 1_048_576) fail();
           let verdict; try { verdict = JSON.parse(verdictBytes.toString("utf8")); } catch { fail(); }
           if (verdict?.paymentMoved !== false || !Array.isArray(verdict.transitions) || verdict.transitions.length !== 3) fail();
-          const events = await client.readEvents({ after: null, waitMs: 0 });
+          const events = await client.readEvents({ after: null, signal: abortSignal, waitMs: 0 });
           const fact = (kind) => events.filter((event) => event.kind === kind && event.subjectRun === subjectRun).length === 1;
           if (!fact("PAYER_MANDATE_READY") || !fact("PAYMENT_REQUEST_READY") || !fact("PAYMENT_REQUEST_MATCHED")) fail();
           let watcher = watcherSnapshots.get(subjectRun);
           if (watcher?.state !== "ACKNOWLEDGED") {
-            const watcherClient = (dependencies.createWatcherClient ?? (({ token }) => createMcpClient({ maxAttempts: 1, token })))({ token: config.clockchainToken });
-            await (dependencies.watchBilateralSession ?? watchBilateralSession)({ advisory: { health: null, status: null }, canaries: [config.clockchainToken], client: watcherClient, descriptor: descriptorEnvelope.descriptor, now, output: (snapshot) => { watcher = structuredClone(snapshot); watcherSnapshots.set(subjectRun, watcher); }, sleeper, windowMs: 0 });
+            const watcherClient = (dependencies.createWatcherClient ?? (({ signal, token }) => createMcpClient({ fetchImpl: signal === undefined ? undefined : (url, init = {}) => { const signals = [signal, init.signal].filter((value) => value !== undefined); return (dependencies.watcherFetch ?? globalThis.fetch)(url, { ...init, signal: signals.length === 1 ? signals[0] : AbortSignal.any(signals) }); }, maxAttempts: 1, token })))({ signal: abortSignal, token: config.clockchainToken });
+            await (dependencies.watchBilateralSession ?? watchBilateralSession)({ advisory: { health: null, status: null }, canaries: [config.clockchainToken], client: watcherClient, descriptor: descriptorEnvelope.descriptor, now, output: (snapshot) => { watcher = structuredClone(snapshot); watcherSnapshots.set(subjectRun, watcher); }, signal: abortSignal, sleeper: sleep, windowMs: 0 });
           }
           if (watcher?.state !== "ACKNOWLEDGED" || watcher.terminal !== null || !Array.isArray(watcher.transitions) || watcher.transitions.length !== 3) fail();
           const nowMs = now();
@@ -1102,7 +1183,30 @@ export function createCoordinatorRuntimeDependencies(config, dependencies = {}) 
             watcherSnapshot: { anchors, descriptorDigest: context.descriptorDigest, packageDigests: context.packageDigests },
           };
           await assertRoot(config.releaseRoot);
-          return publishConsoleState(config.releaseRoot, state);
+          const consolePath = await publishConsoleState(config.releaseRoot, state);
+          if (publicStager !== undefined && subjectRun === "stakeholder") {
+            const projection = buildConsoleProjection(state);
+            const publicSnapshot = buildPublicMonitorSnapshot(
+              projection,
+              {
+                anchorExplorerUrls: projection.anchors.map(({ block }) => `https://sepolia.etherscan.io/block/${block}`),
+                nowMs,
+                payerMcpReady: true,
+                publishedAtMs: nowMs,
+                runId: publicRunId,
+                sourceObservedAtMs: projection.deadline.nowMs,
+                staleAfterMs: 60_000,
+                verifierPublicationValidated: true,
+              },
+            );
+            await publicStager.stageSnapshot({
+              completedAtMs: nowMs,
+              nowMs,
+              snapshot: publicSnapshot,
+              verifierPublicationValidated: true,
+            });
+          }
+          return consolePath;
         },
       });
       runDependencyCache.set(key, runtimeDependencies);
@@ -1118,6 +1222,7 @@ export async function loadOrCreateCoordinatorRelease(config, dependencies = {}) 
 }
 
 export async function runCoordinatorUntilComplete(config, dependencies = {}) {
+  const abortSignal = validateAbortSignal(dependencies.abortSignal);
   const runtime = dependencies.runtime ?? (dependencies.runCoordinator === undefined || dependencies.loadOrCreateRelease === undefined ? createCoordinatorRuntimeDependencies(config, dependencies) : null);
   const load = dependencies.loadOrCreateRelease ?? ((input) => loadOrCreateCoordinatorRelease(input, { ...dependencies, runtime })); const invoke = dependencies.runCoordinator ?? ((input) => runCoordinator({ release: input.release, releaseRoot: config.releaseRoot.path, dependencies: runtime.runDependencies(input.release) }));
   let release; let drainWatchers = async () => {};
@@ -1127,16 +1232,21 @@ export async function runCoordinatorUntilComplete(config, dependencies = {}) {
       const drain = runtime.runDependencies(release).drainWatchers;
       if (typeof drain === "function") drainWatchers = drain;
     }
+    abortIfRequested(abortSignal);
     const seen = new Set();
     for (let turns = 0; turns < 128; turns += 1) {
+      abortIfRequested(abortSignal);
       if (release?.state === "COMPLETE") {
-        const reconciled = await invoke({ release });
+        const reconciled = await invoke({ abortSignal, release });
+        abortIfRequested(abortSignal);
         if (!reconciled || reconciled.state !== "COMPLETE" || reconciled.paymentMoved !== false || (release.repositorySha !== undefined && reconciled.repositorySha !== release.repositorySha)) fail();
         return Object.freeze({ ...release, ...reconciled });
       }
       const fingerprint = (() => { try { return createHash("sha256").update(canonical(release)).digest("hex"); } catch { fail(); } })();
       if (!release || typeof release.state !== "string" || seen.has(fingerprint)) fail(); seen.add(fingerprint);
-      const next = await invoke({ release }); if (!next || next.paymentMoved !== false || typeof next.state !== "string" || next.state === "ABORTED") fail(); release = Object.freeze({ ...release, ...next });
+      const next = await invoke({ abortSignal, release });
+      abortIfRequested(abortSignal);
+      if (!next || next.paymentMoved !== false || typeof next.state !== "string" || next.state === "ABORTED") fail(); release = Object.freeze({ ...release, ...next });
     }
     fail();
   } finally { await drainWatchers(); }

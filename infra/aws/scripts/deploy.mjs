@@ -36,6 +36,10 @@ const SECRET_ARN =
   /^arn:aws(?:-[a-z]+)?:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]{1,512}$/;
 const PUBLIC_HOSTNAME =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const SSH_ED25519_PUBLIC_KEY =
+  /^ssh-ed25519 ([A-Za-z0-9+/]+={0,2})$/;
+const SSH_SHA256_FINGERPRINT =
+  /^SHA256:[A-Za-z0-9+/]{43}$/;
 
 function required(value, pattern, label) {
   if (
@@ -61,6 +65,50 @@ function validOperatorPublicKey(value) {
   );
 }
 
+function validTunnelHostKey(publicKey, fingerprint) {
+  if (
+    typeof publicKey !== "string" ||
+    typeof fingerprint !== "string" ||
+    !SSH_SHA256_FINGERPRINT.test(fingerprint)
+  ) {
+    return false;
+  }
+  const match =
+    SSH_ED25519_PUBLIC_KEY.exec(publicKey);
+  if (match === null) return false;
+  const blob = Buffer.from(match[1], "base64");
+  if (blob.toString("base64") !== match[1]) {
+    return false;
+  }
+  let offset = 0;
+  const readString = () => {
+    if (offset + 4 > blob.length) return null;
+    const length = blob.readUInt32BE(offset);
+    offset += 4;
+    if (offset + length > blob.length) {
+      return null;
+    }
+    const value = blob.subarray(
+      offset,
+      offset + length,
+    );
+    offset += length;
+    return value;
+  };
+  const algorithm = readString();
+  const key = readString();
+  return (
+    algorithm?.toString("ascii") ===
+      "ssh-ed25519" &&
+    key?.length === 32 &&
+    offset === blob.length &&
+    `SHA256:${createHash("sha256")
+      .update(blob)
+      .digest("base64")
+      .replace(/=+$/u, "")}` === fingerprint
+  );
+}
+
 export function createDeploymentPlan({
   account = DEFAULT_ACCOUNT,
   activateServices = false,
@@ -75,6 +123,8 @@ export function createDeploymentPlan({
   relayTlsSecretArn,
   sessionId,
   sourceTreeSha256,
+  tunnelHostKeyFingerprint,
+  tunnelHostPublicKey,
   tunnelImage,
 }) {
   if (typeof activateServices !== "boolean") {
@@ -131,6 +181,16 @@ export function createDeploymentPlan({
   if (!validOperatorPublicKey(operatorPublicKey)) {
     throw new Error(
       "Operator public key is invalid.",
+    );
+  }
+  if (
+    !validTunnelHostKey(
+      tunnelHostPublicKey,
+      tunnelHostKeyFingerprint,
+    )
+  ) {
+    throw new Error(
+      "Tunnel host public key and fingerprint must match.",
     );
   }
   required(
@@ -191,6 +251,8 @@ export function createDeploymentPlan({
       "ClockchainHandshake",
     ],
     tunnelImage,
+    tunnelHostKeyFingerprint,
+    tunnelHostPublicKey,
   };
 }
 
@@ -224,6 +286,10 @@ export function createDeploymentContexts(plan) {
     `operatorPublicKey=${plan.operatorPublicKey}`,
     "-c",
     `sourceTreeSha256=${plan.sourceTreeSha256}`,
+    "-c",
+    `tunnelHostKeyFingerprint=${plan.tunnelHostKeyFingerprint}`,
+    "-c",
+    `tunnelHostPublicKey=${plan.tunnelHostPublicKey}`,
   ];
 }
 
@@ -320,6 +386,10 @@ async function main() {
     process.env.OPERATOR_PUBLIC_KEY;
   const sourceTreeSha256 =
     process.env.SOURCE_TREE_SHA256;
+  const tunnelHostKeyFingerprint =
+    process.env.TUNNEL_HOST_KEY_FINGERPRINT;
+  const tunnelHostPublicKey =
+    process.env.TUNNEL_HOST_PUBLIC_KEY;
   const activateServicesInput =
     process.env.ACTIVATE_SERVICES;
   if (
@@ -352,6 +422,8 @@ async function main() {
     sessionId,
     operatorPublicKey,
     sourceTreeSha256,
+    tunnelHostKeyFingerprint,
+    tunnelHostPublicKey,
     tunnelImage,
   });
   const contexts = createDeploymentContexts(plan);

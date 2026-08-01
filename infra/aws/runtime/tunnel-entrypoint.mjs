@@ -11,14 +11,15 @@ import {
   rename,
   rm,
 } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
   main as tunnelMain,
 } from "../../../scripts/run-aws-tunnel-service.mjs";
 
-function required(key) {
-  const value = process.env[key];
+function required(env, key) {
+  const value = env[key];
   if (
     typeof value !== "string" ||
     value.length === 0 ||
@@ -31,11 +32,36 @@ function required(key) {
   return value;
 }
 
+export function validateTunnelRuntimeConfiguration(
+  env = process.env,
+) {
+  const healthPath = env.AWS_TUNNEL_HEALTH_PATH;
+  if (
+    typeof healthPath !== "string" ||
+    healthPath.length === 0 ||
+    healthPath.trim() !== healthPath ||
+    healthPath.includes("\0") ||
+    !isAbsolute(healthPath)
+  ) {
+    throw new Error(
+      "AWS tunnel entrypoint configuration invalid.",
+    );
+  }
+  return Object.freeze({
+    healthPath,
+    hostKeySecretArn: required(
+      env,
+      "TUNNEL_HOST_KEY_SECRET_ARN",
+    ),
+  });
+}
+
 export async function installHostKey({
   client = new SecretsManagerClient({}),
   path =
     "/run/clockchain/ssh_host_ed25519_key",
   secretArn = required(
+    process.env,
     "TUNNEL_HOST_KEY_SECRET_ARN",
   ),
 } = {}) {
@@ -80,8 +106,11 @@ export async function installHostKey({
 }
 
 export async function main() {
-  await installHostKey();
-  await tunnelMain();
+  const config = validateTunnelRuntimeConfiguration();
+  await installHostKey({
+    secretArn: config.hostKeySecretArn,
+  });
+  await tunnelMain(process.env);
 }
 
 if (

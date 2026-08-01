@@ -672,6 +672,24 @@ export function createAwsOperatorBootstrapAdapter(
               openBootstrap(active, target.role),
             persistTunnelGrant: async (grant) =>
               persistGrant(active, grant),
+            ...(typeof dependencies.publishApprovedPayer === "function"
+              ? {
+                  publishApprovedPayer: async ({
+                    claim,
+                    claimFingerprint,
+                    expiresAtMs,
+                  }) =>
+                    dependencies.publishApprovedPayer({
+                      claim,
+                      claimFingerprint,
+                      expiresAtMs,
+                      nowMs: nowMs(active),
+                      releaseId: active.releaseId,
+                      repositorySha: active.repositorySha,
+                      sessionId: active.sessionId,
+                    }),
+                }
+              : {}),
           });
         } catch (error) {
           sanitize(error);

@@ -172,6 +172,90 @@ test("coordinator runtime advances one core state at a time and rejects no progr
   }));
 });
 
+test("coordinator runtime validates and threads abort signals into the core loop", async () => {
+  const signal = new AbortController().signal;
+  let observed;
+  const result = await runCoordinatorUntilComplete(Object.freeze({}), {
+    abortSignal: signal,
+    loadOrCreateRelease: async () => ({ state: "BOOTSTRAPPING" }),
+    runCoordinator: async ({ abortSignal }) => {
+      observed = abortSignal;
+      return Object.freeze({
+        paymentMoved: false,
+        state: "COMPLETE",
+      });
+    },
+  });
+  assert.equal(result.state, "COMPLETE");
+  assert.equal(observed, signal);
+  await assert.rejects(
+    runCoordinatorUntilComplete(Object.freeze({}), {
+      abortSignal: {},
+      loadOrCreateRelease: async () => ({ state: "COMPLETE" }),
+      runCoordinator: async () => ({
+        paymentMoved: false,
+        state: "COMPLETE",
+      }),
+    }),
+    /Coordinator startup failed safely/,
+  );
+  const spoof = {
+    aborted: false,
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  Object.setPrototypeOf(spoof, AbortSignal.prototype);
+  await assert.rejects(
+    runCoordinatorUntilComplete(Object.freeze({}), {
+      abortSignal: spoof,
+      loadOrCreateRelease: async () => ({ state: "COMPLETE" }),
+      runCoordinator: async () => ({
+        paymentMoved: false,
+        state: "COMPLETE",
+      }),
+    }),
+    /Coordinator startup failed safely/,
+  );
+});
+
+test("coordinator runtime aborts before advancing the loop and drains watchers", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const calls = [];
+  await assert.rejects(
+    runCoordinatorUntilComplete(Object.freeze({}), {
+      abortSignal: controller.signal,
+      loadOrCreateRelease: async () => {
+        calls.push("load");
+        return {
+          releaseId: "release-a",
+          repositorySha: "a".repeat(40),
+          sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd",
+          state: "BOOTSTRAPPING",
+        };
+      },
+      runCoordinator: async () => {
+        calls.push("run");
+        return {
+          paymentMoved: false,
+          state: "COMPLETE",
+        };
+      },
+      runtime: {
+        runDependencies() {
+          return {
+            async drainWatchers() {
+              calls.push("drain");
+            },
+          };
+        },
+      },
+    }),
+    /Coordinator startup failed safely/,
+  );
+  assert.deepEqual(calls, ["load", "drain"]);
+});
+
 test("runtime derives stable, distinct descriptor session ids per run", () => {
   const release = { releaseId: "release-a", repositorySha: "a".repeat(40), sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd" };
   const rehearsal = deriveDescriptorSessionId({ ...release, subjectRun: "rehearsal" });
@@ -1120,13 +1204,16 @@ test("restarted aws verifier context drives console state from the attempt outpu
   const verdict = {
     paymentMoved: false,
     transitions: [
-      { blockHeight: "10", digest: "a".repeat(64), ledgerId: "sepolia" },
-      { blockHeight: "11", digest: "b".repeat(64), ledgerId: "sepolia" },
-      { blockHeight: "12", digest: "c".repeat(64), ledgerId: "sepolia" },
+      { blockHeight: "10", digest: "a".repeat(64), ledgerId: "00000000-0000-4000-8000-000000000001" },
+      { blockHeight: "11", digest: "b".repeat(64), ledgerId: "00000000-0000-4000-8000-000000000002" },
+      { blockHeight: "12", digest: "c".repeat(64), ledgerId: "00000000-0000-4000-8000-000000000003" },
     ],
   };
   const readerCalls = [];
+  const publicStages = [];
+  const readEventCalls = [];
   const validationCalls = [];
+  const abortSignal = new AbortController().signal;
   const runtime = createCoordinatorRuntimeDependencies({
     clockchainToken: "clockchain-token",
     clockchainTokenPath: tokenPath,
@@ -1142,6 +1229,7 @@ test("restarted aws verifier context drives console state from the attempt outpu
     tlsCertificatePem,
     tlsFingerprint: createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex"),
   }, {
+    abortSignal,
     createClient: () => ({
       getArtifact: async ({ artifactType, digest }) => {
         if (artifactType === "signed-descriptor" && digest === descriptorDigest) return descriptorBytes;
@@ -1149,11 +1237,14 @@ test("restarted aws verifier context drives console state from the attempt outpu
         if (artifactType === "payment-request" && digest === requestArtifactDigest) return requestBytes;
         return Buffer.from("{}\n");
       },
-      readEvents: async () => [
-        { artifactDigest: mandateArtifactDigest, kind: "PAYER_MANDATE_READY", role: "payer", subjectRun: "stakeholder" },
-        { artifactDigest: requestArtifactDigest, kind: "PAYMENT_REQUEST_READY", role: "payee", subjectRun: "stakeholder" },
-        { artifactDigest: null, kind: "PAYMENT_REQUEST_MATCHED", role: "payer", subjectRun: "stakeholder" },
-      ],
+      readEvents: async (input) => {
+        readEventCalls.push(input);
+        return [
+          { artifactDigest: mandateArtifactDigest, kind: "PAYER_MANDATE_READY", role: "payer", subjectRun: "stakeholder" },
+          { artifactDigest: requestArtifactDigest, kind: "PAYMENT_REQUEST_READY", role: "payee", subjectRun: "stakeholder" },
+          { artifactDigest: null, kind: "PAYMENT_REQUEST_MATCHED", role: "payer", subjectRun: "stakeholder" },
+        ];
+      },
     }),
     createTransport: () => ({}),
     now: () => 1_785_294_400_000,
@@ -1165,6 +1256,15 @@ test("restarted aws verifier context drives console state from the attempt outpu
           repositorySha: release.repositorySha,
           sourceTreeSha256: "1".repeat(64),
         };
+      },
+    },
+    publicStager: {
+      async stageSnapshot(input) {
+        assert.match(
+          await readFile(join(rootPath, "console-state.json"), "utf8"),
+          /"state":"STAKEHOLDER_VERIFIED"/,
+        );
+        publicStages.push(input);
       },
     },
     readVerifierVerdictBytes: async ({ outputDirectory }) => {
@@ -1195,9 +1295,9 @@ test("restarted aws verifier context drives console state from the attempt outpu
         state: "ACKNOWLEDGED",
         terminal: null,
         transitions: [
-          { blockHeight: "10", cardinality: "1", ledgerId: "sepolia", slot: "proposal", verified: true },
-          { blockHeight: "11", cardinality: "1", ledgerId: "sepolia", slot: "acceptance", verified: true },
-          { blockHeight: "12", cardinality: "1", ledgerId: "sepolia", slot: "acknowledgment", verified: true },
+          { blockHeight: "10", cardinality: "1", ledgerId: "00000000-0000-4000-8000-000000000001", slot: "proposal", verified: true },
+          { blockHeight: "11", cardinality: "1", ledgerId: "00000000-0000-4000-8000-000000000002", slot: "acceptance", verified: true },
+          { blockHeight: "12", cardinality: "1", ledgerId: "00000000-0000-4000-8000-000000000003", slot: "acknowledgment", verified: true },
         ],
       });
     },
@@ -1213,7 +1313,26 @@ test("restarted aws verifier context drives console state from the attempt outpu
     subjectRun: "stakeholder",
   });
   assert.deepEqual(readerCalls, [attemptRoot]);
+  assert.deepEqual(readEventCalls, [
+    { after: null, signal: abortSignal, waitMs: 30_000 },
+    { after: null, signal: abortSignal, waitMs: 30_000 },
+    { after: null, signal: abortSignal, waitMs: 0 },
+  ]);
   assert.deepEqual(validationCalls.map((call) => call.outputDirectory), [attemptRoot]);
+  assert.equal(publicStages.length, 1);
+  assert.equal(publicStages[0].completedAtMs, 1_785_294_400_000);
+  assert.equal(publicStages[0].nowMs, 1_785_294_400_000);
+  assert.equal(publicStages[0].verifierPublicationValidated, true);
+  assert.equal(publicStages[0].snapshot.runStatus, "VERIFIED");
+  assert.equal(publicStages[0].snapshot.verifier.status, "VERIFIED");
+  assert.deepEqual(
+    publicStages[0].snapshot.anchors.map(({ explorerUrl }) => explorerUrl),
+    [
+      "https://sepolia.etherscan.io/block/10",
+      "https://sepolia.etherscan.io/block/11",
+      "https://sepolia.etherscan.io/block/12",
+    ],
+  );
 
   const badContext = {
     ...context,
@@ -1395,6 +1514,314 @@ test("default MCP watcher fetch composes finalizer and timeout signals without r
   assert.equal(capturedSignals[0].aborted, true);
   assert.equal(capturedSignals[1].aborted, false);
   assert.equal(fetchSignal.aborted, true);
+});
+
+test("stakeholder watcher progress is staged publicly before raw watcher output continues", async () => {
+  const digest = "a".repeat(64);
+  const release = {
+    releaseId: "release-0123456789abcdef",
+    repositorySha: "b".repeat(40),
+    sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd",
+    state: "RUNNING",
+  };
+  const calls = [];
+  let finished;
+  const done = new Promise((resolve_) => {
+    finished = resolve_;
+  });
+  const config = {
+    clockchainToken: "token-canary",
+    operatorIdentity: {
+      keyId: "clockchain-demo-2026",
+      privateKeyPem: "private",
+      publicKey: "public",
+    },
+    operatorPublicKey: "public",
+    releaseRoot: { path: "/release" },
+    repositorySha: release.repositorySha,
+    relayUrl: "https://127.0.0.1:8443",
+    rpcUrl: "https://127.0.0.1/",
+    tlsCertificatePem: "certificate",
+    tlsFingerprint: "c".repeat(64),
+  };
+  const runtime = createCoordinatorRuntimeDependencies(config, {
+    createClient: () => ({
+      getArtifact: async () => Buffer.from("descriptor"),
+    }),
+    createTransport: () => ({}),
+    now: () => 2_000_000_000_000,
+    publicStager: {
+      async stageSnapshot(input) {
+        calls.push(["stage", input]);
+      },
+    },
+    validateArtifactWithFacts: async () => ({
+      facts: { descriptor: {} },
+    }),
+    watcherOutput: () => {
+      calls.push(["raw-output"]);
+    },
+    watchBilateralSession: async ({ output }) => {
+      await output({
+        paymentMoved: false,
+        state: "ACCEPTED",
+        terminal: null,
+        transitions: [
+          {
+            blockHeight: "101",
+            cardinality: "1",
+            ledgerId: "00000000-0000-4000-8000-000000000001",
+            slot: "proposal",
+            verified: true,
+          },
+          {
+            blockHeight: "102",
+            cardinality: "1",
+            ledgerId: "00000000-0000-4000-8000-000000000002",
+            slot: "acceptance",
+            verified: true,
+          },
+          {
+            blockHeight: null,
+            cardinality: "0",
+            ledgerId: null,
+            slot: "acknowledgment",
+            verified: false,
+          },
+        ],
+      });
+      calls.push(["watcher-continued"]);
+      finished();
+      return { paymentMoved: false, terminal: null };
+    },
+  });
+  const bridges = runtime.runDependencies(release);
+
+  await bridges.startWatcher({
+    descriptorDigest: digest,
+    subjectRun: "stakeholder",
+  });
+  await done;
+
+  assert.equal(calls[0][0], "stage");
+  assert.equal(calls[1][0], "raw-output");
+  assert.equal(calls[2][0], "watcher-continued");
+  assert.deepEqual(calls[0][1], {
+    completedAtMs: null,
+    nowMs: 2_000_000_000_000,
+    snapshot: {
+      anchors: [
+        {
+          block: "101",
+          explorerUrl: "https://sepolia.etherscan.io/block/101",
+          kind: "PROPOSED",
+          signerRole: "Payer",
+        },
+        {
+          block: "102",
+          explorerUrl: "https://sepolia.etherscan.io/block/102",
+          kind: "ACCEPTED",
+          signerRole: "Requestor",
+        },
+      ],
+      currentStep:
+        "The Payer is reviewing the Requestor acceptance before acknowledgment.",
+      funding: { status: "READY" },
+      mcp: { status: "READY" },
+      paymentMoved: false,
+      payer: { status: "READY" },
+      publishedAtMs: "2000000000000",
+      relay: { status: "READY" },
+      requestor: { status: "READY" },
+      runId: "run-0123456789abcdef",
+      runStatus: "RUNNING",
+      schema: "clockchain.bilateral-public-monitor/v2",
+      staleAfterMs: 60_000,
+      verifier: { status: "NOT_STARTED" },
+    },
+    verifierPublicationValidated: false,
+  });
+});
+
+test("rehearsal watcher progress remains private even when a public stager exists", async () => {
+  const release = {
+    releaseId: "release-0123456789abcdef",
+    repositorySha: "b".repeat(40),
+    sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd",
+    state: "RUNNING",
+  };
+  const calls = [];
+  let finished;
+  const done = new Promise((resolve_) => {
+    finished = resolve_;
+  });
+  const runtime = createCoordinatorRuntimeDependencies({
+    clockchainToken: "token-canary",
+    operatorIdentity: {
+      keyId: "clockchain-demo-2026",
+      privateKeyPem: "private",
+      publicKey: "public",
+    },
+    operatorPublicKey: "public",
+    releaseRoot: { path: "/release" },
+    repositorySha: release.repositorySha,
+    relayUrl: "https://127.0.0.1:8443",
+    rpcUrl: "https://127.0.0.1/",
+    tlsCertificatePem: "certificate",
+    tlsFingerprint: "c".repeat(64),
+  }, {
+    createClient: () => ({
+      getArtifact: async () => Buffer.from("descriptor"),
+    }),
+    createTransport: () => ({}),
+    now: () => 2_000_000_000_000,
+    publicStager: {
+      async stageSnapshot(input) {
+        calls.push(["stage", input]);
+      },
+    },
+    validateArtifactWithFacts: async () => ({
+      facts: { descriptor: {} },
+    }),
+    watcherOutput: () => {
+      calls.push(["raw-output"]);
+    },
+    watchBilateralSession: async ({ output }) => {
+      await output({
+        paymentMoved: false,
+        state: "PROPOSED",
+        terminal: null,
+        transitions: [
+          {
+            blockHeight: "101",
+            cardinality: "1",
+            ledgerId: "00000000-0000-4000-8000-000000000001",
+            slot: "proposal",
+            verified: true,
+          },
+          {
+            blockHeight: null,
+            cardinality: "0",
+            ledgerId: null,
+            slot: "acceptance",
+            verified: false,
+          },
+          {
+            blockHeight: null,
+            cardinality: "0",
+            ledgerId: null,
+            slot: "acknowledgment",
+            verified: false,
+          },
+        ],
+      });
+      finished();
+      return { paymentMoved: false, terminal: null };
+    },
+  });
+
+  await runtime.runDependencies(release).startWatcher({
+    descriptorDigest: "a".repeat(64),
+    subjectRun: "rehearsal",
+  });
+  await done;
+
+  assert.deepEqual(calls, [["raw-output"]]);
+});
+
+test("public staging rejection fails closed before raw watcher output is emitted", async () => {
+  const release = {
+    releaseId: "release-0123456789abcdef",
+    repositorySha: "b".repeat(40),
+    sessionId: "8f953393-86d0-4f99-9d6a-102f525fbecd",
+    state: "RUNNING",
+  };
+  let stageAttempted;
+  const staged = new Promise((resolve_) => {
+    stageAttempted = resolve_;
+  });
+  let rawOutputCalled = false;
+  const runtime = createCoordinatorRuntimeDependencies({
+    clockchainToken: "token-canary",
+    operatorIdentity: {
+      keyId: "clockchain-demo-2026",
+      privateKeyPem: "private",
+      publicKey: "public",
+    },
+    operatorPublicKey: "public",
+    releaseRoot: { path: "/release" },
+    repositorySha: release.repositorySha,
+    relayUrl: "https://127.0.0.1:8443",
+    rpcUrl: "https://127.0.0.1/",
+    tlsCertificatePem: "certificate",
+    tlsFingerprint: "c".repeat(64),
+  }, {
+    createClient: () => ({
+      getArtifact: async () => Buffer.from("descriptor"),
+    }),
+    createTransport: () => ({}),
+    now: () => 2_000_000_000_000,
+    publicStager: {
+      async stageSnapshot() {
+        stageAttempted();
+        throw new Error("stage rejected");
+      },
+    },
+    validateArtifactWithFacts: async () => ({
+      facts: { descriptor: {} },
+    }),
+    watcherOutput: () => {
+      rawOutputCalled = true;
+    },
+    watchBilateralSession: async ({ output }) => {
+      await output({
+        paymentMoved: false,
+        state: "PROPOSED",
+        terminal: null,
+        transitions: [
+          {
+            blockHeight: "101",
+            cardinality: "1",
+            ledgerId: "00000000-0000-4000-8000-000000000001",
+            slot: "proposal",
+            verified: true,
+          },
+          {
+            blockHeight: null,
+            cardinality: "0",
+            ledgerId: null,
+            slot: "acceptance",
+            verified: false,
+          },
+          {
+            blockHeight: null,
+            cardinality: "0",
+            ledgerId: null,
+            slot: "acknowledgment",
+            verified: false,
+          },
+        ],
+      });
+      return { paymentMoved: false, terminal: null };
+    },
+  });
+  const bridges = runtime.runDependencies(release);
+
+  await bridges.startWatcher({
+    descriptorDigest: "a".repeat(64),
+    subjectRun: "stakeholder",
+  });
+  await staged;
+  await new Promise((resolve_) => setImmediate(resolve_));
+
+  assert.equal(rawOutputCalled, false);
+  await assert.rejects(
+    bridges.waitForRoleStarted({
+      role: "payer",
+      subjectRun: "stakeholder",
+    }),
+    /Coordinator startup failed safely/,
+  );
 });
 
 test("pinned descriptor envelope requires the exact Git operator and derived run binding", () => {

@@ -83,6 +83,7 @@ const PRODUCTION_OPERATOR_KEYS = Object.freeze([
 ]);
 const BOOTSTRAP_KEYS = Object.freeze([
   "abortMarkerPath",
+  "approvedPayerPublicPath",
   "bootstrapBrokerCapabilitySecretArn",
   "bootstrapBrokerUrl",
   "bootstrapStatePath",
@@ -330,6 +331,8 @@ function validateProductionOperator(value) {
     operator.bootstrap,
     BOOTSTRAP_KEYS,
   );
+  const approvedPayerPublicPath =
+    `/var/lib/clockchain/approved-payer/releases/${base.releaseId}/approved-payer.json`;
   if (
     !SECRET_ARN.test(
       bootstrap.bootstrapBrokerCapabilitySecretArn,
@@ -348,6 +351,12 @@ function validateProductionOperator(value) {
     "tunnelGrantPath",
   ]) {
     absolutePath(bootstrap[key]);
+  }
+  if (
+    bootstrap.approvedPayerPublicPath !==
+    approvedPayerPublicPath
+  ) {
+    fail();
   }
   const children = exact(operator.children, [
     "abort",
@@ -409,6 +418,7 @@ function validateProductionOperator(value) {
     "containerName",
     "operatorKeyId",
     "operatorKeySecretArn",
+    "publicStaging",
     "relayUrl",
     "rpcSecretArn",
     "securityGroupId",
@@ -434,9 +444,35 @@ function validateProductionOperator(value) {
     coordinator.tlsCertificatePem,
     coordinator.tlsFingerprint,
   );
+  const coordinatorRuntime =
+    buildCoordinatorRuntimeInput({
+      clockchainTokenSecretArn:
+        coordinator.clockchainTokenSecretArn,
+      operatorKeyId:
+        coordinator.operatorKeyId,
+      operatorKeySecretArn:
+        coordinator.operatorKeySecretArn,
+      paymentMoved: false,
+      publicStaging:
+        coordinator.publicStaging,
+      releaseId: base.releaseId,
+      releaseRoot:
+        `/var/lib/clockchain/operator/releases/${base.releaseId}`,
+      relayUrl: coordinator.relayUrl,
+      repositorySha: base.repositorySha,
+      rpcSecretArn: coordinator.rpcSecretArn,
+      sessionId: base.sessionId,
+      tlsCertificatePem:
+        coordinator.tlsCertificatePem,
+      tlsFingerprint:
+        coordinator.tlsFingerprint,
+    });
   return Object.freeze({
     ...base,
-    bootstrap: Object.freeze({ ...bootstrap }),
+    bootstrap: Object.freeze({
+      ...bootstrap,
+      approvedPayerPublicPath,
+    }),
     children: Object.freeze({
       abort: taskConfig(children.abort),
       bootstrapApproval: taskConfig(
@@ -477,6 +513,9 @@ function validateProductionOperator(value) {
         coordinator.operatorKeyId,
       operatorKeySecretArn:
         coordinator.operatorKeySecretArn,
+      publicStaging:
+        coordinatorRuntime.coordinator
+          .publicStaging,
       relayUrl: coordinator.relayUrl,
       rpcSecretArn: coordinator.rpcSecretArn,
       tlsCertificatePem:
@@ -528,8 +567,8 @@ function oneShotRuntimeInput(key, value) {
 
 function clientToken(childTask, action, input) {
   return Object.freeze({
-    action,
     childTask,
+    action,
     fingerprint: createHash("sha256")
       .update(
         JSON.stringify({
@@ -679,6 +718,9 @@ function createProductionBuildTransitions({
                 {
                   claimFingerprint:
                     input.claimFingerprint,
+                  approvedPayerPublicPath:
+                    operator.bootstrap
+                      .approvedPayerPublicPath,
                   operatorKeySecretArn:
                     operator.bootstrap
                       .operatorKeySecretArn,
@@ -777,6 +819,9 @@ function createProductionBuildTransitions({
                         operator.coordinator
                           .operatorKeySecretArn,
                       paymentMoved: false,
+                      publicStaging:
+                        operator.coordinator
+                          .publicStaging,
                       releaseId: input.releaseId,
                       releaseRoot:
                         `/var/lib/clockchain/operator/releases/${input.releaseId}`,

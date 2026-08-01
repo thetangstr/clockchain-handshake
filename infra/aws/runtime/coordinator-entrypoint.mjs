@@ -11,6 +11,8 @@ import {
 } from "node:crypto";
 import {
   chmod,
+  lstat,
+  mkdir,
   mkdtemp,
   rm,
   rmdir,
@@ -27,16 +29,34 @@ import {
   join,
   normalize,
 } from "node:path";
+import {
+  setTimeout as delay,
+} from "node:timers/promises";
 import { types } from "node:util";
 
 import {
   main as coordinatorMain,
 } from "../../../bin/handshake-coordinator.mjs";
 import {
+  readApprovedPayerPublicProjection,
+} from "../../../src/bilateral/aws/approved-payer-public.mjs";
+import {
+  createAwsPublicStager,
+} from "../../../src/bilateral/aws/public-staging.mjs";
+import {
+  readTunnelHealthProjection,
+} from "../../../src/bilateral/aws/tunnel-health.mjs";
+import {
+  buildUnavailablePublicMonitorSnapshot,
+} from "../../../src/bilateral/coordination/public-monitor.mjs";
+import {
   installPrivateFile,
   parseRuntimeInput,
   readSecretString,
 } from "./runtime-input.mjs";
+import {
+  sshEd25519Fingerprint,
+} from "../../../scripts/publish-payer-bootstrap-discovery.mjs";
 import {
   validatePublicAddress,
 } from "../../../src/bilateral/network-endpoint.mjs";
@@ -45,6 +65,7 @@ const COORDINATOR_INPUT_KEYS = Object.freeze([
   "clockchainTokenSecretArn",
   "operatorKeyId",
   "operatorKeySecretArn",
+  "publicStaging",
   "releaseIdentity",
   "releaseRoot",
   "relayUrl",
@@ -57,10 +78,35 @@ const RELEASE_IDENTITY_KEYS = Object.freeze([
   "releaseId",
   "sessionId",
 ]);
+const PUBLIC_STAGING_KEYS = Object.freeze([
+  "approvedPayerPublicPath",
+  "bootstrapPayerClaimUrl",
+  "imageDigest",
+  "paths",
+  "publicBaseUrl",
+  "publicMcpHostname",
+  "publicMcpUrl",
+  "tunnelHealthPath",
+  "tunnelHostKeyFingerprint",
+  "tunnelHostPublicKey",
+]);
+const PUBLIC_STAGING_PATH_KEYS = Object.freeze([
+  "certificate",
+  "gate",
+  "input",
+  "payer",
+  "requestor",
+]);
 const OPERATOR_ROOT =
   "/var/lib/clockchain/operator";
+const PUBLIC_ROOT =
+  "/var/lib/clockchain/public";
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const FINGERPRINT = /^[0-9a-f]{64}$/;
+const IMAGE =
+  /^[0-9]{12}\.dkr\.ecr\.[a-z]{2}-[a-z]+-[1-9]\.amazonaws\.com\/[a-z0-9][a-z0-9._/-]{0,254}@sha256:[0-9a-f]{64}$/;
+const HOST =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const OPERATOR_KEY_ID =
   /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const RELEASE = /^release-[0-9a-f]{16}$/;
@@ -70,6 +116,8 @@ const SESSION =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA40 = /^[0-9a-f]{40}$/;
 const TOKEN = /^[\x20-\x7e]{1,4096}$/;
+const SSH_SHA256_FINGERPRINT =
+  /^SHA256:[A-Za-z0-9+/]{43}$/;
 const RESERVED_DNS_SUFFIXES = Object.freeze([
   "invalid",
   "test",
@@ -196,6 +244,36 @@ async function defaultCreateTempDir(prefix) {
   return path;
 }
 
+async function defaultCreatePublicReleaseRoot(path) {
+  const created = await mkdir(path, {
+    mode: 0o700,
+    recursive: true,
+  });
+  let stats = await lstat(path);
+  if (
+    !stats.isDirectory() ||
+    stats.isSymbolicLink()
+  ) {
+    fail();
+  }
+  if ((stats.mode & 0o777) !== 0o700) {
+    if (created === undefined) fail();
+    await chmod(path, 0o700);
+    stats = await lstat(path);
+    if (
+      !stats.isDirectory() ||
+      stats.isSymbolicLink() ||
+      (stats.mode & 0o777) !== 0o700
+    ) {
+      fail();
+    }
+  }
+}
+
+function defaultSleeper(ms, { signal } = {}) {
+  return delay(ms, undefined, { signal });
+}
+
 function validateScratchDir(path) {
   if (
     typeof path !== "string" ||
@@ -275,6 +353,24 @@ function validRpcUrl(value) {
   }
 }
 
+function validPublicUrl(value, expectedPath) {
+  try {
+    const url = new URL(value);
+    return (
+      url.href === value &&
+      url.protocol === "https:" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.pathname === expectedPath &&
+      url.search === "" &&
+      url.hash === "" &&
+      !reservedHostname(url.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function validateReleaseIdentity(value) {
   const releaseIdentity = exact(
     value,
@@ -293,6 +389,106 @@ function validateReleaseIdentity(value) {
   return Object.freeze({
     releaseId: releaseIdentity.releaseId,
     sessionId: releaseIdentity.sessionId,
+  });
+}
+
+function exactPath(value, expected) {
+  const path = normalizedAbsolute(value);
+  if (path !== expected) fail();
+  return path;
+}
+
+function validatePublicStaging(value, scope) {
+  const input = exact(value, PUBLIC_STAGING_KEYS);
+  const paths = exact(
+    input.paths,
+    PUBLIC_STAGING_PATH_KEYS,
+  );
+  let bootstrapUrl;
+  let baseUrl;
+  let mcpUrl;
+  try {
+    bootstrapUrl = new URL(
+      input.bootstrapPayerClaimUrl,
+    );
+    baseUrl = new URL(input.publicBaseUrl);
+    mcpUrl = new URL(input.publicMcpUrl);
+  } catch {
+    fail();
+  }
+  const publicRoot =
+    `${PUBLIC_ROOT}/releases/${scope.releaseId}`;
+  if (
+    !validPublicUrl(
+      input.bootstrapPayerClaimUrl,
+      "/v1/payer-claims",
+    ) ||
+    bootstrapUrl.port !== "" ||
+    !IMAGE.test(input.imageDigest) ||
+    !validPublicUrl(input.publicBaseUrl, "/") ||
+    baseUrl.port !== "" ||
+    !validPublicUrl(input.publicMcpUrl, "/mcp") ||
+    mcpUrl.port !== "9443" ||
+    input.publicMcpHostname !== mcpUrl.hostname ||
+    !HOST.test(input.publicMcpHostname) ||
+    reservedHostname(input.publicMcpHostname) ||
+    !SSH_SHA256_FINGERPRINT.test(
+      input.tunnelHostKeyFingerprint,
+    ) ||
+    sshEd25519Fingerprint(
+      input.tunnelHostPublicKey,
+    ) !== input.tunnelHostKeyFingerprint
+  ) {
+    fail();
+  }
+  const checkedPaths = Object.freeze({
+    certificate: exactPath(
+      paths.certificate,
+      `${publicRoot}/payer-mcp.crt`,
+    ),
+    gate: exactPath(
+      paths.gate,
+      `${publicRoot}/publication-gate.json`,
+    ),
+    input: exactPath(
+      paths.input,
+      `${publicRoot}/publisher-input.json`,
+    ),
+    payer: exactPath(
+      paths.payer,
+      `${publicRoot}/payer.json`,
+    ),
+    requestor: exactPath(
+      paths.requestor,
+      `${publicRoot}/requestor.json`,
+    ),
+  });
+  if (
+    new Set(Object.values(checkedPaths)).size !==
+    PUBLIC_STAGING_PATH_KEYS.length
+  ) {
+    fail();
+  }
+  return Object.freeze({
+    approvedPayerPublicPath: exactPath(
+      input.approvedPayerPublicPath,
+      `/var/lib/clockchain/approved-payer/releases/${scope.releaseId}/approved-payer.json`,
+    ),
+    bootstrapPayerClaimUrl: bootstrapUrl.href,
+    imageDigest: input.imageDigest,
+    paths: checkedPaths,
+    publicBaseUrl: baseUrl.href,
+    publicMcpHostname: input.publicMcpHostname,
+    publicMcpUrl: mcpUrl.href,
+    releaseRoot: publicRoot,
+    tunnelHealthPath: exactPath(
+      input.tunnelHealthPath,
+      `/var/lib/clockchain/tunnel-health/releases/${scope.releaseId}/tunnel-health.json`,
+    ),
+    tunnelHostKeyFingerprint:
+      input.tunnelHostKeyFingerprint,
+    tunnelHostPublicKey:
+      input.tunnelHostPublicKey,
   });
 }
 
@@ -345,6 +541,10 @@ function validateCoordinatorInput(value) {
       coordinator.tlsFingerprint,
     ),
     tlsFingerprint: coordinator.tlsFingerprint,
+    publicStaging: validatePublicStaging(
+      coordinator.publicStaging,
+      releaseIdentity,
+    ),
   });
 }
 
@@ -378,21 +578,139 @@ function validOperatorPrivateKey(value) {
   }
 }
 
+function publicStagerConfig(coordinator, operatorPrivateKey) {
+  const staging = coordinator.publicStaging;
+  return Object.freeze({
+    imageDigest: staging.imageDigest,
+    operatorKeyId: coordinator.operatorKeyId,
+    operatorPrivateKey,
+    paths: staging.paths,
+    payerClaimUrl: staging.bootstrapPayerClaimUrl,
+    publicBaseUrl: staging.publicBaseUrl,
+    publicMcpHostname: staging.publicMcpHostname,
+    publicMcpUrl: staging.publicMcpUrl,
+    releaseId: coordinator.releaseIdentity.releaseId,
+    repositorySha: coordinator.repositorySha,
+    sessionId: coordinator.releaseIdentity.sessionId,
+    tunnelHost: staging.publicMcpHostname,
+    tunnelHostPublicKey:
+      staging.tunnelHostPublicKey,
+    tunnelHostKeyFingerprint:
+      staging.tunnelHostKeyFingerprint,
+  });
+}
+
+function initialPublicSnapshot(coordinator, nowMs) {
+  if (!Number.isSafeInteger(nowMs + 600_000)) {
+    fail();
+  }
+  return buildUnavailablePublicMonitorSnapshot({
+    publishedAtMs: nowMs,
+    runId: `run-${coordinator.releaseIdentity.releaseId.slice("release-".length)}`,
+    staleAfterMs: 60_000,
+  });
+}
+
+function validateReadyEvidence({
+  approvedPayer,
+  coordinator,
+  nowMs,
+  tunnelHealth,
+}) {
+  if (
+    approvedPayer === null ||
+    tunnelHealth === null ||
+    approvedPayer.paymentMoved !== false ||
+    tunnelHealth.paymentMoved !== false ||
+    approvedPayer.releaseId !== coordinator.releaseIdentity.releaseId ||
+    tunnelHealth.releaseId !== coordinator.releaseIdentity.releaseId ||
+    approvedPayer.repositorySha !== coordinator.repositorySha ||
+    tunnelHealth.repositorySha !== coordinator.repositorySha ||
+    approvedPayer.sessionId !== coordinator.releaseIdentity.sessionId ||
+    tunnelHealth.sessionId !== coordinator.releaseIdentity.sessionId ||
+    approvedPayer.status !== "APPROVED" ||
+    tunnelHealth.status !== "READY" ||
+    tunnelHealth.claimFingerprint !== approvedPayer.claimFingerprint ||
+    tunnelHealth.mcpTlsFingerprint !== approvedPayer.certificateFingerprint ||
+    BigInt(approvedPayer.expiresAtMs) <= BigInt(nowMs) ||
+    BigInt(tunnelHealth.expiresAtMs) <= BigInt(nowMs)
+  ) {
+    fail();
+  }
+}
+
+async function pollPayerReadiness({
+  approvedPayerReader,
+  coordinator,
+  now,
+  publicStager,
+  signal,
+  sleeper,
+  tunnelHealthReader,
+}) {
+  const start = now();
+  if (!Number.isSafeInteger(start) || start < 0) {
+    fail();
+  }
+  for (let attempt = 0; attempt < 601; attempt += 1) {
+    if (signal.aborted) return false;
+    const approvedPayer = await approvedPayerReader(
+      coordinator.publicStaging.approvedPayerPublicPath,
+    );
+    const tunnelHealth = await tunnelHealthReader(
+      coordinator.publicStaging.tunnelHealthPath,
+    );
+    if (approvedPayer !== null || tunnelHealth !== null) {
+      if (approvedPayer === null || tunnelHealth === null) {
+        fail();
+      }
+      const nowMs = now();
+      validateReadyEvidence({
+        approvedPayer,
+        coordinator,
+        nowMs,
+        tunnelHealth,
+      });
+      await publicStager.stagePayerReady({
+        approvedPayer,
+        nowMs,
+        tunnelHealth,
+      });
+      return true;
+    }
+    if (now() - start >= 600_000) break;
+    await sleeper(1000, { signal });
+  }
+  fail();
+}
+
 export async function main({
+  approvedPayerReader = readApprovedPayerPublicProjection,
   client = new SecretsManagerClient({}),
+  createPublicReleaseRoot = defaultCreatePublicReleaseRoot,
   createTempDir = defaultCreateTempDir,
   env = process.env,
+  now = Date.now,
+  publicStagerFactory = createAwsPublicStager,
   removeDir = rmdir,
   removeFile = (path) => rm(path, { force: true }),
   run = coordinatorMain,
+  sleeper = defaultSleeper,
+  tunnelHealthReader = readTunnelHealthProjection,
 } = {}) {
   let failure;
   let operatorKeyPath;
+  let pollPromise;
   let result;
   let rpcUrlFile;
   let scratchDir;
   let tlsCertificatePath;
   let tokenPath;
+  let pollAbort;
+  let publicStager;
+  let runAbort;
+  let runPromise;
+  let stageStarted = false;
   try {
     const input = exact(parseRuntimeInput(env), [
       "coordinator",
@@ -407,10 +725,16 @@ export async function main({
       client === null ||
       typeof client !== "object" ||
       typeof client.send !== "function" ||
+      typeof approvedPayerReader !== "function" ||
+      typeof createPublicReleaseRoot !== "function" ||
       typeof createTempDir !== "function" ||
+      typeof now !== "function" ||
+      typeof publicStagerFactory !== "function" ||
       typeof removeDir !== "function" ||
       typeof removeFile !== "function" ||
-      typeof run !== "function"
+      typeof run !== "function" ||
+      typeof sleeper !== "function" ||
+      typeof tunnelHealthReader !== "function"
     ) {
       fail();
     }
@@ -439,6 +763,44 @@ export async function main({
       secretArn: coordinator.rpcSecretArn,
       validate: validRpcUrl,
     });
+    const operatorPrivateKeyObject =
+      createPrivateKey(operatorPrivateKey);
+    await createPublicReleaseRoot(
+      coordinator.publicStaging.releaseRoot,
+    );
+    publicStager = publicStagerFactory(
+      publicStagerConfig(
+        coordinator,
+        operatorPrivateKeyObject,
+      ),
+    );
+    if (
+      publicStager === null ||
+      typeof publicStager !== "object" ||
+      typeof publicStager.close !== "function" ||
+      typeof publicStager.stagePayerReady !== "function" ||
+      typeof publicStager.stageStart !== "function" ||
+      typeof publicStager.stageTerminalFailure !== "function"
+    ) {
+      fail();
+    }
+    const currentNow = now();
+    if (
+      !Number.isSafeInteger(currentNow) ||
+      currentNow < 0 ||
+      !Number.isSafeInteger(currentNow + 600_000)
+    ) {
+      fail();
+    }
+    await publicStager.stageStart({
+      expiresAtMs: String(currentNow + 600_000),
+      nowMs: currentNow,
+      snapshot: initialPublicSnapshot(
+        coordinator,
+        currentNow,
+      ),
+    });
+    stageStarted = true;
     scratchDir = validateScratchDir(
       await createTempDir(
         join(tmpdir(), "clockchain-coordinator-"),
@@ -496,16 +858,81 @@ export async function main({
       "--tls-fingerprint",
       coordinator.tlsFingerprint,
     ];
-    result = await run(argv, {
-      releaseIdentity:
-        coordinator.releaseIdentity,
+    pollAbort = new AbortController();
+    pollPromise = pollPayerReadiness({
+      approvedPayerReader,
+      coordinator,
+      now,
+      publicStager,
+      signal: pollAbort.signal,
+      sleeper,
+      tunnelHealthReader,
     });
+    runAbort = new AbortController();
+    runPromise = Promise.resolve(
+      run(argv, {
+        abortSignal: runAbort.signal,
+        releaseIdentity:
+          coordinator.releaseIdentity,
+        publicStager,
+      }),
+    );
+    const first = await Promise.race([
+      runPromise.then((value) => ({
+        type: "run",
+        value,
+      })),
+      pollPromise.then((value) => ({
+        type: "poll",
+        value,
+      })),
+    ]);
+    if (first.type === "run") {
+      result = first.value;
+      if (result !== 0) {
+        fail();
+      }
+      await pollPromise;
+    } else {
+      result = await runPromise;
+    }
     if (result !== 0) {
       fail();
     }
   } catch (error) {
+    runAbort?.abort();
+    if (runPromise !== undefined) {
+      try {
+        await runPromise;
+      } catch {}
+    }
+    pollAbort?.abort();
+    if (pollPromise !== undefined) {
+      try {
+        await pollPromise;
+      } catch {}
+    }
     failure = error;
   } finally {
+    pollAbort?.abort();
+    if (
+      failure !== undefined &&
+      publicStager !== undefined &&
+      stageStarted
+    ) {
+      try {
+        await publicStager.stageTerminalFailure({
+          nowMs: now(),
+        });
+      } catch {}
+    }
+    if (publicStager !== undefined) {
+      try {
+        await publicStager.close();
+      } catch (error) {
+        failure ??= error;
+      }
+    }
     if (scratchDir !== undefined) {
       for (const path of [
         tokenPath,

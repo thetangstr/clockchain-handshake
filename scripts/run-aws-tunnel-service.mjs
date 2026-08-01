@@ -26,6 +26,9 @@ import {
   tombstoneTunnelGrant,
   validateTunnelGrantRecord,
 } from "../src/bilateral/aws/tunnel-grant.mjs";
+import {
+  writeTunnelHealthProjection,
+} from "../src/bilateral/aws/tunnel-health.mjs";
 
 const ACTIVE_SCHEMA =
   "clockchain.payer-tunnel-grant/v1";
@@ -281,6 +284,7 @@ function healthServer({ host, port, readHealth }) {
 }
 
 export function createAwsTunnelService({
+  healthProjectionPath,
   healthHost = "0.0.0.0",
   healthPort = 8080,
   logger = console,
@@ -299,6 +303,10 @@ export function createAwsTunnelService({
     typeof stateRoot !== "string" ||
     !isAbsolute(stateRoot) ||
     stateRoot.includes("\0") ||
+    (healthProjectionPath !== undefined &&
+      (typeof healthProjectionPath !== "string" ||
+        !isAbsolute(healthProjectionPath) ||
+        healthProjectionPath.includes("\0"))) ||
     typeof healthHost !== "string" ||
     !Number.isSafeInteger(healthPort) ||
     healthPort < 0 ||
@@ -334,6 +342,46 @@ export function createAwsTunnelService({
     readHealth: () => currentHealth,
   });
 
+  function currentTimestamp() {
+    const value = nowMs();
+    if (
+      !Number.isSafeInteger(value) ||
+      value < 0
+    ) {
+      fail();
+    }
+    return value;
+  }
+
+  async function persistHealth(status, grant, observedAtMs) {
+    if (healthProjectionPath === undefined) return;
+    const expiresAtMs =
+      grant?.expiresAtMs ?? String(observedAtMs);
+    await writeTunnelHealthProjection(
+      healthProjectionPath,
+      {
+        claimFingerprint:
+          grant?.claimFingerprint ?? null,
+        expiresAtMs,
+        mcpTlsFingerprint:
+          grant?.claim?.mcpTlsFingerprint ?? null,
+        observedAtMs,
+        paymentMoved: false,
+        releaseId: grant?.claim?.releaseId ??
+          grant?.releaseId ??
+          null,
+        repositorySha:
+          grant?.claim?.repositorySha ??
+          grant?.repositorySha ??
+          null,
+        sessionId: grant?.claim?.sessionId ??
+          grant?.sessionId ??
+          null,
+        status,
+      },
+    );
+  }
+
   async function stopProcess() {
     currentHealth = UNHEALTHY;
     if (processStarted) {
@@ -359,6 +407,7 @@ export function createAwsTunnelService({
   async function reconcile() {
     try {
       currentHealth = UNHEALTHY;
+      const observedAtMs = currentTimestamp();
       const abortMarker = await readAbortMarker();
       if (abortMarker !== null) {
         if (
@@ -372,18 +421,33 @@ export function createAwsTunnelService({
         ) {
           fail();
         }
+        await persistHealth(
+          "ABORTED",
+          activeGrant,
+          observedAtMs,
+        );
         await stopProcess();
         fixedLog(logger, "ABORTED");
         return UNHEALTHY;
       }
       const candidate = await readGrant();
       if (candidate === null) {
+        await persistHealth(
+          "WAITING",
+          activeGrant,
+          observedAtMs,
+        );
         await stopProcess();
         fixedLog(logger, "WAITING");
         return UNHEALTHY;
       }
       const grant = validateGrant(candidate);
       if (grant.schema === TOMBSTONE_SCHEMA) {
+        await persistHealth(
+          "TOMBSTONED",
+          grant,
+          observedAtMs,
+        );
         await stopProcess();
         fixedLog(logger, "TOMBSTONED");
         return UNHEALTHY;
@@ -394,13 +458,7 @@ export function createAwsTunnelService({
       ) {
         fail();
       }
-      const currentNow = nowMs();
-      if (
-        !Number.isSafeInteger(currentNow) ||
-        currentNow < 0
-      ) {
-        fail();
-      }
+      const currentNow = observedAtMs;
       if (
         currentNow >= Number(grant.expiresAtMs)
       ) {
@@ -410,6 +468,11 @@ export function createAwsTunnelService({
           reason: "EXPIRED",
         });
         await writeTombstone(tombstone);
+        await persistHealth(
+          "EXPIRED",
+          grant,
+          currentNow,
+        );
         await stopProcess();
         fixedLog(logger, "EXPIRED");
         return UNHEALTHY;
@@ -453,6 +516,11 @@ export function createAwsTunnelService({
         grant.connectionStatus !==
         "CONNECTED"
       ) {
+        await persistHealth(
+          "WAITING",
+          grant,
+          currentNow,
+        );
         fixedLog(logger, "WAITING");
         return UNHEALTHY;
       }
@@ -463,10 +531,20 @@ export function createAwsTunnelService({
         port: 9443,
       });
       if (ready !== true) {
+        await persistHealth(
+          "UNHEALTHY",
+          grant,
+          currentNow,
+        );
         fixedLog(logger, "UNHEALTHY");
         return UNHEALTHY;
       }
       currentHealth = HEALTHY;
+      await persistHealth(
+        "READY",
+        grant,
+        currentNow,
+      );
       fixedLog(logger, "READY");
       return HEALTHY;
     } catch (error) {
@@ -511,6 +589,11 @@ export function createAwsTunnelService({
       stopped = true;
       await stopProcess();
       await listener.stop();
+      await persistHealth(
+        "STOPPED",
+        null,
+        currentTimestamp(),
+      );
       fixedLog(logger, "STOPPED");
     },
     async terminate(reason) {
@@ -574,6 +657,10 @@ export async function main(env = process.env) {
     "AWS_TUNNEL_ABORT_MARKER_PATH",
   );
   const service = createAwsTunnelService({
+    healthProjectionPath: required(
+      env,
+      "AWS_TUNNEL_HEALTH_PATH",
+    ),
     readAbortMarker: () =>
       readOptionalJson(abortMarkerPath),
     readGrant: () =>

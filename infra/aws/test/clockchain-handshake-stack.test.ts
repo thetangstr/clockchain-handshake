@@ -1,10 +1,21 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 
 import {
   App,
 } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
+
+const { buildCoordinatorRuntimeInput } =
+  (await import(
+    // @ts-expect-error The runtime entrypoint helper is JavaScript; this test supplies the checked shape below.
+    "../runtime/operator-task-inputs.mjs"
+  )) as {
+    buildCoordinatorRuntimeInput: (
+      value: unknown,
+    ) => unknown;
+  };
 
 import {
   ClockchainHandshakeStack,
@@ -29,6 +40,11 @@ const RELAY_TLS_FINGERPRINT =
   "3dbe9d0ea7491d9d6e4586f978ddf2b67c4ac173780b3b8d5b86def84a0d73d9";
 const SESSION_ID =
   "11111111-1111-4111-8111-111111111111";
+const RELEASE_ID =
+  `release-${createHash("sha256")
+    .update(SESSION_ID, "utf8")
+    .digest("hex")
+    .slice(0, 16)}`;
 const RELAY_TLS_SECRET_ARN =
   "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-relay-tls-AbCdEf";
 const STACK_PROPS = {
@@ -48,6 +64,10 @@ const STACK_PROPS = {
     "abcdef0123456789abcdef0123456789abcdef01",
   sessionId: SESSION_ID,
   sourceTreeSha256: "e".repeat(64),
+  tunnelHostKeyFingerprint:
+    "SHA256:UgP8WeC7EtU7Ik6LFbMNeUckAOfLBKJvnaP1ez/1MwU",
+  tunnelHostPublicKey:
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILzWMEVEge8QmmJQH5at7CDm9iuX7O4hop0rjeJ95xnC",
   tunnelImage: IMAGE.replace(
     /a+$/,
     "b".repeat(64),
@@ -72,6 +92,27 @@ test("rejects a relay certificate that does not cover the public hostname", () =
         },
       ),
     /hostname/i,
+  );
+});
+
+test("rejects a tunnel host public key that does not match its fingerprint", () => {
+  const app = new App();
+  assert.throws(
+    () =>
+      new ClockchainHandshakeStack(
+        app,
+        "TunnelHostMismatchStack",
+        {
+          ...STACK_PROPS,
+          env: {
+            account: "123456789012",
+            region: "us-west-2",
+          },
+          tunnelHostKeyFingerprint:
+            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        },
+      ),
+    /tunnel host/i,
   );
 });
 
@@ -148,6 +189,41 @@ function template(): Template {
   );
 }
 
+function rendered(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "Fn::Join" in value
+  ) {
+    const [separator, parts] = (
+      value as {
+        "Fn::Join": [string, unknown[]];
+      }
+    )["Fn::Join"];
+    return parts.map(rendered).join(separator);
+  }
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "Ref" in value
+  ) {
+    return `\${Ref:${String(
+      (value as { Ref: unknown }).Ref,
+    )}}`;
+  }
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "Fn::GetAtt" in value
+  ) {
+    return `\${GetAtt:${(
+      value as { "Fn::GetAtt": unknown[] }
+    )["Fn::GetAtt"].join(".")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 test("keeps every long-lived service stopped until runtime activation is explicit", () => {
   const app = new App();
   const output = Template.fromStack(
@@ -222,7 +298,7 @@ test("creates a two-AZ no-NAT public Fargate foundation with encrypted EFS", () 
   );
   output.resourceCountIs(
     "AWS::EFS::AccessPoint",
-    10,
+    12,
   );
   output.hasResourceProperties(
     "AWS::ECS::Service",
@@ -583,9 +659,43 @@ test("configures long-lived bootstrap and publisher startup inputs", () => {
     (item) => item.Name === "AWS_RUNTIME_INPUT",
   );
   assert.notEqual(runtimeInput, undefined);
-  assert.match(
-    JSON.stringify(runtimeInput?.Value),
-    /clockchain\.aws-publisher-runtime\/v1/,
+  const publisherRuntime = JSON.parse(
+    rendered(runtimeInput?.Value),
+  ) as {
+    publisher: {
+      bucketName: unknown;
+      paymentMoved: boolean;
+      publicBaseUrl: unknown;
+      publicationInputPath: string;
+      schema: string;
+      stagedPaths: Record<string, string>;
+    };
+  };
+  const publicRoot =
+    `/var/lib/clockchain/public/releases/${RELEASE_ID}`;
+  assert.deepEqual(
+    publisherRuntime.publisher,
+    {
+      bucketName:
+        publisherRuntime.publisher.bucketName,
+      paymentMoved: false,
+      publicBaseUrl:
+        publisherRuntime.publisher.publicBaseUrl,
+      publicationInputPath:
+        `${publicRoot}/publisher-input.json`,
+      schema:
+        "clockchain.aws-publisher-runtime/v1",
+      stagedPaths: {
+        certificate:
+          `${publicRoot}/payer-mcp.crt`,
+        payerDiscovery:
+          `${publicRoot}/payer.json`,
+        publicationGate:
+          `${publicRoot}/publication-gate.json`,
+        requestorDiscovery:
+          `${publicRoot}/requestor.json`,
+      },
+    },
   );
   const operator = environment("OperatorTask");
   const operatorRuntimeInput = operator.find(
@@ -605,6 +715,169 @@ test("configures long-lived bootstrap and publisher startup inputs", () => {
   assert.match(
     operatorRuntime,
     /\\"publicMonitorControlKey\\":\\"control\.json\\"/,
+  );
+});
+
+test("configures trusted public staging inputs without leaking private tunnel key material", () => {
+  const resources = template().toJSON()
+    .Resources as Record<
+    string,
+    {
+      Properties?: {
+        ContainerDefinitions?: Array<{
+          Environment?: Array<{
+            Name?: string;
+            Value?: unknown;
+          }>;
+        }>;
+      };
+      Type: string;
+    }
+  >;
+  const environment = (prefix: string) =>
+    Object.entries(resources).find(
+      ([logicalId, resource]) =>
+        logicalId.startsWith(prefix) &&
+        resource.Type ===
+          "AWS::ECS::TaskDefinition",
+    )?.[1].Properties?.ContainerDefinitions?.[0]
+      ?.Environment ?? [];
+  const value = (prefix: string, name: string) =>
+    environment(prefix).find(
+      (item) => item.Name === name,
+    )?.Value;
+  const publicRoot =
+    `/var/lib/clockchain/public/releases/${RELEASE_ID}`;
+  assert.equal(
+    value("TunnelTask", "AWS_TUNNEL_HEALTH_PATH"),
+    `/var/lib/clockchain/health/releases/${RELEASE_ID}/tunnel-health.json`,
+  );
+  const operatorRuntime = JSON.parse(
+    rendered(
+      value(
+        "OperatorTask",
+        "AWS_RUNTIME_INPUT",
+      ),
+    ),
+  ) as {
+    operator: {
+      bootstrap: Record<string, unknown>;
+      coordinator: {
+        publicStaging?: Record<string, unknown>;
+      };
+    };
+  };
+  assert.equal(
+    operatorRuntime.operator.bootstrap
+      .approvedPayerPublicPath,
+    `/var/lib/clockchain/approved-payer/releases/${RELEASE_ID}/approved-payer.json`,
+  );
+  const coordinatorRuntime = JSON.parse(
+    rendered(
+      value(
+        "CoordinatorTask",
+        "AWS_RUNTIME_INPUT",
+      ),
+    ),
+  ) as {
+    coordinator: {
+      publicStaging: {
+        bootstrapPayerClaimUrl: string;
+        publicBaseUrl: unknown;
+      } & Record<string, unknown>;
+    };
+  };
+  assert.match(
+    coordinatorRuntime.coordinator.publicStaging
+      .bootstrapPayerClaimUrl,
+    /v1\/payer-claims$/,
+  );
+  assert.deepEqual(
+    operatorRuntime.operator.coordinator
+      .publicStaging,
+    coordinatorRuntime.coordinator.publicStaging,
+  );
+  assert.deepEqual(
+    coordinatorRuntime.coordinator.publicStaging,
+    {
+      approvedPayerPublicPath:
+        `/var/lib/clockchain/approved-payer/releases/${RELEASE_ID}/approved-payer.json`,
+      bootstrapPayerClaimUrl:
+        coordinatorRuntime.coordinator.publicStaging
+          .bootstrapPayerClaimUrl,
+      imageDigest: STACK_PROPS.controlPlaneImage,
+      paths: {
+        certificate:
+          `${publicRoot}/payer-mcp.crt`,
+        gate: `${publicRoot}/publication-gate.json`,
+        input:
+          `${publicRoot}/publisher-input.json`,
+        payer: `${publicRoot}/payer.json`,
+        requestor:
+          `${publicRoot}/requestor.json`,
+      },
+      publicBaseUrl:
+        coordinatorRuntime.coordinator.publicStaging
+          .publicBaseUrl,
+      publicMcpHostname:
+        "relay.clockchain.net",
+      publicMcpUrl:
+        "https://relay.clockchain.net:9443/mcp",
+      tunnelHealthPath:
+        `/var/lib/clockchain/tunnel-health/releases/${RELEASE_ID}/tunnel-health.json`,
+      tunnelHostKeyFingerprint:
+        STACK_PROPS.tunnelHostKeyFingerprint,
+      tunnelHostPublicKey:
+        STACK_PROPS.tunnelHostPublicKey,
+    },
+  );
+  const emittedPublicStaging = {
+    ...operatorRuntime.operator.coordinator
+      .publicStaging,
+    bootstrapPayerClaimUrl:
+      "https://bootstrap.clockchain.net/v1/payer-claims",
+    publicBaseUrl:
+      "https://public.clockchain.net/",
+  };
+  assert.match(
+    String(
+      operatorRuntime.operator.coordinator
+        .publicStaging?.publicBaseUrl,
+    ),
+    /^https:\/\/\$\{GetAtt:[^}]+\.DomainName\}\/$/,
+  );
+  assert.doesNotThrow(() =>
+    buildCoordinatorRuntimeInput({
+      clockchainTokenSecretArn:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:clockchain-token-AbCdEf",
+      operatorKeyId:
+        "clockchain-demo-2026",
+      operatorKeySecretArn:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key-AbCdEf",
+      paymentMoved: false,
+      publicStaging: emittedPublicStaging,
+      releaseId: RELEASE_ID,
+      releaseRoot:
+        `/var/lib/clockchain/operator/releases/${RELEASE_ID}`,
+      relayUrl:
+        "https://relay.clockchain.net:8443",
+      repositorySha:
+        STACK_PROPS.repositorySha,
+      rpcSecretArn:
+        "arn:aws:secretsmanager:us-west-2:123456789012:secret:sepolia-rpc-AbCdEf",
+      sessionId: SESSION_ID,
+      tlsCertificatePem:
+        STACK_PROPS.relayTlsCertificatePem,
+      tlsFingerprint:
+        STACK_PROPS.relayTlsFingerprint,
+    }),
+  );
+  const serialized = JSON.stringify(
+    coordinatorRuntime,
+  );
+  assert.doesNotMatch(
+    serialized,
+    /TUNNEL_HOST_KEY_SECRET_ARN|privateKey/i,
   );
 });
 

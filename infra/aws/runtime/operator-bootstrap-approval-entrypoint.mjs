@@ -17,6 +17,10 @@ import {
   createAwsOperatorBootstrapAdapter,
 } from "./operator-bootstrap-adapter.mjs";
 import {
+  createApprovedPayerPublicProjection,
+  writeApprovedPayerPublicProjection,
+} from "../../../src/bilateral/aws/approved-payer-public.mjs";
+import {
   parseRuntimeInput,
   readSecretString,
 } from "./runtime-input.mjs";
@@ -38,6 +42,7 @@ function validateCapability(value) {
 
 const BOOTSTRAP_APPROVAL_KEYS = Object.freeze([
   "claimFingerprint",
+  "approvedPayerPublicPath",
   "operatorKeySecretArn",
   "bootstrapBrokerCapabilitySecretArn",
   "bootstrapBrokerUrl",
@@ -54,6 +59,17 @@ const BOOTSTRAP_APPROVAL_KEYS = Object.freeze([
   "sessionId",
   "tunnelGrantPath",
 ]);
+
+function approvedPayerPath(value, releaseId) {
+  const expected =
+    `/var/lib/clockchain/approved-payer/releases/${releaseId}/approved-payer.json`;
+  if (value !== expected) {
+    throw new Error(
+      "AWS operator bootstrap approval entrypoint failed safely.",
+    );
+  }
+  return value;
+}
 
 function exact(value, keys) {
   if (
@@ -99,6 +115,11 @@ export async function main({
       parseRuntimeInput(env).bootstrapApproval,
       BOOTSTRAP_APPROVAL_KEYS,
     );
+  const publicProjectionPath =
+    approvedPayerPath(
+      input.approvedPayerPublicPath,
+      input.releaseId,
+    );
   const clients = await createClients();
   const operatorPrivateKeyPem =
     await readSecretString({
@@ -138,6 +159,14 @@ export async function main({
       sessionId: input.sessionId,
       tunnelGrantPath:
         input.tunnelGrantPath,
+    }, {
+      publishApprovedPayer: async (projectionInput) =>
+        writeApprovedPayerPublicProjection(
+          publicProjectionPath,
+          createApprovedPayerPublicProjection(
+            projectionInput,
+          ),
+        ),
     });
   return adapter.approveAndSeal({
     claimFingerprint:

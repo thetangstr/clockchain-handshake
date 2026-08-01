@@ -107,8 +107,9 @@ function exact(value, keys) {
 function inputSnapshot(value) {
   const input = exact(value, INPUT_KEYS);
   if (
-    !SHA64.test(
-      input.certificateFingerprint,
+    !(
+      input.certificateFingerprint === null ||
+      SHA64.test(input.certificateFingerprint)
     ) ||
     !IMAGE_DIGEST.test(input.imageDigest) ||
     !RELEASE_ID.test(input.releaseId) ||
@@ -381,15 +382,28 @@ export async function publishAwsPublicMonitor(
         input.completedAtMs !== null &&
         !["VERIFIED", "FAILED", "EXPIRED"]
           .includes(snapshot.runStatus)
+      ) ||
+      (
+        snapshot.runStatus === "VERIFIED" &&
+        input.certificateFingerprint === null
       )
     ) {
       fail();
     }
-    const keys = publicArtifactKeys({
-      certificateFingerprint:
-        input.certificateFingerprint,
-      runId: snapshot.runId,
-    });
+    const keys = input.certificateFingerprint === null
+      ? Object.freeze({
+          certificate: null,
+          index: "runs/index.json",
+          latest: "latest.json",
+          payerDiscovery: "discoveries/payer.json",
+          requestorDiscovery: "discoveries/requestor.json",
+          summary: `runs/${snapshot.runId}.json`,
+        })
+      : publicArtifactKeys({
+          certificateFingerprint:
+            input.certificateFingerprint,
+          runId: snapshot.runId,
+        });
     const records = [];
     await putPublicObject(
       active,
@@ -449,6 +463,12 @@ export async function publishAwsPublicMonitor(
       gate.requestorDiscoveryReady &&
       gate.tunnelTlsHealthy
     ) {
+      if (
+        input.certificateFingerprint === null ||
+        keys.certificate === null
+      ) {
+        fail();
+      }
       const certificate = stagedObject(
         await active.readStagedPublicObject(
           "certificate",
