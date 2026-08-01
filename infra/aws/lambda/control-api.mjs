@@ -28,6 +28,10 @@ const HISTORY_KEYS = Object.freeze([
   "actionId",
   "type",
 ]);
+const LOOKUP_KEYS = Object.freeze([
+  "expectedClaimFingerprint",
+  "state",
+]);
 
 function plain(value) {
   return (
@@ -387,20 +391,21 @@ export function createControlApiHandler({
       return reject(500);
     }
     let lookupValid = false;
+    let expectedClaimFingerprint;
     let state;
     try {
+      const canonicalLookup = exactDataRecord(
+        lookup,
+        LOOKUP_KEYS,
+      );
       lookupValid =
-        plain(lookup) &&
-        Reflect.ownKeys(lookup).length === 2 &&
-        Object.hasOwn(
-          lookup,
-          "expectedClaimFingerprint",
-        ) &&
-        Object.hasOwn(lookup, "state") &&
-        plain(lookup.state);
+        canonicalLookup !== null &&
+        plain(canonicalLookup.state);
       if (lookupValid) {
+        expectedClaimFingerprint =
+          canonicalLookup.expectedClaimFingerprint;
         state = canonicalStoredControlState(
-          lookup.state,
+          canonicalLookup.state,
         );
         lookupValid = state !== null;
       }
@@ -417,8 +422,7 @@ export function createControlApiHandler({
           action.type === "START_RUN"
             ? SESSION_PLACEHOLDER
             : undefined,
-        expectedClaimFingerprint:
-          lookup.expectedClaimFingerprint,
+        expectedClaimFingerprint,
         state,
       });
     } catch {

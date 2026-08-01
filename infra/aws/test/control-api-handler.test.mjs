@@ -81,3 +81,36 @@ test("accepts API Gateway bracket-serialized Cognito groups", async () => {
   });
   assert.equal(response.statusCode, 400);
 });
+
+test("rejects ambiguous API Gateway bracket-serialized Cognito groups", async () => {
+  configureEnvironment();
+  const { handler } = await import(
+    `../lambda/handler.mjs?ambiguous-bracket-groups=${Date.now()}`
+  );
+  const response = await handler({
+    body: "{",
+    headers: {
+      authorization: "Bearer signed-jwt-canary",
+      "content-type": "application/json",
+      origin: ORIGIN,
+    },
+    rawPath: "/v1/actions",
+    requestContext: {
+      authorizer: {
+        jwt: {
+          claims: {
+            "cognito:groups": `[${OPERATOR_GROUP},other]`,
+            client_id: AUDIENCE,
+            exp: String(Math.floor(Date.now() / 1000) + 60),
+            iss: ISSUER,
+            sub: "operator-1",
+          },
+        },
+      },
+      http: {
+        method: "POST",
+      },
+    },
+  });
+  assert.equal(response.statusCode, 401);
+});

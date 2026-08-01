@@ -174,6 +174,110 @@ test("rejects hostile persisted state without invoking nested accessors", async 
   );
 });
 
+test("rejects hostile lookup state accessor without invoking it", async () => {
+  let getterInvoked = false;
+  const calls = [];
+  const lookup = {
+    expectedClaimFingerprint: null,
+  };
+  Object.defineProperty(lookup, "state", {
+    enumerable: true,
+    get() {
+      getterInvoked = true;
+      return createInitialControlState();
+    },
+  });
+  const handler = createControlApiHandler({
+    allowedOrigin: ORIGIN,
+    audience: AUDIENCE,
+    issuer: ISSUER,
+    nowMs: () => NOW_MS,
+    operatorGroup: "clockchain-operators",
+    putIdempotency: async (input) => {
+      calls.push(["idempotency", input]);
+      return "CREATED";
+    },
+    readSessionState: async (input) => {
+      calls.push(["state", input]);
+      return lookup;
+    },
+    sendMessage: async (input) => {
+      calls.push(["send", input]);
+    },
+    verifyJwt: async (token) => {
+      calls.push(["jwt", token]);
+      return {
+        aud: AUDIENCE,
+        exp: Math.floor(NOW_MS / 1000) + 60,
+        groups: ["clockchain-operators"],
+        iss: ISSUER,
+        sub: "operator-1",
+      };
+    },
+  });
+  const response = await handler(event());
+  assert.equal(response.statusCode, 500);
+  assert.equal(getterInvoked, false);
+  assert.equal(
+    calls.some(([name]) => name === "send"),
+    false,
+  );
+});
+
+test("rejects hostile lookup fingerprint accessor without invoking it", async () => {
+  let getterInvoked = false;
+  const calls = [];
+  const lookup = {
+    state: createInitialControlState(),
+  };
+  Object.defineProperty(
+    lookup,
+    "expectedClaimFingerprint",
+    {
+      enumerable: true,
+      get() {
+        getterInvoked = true;
+        return null;
+      },
+    },
+  );
+  const handler = createControlApiHandler({
+    allowedOrigin: ORIGIN,
+    audience: AUDIENCE,
+    issuer: ISSUER,
+    nowMs: () => NOW_MS,
+    operatorGroup: "clockchain-operators",
+    putIdempotency: async (input) => {
+      calls.push(["idempotency", input]);
+      return "CREATED";
+    },
+    readSessionState: async (input) => {
+      calls.push(["state", input]);
+      return lookup;
+    },
+    sendMessage: async (input) => {
+      calls.push(["send", input]);
+    },
+    verifyJwt: async (token) => {
+      calls.push(["jwt", token]);
+      return {
+        aud: AUDIENCE,
+        exp: Math.floor(NOW_MS / 1000) + 60,
+        groups: ["clockchain-operators"],
+        iss: ISSUER,
+        sub: "operator-1",
+      };
+    },
+  });
+  const response = await handler(event());
+  assert.equal(response.statusCode, 500);
+  assert.equal(getterInvoked, false);
+  assert.equal(
+    calls.some(([name]) => name === "send"),
+    false,
+  );
+});
+
 test("serves only a same-origin bounded CORS preflight", async () => {
   const { calls, handler } = fixture();
   const response = await handler({

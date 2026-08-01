@@ -41,7 +41,7 @@ const documentClient =
   );
 const sqs = new SQSClient({});
 
-function groups(value) {
+function groups(value, exactBracketGroup) {
   if (Array.isArray(value)) return value;
   if (
     typeof value !== "string" ||
@@ -55,12 +55,8 @@ function groups(value) {
   } catch {
     // Cognito may serialize one group as a string.
   }
-  const bracketed =
-    /^\[([A-Za-z0-9+=,.@_-]+(?:[,\s]+[A-Za-z0-9+=,.@_-]+)*)\]$/u.exec(
-      value,
-    );
-  if (bracketed !== null) {
-    return bracketed[1].split(/[,\s]+/u);
+  if (value === `[${exactBracketGroup}]`) {
+    return [exactBracketGroup];
   }
   if (
     value.startsWith("[") ||
@@ -200,7 +196,10 @@ export async function handler(event) {
       typeof jwt?.exp === "string"
         ? Number(jwt.exp)
         : jwt?.exp,
-    groups: groups(jwt?.["cognito:groups"]),
+    groups: groups(
+      jwt?.["cognito:groups"],
+      operatorGroup,
+    ),
     iss: jwt?.iss,
     sub: jwt?.sub,
   });
