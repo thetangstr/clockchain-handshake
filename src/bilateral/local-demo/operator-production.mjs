@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { readCoordinatorState } from "../coordination/coordinator-runtime.mjs";
 import { approveBootstrapClaim } from "../local-mcp/bootstrap-broker.mjs";
 import {
+  HybridPublicEdgeError,
   buildPublicEdgeArguments,
   probePinnedTlsEndpoint,
   waitForPublicEdge as waitForPinnedPublicEdge,
@@ -278,13 +279,41 @@ async function startPublicEdge({ config }, { spawnService = createSpawnedService
   });
 }
 
-async function probeCoordinationEdge({ config }, { probePinnedTlsEndpoint: probe = probePinnedTlsEndpoint } = {}) {
-  return probe({
+const COORDINATION_PROBE_ATTEMPTS = 40;
+const COORDINATION_PROBE_DELAY_MS = 250;
+
+async function probeCoordinationEdge(
+  { config },
+  {
+    probePinnedTlsEndpoint: probe = probePinnedTlsEndpoint,
+    sleep = (delayMs) => new Promise((resolve_) => setTimeout(resolve_, delayMs)),
+  } = {},
+) {
+  if (typeof sleep !== "function") fail();
+  const input = Object.freeze({
     expectedFingerprint: config.relay.tlsFingerprint,
     host: config.publicEdge.host,
     path: "/",
     port: config.publicEdge.relayRemotePort,
   });
+  let lastError = null;
+  for (let attempt = 0; attempt < COORDINATION_PROBE_ATTEMPTS; attempt += 1) {
+    try {
+      return await probe(input);
+    } catch (error) {
+      if (
+        error instanceof HybridPublicEdgeError &&
+        error.code === "HYBRID_PUBLIC_EDGE_IDENTITY_MISMATCH"
+      ) {
+        throw error;
+      }
+      lastError = error;
+      if (attempt + 1 < COORDINATION_PROBE_ATTEMPTS) {
+        await sleep(COORDINATION_PROBE_DELAY_MS);
+      }
+    }
+  }
+  throw lastError ?? new HybridPublicEdgeError("HYBRID_PUBLIC_EDGE_UNAVAILABLE");
 }
 
 async function readStateFromRoot(releaseRoot) {
@@ -648,6 +677,7 @@ export function createProductionHybridOperatorDependencies(overrides = {}) {
   const deps = Object.freeze({
     approveBootstrapClaim: overrides.approveBootstrapClaim ?? approveBootstrapClaim,
     now: overrides.now ?? Date.now,
+    sleep: overrides.sleep ?? ((delayMs) => new Promise((resolve_) => setTimeout(resolve_, delayMs))),
     probePinnedTlsEndpoint: overrides.probePinnedTlsEndpoint ?? probePinnedTlsEndpoint,
     spawnService: overrides.spawnService ?? createSpawnedService,
     stdout: overrides.stdout ?? process.stdout,

@@ -5,6 +5,7 @@ import { basename, join } from "node:path";
 import test from "node:test";
 
 import { createProductionHybridOperatorDependencies } from "../src/bilateral/local-demo/operator-production.mjs";
+import { HybridPublicEdgeError } from "../src/bilateral/local-demo/public-edge.mjs";
 
 const REPOSITORY_SHA = "b".repeat(40);
 const RELEASE_ID = "release-aaaaaaaaaaaaaaaa";
@@ -263,4 +264,83 @@ test("waits for the coordinator-owned funding record before launching funding", 
     ["wait-funding-record", join(paths.releaseRoot, "funding-addresses.json")],
     ["spawn", "fund-bilateral-addresses.mjs"],
   ]);
+});
+
+test("probeCoordinationEdge retries transient failures until the public tunnel is ready", async (t) => {
+  const privateRoot = await mkdtemp(join(tmpdir(), "clockchain-production-probe-retry-"));
+  const stateRoot = join(privateRoot, "state");
+  t.after(() => rm(privateRoot, { force: true, recursive: true }));
+  const activeConfig = config(privateRoot);
+  const calls = [];
+  let failures = 2;
+  const dependencies = createProductionHybridOperatorDependencies({
+    async probePinnedTlsEndpoint(input) {
+      calls.push(input);
+      if (failures > 0) {
+        failures -= 1;
+        throw new HybridPublicEdgeError("HYBRID_PUBLIC_EDGE_UNAVAILABLE");
+      }
+      return Object.freeze({ paymentMoved: false, ready: true });
+    },
+    async sleep() {},
+  });
+
+  assert.deepEqual(
+    await dependencies.probeCoordinationEdge({ config: activeConfig }),
+    { paymentMoved: false, ready: true },
+  );
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[0], {
+    expectedFingerprint: activeConfig.relay.tlsFingerprint,
+    host: activeConfig.publicEdge.host,
+    path: "/",
+    port: activeConfig.publicEdge.relayRemotePort,
+  });
+});
+
+test("probeCoordinationEdge fails fast on certificate identity mismatch", async (t) => {
+  const privateRoot = await mkdtemp(join(tmpdir(), "clockchain-production-probe-mismatch-"));
+  const stateRoot = join(privateRoot, "state");
+  t.after(() => rm(privateRoot, { force: true, recursive: true }));
+  const activeConfig = config(privateRoot);
+  const calls = [];
+  const dependencies = createProductionHybridOperatorDependencies({
+    async probePinnedTlsEndpoint(input) {
+      calls.push(input);
+      throw new HybridPublicEdgeError("HYBRID_PUBLIC_EDGE_IDENTITY_MISMATCH");
+    },
+    async sleep() {},
+  });
+
+  await assert.rejects(
+    dependencies.probeCoordinationEdge({ config: activeConfig }),
+    (error) =>
+      error instanceof HybridPublicEdgeError &&
+      error.code === "HYBRID_PUBLIC_EDGE_IDENTITY_MISMATCH",
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("probeCoordinationEdge stops safely after bounded attempts", async (t) => {
+  const privateRoot = await mkdtemp(join(tmpdir(), "clockchain-production-probe-bound-"));
+  const stateRoot = join(privateRoot, "state");
+  t.after(() => rm(privateRoot, { force: true, recursive: true }));
+  const activeConfig = config(privateRoot);
+  let attempts = 0;
+  const dependencies = createProductionHybridOperatorDependencies({
+    async probePinnedTlsEndpoint() {
+      attempts += 1;
+      throw new HybridPublicEdgeError("HYBRID_PUBLIC_EDGE_UNAVAILABLE");
+    },
+    async sleep() {},
+  });
+
+  await assert.rejects(
+    dependencies.probeCoordinationEdge({ config: activeConfig }),
+    (error) =>
+      error instanceof HybridPublicEdgeError &&
+      error.code === "HYBRID_PUBLIC_EDGE_UNAVAILABLE",
+  );
+  assert.equal(attempts > 1 && attempts <= 40, true);
+  assert.equal(attempts, 40);
 });
