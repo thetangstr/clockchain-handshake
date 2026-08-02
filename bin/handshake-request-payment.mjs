@@ -509,7 +509,9 @@ export async function main(arguments_ = process.argv.slice(2), dependencies = {}
     }));
     return await supervisor({
       launchManifestPath: manifestPath,
-      runMode: discovery.runMode,
+      runMode: discovery.runMode === "hybrid-local"
+        ? "local-two-run"
+        : discovery.runMode,
       stateRoot: parsed.stateRoot,
     });
   } catch (error) {

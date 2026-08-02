@@ -15,6 +15,7 @@ const LEGACY_REQUESTOR_DISCOVERY_SCHEMA =
 const DEFAULT_RUN_MODE = "aws-stakeholder-only";
 const RUN_MODES = Object.freeze(new Set([
   "aws-stakeholder-only",
+  "hybrid-local",
   "local-two-run",
 ]));
 

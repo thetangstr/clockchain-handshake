@@ -93,7 +93,7 @@ async function fixture(t) {
     expiresAtMs: String(Date.now() + 60_000),
     operator,
     publicUrl: "https://127.0.0.1:9443/mcp",
-    runMode: "local-two-run",
+    runMode: "hybrid-local",
   });
   const { manifest } = createLaunchManifest({
     expectedTlsFingerprint: certificateFingerprint,
