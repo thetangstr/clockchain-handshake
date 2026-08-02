@@ -16,6 +16,8 @@ const SHA64 = /^[0-9a-f]{64}$/;
 const KEY_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const BUCKET = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
 const REGION = /^[a-z]{2}-[a-z]+-[1-9]$/;
+const IMAGE_DIGEST =
+  /^[0-9]{12}\.dkr\.ecr\.[a-z]{2}-[a-z]+-[1-9]\.amazonaws\.com\/[a-z0-9][a-z0-9._/-]{0,254}@sha256:[0-9a-f]{64}$/;
 const HOST = /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}[A-Za-z0-9]$/;
 const LOOPBACKS = new Set(["127.0.0.1", "::1", "localhost"]);
 const PRIVATE_FILE_KEYS = Object.freeze([
@@ -63,6 +65,7 @@ const KEYS = Object.freeze({
   ]),
   publishing: Object.freeze([
     "bucket",
+    "imageDigest",
     "receiptEmailUrl",
     "region",
     "requestorDiscoveryUrl",
@@ -311,6 +314,8 @@ function validateShape(value) {
     publicEdge.user !== "clockchain-tunnel" ||
     typeof publishing.bucket !== "string" ||
     !BUCKET.test(publishing.bucket) ||
+    typeof publishing.imageDigest !== "string" ||
+    !IMAGE_DIGEST.test(publishing.imageDigest) ||
     typeof publishing.region !== "string" ||
     !REGION.test(publishing.region)
   ) {

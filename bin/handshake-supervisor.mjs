@@ -37,7 +37,12 @@ function parseArguments(arguments_) {
   if (suppliedBroker.length !== 0 && suppliedBroker.length !== PAYER_MCP_BOOTSTRAP_BROKER_OPTIONS.length) fail();
   if (suppliedBroker.length !== 0 && suppliedMcp.length !== PAYER_MCP_OPTIONS.length) fail();
   const explicitRunMode = Object.hasOwn(values, RUN_MODE_OPTION);
-  if (explicitRunMode && values[RUN_MODE_OPTION] !== "aws-stakeholder-only") fail();
+  if (
+    explicitRunMode &&
+    !["aws-stakeholder-only", "local-two-run"].includes(values[RUN_MODE_OPTION])
+  ) {
+    fail();
+  }
   return Object.freeze({
     launchManifestPath: values["--launch-manifest"],
     payerMcpServerOptions: suppliedMcp.length === 0 ? undefined : Object.freeze({

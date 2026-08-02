@@ -70,6 +70,7 @@ async function fixture(t) {
     },
     publishing: {
       bucket: "clockchain-handshake-monitor-570035913370-us-west-2",
+      imageDigest: `570035913370.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake@sha256:${"c".repeat(64)}`,
       receiptEmailUrl: "https://anhgkkcm46.execute-api.us-west-2.amazonaws.com/v1/receipt-email",
       region: "us-west-2",
       requestorDiscoveryUrl: "https://clockchain-handshake-monitor-570035913370-us-west-2.s3.us-west-2.amazonaws.com/requestor-discovery.json",

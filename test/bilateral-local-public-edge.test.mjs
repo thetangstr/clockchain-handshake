@@ -65,6 +65,11 @@ async function tlsFixture(t) {
       response.end('{"error":"PAYER_MCP_PROTOCOL_FAILED","paymentMoved":false}\n');
       return;
     }
+    if (request.method === "GET" && request.url === "/") {
+      response.statusCode = 400;
+      response.end('{"code":"COORDINATION_RELAY_REQUEST_INVALID","paymentMoved":false}\n');
+      return;
+    }
     if (
       request.method === "GET" &&
       request.url === `/v1/sessions/${SESSION_ID}/enrollment-readiness?waitMs=0`
@@ -148,6 +153,12 @@ test("proves Payer MCP and relay readiness over exact certificate pins", async (
     path: "/mcp",
     port: fixture.port,
   });
+  const coordinationListener = await probePinnedTlsEndpoint({
+    expectedFingerprint: fixture.fingerprint,
+    host: fixture.host,
+    path: "/",
+    port: fixture.port,
+  });
   const relay = await probePinnedTlsEndpoint({
     expectedFingerprint: fixture.fingerprint,
     host: fixture.host,
@@ -156,6 +167,7 @@ test("proves Payer MCP and relay readiness over exact certificate pins", async (
   });
 
   assert.deepEqual(payer, { paymentMoved: false, ready: true });
+  assert.deepEqual(coordinationListener, { paymentMoved: false, ready: true });
   assert.deepEqual(relay, { paymentMoved: false, ready: true });
   assert.deepEqual(await waitForPublicEdge({
     coordination: {

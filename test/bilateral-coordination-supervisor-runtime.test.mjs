@@ -288,18 +288,22 @@ test("supervisor CLI keeps legacy default run mode unless exact explicit mode is
     },
   });
   assert.equal(calls[1].runMode, "aws-stakeholder-only");
+
+  await supervisorMain([
+    ...baseArguments,
+    "--run-mode",
+    "local-two-run",
+  ], {
+    async runSupervisor(input) {
+      calls.push(input);
+      return { paymentMoved: false };
+    },
+  });
+  assert.equal(calls[2].runMode, "local-two-run");
 });
 
 test("supervisor CLI rejects unsupported or duplicate run mode before production setup", async () => {
   for (const arguments_ of [
-    [
-      "--launch-manifest",
-      "/private/launch.json",
-      "--state",
-      "/private/state",
-      "--run-mode",
-      "local-two-run",
-    ],
     [
       "--launch-manifest",
       "/private/launch.json",

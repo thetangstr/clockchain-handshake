@@ -169,6 +169,7 @@ function validateProbeInput(value) {
     typeof value.expectedFingerprint !== "string" ||
     !SHA64.test(value.expectedFingerprint) ||
     !(
+      value.path === "/" ||
       value.path === "/mcp" ||
       SESSION_READINESS.test(value.path)
     )
@@ -218,6 +219,17 @@ function exactJson(body) {
 
 function validateProbeResponse(input, response) {
   const value = exactJson(response.body);
+  if (input.path === "/") {
+    if (
+      response.statusCode !== 400 ||
+      Reflect.ownKeys(value).length !== 2 ||
+      value.code !== "COORDINATION_RELAY_REQUEST_INVALID" ||
+      value.paymentMoved !== false
+    ) {
+      fail("HYBRID_PUBLIC_EDGE_PROTOCOL_MISMATCH");
+    }
+    return;
+  }
   if (input.path === "/mcp") {
     if (
       response.statusCode !== 405 ||

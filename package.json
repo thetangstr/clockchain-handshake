@@ -17,6 +17,7 @@
     "aws:verify": "node scripts/run-aws-verifier-task.mjs",
     "bilateral:console": "node bin/handshake-console.mjs",
     "bilateral:coordinator": "node bin/handshake-coordinator.mjs",
+    "bilateral:local-operator": "node bin/handshake-local-operator.mjs",
     "bilateral:bootstrap-broker": "node bin/handshake-bootstrap-broker.mjs",
     "bilateral:fund": "node scripts/fund-bilateral-addresses.mjs",
     "bilateral:payer": "node bin/handshake-payer-bootstrap.mjs",
