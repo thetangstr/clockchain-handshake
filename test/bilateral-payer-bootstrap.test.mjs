@@ -25,6 +25,7 @@ import * as payerBootstrapProduction from
   "../src/bilateral/local-mcp/payer-bootstrap-production.mjs";
 import {
   createPayerBootstrapKey,
+  PAYER_BOOTSTRAP_CLAIM_SCHEMA,
   payerBootstrapClaimFingerprint,
   sshEd25519Fingerprint,
 } from "../src/bilateral/local-mcp/payer-bootstrap-envelope.mjs";
@@ -77,6 +78,29 @@ function openSshPublicKey(pair) {
     sshString("ssh-ed25519"),
     sshString(raw),
   ]).toString("base64")}`;
+}
+
+function payerClaimFixture() {
+  const sshPair = generateKeyPairSync("ed25519");
+  const sshPublicKey = openSshPublicKey(sshPair);
+  const x25519 = createPayerBootstrapKey();
+  return Object.freeze({
+    claimNonce: CLAIM_NONCE,
+    mcpTlsCertificatePem: CERTIFICATE_PEM,
+    mcpTlsFingerprint: createHash("sha256")
+      .update(new X509Certificate(CERTIFICATE_PEM).raw)
+      .digest("hex"),
+    paymentMoved: false,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    role: "payer",
+    schema: PAYER_BOOTSTRAP_CLAIM_SCHEMA,
+    sessionId: SESSION_ID,
+    sshPublicKey,
+    sshPublicKeyFingerprint:
+      sshEd25519Fingerprint(sshPublicKey),
+    x25519PublicKey: x25519.publicKey,
+  });
 }
 
 function fixtureDependencies({
@@ -285,6 +309,81 @@ test("builds the exact Payer claim from locally generated public identities", as
   assert.equal(submitted.claim.role, "payer");
   assert.equal(submitted.claim.repositorySha, REPOSITORY_SHA);
   assert.equal(submitted.claim.sessionId, SESSION_ID);
+});
+
+test("production Payer claim submit replays the same body once after a transport failure", async () => {
+  const requestBodies = [];
+  const serializedBodies = [];
+  const claim = payerClaimFixture();
+  const dependencies =
+    await payerBootstrapProduction.createProductionPayerBootstrapDependencies({
+      async submitHttpRequest({ body }) {
+        requestBodies.push(body);
+        serializedBodies.push(JSON.stringify(body));
+        if (requestBodies.length === 1) {
+          throw new Error("connection reset after accept");
+        }
+        return {
+          claimFingerprint:
+            payerBootstrapClaimFingerprint(claim),
+          paymentMoved: false,
+          status: "PENDING",
+        };
+      },
+    });
+
+  const result = await dependencies.submitPayerClaim({
+    claim,
+    payerClaimUrl: "https://127.0.0.1/v1/payer-claims",
+  });
+
+  assert.equal(requestBodies.length, 2);
+  assert.strictEqual(requestBodies[0].claim, claim);
+  assert.strictEqual(requestBodies[1].claim, claim);
+  assert.equal(serializedBodies[1], serializedBodies[0]);
+  assert.equal(
+    requestBodies[1].pollCapability,
+    requestBodies[0].pollCapability,
+  );
+  assert.deepEqual(result, {
+    claimFingerprint: payerBootstrapClaimFingerprint(claim),
+    pollCapability: requestBodies[0].pollCapability,
+  });
+});
+
+test("production Payer claim submit fails closed after repeated or altered retry rejection", async () => {
+  for (const retryResult of [
+    async () => {
+      throw new Error("second rejection leaked");
+    },
+    async () => ({
+      claimFingerprint: "b".repeat(64),
+      paymentMoved: false,
+      status: "PENDING",
+    }),
+  ]) {
+    const claim = payerClaimFixture();
+    let attempts = 0;
+    const dependencies =
+      await payerBootstrapProduction.createProductionPayerBootstrapDependencies({
+        async submitHttpRequest() {
+          attempts += 1;
+          if (attempts === 1) {
+            throw new Error("first rejection after accept");
+          }
+          return retryResult();
+        },
+      });
+
+    await assert.rejects(
+      dependencies.submitPayerClaim({
+        claim,
+        payerClaimUrl: "https://127.0.0.1/v1/payer-claims",
+      }),
+      /Payer production bootstrap failed safely/,
+    );
+    assert.equal(attempts, 2);
+  }
 });
 
 test("fails safely, cleans up children, and zeroizes bootstrap material at every boundary", async () => {

@@ -51,6 +51,7 @@ import {
 import {
   createPayerBootstrapKey,
   openSignedPayerBootstrapPackage,
+  payerBootstrapClaimFingerprint,
   sshEd25519Fingerprint,
 } from "./payer-bootstrap-envelope.mjs";
 import {
@@ -594,6 +595,10 @@ export function buildPayerSupervisorArguments({
 export async function createProductionPayerBootstrapDependencies(
   input,
 ) {
+  const submitHttpRequest =
+    typeof input?.submitHttpRequest === "function"
+      ? input.submitHttpRequest
+      : httpsRequest;
   let prerequisites;
   let operatorPublicKey;
   let privateState;
@@ -949,15 +954,26 @@ export async function createProductionPayerBootstrapDependencies(
       activeClaim = claim;
       const pollCapability =
         randomBytes(32).toString("hex");
-      const response = await httpsRequest({
-        body: {
-          claim,
-          paymentMoved: false,
-          pollCapability,
-        },
+      const body = {
+        claim,
+        paymentMoved: false,
+        pollCapability,
+      };
+      const request = () => submitHttpRequest({
+        body,
         method: "POST",
         url: payerClaimUrl,
       });
+      let response;
+      try {
+        response = await request();
+      } catch {
+        try {
+          response = await request();
+        } catch {
+          fail();
+        }
+      }
       const claimFingerprint =
         payerBootstrapClaimFingerprint(claim);
       if (
