@@ -19,9 +19,6 @@ import {
   rmdir,
 } from "node:fs/promises";
 import {
-  tmpdir,
-} from "node:os";
-import {
   isIP,
 } from "node:net";
 import {
@@ -103,6 +100,7 @@ const OPERATOR_ROOT =
   "/var/lib/clockchain/operator";
 const PUBLIC_ROOT =
   "/var/lib/clockchain/public";
+const SCRATCH_ROOT = "/dev/shm";
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const FINGERPRINT = /^[0-9a-f]{64}$/;
 const IMAGE =
@@ -741,6 +739,7 @@ export async function main({
   removeDir = rmdir,
   removeFile = (path) => rm(path, { force: true }),
   run = coordinatorMain,
+  scratchRoot = SCRATCH_ROOT,
   sleeper = defaultSleeper,
   tunnelHealthReader = readTunnelHealthProjection,
 } = {}) {
@@ -779,6 +778,10 @@ export async function main({
       typeof removeDir !== "function" ||
       typeof removeFile !== "function" ||
       typeof run !== "function" ||
+      typeof scratchRoot !== "string" ||
+      !isAbsolute(scratchRoot) ||
+      CONTROL.test(scratchRoot) ||
+      normalize(scratchRoot) !== scratchRoot ||
       typeof sleeper !== "function" ||
       typeof tunnelHealthReader !== "function"
     ) {
@@ -892,7 +895,7 @@ export async function main({
     stageStarted = true;
     scratchDir = validateScratchDir(
       await createTempDir(
-        join(tmpdir(), "clockchain-coordinator-"),
+        join(scratchRoot, "clockchain-coordinator-"),
       ),
     );
     tokenPath = join(

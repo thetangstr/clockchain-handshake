@@ -610,6 +610,7 @@ function publicBootstrapTestDependencies(overrides = {}) {
     createPublicReleaseRoot: async () => {},
     now: () => 2_000_000_000_000,
     publicStagerFactory: () => stager,
+    scratchRoot: tmpdir(),
     sleeper: async () => {},
     tunnelHealthReader: async () =>
       readyCoordinatorTunnelHealth(),
@@ -1188,6 +1189,7 @@ test("coordinator entrypoint stages initial public monitor and opens Requestor d
       ]);
       return 0;
     },
+    scratchRoot: tmpdir(),
     sleeper: async () => {
       calls.push(["sleep"]);
     },
@@ -1285,6 +1287,7 @@ test("coordinator entrypoint terminal-stages public failure when Payer evidence 
         calls.push(["run"]);
         return 0;
       },
+      scratchRoot: tmpdir(),
       sleeper: async () => {},
       tunnelHealthReader: async () =>
         readyCoordinatorTunnelHealth({
@@ -1849,6 +1852,7 @@ test("coordinator entrypoint attempts all cleanup and fails closed when cleanup 
     await assert.rejects(
       coordinatorEntrypoint({
         ...publicBootstrapTestDependencies(),
+        scratchRoot: "/dev/shm",
         client: {
           async send(command) {
             if (
@@ -1928,7 +1932,7 @@ test("coordinator entrypoint attempts all cleanup and fails closed when cleanup 
   assert.deepEqual(calls, [
     [
       "createTempDir",
-      join(tmpdir(), "clockchain-coordinator-"),
+      join("/dev/shm", "clockchain-coordinator-"),
       scratchDir,
     ],
     ["run"],
