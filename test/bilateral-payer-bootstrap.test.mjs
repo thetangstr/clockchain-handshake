@@ -486,6 +486,76 @@ test("production Payer approval polling rejects terminal and malformed non-seale
   }
 });
 
+test("production Payer approval polling retries a transient request failure before sealing", async (t) => {
+  const realNow = Date.now;
+  const realSetTimeout = globalThis.setTimeout;
+  const startMs = 2_000_000_000_000;
+  let clockMs = startMs;
+  const sleeps = [];
+  const claimFingerprint = "b".repeat(64);
+  let requests = 0;
+  t.after(() => {
+    Date.now = realNow;
+    globalThis.setTimeout = realSetTimeout;
+  });
+  Date.now = () => clockMs;
+  globalThis.setTimeout = (callback, ms) => {
+    sleeps.push(ms);
+    clockMs += ms;
+    queueMicrotask(callback);
+    return { unref() {} };
+  };
+  const dependencies =
+    await payerBootstrapProduction.createProductionPayerBootstrapDependencies({
+      async httpsRequest() {
+        requests += 1;
+        if (requests === 1) {
+          return {
+            paymentMoved: false,
+            status: "PENDING",
+          };
+        }
+        if (requests === 2) {
+          throw new Error("temporary transport reset");
+        }
+        if (requests === 3) {
+          return {
+            paymentMoved: false,
+            status: "APPROVED",
+          };
+        }
+        return {
+          claimFingerprint,
+          packageResponse: {
+            sealed: true,
+          },
+          paymentMoved: false,
+          status: "SEALED",
+        };
+      },
+    });
+
+  assert.deepEqual(
+    await dependencies.pollApprovedPackage({
+      claimFingerprint,
+      expiresAtMs: String(startMs + 60_000),
+      payerClaimUrl: "https://127.0.0.1/v1/payer-claims",
+      pollCapability: SECRET_CANARY,
+    }),
+    {
+      claimFingerprint,
+      packageResponse: {
+        sealed: true,
+      },
+      paymentMoved: false,
+      status: "SEALED",
+    },
+  );
+  assert.equal(requests, 4);
+  assert.equal(clockMs, startMs + 6_000);
+  assert.deepEqual(sleeps, [2_000, 2_000, 2_000]);
+});
+
 test("fails safely, cleans up children, and zeroizes bootstrap material at every boundary", async () => {
   const orderedSteps = [
     "inspect-prerequisites",

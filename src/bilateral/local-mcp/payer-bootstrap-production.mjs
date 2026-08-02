@@ -799,12 +799,25 @@ export async function createProductionPayerBootstrapDependencies(
       );
       const pollUrl =
         `${payerClaimUrl}/${claimFingerprint}`;
+      const waitForNextPoll = async () => {
+        if (Date.now() + POLL_INTERVAL_MS > deadline) {
+          fail();
+        }
+        await new Promise((resolvePromise) =>
+          setTimeout(resolvePromise, POLL_INTERVAL_MS));
+      };
       for (;;) {
-        const response = await requestJson({
-          authorization: `Bearer ${pollCapability}`,
-          method: "GET",
-          url: pollUrl,
-        });
+        let response;
+        try {
+          response = await requestJson({
+            authorization: `Bearer ${pollCapability}`,
+            method: "GET",
+            url: pollUrl,
+          });
+        } catch {
+          await waitForNextPoll();
+          continue;
+        }
         if (response?.paymentMoved !== false) {
           fail();
         }
@@ -815,11 +828,7 @@ export async function createProductionPayerBootstrapDependencies(
         if (!["PENDING", "APPROVED"].includes(response.status)) {
           fail();
         }
-        if (Date.now() + POLL_INTERVAL_MS > deadline) {
-          fail();
-        }
-        await new Promise((resolvePromise) =>
-          setTimeout(resolvePromise, POLL_INTERVAL_MS));
+        await waitForNextPoll();
       }
     },
 
