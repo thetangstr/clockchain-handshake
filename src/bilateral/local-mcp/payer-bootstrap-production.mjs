@@ -83,6 +83,8 @@ const GIT_PREFIX = Object.freeze([
 const MAX_HTTP_BYTES = 262_144;
 const POLL_INTERVAL_MS = 2_000;
 const MAX_POLL_MS = 300_000;
+const MCP_CERTIFICATE_COMMON_NAME =
+  "clockchain-payer-mcp";
 const ED25519_SPKI_PREFIX = Buffer.from(
   "302a300506032b6570032100",
   "hex",
@@ -504,6 +506,44 @@ export function buildRestrictedTunnelArguments({
   ]);
 }
 
+export function buildMcpCertificateArguments({
+  certificatePath,
+  hostname,
+  privateKeyPath,
+} = {}) {
+  if (
+    typeof certificatePath !== "string" ||
+    resolve(certificatePath) !== certificatePath ||
+    typeof privateKeyPath !== "string" ||
+    resolve(privateKeyPath) !== privateKeyPath ||
+    typeof hostname !== "string" ||
+    hostname.length === 0 ||
+    hostname.length > 253 ||
+    !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(
+      hostname,
+    )
+  ) {
+    fail();
+  }
+  return Object.freeze([
+    "req",
+    "-x509",
+    "-newkey",
+    "ed25519",
+    "-keyout",
+    privateKeyPath,
+    "-out",
+    certificatePath,
+    "-nodes",
+    "-days",
+    "1",
+    "-subj",
+    `/CN=${MCP_CERTIFICATE_COMMON_NAME}`,
+    "-addext",
+    `subjectAltName=DNS:${hostname}`,
+  ]);
+}
+
 export function buildPayerSupervisorArguments({
   discovery,
   paths,
@@ -598,23 +638,11 @@ export async function createProductionPayerBootstrapDependencies(
       );
       await execFileAsync(
         prerequisites.openssl.command,
-        [
-          "req",
-          "-x509",
-          "-newkey",
-          "ed25519",
-          "-keyout",
-          privateKeyPath,
-          "-out",
+        buildMcpCertificateArguments({
           certificatePath,
-          "-nodes",
-          "-days",
-          "1",
-          "-subj",
-          `/CN=${hostname}`,
-          "-addext",
-          `subjectAltName=DNS:${hostname}`,
-        ],
+          hostname,
+          privateKeyPath,
+        }),
         {
           encoding: "utf8",
           env: childEnvironment(),

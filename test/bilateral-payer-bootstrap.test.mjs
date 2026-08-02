@@ -21,10 +21,8 @@ import {
 import {
   runPayerBootstrap,
 } from "../src/bilateral/local-mcp/payer-bootstrap.mjs";
-import {
-  buildPayerSupervisorArguments,
-  buildRestrictedTunnelArguments,
-} from "../src/bilateral/local-mcp/payer-bootstrap-production.mjs";
+import * as payerBootstrapProduction from
+  "../src/bilateral/local-mcp/payer-bootstrap-production.mjs";
 import {
   createPayerBootstrapKey,
   payerBootstrapClaimFingerprint,
@@ -37,6 +35,11 @@ const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const CLAIM_NONCE = "11111111-1111-4111-8111-111111111111";
 const STATE_ROOT = "/private/payer-state";
 const SECRET_CANARY = "private-bootstrap-capability-canary";
+const {
+  buildMcpCertificateArguments,
+  buildPayerSupervisorArguments,
+  buildRestrictedTunnelArguments,
+} = payerBootstrapProduction;
 
 function certificatePem() {
   const root = mkdtempSync(join(tmpdir(), "payer-bootstrap-"));
@@ -486,6 +489,39 @@ test("SIGINT or SIGTERM aborts the active Payer path and runs the same cleanup",
       "PAYER_BOOTSTRAP_FAILED",
     );
   }
+});
+
+test("Payer MCP certificates keep the public hostname in SAN when it exceeds the CN limit", () => {
+  assert.equal(
+    typeof buildMcpCertificateArguments,
+    "function",
+  );
+  const hostname =
+    "clockc-publi-zy7cx0fg51wv-6631635de11f13ca.elb.us-west-2.amazonaws.com";
+  assert.deepEqual(
+    buildMcpCertificateArguments({
+      certificatePath: `${STATE_ROOT}/payer-mcp.crt`,
+      hostname,
+      privateKeyPath: `${STATE_ROOT}/payer-mcp.key`,
+    }),
+    [
+      "req",
+      "-x509",
+      "-newkey",
+      "ed25519",
+      "-keyout",
+      `${STATE_ROOT}/payer-mcp.key`,
+      "-out",
+      `${STATE_ROOT}/payer-mcp.crt`,
+      "-nodes",
+      "-days",
+      "1",
+      "-subj",
+      "/CN=clockchain-payer-mcp",
+      "-addext",
+      `subjectAltName=DNS:${hostname}`,
+    ],
+  );
 });
 
 test("production commands pin one reverse listener and pass private material only by path", () => {
