@@ -137,8 +137,8 @@ export function buildPublicEdgeArguments(publicEdge, localPorts) {
     "-o", "ServerAliveCountMax=2",
     "-i", edge.identityFile,
     "-p", String(edge.port),
-    "-R", `${edge.relayRemotePort}:127.0.0.1:${locals.relay}`,
-    "-R", `${edge.payerMcpRemotePort}:127.0.0.1:${locals.payerMcp}`,
+    "-R", `0.0.0.0:${edge.relayRemotePort}:127.0.0.1:${locals.relay}`,
+    "-R", `0.0.0.0:${edge.payerMcpRemotePort}:127.0.0.1:${locals.payerMcp}`,
     `${edge.user}@${edge.host}`,
   ]);
 }

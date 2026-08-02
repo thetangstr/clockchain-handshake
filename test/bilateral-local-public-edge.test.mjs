@@ -119,8 +119,8 @@ test("builds only the two fixed reverse forwards with noninteractive SSH restric
     "-o", "ServerAliveCountMax=2",
     "-i", config.identityFile,
     "-p", "22",
-    "-R", "8443:127.0.0.1:8443",
-    "-R", "9443:127.0.0.1:9443",
+    "-R", "0.0.0.0:8443:127.0.0.1:8443",
+    "-R", "0.0.0.0:9443:127.0.0.1:9443",
     "clockchain-tunnel@32.186.198.119",
   ]);
   assert.equal(Object.isFrozen(args), true);
