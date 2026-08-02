@@ -1328,7 +1328,7 @@ test("production commands pin one reverse listener and pass private material onl
     "443",
     "-R",
     "0.0.0.0:9443:127.0.0.1:9443",
-    "clockchain-payer@tunnel.clockchain.network",
+    "clockchain-tunnel@tunnel.clockchain.network",
   ]);
   assert.equal(ssh.includes("-L"), false);
   assert.equal(ssh.includes("-A"), false);

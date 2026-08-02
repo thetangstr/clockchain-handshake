@@ -506,7 +506,7 @@ export function buildRestrictedTunnelArguments({
     "443",
     "-R",
     "0.0.0.0:9443:127.0.0.1:9443",
-    `clockchain-payer@${discovery.tunnelHost}`,
+    `clockchain-tunnel@${discovery.tunnelHost}`,
   ]);
 }
 
