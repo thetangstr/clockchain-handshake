@@ -294,3 +294,135 @@ test("maintains a bounded newest-first unique run index", () => {
     /AWS public history failed safely/,
   );
 });
+
+test("migrates a valid legacy v1 run index to v2 while preserving entries", () => {
+  const legacyRunId = "run-1111111111111111";
+  const legacyEntry = {
+    anchors: [],
+    businessResult:
+      "The run stopped safely because the available evidence did not satisfy every required check.",
+    completedAtMs: "1999999999000",
+    runId: legacyRunId,
+    runStatus: "FAILED",
+    summaryUrl:
+      `https://monitor.example/runs/${legacyRunId}.json`,
+  };
+  const nextSummary = createImmutableRunSummary({
+    completedAtMs: COMPLETED_AT_MS,
+    projection: projection(),
+    secretCanaries: [],
+    summaryUrl:
+      `https://monitor.example/runs/${RUN_ID}.json`,
+    verifierPublicationValidated: true,
+  });
+
+  const migrated = appendPublicRunIndex({
+    index: {
+      entries: [legacyEntry],
+      paymentMoved: false,
+      schema:
+        "clockchain.aws-public-run-index/v1",
+      updatedAtMs: "1999999999000",
+    },
+    summary: nextSummary,
+    updatedAtMs: COMPLETED_AT_MS,
+  });
+
+  assert.equal(
+    migrated.schema,
+    "clockchain.aws-public-run-index/v2",
+  );
+  assert.deepEqual(
+    migrated.entries.map(({ runId }) => runId),
+    [RUN_ID, legacyRunId],
+  );
+  assert.deepEqual(
+    migrated.entries[1],
+    legacyEntry,
+  );
+});
+
+test("rejects malformed legacy v1 run indexes instead of migrating them", () => {
+  const legacyRunId = "run-1111111111111111";
+  const legacyEntry = {
+    anchors: [],
+    businessResult:
+      "The run stopped safely because the available evidence did not satisfy every required check.",
+    completedAtMs: "1999999999000",
+    runId: legacyRunId,
+    runStatus: "FAILED",
+    summaryUrl:
+      `https://monitor.example/runs/${legacyRunId}.json`,
+  };
+  const nextSummary = createImmutableRunSummary({
+    completedAtMs: COMPLETED_AT_MS,
+    projection: projection(),
+    secretCanaries: [],
+    summaryUrl:
+      `https://monitor.example/runs/${RUN_ID}.json`,
+    verifierPublicationValidated: true,
+  });
+  for (const index of [
+    {
+      entries: [legacyEntry],
+      paymentMoved: true,
+      schema:
+        "clockchain.aws-public-run-index/v1",
+      updatedAtMs: "1999999999000",
+    },
+    {
+      entries: [
+        legacyEntry,
+        { ...legacyEntry },
+      ],
+      paymentMoved: false,
+      schema:
+        "clockchain.aws-public-run-index/v1",
+      updatedAtMs: "1999999999000",
+    },
+    {
+      entries: [
+        {
+          ...legacyEntry,
+          completedAtMs: "1999999998000",
+        },
+        legacyEntry,
+      ],
+      paymentMoved: false,
+      schema:
+        "clockchain.aws-public-run-index/v1",
+      updatedAtMs: "1999999999000",
+    },
+    {
+      entries: [
+        {
+          ...legacyEntry,
+          businessResult:
+            "The run expired before fresh independent verification completed.",
+        },
+      ],
+      paymentMoved: false,
+      schema:
+        "clockchain.aws-public-run-index/v1",
+      updatedAtMs: "1999999999000",
+    },
+    {
+      entries: [legacyEntry],
+      paymentMoved: false,
+      schema:
+        "clockchain.aws-public-run-index/v0",
+      updatedAtMs: "1999999999000",
+    },
+  ]) {
+    assert.throws(
+      () =>
+        appendPublicRunIndex({
+          index,
+          summary: nextSummary,
+          updatedAtMs:
+            COMPLETED_AT_MS,
+        }),
+      /AWS public history failed safely/,
+    );
+  }
+});

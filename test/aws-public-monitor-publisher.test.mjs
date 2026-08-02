@@ -347,6 +347,97 @@ test("uses an immutable summary and conditional newest-first index only for a va
   );
 });
 
+test("migrates a valid legacy v1 run index during terminal publication", async () => {
+  const legacyRunId = "run-1111111111111111";
+  const legacyIndex = {
+    entries: [
+      {
+        anchors: [],
+        businessResult:
+          "The run stopped safely because the available evidence did not satisfy every required check.",
+        completedAtMs: "1999999999000",
+        runId: legacyRunId,
+        runStatus: "FAILED",
+        summaryUrl:
+          `https://clockchain-research.vercel.app/handshake/runs/${legacyRunId}.json`,
+      },
+    ],
+    paymentMoved: false,
+    schema: "clockchain.aws-public-run-index/v1",
+    updatedAtMs: "1999999999000",
+  };
+  const verified = snapshot({
+    anchors: [
+      {
+        block: "101",
+        cardinality: "1",
+        explorerUrl:
+          "https://sepolia.etherscan.io/block/101",
+        kind: "PROPOSED",
+        ledgerId: "00000000-0000-4000-8000-000000000001",
+        signerRole: "Payer",
+        verified: true,
+      },
+      {
+        block: "102",
+        cardinality: "1",
+        explorerUrl:
+          "https://sepolia.etherscan.io/block/102",
+        kind: "ACCEPTED",
+        ledgerId: "00000000-0000-4000-8000-000000000002",
+        signerRole: "Requestor",
+        verified: true,
+      },
+      {
+        block: "103",
+        cardinality: "1",
+        explorerUrl:
+          "https://sepolia.etherscan.io/block/103",
+        kind: "ACKNOWLEDGED",
+        ledgerId: "00000000-0000-4000-8000-000000000003",
+        signerRole: "Payer",
+        verified: true,
+      },
+    ],
+    currentStep:
+      "Fresh independent verification confirmed all three Clockchain anchors.",
+    funding: { status: "READY" },
+    mcp: { status: "READY" },
+    payer: { status: "READY" },
+    requestor: { status: "READY" },
+    runStatus: "VERIFIED",
+    verifier: { status: "VERIFIED" },
+  });
+  const fx = fixture();
+  fx.dependencies.readIndex = async () => ({
+    body: `${JSON.stringify(legacyIndex)}\n`,
+    etag: "\"legacy-index\"",
+  });
+  await publishAwsPublicMonitor(
+    input({
+      completedAtMs: 2_000_000_000_500,
+      snapshot: verified,
+      verifierPublicationValidated: true,
+    }),
+    fx.dependencies,
+  );
+
+  const indexPut = fx.calls
+    .filter(([name]) => name === "put")
+    .map(([, value]) => value)
+    .find(({ key }) => key === "runs/index.json");
+  const migrated = JSON.parse(indexPut.body);
+  assert.equal(
+    migrated.schema,
+    "clockchain.aws-public-run-index/v2",
+  );
+  assert.equal(indexPut.ifMatch, "\"legacy-index\"");
+  assert.deepEqual(
+    migrated.entries.map(({ runId }) => runId),
+    [RUN_ID, legacyRunId],
+  );
+});
+
 test("rejects a changed immutable summary, any secret canary, and unvalidated green output", async () => {
   for (const overrides of [
     {

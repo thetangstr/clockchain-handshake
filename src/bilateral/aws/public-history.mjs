@@ -10,6 +10,8 @@ export const AWS_PUBLIC_RUN_SUMMARY_SCHEMA =
   "clockchain.aws-public-run-summary/v2";
 export const AWS_PUBLIC_RUN_INDEX_SCHEMA =
   "clockchain.aws-public-run-index/v2";
+const AWS_PUBLIC_RUN_INDEX_LEGACY_SCHEMA =
+  "clockchain.aws-public-run-index/v1";
 
 const SUMMARY_KEYS = Object.freeze([
   "anchors",
@@ -229,8 +231,10 @@ function indexEntry(value) {
 function validateIndex(value) {
   const index = exact(value, INDEX_KEYS);
   if (
-    index.schema !==
-      AWS_PUBLIC_RUN_INDEX_SCHEMA ||
+    ![
+      AWS_PUBLIC_RUN_INDEX_SCHEMA,
+      AWS_PUBLIC_RUN_INDEX_LEGACY_SCHEMA,
+    ].includes(index.schema) ||
     index.paymentMoved !== false ||
     !Array.isArray(index.entries) ||
     index.entries.length > 25
@@ -259,6 +263,7 @@ function validateIndex(value) {
   );
   return {
     ...index,
+    schema: AWS_PUBLIC_RUN_INDEX_SCHEMA,
     entries: Object.freeze(entries),
   };
 }
