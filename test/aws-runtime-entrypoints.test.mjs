@@ -46,6 +46,9 @@ import {
   main as operatorWorkerEntrypoint,
 } from "../infra/aws/runtime/operator-worker-entrypoint.mjs";
 import {
+  main as operatorBootstrapApprovalEntrypoint,
+} from "../infra/aws/runtime/operator-bootstrap-approval-entrypoint.mjs";
+import {
   main as verifierEntrypoint,
 } from "../infra/aws/runtime/verifier-entrypoint.mjs";
 import {
@@ -478,6 +481,46 @@ function operatorProductionRuntimeInput(overrides = {}) {
   });
 }
 
+function operatorBootstrapApprovalRuntimeInput(
+  overrides = {},
+) {
+  const bootstrapApproval = {
+    claimFingerprint: "b".repeat(64),
+    approvedPayerPublicPath:
+      OPERATOR_APPROVED_PAYER_PUBLIC_PATH,
+    operatorKeySecretArn:
+      "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key",
+    bootstrapBrokerCapabilitySecretArn:
+      "arn:aws:secretsmanager:us-west-2:123456789012:secret:bootstrap-capability",
+    bootstrapBrokerUrl:
+      "https://bootstrap.clockchain.network/v1/",
+    bootstrapStatePath:
+      `/var/lib/clockchain/bootstrap/releases/${OPERATOR_RELEASE_ID}/bootstrap-state.json`,
+    expectedRevision: 7,
+    operatorKeyId: "clockchain-demo-2026",
+    paymentMoved: false,
+    payeeLaunchManifestPath:
+      `/var/lib/clockchain/operator/releases/${OPERATOR_RELEASE_ID}/requestor-launch-manifest.json`,
+    payerLaunchManifestPath:
+      `/var/lib/clockchain/operator/releases/${OPERATOR_RELEASE_ID}/payer-launch-manifest.json`,
+    publicMcpHostname:
+      "payer.clockchain.network",
+    releaseId: OPERATOR_RELEASE_ID,
+    repositorySha:
+      "abcdef0123456789abcdef0123456789abcdef01",
+    role: "payer",
+    sessionId: OPERATOR_SESSION_ID,
+    tunnelGrantPath:
+      `/var/lib/clockchain/tunnel/grants/${OPERATOR_RELEASE_ID}/tunnel-grant.json`,
+    ...overrides,
+  };
+  return JSON.stringify({
+    bootstrapApproval,
+    paymentMoved: false,
+    schema: "clockchain.aws-runtime-input/v1",
+  });
+}
+
 function operatorPublicStaging(overrides = {}) {
   return {
     approvedPayerPublicPath:
@@ -726,6 +769,106 @@ test("every AWS task entrypoint is present and no production entrypoint is a pla
       typeof module.main,
       "function",
       path,
+    );
+  }
+});
+
+test("operator bootstrap approval entrypoint validates revision but sends only authority fields to adapter", async () => {
+  const calls = [];
+  const result =
+    await operatorBootstrapApprovalEntrypoint({
+      createAdapter: () => ({
+        approveAndSeal: async (input) => {
+          calls.push(input);
+          return {
+            paymentMoved: false,
+            status: "APPROVED",
+          };
+        },
+      }),
+      createClients: async () => ({
+        secrets: {
+          async send(command) {
+            if (
+              command.input.SecretId.endsWith(
+                "operator-key",
+              )
+            ) {
+              return {
+                SecretString:
+                  ed25519PrivateKeyPem(),
+              };
+            }
+            if (
+              command.input.SecretId.endsWith(
+                "bootstrap-capability",
+              )
+            ) {
+              return {
+                SecretString: "c".repeat(64),
+              };
+            }
+            assert.fail(
+              `unexpected secret read ${command.input.SecretId}`,
+            );
+          },
+        },
+      }),
+      env: {
+        AWS_RUNTIME_INPUT:
+          operatorBootstrapApprovalRuntimeInput(),
+      },
+      publishApprovedPayer: async () => {},
+    });
+
+  assert.deepEqual(result, {
+    paymentMoved: false,
+    status: "APPROVED",
+  });
+  assert.deepEqual(calls, [
+    {
+      claimFingerprint: "b".repeat(64),
+      paymentMoved: false,
+      releaseId: OPERATOR_RELEASE_ID,
+      repositorySha:
+        "abcdef0123456789abcdef0123456789abcdef01",
+      role: "payer",
+      sessionId: OPERATOR_SESSION_ID,
+    },
+  ]);
+});
+
+test("operator bootstrap approval entrypoint rejects malformed revisions before adapter invocation", async () => {
+  for (const expectedRevision of [
+    -1,
+    1.25,
+    Number.MAX_SAFE_INTEGER + 1,
+    "7",
+    null,
+  ]) {
+    await assert.rejects(
+      operatorBootstrapApprovalEntrypoint({
+        createAdapter: () => ({
+          approveAndSeal: async () => {
+            assert.fail(
+              "invalid expectedRevision must not reach adapter",
+            );
+          },
+        }),
+        createClients: async () => {
+          assert.fail(
+            "invalid expectedRevision must not read secrets",
+          );
+        },
+        env: {
+          AWS_RUNTIME_INPUT:
+            operatorBootstrapApprovalRuntimeInput({
+              expectedRevision,
+            }),
+        },
+        publishApprovedPayer: async () => {},
+      }),
+      /AWS operator bootstrap approval entrypoint failed safely/,
     );
   }
 });

@@ -40,6 +40,18 @@ function validateCapability(value) {
   return /^[0-9a-f]{64}$/.test(value);
 }
 
+function expectedRevision(value) {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 0
+  ) {
+    throw new Error(
+      "AWS operator bootstrap approval entrypoint failed safely.",
+    );
+  }
+  return value;
+}
+
 const BOOTSTRAP_APPROVAL_KEYS = Object.freeze([
   "claimFingerprint",
   "approvedPayerPublicPath",
@@ -106,15 +118,28 @@ function exact(value, keys) {
 }
 
 export async function main({
+  createAdapter =
+    createAwsOperatorBootstrapAdapter,
   createClients = createAwsRuntimeClients,
   env = process.env,
   nowMs = () => Date.now(),
+  publishApprovedPayer = async (
+    publicProjectionPath,
+    projectionInput,
+  ) =>
+    writeApprovedPayerPublicProjection(
+      publicProjectionPath,
+      createApprovedPayerPublicProjection(
+        projectionInput,
+      ),
+    ),
 } = {}) {
   const input =
     exact(
       parseRuntimeInput(env).bootstrapApproval,
       BOOTSTRAP_APPROVAL_KEYS,
     );
+  expectedRevision(input.expectedRevision);
   const publicProjectionPath =
     approvedPayerPath(
       input.approvedPayerPublicPath,
@@ -139,7 +164,7 @@ export async function main({
       validate: validateCapability,
     });
   const adapter =
-    createAwsOperatorBootstrapAdapter({
+    createAdapter({
       bootstrapBrokerCapability,
       bootstrapBrokerUrl:
         input.bootstrapBrokerUrl,
@@ -161,18 +186,14 @@ export async function main({
         input.tunnelGrantPath,
     }, {
       publishApprovedPayer: async (projectionInput) =>
-        writeApprovedPayerPublicProjection(
+        publishApprovedPayer(
           publicProjectionPath,
-          createApprovedPayerPublicProjection(
-            projectionInput,
-          ),
+          projectionInput,
         ),
     });
   return adapter.approveAndSeal({
     claimFingerprint:
       input.claimFingerprint,
-    expectedRevision:
-      input.expectedRevision,
     paymentMoved: false,
     releaseId: input.releaseId,
     repositorySha: input.repositorySha,
