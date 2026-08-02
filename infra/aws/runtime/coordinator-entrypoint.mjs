@@ -704,10 +704,24 @@ async function pollPayerReadiness({
     const tunnelHealth = await tunnelHealthReader(
       coordinator.publicStaging.tunnelHealthPath,
     );
-    if (approvedPayer !== null || tunnelHealth !== null) {
-      if (approvedPayer === null || tunnelHealth === null) {
-        fail();
-      }
+    if (
+      approvedPayer !== null &&
+      approvedPayer.status !== "APPROVED"
+    ) {
+      fail();
+    }
+    if (
+      tunnelHealth !== null &&
+      !["WAITING", "READY"].includes(
+        tunnelHealth.status,
+      )
+    ) {
+      fail();
+    }
+    if (
+      approvedPayer !== null &&
+      tunnelHealth?.status === "READY"
+    ) {
       const nowMs = now();
       validateReadyEvidence({
         approvedPayer,

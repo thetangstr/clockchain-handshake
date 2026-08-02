@@ -652,6 +652,21 @@ function readyCoordinatorTunnelHealth(overrides = {}) {
   };
 }
 
+function waitingCoordinatorTunnelHealth() {
+  return {
+    schema: "clockchain.payer-tunnel-health/v1",
+    releaseId: null,
+    repositorySha: null,
+    sessionId: null,
+    claimFingerprint: null,
+    mcpTlsFingerprint: null,
+    observedAtMs: "2000000000000",
+    expiresAtMs: "2000000600000",
+    paymentMoved: false,
+    status: "WAITING",
+  };
+}
+
 function verifierRuntimeInput(overrides = {}) {
   const verifier = {
     actionAtMs: 2_000_000_000_000,
@@ -1197,7 +1212,7 @@ test("coordinator entrypoint stages initial public monitor and opens Requestor d
       calls.push(["tunnelReader", path]);
       tunnelReads += 1;
       return tunnelReads === 1
-        ? null
+        ? waitingCoordinatorTunnelHealth()
         : readyCoordinatorTunnelHealth();
     },
   });
