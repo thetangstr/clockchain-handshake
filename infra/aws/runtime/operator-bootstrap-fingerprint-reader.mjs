@@ -184,6 +184,7 @@ export function createAwsOperatorBootstrapFingerprintReader(
                 ) &&
                 Number(entry.expiresAtMs) > nowMs,
             );
+          if (matches.length === 0) return null;
           if (matches.length !== 1) fail();
           const fingerprint =
             matches[0].claimFingerprint;

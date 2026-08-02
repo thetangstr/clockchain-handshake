@@ -363,3 +363,39 @@ test("bootstrap fingerprint reader performs projection-only reads and returns on
     null,
   );
 });
+
+test("bootstrap fingerprint reader reports no expected fingerprint before the payer joins", async () => {
+  const state = createBootstrapState({
+    paymentMoved: false,
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    schema: "clockchain.aws-bootstrap-state/v1",
+    sessionId: SESSION_ID,
+  });
+  const reader =
+    createAwsOperatorBootstrapFingerprintReader(
+      {
+        bootstrapStatePath:
+          "/var/lib/clockchain/bootstrap/releases/release-bd7662a5eeb41614/bootstrap-state.json",
+        nowMs: () => NOW,
+        paymentMoved: false,
+        releaseId: RELEASE_ID,
+        repositorySha: REPOSITORY_SHA,
+        sessionId: SESSION_ID,
+      },
+      {
+        readStableJson: async () => state,
+      },
+    );
+
+  assert.equal(
+    await reader.readExpectedClaimFingerprint({
+      releaseId: RELEASE_ID,
+      sessionId: SESSION_ID,
+      state: {
+        status: "RUN_STARTED",
+      },
+    }),
+    null,
+  );
+});
