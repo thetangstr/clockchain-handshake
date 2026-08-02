@@ -7,7 +7,9 @@ import test from "node:test";
 import {
   BOOTSTRAP_CLAIM_WAIT_MS,
   createProductionHybridOperatorDependencies,
+  FUNDING_RECORD_WAIT_MS,
   waitForPendingBootstrapClaim,
+  waitForStableFile,
 } from "../src/bilateral/local-demo/operator-production.mjs";
 import { HybridPublicEdgeError } from "../src/bilateral/local-demo/public-edge.mjs";
 
@@ -407,4 +409,54 @@ test("requestor claim wait returns the pending claim fingerprint", async (t) => 
     { now: () => 0, sleep: async () => assert.fail("must not sleep") },
   );
   assert.equal(result, claimFingerprint);
+});
+
+test("funding record wait uses the full 30-minute human-paced window", () => {
+  assert.equal(FUNDING_RECORD_WAIT_MS, 1_800_000);
+});
+
+test("funding record wait fails closed only after the full window elapses", async (t) => {
+  const privateRoot = await mkdtemp(join(tmpdir(), "clockchain-funding-record-missing-"));
+  t.after(() => rm(privateRoot, { force: true, recursive: true }));
+  const missingPath = join(privateRoot, "funding-addresses.json");
+  const clock = [0, 0, FUNDING_RECORD_WAIT_MS - 1, FUNDING_RECORD_WAIT_MS];
+  const sleeps = [];
+  await assert.rejects(
+    waitForStableFile(missingPath, {
+      deadlineMs: FUNDING_RECORD_WAIT_MS,
+      now: () => clock.shift(),
+      sleep: async (delayMs) => {
+        sleeps.push(delayMs);
+      },
+    }),
+  );
+  assert.equal(clock.length, 0);
+  assert.deepEqual(sleeps, [100, 100]);
+});
+
+test("funding record wait accepts a stable owner-private file inside the window", async (t) => {
+  const privateRoot = await mkdtemp(join(tmpdir(), "clockchain-funding-record-stable-"));
+  t.after(() => rm(privateRoot, { force: true, recursive: true }));
+  const recordPath = join(privateRoot, "funding-addresses.json");
+  await writeFile(recordPath, "{}\n", { mode: 0o600 });
+  await waitForStableFile(recordPath, {
+    deadlineMs: FUNDING_RECORD_WAIT_MS,
+    now: () => 0,
+    sleep: async () => assert.fail("must not sleep"),
+  });
+});
+
+test("production funding wait polls for the full window before failing closed", async (t) => {
+  const privateRoot = await mkdtemp(join(tmpdir(), "clockchain-production-funding-window-"));
+  const stateRoot = join(privateRoot, "state");
+  t.after(() => rm(privateRoot, { force: true, recursive: true }));
+  const activeConfig = config(privateRoot);
+  const clock = [0, 0, FUNDING_RECORD_WAIT_MS - 1, FUNDING_RECORD_WAIT_MS];
+  const dependencies = createProductionHybridOperatorDependencies({
+    now: () => clock.shift(),
+    async sleep() {},
+  });
+  const paths = await dependencies.createStateRoot({ config: activeConfig, stateRoot });
+  await assert.rejects(dependencies.runFunding({ config: activeConfig, paths }));
+  assert.equal(clock.length, 0);
 });

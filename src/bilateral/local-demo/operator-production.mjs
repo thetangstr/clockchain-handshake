@@ -23,6 +23,7 @@ const SESSION_ID =
 const MAX_LINE_BYTES = 16 * 1024;
 const DEFAULT_WAIT_MS = 120_000;
 export const BOOTSTRAP_CLAIM_WAIT_MS = 1_800_000;
+export const FUNDING_RECORD_WAIT_MS = 1_800_000;
 const BROKER_PORT = 9555;
 
 class HybridOperatorProductionError extends Error {
@@ -501,6 +502,9 @@ export async function waitForPendingBootstrapClaim(
   }
 }
 
+const defaultWaitForStableFundingRecord = (path) =>
+  waitForStableFile(path, { deadlineMs: FUNDING_RECORD_WAIT_MS });
+
 async function startPayer({ broker, config, paths, release }, { spawnService = createSpawnedService } = {}) {
   return spawnService({
     args: [
@@ -544,8 +548,15 @@ async function certificateFingerprint(path) {
   return createHash("sha256").update(new X509Certificate(pem).raw).digest("hex");
 }
 
-async function waitForStableFile(path) {
-  const deadline = Date.now() + DEFAULT_WAIT_MS;
+export async function waitForStableFile(
+  path,
+  {
+    deadlineMs = DEFAULT_WAIT_MS,
+    now = Date.now,
+    sleep = (delayMs) => new Promise((resolvePromise) => setTimeout(resolvePromise, delayMs)),
+  } = {},
+) {
+  const deadline = now() + deadlineMs;
   for (;;) {
     try {
       const before = await lstat(path);
@@ -580,8 +591,8 @@ async function waitForStableFile(path) {
     } catch (error) {
       if (error instanceof HybridOperatorProductionError) throw error;
     }
-    if (Date.now() >= deadline) fail();
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+    if (now() >= deadline) fail();
+    await sleep(100);
   }
 }
 
@@ -653,7 +664,7 @@ async function runFunding(
   {
     spawnService = createSpawnedService,
     useProductionFundingRecord = true,
-    waitForStableFundingRecord = waitForStableFile,
+    waitForStableFundingRecord = defaultWaitForStableFundingRecord,
   } = {},
 ) {
   const fundingRecord = join(paths.releaseRoot, "funding-addresses.json");
@@ -690,7 +701,14 @@ export function createProductionHybridOperatorDependencies(overrides = {}) {
     spawnService: overrides.spawnService ?? createSpawnedService,
     stdout: overrides.stdout ?? process.stdout,
     waitForCoordinatorRelease: overrides.waitForCoordinatorRelease ?? waitForCoordinatorRelease,
-    waitForStableFundingRecord: overrides.waitForStableFundingRecord ?? waitForStableFile,
+    waitForStableFundingRecord:
+      overrides.waitForStableFundingRecord ??
+      ((path) =>
+        waitForStableFile(path, {
+          deadlineMs: FUNDING_RECORD_WAIT_MS,
+          now: deps.now,
+          sleep: deps.sleep,
+        })),
     waitForPendingBootstrapClaim: overrides.waitForPendingBootstrapClaim ?? waitForPendingBootstrapClaim,
     waitForPublicEdge: overrides.waitForPublicEdge ?? waitForPinnedPublicEdge,
     useProductionCoordinatorState: overrides.waitForCoordinatorRelease === undefined,
