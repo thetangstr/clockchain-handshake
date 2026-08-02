@@ -48,7 +48,7 @@ const GIT_PREFIX = Object.freeze(["--no-pager", "--no-replace-objects", "-c", "c
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const MAX_FETCH_BYTES = 262_144;
 const BOOTSTRAP_POLL_MS = 2_000;
-const BOOTSTRAP_MAX_WAIT_MS = 300_000;
+const BOOTSTRAP_MAX_WAIT_MS = 1_800_000;
 
 function fail() {
   throw new Error("Request payment startup failed safely.");

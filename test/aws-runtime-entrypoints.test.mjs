@@ -1398,7 +1398,7 @@ test("coordinator entrypoint stages initial public monitor and opens Requestor d
     calls[2][1].snapshot.currentStep,
     "Waiting for the Payer and Requestor to join the run.",
   );
-  assert.equal(calls[2][1].expiresAtMs, "2000000600000");
+  assert.equal(calls[2][1].expiresAtMs, "2000001800000");
   assert.equal(
     calls.some((call) => call[0] === "run"),
     true,

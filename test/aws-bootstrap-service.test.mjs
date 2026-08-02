@@ -658,7 +658,7 @@ test("builds the Fargate bootstrap adapter from exact public configuration and a
         createHash("sha256")
           .update(BROKER_CAPABILITY)
           .digest("hex"),
-      AWS_BOOTSTRAP_CLAIM_EXPIRES_AFTER_MS: "300000",
+      AWS_BOOTSTRAP_CLAIM_EXPIRES_AFTER_MS: "1800000",
       AWS_BOOTSTRAP_PORT: "8080",
       AWS_BOOTSTRAP_STATE_PATH:
         "/bootstrap-private/bootstrap-state.json",
@@ -683,6 +683,10 @@ test("builds the Fargate bootstrap adapter from exact public configuration and a
   assert.equal(services.length, 1);
   assert.equal(services[0].host, "0.0.0.0");
   assert.equal(services[0].port, 8080);
+  assert.equal(
+    services[0].claimExpiresAfterMs,
+    1_800_000,
+  );
   assert.equal(
     services[0].brokerCapabilityDigest,
     createHash("sha256")

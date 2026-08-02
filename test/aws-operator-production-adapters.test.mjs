@@ -211,6 +211,89 @@ test("ABORT adapter tombstones an active tunnel grant before reporting ABORTED",
   }
 });
 
+test("ABORT adapter expires an already-expired active tunnel grant while reporting ABORTED", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "clockchain-operator-abort-"),
+  );
+  try {
+    const path = join(root, "tunnel-grant.json");
+    const abortMarkerPath = join(
+      root,
+      "abort-marker.json",
+    );
+    await writeFile(
+      path,
+      JSON.stringify(activeGrant()),
+      { mode: 0o600 },
+    );
+    const terminalAtMs = NOW + 60_000;
+    const adapter = createAwsOperatorAbortAdapter({
+      abortMarkerPath,
+      nowMs: () => terminalAtMs,
+      paymentMoved: false,
+      releaseId: RELEASE_ID,
+      repositorySha: REPOSITORY_SHA,
+      sessionId: SESSION_ID,
+      tunnelGrantPath: path,
+    });
+    const input = {
+      actionId: ACTION_ID,
+      expectedRevision: 2,
+      paymentMoved: false,
+      releaseId: RELEASE_ID,
+      repositorySha: REPOSITORY_SHA,
+      sessionId: SESSION_ID,
+    };
+
+    assert.deepEqual(await adapter.abort(input), {
+      paymentMoved: false,
+      status: "ABORTED",
+    });
+    assert.deepEqual(await adapter.abort(input), {
+      paymentMoved: false,
+      status: "ABORTED",
+    });
+
+    const tombstone = validateTunnelGrantRecord(
+      JSON.parse(await readFile(path, "utf8")),
+    );
+    assert.equal(tombstone.status, "TOMBSTONED");
+    assert.equal(
+      tombstone.terminalReason,
+      "EXPIRED",
+    );
+    assert.equal(
+      tombstone.terminalAtMs,
+      String(terminalAtMs),
+    );
+    assert.equal(tombstone.releaseId, RELEASE_ID);
+    assert.equal(tombstone.repositorySha, REPOSITORY_SHA);
+    assert.equal(tombstone.sessionId, SESSION_ID);
+    assert.equal(tombstone.paymentMoved, false);
+    assert.deepEqual(
+      JSON.parse(await readFile(abortMarkerPath, "utf8")),
+      {
+        actionId: ACTION_ID,
+        expectedRevision: 2,
+        paymentMoved: false,
+        releaseId: RELEASE_ID,
+        repositorySha: REPOSITORY_SHA,
+        schema:
+          "clockchain.aws-operator-abort-marker/v1",
+        sessionId: SESSION_ID,
+        status: "ABORTED",
+        terminalAtMs,
+        tunnelGrantPath: path,
+      },
+    );
+  } finally {
+    await rm(root, {
+      force: true,
+      recursive: true,
+    });
+  }
+});
+
 test("DynamoDB launch record store reads null and writes exact durable records under the action table", async () => {
   const calls = [];
   const store = createDynamoOperatorLaunchRecordStore({

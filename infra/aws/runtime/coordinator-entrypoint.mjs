@@ -59,6 +59,8 @@ import {
   validatePublicAddress,
 } from "../../../src/bilateral/network-endpoint.mjs";
 
+const STAKEHOLDER_DISCOVERY_WINDOW_MS =
+  1_800_000;
 const COORDINATOR_INPUT_KEYS = Object.freeze([
   "clockchainTokenSecretArn",
   "operatorKeyId",
@@ -645,7 +647,11 @@ function publicStagerConfig(coordinator, operatorPrivateKey) {
 }
 
 function initialPublicSnapshot(coordinator, nowMs) {
-  if (!Number.isSafeInteger(nowMs + 600_000)) {
+  if (
+    !Number.isSafeInteger(
+      nowMs + STAKEHOLDER_DISCOVERY_WINDOW_MS,
+    )
+  ) {
     fail();
   }
   return buildUnavailablePublicMonitorSnapshot({
@@ -736,7 +742,10 @@ async function pollPayerReadiness({
       });
       return true;
     }
-    if (now() - start >= 600_000) break;
+    if (
+      now() - start >=
+      STAKEHOLDER_DISCOVERY_WINDOW_MS
+    ) break;
     await sleeper(1000, { signal });
   }
   fail();
@@ -894,12 +903,18 @@ export async function main({
     if (
       !Number.isSafeInteger(currentNow) ||
       currentNow < 0 ||
-      !Number.isSafeInteger(currentNow + 600_000)
+      !Number.isSafeInteger(
+        currentNow +
+          STAKEHOLDER_DISCOVERY_WINDOW_MS,
+      )
     ) {
       fail();
     }
     await publicStager.stageStart({
-      expiresAtMs: String(currentNow + 600_000),
+      expiresAtMs: String(
+        currentNow +
+          STAKEHOLDER_DISCOVERY_WINDOW_MS,
+      ),
       nowMs: currentNow,
       snapshot: initialPublicSnapshot(
         coordinator,

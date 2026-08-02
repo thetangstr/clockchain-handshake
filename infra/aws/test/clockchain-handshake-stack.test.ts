@@ -762,7 +762,7 @@ test("configures long-lived bootstrap and publisher startup inputs", () => {
     {
       Name:
         "AWS_BOOTSTRAP_CLAIM_EXPIRES_AFTER_MS",
-      Value: "600000",
+      Value: "1800000",
     },
   );
   const publisher = environment("PublisherTask");

@@ -313,6 +313,87 @@ test("Requestor CLI polls pending bootstrap without a second prompt until sealed
   assert.equal(supervisorCalls, 1);
 });
 
+test("Requestor CLI keeps polling pending bootstrap for the 30 minute demo window", async (t) => {
+  const fx = await fixture(t);
+  const sleeps = [];
+  const startMs = Date.now();
+  let clockMs = startMs;
+  let attempts = 0;
+  let supervisorCalls = 0;
+  const result = await main(fx.args, {
+    async inspectRepository() {
+      return { clean: true, detached: true, head: REPOSITORY_SHA };
+    },
+    async fetchJson() {
+      return signedDiscovery({
+        certificateFingerprint: fx.certificateFingerprint,
+        certificateUrl: fx.discovery.certificateUrl,
+        expiresAtMs: String(startMs + 1_800_000),
+        operator: fx.operator,
+        publicUrl: fx.discovery.publicUrl,
+      });
+    },
+    async readOperatorPublicKey() {
+      return fx.operatorPublicKey;
+    },
+    async fetchText() {
+      return fx.tlsCertificatePem;
+    },
+    async requestBootstrap(input) {
+      attempts += 1;
+      return clockMs >= startMs + 302_000
+        ? sealedBrokerResponse({
+            claim: input.claim,
+            manifestBytes: fx.manifestBytes,
+            operator: fx.operator,
+          })
+        : {
+            claimFingerprint:
+              bootstrapClaimFingerprint(input.claim),
+            paymentMoved: false,
+            repositorySha: REPOSITORY_SHA,
+            schema:
+              "clockchain.requestor-bootstrap-broker-response/v1",
+            status: "PENDING_APPROVAL",
+          };
+    },
+    async requestPayment() {
+      return {
+        paymentMoved: false,
+        status: "HANDSHAKE_REQUIRED",
+      };
+    },
+    async runSupervisor() {
+      supervisorCalls += 1;
+      return { paymentMoved: false, supervisor: "started" };
+    },
+    async sleep(ms) {
+      sleeps.push(ms);
+      clockMs += ms;
+    },
+    nowMs: () => clockMs,
+    async readLaunchManifest() {
+      return {
+        ...JSON.parse(fx.manifestBytes.toString("utf8")),
+        expiresAtMs: String(startMs + 1_800_000),
+      };
+    },
+    writeStatus() {},
+  });
+
+  assert.deepEqual(result, {
+    paymentMoved: false,
+    supervisor: "started",
+  });
+  assert.equal(attempts > 150, true);
+  assert.equal(clockMs, startMs + 302_000);
+  assert.equal(
+    sleeps.every((value) => value === 2_000),
+    true,
+  );
+  assert.equal(supervisorCalls, 1);
+});
+
 test("Requestor CLI fails closed when pending bootstrap exceeds approval deadline", async (t) => {
   const fx = await fixture(t);
   const sleeps = [];

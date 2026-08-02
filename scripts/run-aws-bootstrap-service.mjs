@@ -85,7 +85,7 @@ export async function createAwsBootstrapServiceFromEnvironment({
         env,
         "AWS_BOOTSTRAP_CLAIM_EXPIRES_AFTER_MS",
         1_000,
-        600_000,
+        1_800_000,
       ),
       host: required(
         env,

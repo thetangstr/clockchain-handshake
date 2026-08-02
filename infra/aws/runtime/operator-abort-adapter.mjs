@@ -53,6 +53,8 @@ const SESSION =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA40 = /^[0-9a-f]{40}$/;
 const UUID = SESSION;
+const IDEMPOTENT_ABORT_TERMINAL_REASONS =
+  new Set(["ABORT", "EXPIRED"]);
 
 export class AwsOperatorAbortAdapterError extends Error {
   constructor() {
@@ -217,6 +219,18 @@ function validateAbortMarker(value, active, input) {
   return marker;
 }
 
+function isActiveGrantExpired(grant, nowMs) {
+  return nowMs >= Number(grant.expiresAtMs);
+}
+
+function isSameActiveContext(record, active) {
+  return (
+    record.releaseId === active.releaseId &&
+    record.repositorySha === active.repositorySha &&
+    record.sessionId === active.sessionId
+  );
+}
+
 async function writeAbortMarker(active, input, terminalAtMs) {
   const marker = abortMarker(active, input, terminalAtMs);
   try {
@@ -294,11 +308,10 @@ export function createAwsOperatorAbortAdapter(
           }
           if (
             existing.status === "TOMBSTONED" &&
-            existing.terminalReason === "ABORT" &&
-            existing.releaseId === active.releaseId &&
-            existing.repositorySha ===
-              active.repositorySha &&
-            existing.sessionId === active.sessionId
+            IDEMPOTENT_ABORT_TERMINAL_REASONS.has(
+              existing.terminalReason,
+            ) &&
+            isSameActiveContext(existing, active)
           ) {
             await writeAbortMarker(
               active,
@@ -310,11 +323,19 @@ export function createAwsOperatorAbortAdapter(
               status: "ABORTED",
             });
           }
+          if (existing.status === "TOMBSTONED") {
+            fail();
+          }
           const tombstone =
             tombstoneTunnelGrant({
               activeGrant: existing,
               nowMs,
-              reason: "ABORT",
+              reason: isActiveGrantExpired(
+                existing,
+                nowMs,
+              )
+                ? "EXPIRED"
+                : "ABORT",
             });
           if (
             tombstone.releaseId !== active.releaseId ||

@@ -585,7 +585,7 @@ export class ClockchainHandshakeStack extends Stack {
     );
     bootstrap.container.addEnvironment(
       "AWS_BOOTSTRAP_CLAIM_EXPIRES_AFTER_MS",
-      "600000",
+      "1800000",
     );
     bootstrap.container.addEnvironment(
       "AWS_BOOTSTRAP_BIND_HOST",

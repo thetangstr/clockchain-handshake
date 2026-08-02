@@ -83,7 +83,7 @@ const GIT_PREFIX = Object.freeze([
 ]);
 const MAX_HTTP_BYTES = 262_144;
 const POLL_INTERVAL_MS = 2_000;
-const MAX_POLL_MS = 300_000;
+const MAX_POLL_MS = 1_800_000;
 const MCP_CERTIFICATE_COMMON_NAME =
   "clockchain-payer-mcp";
 const ED25519_SPKI_PREFIX = Buffer.from(
@@ -595,10 +595,14 @@ export function buildPayerSupervisorArguments({
 export async function createProductionPayerBootstrapDependencies(
   input,
 ) {
+  const requestJson =
+    typeof input?.httpsRequest === "function"
+      ? input.httpsRequest
+      : httpsRequest;
   const submitHttpRequest =
     typeof input?.submitHttpRequest === "function"
       ? input.submitHttpRequest
-      : httpsRequest;
+      : requestJson;
   let prerequisites;
   let operatorPublicKey;
   let privateState;
@@ -796,7 +800,7 @@ export async function createProductionPayerBootstrapDependencies(
       const pollUrl =
         `${payerClaimUrl}/${claimFingerprint}`;
       for (;;) {
-        const response = await httpsRequest({
+        const response = await requestJson({
           authorization: `Bearer ${pollCapability}`,
           method: "GET",
           url: pollUrl,

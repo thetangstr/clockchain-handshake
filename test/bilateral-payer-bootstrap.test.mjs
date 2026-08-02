@@ -386,6 +386,66 @@ test("production Payer claim submit fails closed after repeated or altered retry
   }
 });
 
+test("production Payer approval polling continues for the 30 minute demo window", async (t) => {
+  const realNow = Date.now;
+  const realSetTimeout = globalThis.setTimeout;
+  const startMs = 2_000_000_000_000;
+  let clockMs = startMs;
+  const sleeps = [];
+  const claimFingerprint = "b".repeat(64);
+  t.after(() => {
+    Date.now = realNow;
+    globalThis.setTimeout = realSetTimeout;
+  });
+  Date.now = () => clockMs;
+  globalThis.setTimeout = (callback, ms) => {
+    sleeps.push(ms);
+    clockMs += ms;
+    queueMicrotask(callback);
+    return { unref() {} };
+  };
+  const dependencies =
+    await payerBootstrapProduction.createProductionPayerBootstrapDependencies({
+      async httpsRequest() {
+        return clockMs >= startMs + 302_000
+          ? {
+              claimFingerprint,
+              packageResponse: {
+                sealed: true,
+              },
+              paymentMoved: false,
+              status: "SEALED",
+            }
+          : {
+              paymentMoved: false,
+              status: "PENDING",
+            };
+      },
+    });
+
+  assert.deepEqual(
+    await dependencies.pollApprovedPackage({
+      claimFingerprint,
+      expiresAtMs: String(startMs + 1_800_000),
+      payerClaimUrl: "https://127.0.0.1/v1/payer-claims",
+      pollCapability: SECRET_CANARY,
+    }),
+    {
+      claimFingerprint,
+      packageResponse: {
+        sealed: true,
+      },
+      paymentMoved: false,
+      status: "SEALED",
+    },
+  );
+  assert.equal(clockMs, startMs + 302_000);
+  assert.equal(
+    sleeps.every((value) => value === 2_000),
+    true,
+  );
+});
+
 test("fails safely, cleans up children, and zeroizes bootstrap material at every boundary", async () => {
   const orderedSteps = [
     "inspect-prerequisites",
