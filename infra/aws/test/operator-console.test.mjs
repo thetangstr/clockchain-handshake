@@ -194,3 +194,372 @@ test("maps the Cognito access-token client_id into the validated audience field"
     /aud:\s*jwt\?\.aud\s*\?\?\s*jwt\?\.client_id/,
   );
 });
+
+function tokenWithExp(exp) {
+  const payload = Buffer.from(
+    JSON.stringify({ exp }),
+  )
+    .toString("base64url");
+  return `header.${payload}.signature`;
+}
+
+function installBrowserGlobals(t) {
+  const original = {
+    confirm: globalThis.confirm,
+    crypto: globalThis.crypto,
+    document: globalThis.document,
+    fetch: globalThis.fetch,
+    history: globalThis.history,
+    location: globalThis.location,
+    sessionStorage: globalThis.sessionStorage,
+  };
+  t.after(() => {
+    for (const [key, value] of Object.entries(
+      original,
+    )) {
+      if (value === undefined) {
+        delete globalThis[key];
+      } else {
+        Object.defineProperty(globalThis, key, {
+          configurable: true,
+          value,
+          writable: true,
+        });
+      }
+    }
+  });
+  const storage = new Map();
+  Object.defineProperty(
+    globalThis,
+    "sessionStorage",
+    {
+      configurable: true,
+      value: {
+        getItem(key) {
+          return storage.has(key)
+            ? storage.get(key)
+            : null;
+        },
+        removeItem(key) {
+          storage.delete(key);
+        },
+        setItem(key, value) {
+          storage.set(key, value);
+        },
+      },
+      writable: true,
+    },
+  );
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: {
+      getRandomValues(bytes) {
+        bytes.fill(7);
+        return bytes;
+      },
+      randomUUID() {
+        return "11111111-2222-4333-8444-555555555555";
+      },
+      subtle: {
+        async digest() {
+          return new Uint8Array(32).buffer;
+        },
+      },
+    },
+    writable: true,
+  });
+  Object.defineProperty(globalThis, "history", {
+    configurable: true,
+    value: {
+      replaceState() {},
+    },
+    writable: true,
+  });
+  return { storage };
+}
+
+test("rejects malformed or nearly expired access tokens before confirming an action", async (t) => {
+  const { sendAction } = await import(
+    new URL("../operator-console/app.js", import.meta.url)
+  );
+  installBrowserGlobals(t);
+  const assigned = [];
+  globalThis.location = {
+    assign(value) {
+      assigned.push(value);
+    },
+    origin: "https://console.example",
+    pathname: "/",
+    search: "",
+  };
+  let confirms = 0;
+  let requests = 0;
+  globalThis.confirm = () => {
+    confirms += 1;
+    return true;
+  };
+  globalThis.fetch = async () => {
+    requests += 1;
+    return {
+      ok: true,
+      async json() {
+        return {};
+      },
+    };
+  };
+  for (const token of [
+    "not-a-jwt",
+    tokenWithExp(2_000_000_299),
+  ]) {
+    sessionStorage.setItem(
+      "clockchain.access-token",
+      token,
+    );
+    await assert.rejects(
+      sendAction(
+        {
+          cognitoClientId: "client-123",
+          cognitoHostedUiUrl:
+            "https://auth.example",
+          controlApiUrl:
+            "https://control.example",
+        },
+        "APPROVE_PAYER",
+        {
+          claims: {
+            payer: {
+              fingerprint: "a".repeat(64),
+            },
+          },
+          releaseId:
+            "release-0123456789abcdef",
+          repositorySha:
+            "abcdef0123456789abcdef0123456789abcdef01",
+          revision: 2,
+          sessionId:
+            "11111111-2222-4333-8444-555555555555",
+        },
+        2_000_000_000_000,
+      ),
+      /REAUTH_STARTED/,
+    );
+    assert.equal(
+      sessionStorage.getItem(
+        "clockchain.access-token",
+      ),
+      null,
+    );
+  }
+  assert.equal(confirms, 0);
+  assert.equal(requests, 0);
+  assert.equal(assigned.length, 2);
+  assert.match(
+    assigned[0],
+    /^https:\/\/auth\.example\/oauth2\/authorize\?/,
+  );
+});
+
+test("schedules proactive re-auth at the five minute token threshold", async (t) => {
+  const { scheduleTokenReauth } = await import(
+    new URL("../operator-console/app.js", import.meta.url)
+  );
+  installBrowserGlobals(t);
+  const assigned = [];
+  globalThis.location = {
+    assign(value) {
+      assigned.push(value);
+    },
+    origin: "https://console.example",
+    pathname: "/",
+    search: "",
+  };
+  let scheduled;
+  sessionStorage.setItem(
+    "clockchain.access-token",
+    tokenWithExp(2_000_000_600),
+  );
+
+  scheduleTokenReauth(
+    {
+      cognitoClientId: "client-123",
+      cognitoHostedUiUrl:
+        "https://auth.example",
+    },
+    sessionStorage.getItem(
+      "clockchain.access-token",
+    ),
+    2_000_000_000_000,
+    (callback, ms) => {
+      scheduled = { callback, ms };
+      return 1;
+    },
+  );
+
+  assert.equal(scheduled.ms, 300_000);
+  scheduled.callback();
+  await new Promise((resolve) =>
+    setImmediate(resolve));
+  assert.equal(
+    sessionStorage.getItem(
+      "clockchain.access-token",
+    ),
+    null,
+  );
+  assert.equal(assigned.length, 1);
+});
+
+function installConsoleDom(t) {
+  installBrowserGlobals(t);
+  const elements = new Map();
+  const ids = [
+    "status-title",
+    "status-pill",
+    "current-step",
+    "run-id",
+    "revision",
+    "payer-claim-status",
+    "payer-fingerprint",
+    "requestor-claim-status",
+    "requestor-fingerprint",
+  ];
+  for (const id of ids) {
+    elements.set(id, {
+      className: "",
+      textContent: "",
+    });
+  }
+  const buttons = [
+    {
+      dataset: { action: "START_RUN" },
+      disabled: false,
+    },
+    {
+      dataset: { action: "FUND" },
+      disabled: true,
+    },
+  ];
+  globalThis.document = {
+    getElementById(id) {
+      return elements.get(id) ?? null;
+    },
+    querySelectorAll(selector) {
+      assert.equal(selector, "[data-action]");
+      return buttons;
+    },
+  };
+  return { buttons, elements };
+}
+
+function snapshot({ revision, action }) {
+  return {
+    control: {
+      allowedActions: [action],
+      claims: {
+        payer: {
+          fingerprint: "a".repeat(64),
+          status: "PENDING",
+        },
+        requestor: {
+          fingerprint: null,
+          status: "WAITING",
+        },
+      },
+      releaseId: "release-0123456789abcdef",
+      repositorySha:
+        "abcdef0123456789abcdef0123456789abcdef01",
+      revision,
+      sessionId:
+        "11111111-2222-4333-8444-555555555555",
+    },
+    currentStep: "Ready.",
+    paymentMoved: false,
+    publishedAtMs: String(Date.now()),
+    runId: "run-123",
+    runStatus: "WAITING",
+    staleAfterMs: 10_000,
+  };
+}
+
+test("refreshes the live monitor view and disables actions after fetch failures", async (t) => {
+  const { refreshMonitor } = await import(
+    new URL("../operator-console/app.js", import.meta.url)
+  );
+  const { buttons, elements } =
+    installConsoleDom(t);
+  globalThis.fetch = async () => ({
+    async json() {
+      return snapshot({
+        action: "FUND",
+        revision: 3,
+      });
+    },
+    ok: true,
+  });
+
+  await refreshMonitor(
+    { monitorUrl: "https://monitor.example" },
+    true,
+  );
+
+  assert.equal(
+    elements.get("revision").textContent,
+    "3",
+  );
+  assert.deepEqual(
+    buttons.map((button) => button.disabled),
+    [true, false],
+  );
+
+  globalThis.fetch = async () => {
+    throw new Error("network down");
+  };
+  await assert.rejects(
+    refreshMonitor(
+      { monitorUrl: "https://monitor.example" },
+      true,
+    ),
+    /network down/,
+  );
+  assert.deepEqual(
+    buttons.map((button) => button.disabled),
+    [true, true],
+  );
+});
+
+test("keeps accepted action message when the immediate monitor refresh fails", async () => {
+  const { handleActionClick } = await import(
+    new URL("../operator-console/app.js", import.meta.url)
+  );
+  let disabled = false;
+  const message = {
+    textContent: "",
+  };
+  let currentView = {
+    revision: 2,
+  };
+
+  const nextView = await handleActionClick({
+    action: "FUND",
+    config: {},
+    disableActions() {
+      disabled = true;
+    },
+    message,
+    refreshMonitor: async () => {
+      throw new Error("network down");
+    },
+    sendAction: async () => true,
+    setView(view) {
+      currentView = view;
+    },
+    signedIn: true,
+    view: currentView,
+  });
+
+  assert.equal(nextView, currentView);
+  assert.equal(disabled, true);
+  assert.equal(
+    message.textContent,
+    "Step accepted. Waiting for a fresh hosted update.",
+  );
+});

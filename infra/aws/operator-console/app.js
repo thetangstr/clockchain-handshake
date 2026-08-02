@@ -1,6 +1,8 @@
 const TOKEN_KEY = "clockchain.access-token";
 const PKCE_KEY = "clockchain.pkce-verifier";
 const STATE_KEY = "clockchain.oauth-state";
+const TOKEN_REAUTH_WINDOW_MS = 300_000;
+const MONITOR_REFRESH_MS = 2_000;
 const ACTIONS = Object.freeze([
   "START_RUN",
   "APPROVE_PAYER",
@@ -168,6 +170,78 @@ async function beginSignIn(config) {
   );
 }
 
+function tokenExpiresAtMs(token) {
+  if (typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const payloadPart = parts[1]
+      .replaceAll("-", "+")
+      .replaceAll("_", "/");
+    const paddedPayload =
+      payloadPart.padEnd(
+        Math.ceil(payloadPart.length / 4) * 4,
+        "=",
+      );
+    const payload = JSON.parse(
+      atob(paddedPayload),
+    );
+    if (!Number.isSafeInteger(payload.exp)) {
+      return null;
+    }
+    return payload.exp * 1_000;
+  } catch {
+    return null;
+  }
+}
+
+function freshStoredToken(nowMs = Date.now()) {
+  const token = sessionStorage.getItem(TOKEN_KEY);
+  const expiresAtMs = tokenExpiresAtMs(token);
+  if (
+    expiresAtMs === null ||
+    expiresAtMs - nowMs <= TOKEN_REAUTH_WINDOW_MS
+  ) {
+    sessionStorage.removeItem(TOKEN_KEY);
+    return null;
+  }
+  return token;
+}
+
+async function requireFreshToken(
+  config,
+  nowMs = Date.now(),
+) {
+  const token = freshStoredToken(nowMs);
+  if (token !== null) return token;
+  await beginSignIn(config);
+  throw new Error("REAUTH_STARTED");
+}
+
+export function scheduleTokenReauth(
+  config,
+  token,
+  nowMs = Date.now(),
+  schedule = setTimeout,
+) {
+  const expiresAtMs = tokenExpiresAtMs(token);
+  if (
+    expiresAtMs === null ||
+    expiresAtMs - nowMs <= TOKEN_REAUTH_WINDOW_MS
+  ) {
+    sessionStorage.removeItem(TOKEN_KEY);
+    void beginSignIn(config);
+    return null;
+  }
+  return schedule(
+    () => {
+      sessionStorage.removeItem(TOKEN_KEY);
+      void beginSignIn(config);
+    },
+    expiresAtMs - nowMs - TOKEN_REAUTH_WINDOW_MS,
+  );
+}
+
 async function finishSignIn(config) {
   const query = new URLSearchParams(
     location.search,
@@ -282,16 +356,16 @@ function confirmation(action, view) {
   return null;
 }
 
-async function sendAction(
+export async function sendAction(
   config,
   action,
   view,
+  nowMs = Date.now(),
 ) {
-  const token =
-    sessionStorage.getItem(TOKEN_KEY);
-  if (token === null) {
-    throw new Error("SIGNED_OUT");
-  }
+  const token = await requireFreshToken(
+    config,
+    nowMs,
+  );
   const prompt = confirmation(action, view);
   if (
     prompt !== null &&
@@ -324,6 +398,14 @@ function element(id) {
     throw new Error("CONSOLE_MARKUP_INVALID");
   }
   return value;
+}
+
+function disableActions() {
+  for (const button of document.querySelectorAll(
+    "[data-action]",
+  )) {
+    button.disabled = true;
+  }
 }
 
 function render(view, signedIn) {
@@ -368,6 +450,76 @@ function render(view, signedIn) {
   }
 }
 
+export async function refreshMonitor(
+  config,
+  signedIn,
+  nowMs = Date.now(),
+) {
+  try {
+    const monitor = await fetch(
+      `${config.monitorUrl}/control.json`,
+      { cache: "no-store" },
+    );
+    if (!monitor.ok) {
+      throw new Error("MONITOR_REJECTED");
+    }
+    const view = deriveView(
+      await monitor.json(),
+      nowMs,
+    );
+    render(view, signedIn);
+    return view;
+  } catch (error) {
+    disableActions();
+    throw error;
+  }
+}
+
+export async function handleActionClick({
+  action,
+  config,
+  disableActions: disableButtons = disableActions,
+  message,
+  refreshMonitor: refresh = refreshMonitor,
+  sendAction: send = sendAction,
+  setView = () => {},
+  signedIn,
+  view,
+}) {
+  message.textContent =
+    "Submitting the selected step…";
+  let accepted;
+  try {
+    accepted = await send(
+      config,
+      action,
+      view,
+    );
+  } catch {
+    message.textContent =
+      "The hosted control plane rejected this step safely.";
+    return view;
+  }
+  if (!accepted) {
+    message.textContent =
+      "No change was made.";
+    return view;
+  }
+  message.textContent =
+    "Step accepted. Waiting for a fresh hosted update.";
+  try {
+    const nextView = await refresh(
+      config,
+      signedIn,
+    );
+    setView(nextView);
+    return nextView;
+  } catch {
+    disableButtons();
+    return view;
+  }
+}
+
 async function start() {
   const message = element("action-message");
   let config;
@@ -379,23 +531,30 @@ async function start() {
     );
     config = await response.json();
     await finishSignIn(config);
-    const monitor = await fetch(
-      `${config.monitorUrl}/control.json`,
-      { cache: "no-store" },
-    );
-    view = deriveView(await monitor.json());
   } catch {
     message.textContent =
       "Could not reach the hosted control plane.";
     return;
   }
-  const signedIn =
-    sessionStorage.getItem(TOKEN_KEY) !== null;
+  const token = freshStoredToken();
+  const signedIn = token !== null;
   element("auth-state").textContent =
     signedIn ? "Signed in" : "Signed out";
   element("sign-in").hidden = signedIn;
   element("sign-out").hidden = !signedIn;
-  render(view, signedIn);
+  if (signedIn) {
+    scheduleTokenReauth(config, token);
+  }
+  try {
+    view = await refreshMonitor(
+      config,
+      signedIn,
+    );
+  } catch {
+    message.textContent =
+      "Could not reach the hosted control plane.";
+    return;
+  }
   message.textContent = signedIn
     ? "Choose the single available next step."
     : "Sign in to operate the hosted run.";
@@ -418,29 +577,27 @@ async function start() {
     button.addEventListener(
       "click",
       async () => {
-        message.textContent =
-          "Submitting the selected step…";
-        try {
-          if (
-            await sendAction(
-              config,
-              button.dataset.action,
-              view,
-            )
-          ) {
-            message.textContent =
-              "Step accepted. Waiting for a fresh hosted update.";
-          } else {
-            message.textContent =
-              "No change was made.";
-          }
-        } catch {
-          message.textContent =
-            "The hosted control plane rejected this step safely.";
-        }
+        await handleActionClick({
+          action: button.dataset.action,
+          config,
+          message,
+          setView(nextView) {
+            view = nextView;
+          },
+          signedIn,
+          view,
+        });
       },
     );
   }
+  setInterval(() => {
+    void refreshMonitor(
+      config,
+      signedIn,
+    ).then((nextView) => {
+      view = nextView;
+    }).catch(() => {});
+  }, MONITOR_REFRESH_MS);
 }
 
 if (typeof document !== "undefined") {
