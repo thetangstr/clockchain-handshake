@@ -48,6 +48,7 @@ const RELEASE_ID =
 const TIMESTAMP =
   /^(?:0|[1-9][0-9]*)$/;
 const MAX_BYTES = 131_072;
+const READ_REPLACEMENT_RACE_RETRIES = 2;
 
 export class TunnelHealthProjectionError extends Error {
   constructor() {
@@ -204,6 +205,17 @@ function sameFile(left, right) {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+function isPrivateRegularFile(stats) {
+  return (
+    stats.isFile() &&
+    !stats.isSymbolicLink() &&
+    stats.nlink === 1 &&
+    (stats.mode & 0o777) === 0o600 &&
+    stats.size > 0 &&
+    stats.size <= MAX_BYTES
+  );
+}
+
 function sameStableFile(left, right) {
   return (
     left.isFile() &&
@@ -242,14 +254,7 @@ async function existingPrivateFile(path) {
     throw error;
   });
   if (stats === null) return null;
-  if (
-    !stats.isFile() ||
-    stats.isSymbolicLink() ||
-    stats.nlink !== 1 ||
-    (stats.mode & 0o777) !== 0o600 ||
-    stats.size <= 0 ||
-    stats.size > MAX_BYTES
-  ) {
+  if (!isPrivateRegularFile(stats)) {
     fail();
   }
   return stats;
@@ -324,54 +329,67 @@ export async function writeTunnelHealthProjection(
   }
 }
 
+async function readStableTunnelHealthProjection(path) {
+  const before = await existingPrivateFile(path);
+  if (before === null) return { projection: null };
+  const handle = await open(
+    path,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const opened = await handle.stat();
+    if (!isPrivateRegularFile(opened)) fail();
+    if (!sameStableFile(before, opened)) {
+      return { replaced: true };
+    }
+    const bytes = await handle.readFile();
+    const after = await lstat(path);
+    const final = await handle.stat();
+    if (!isPrivateRegularFile(after) || !isPrivateRegularFile(final)) {
+      fail();
+    }
+    if (
+      bytes.length !== before.size ||
+      final.size !== before.size ||
+      !sameStableFile(before, final)
+    ) {
+      fail();
+    }
+    if (
+      after.size !== before.size ||
+      !sameStableFile(before, after)
+    ) {
+      return { replaced: true };
+    }
+    const text = bytes.toString("utf8");
+    if (!text.endsWith("\n")) fail();
+    let value;
+    try {
+      value = JSON.parse(text.slice(0, -1));
+    } catch {
+      fail();
+    }
+    const projection = tunnelHealthProjection(value);
+    if (canonicalJson(projection) !== text) fail();
+    return { projection };
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function readTunnelHealthProjection(path) {
   try {
     validatePath(path);
-    const before = await existingPrivateFile(path);
-    if (before === null) return null;
-    const handle = await open(
-      path,
-      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-    );
-    try {
-      const opened = await handle.stat();
-      if (
-        (opened.mode & 0o777) !== 0o600 ||
-        opened.nlink !== 1 ||
-        !sameStableFile(before, opened)
-      ) {
-        fail();
-      }
-      const bytes = await handle.readFile();
-      const after = await lstat(path);
-      const final = await handle.stat();
-      if (
-        bytes.length !== before.size ||
-        after.size !== before.size ||
-        final.size !== before.size ||
-        after.nlink !== 1 ||
-        final.nlink !== 1 ||
-        (after.mode & 0o777) !== 0o600 ||
-        (final.mode & 0o777) !== 0o600 ||
-        !sameStableFile(before, after) ||
-        !sameStableFile(before, final)
-      ) {
-        fail();
-      }
-      const text = bytes.toString("utf8");
-      if (!text.endsWith("\n")) fail();
-      let value;
-      try {
-        value = JSON.parse(text.slice(0, -1));
-      } catch {
-        fail();
-      }
-      const projection = tunnelHealthProjection(value);
-      if (canonicalJson(projection) !== text) fail();
-      return projection;
-    } finally {
-      await handle.close();
+    for (
+      let attempt = 0;
+      attempt <= READ_REPLACEMENT_RACE_RETRIES;
+      attempt += 1
+    ) {
+      const result =
+        await readStableTunnelHealthProjection(path);
+      if (!result.replaced) return result.projection;
     }
+    fail();
   } catch (error) {
     if (error instanceof TunnelHealthProjectionError) {
       throw error;

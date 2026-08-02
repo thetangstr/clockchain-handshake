@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   isPayerMcpReadyProjection,
@@ -150,6 +151,119 @@ test("rejects ambiguous paths, timestamps, statuses, and symlink replacement", a
     /Tunnel health projection failed safely/,
   );
   assert.equal(readFileSync(target, "utf8"), "target");
+});
+
+test("retries a read that observes an atomic tunnel health replacement race", async (t) => {
+  const directory = root(t);
+  const fakeFsPath = join(directory, "fake-fs-promises.mjs");
+  const modulePath = join(
+    directory,
+    "instrumented-tunnel-health.mjs",
+  );
+  const healthPath = join(directory, "health.json");
+  const observed = readyInput({
+    observedAtMs: NOW,
+    expiresAtMs: NOW + 60_000,
+  });
+  const replacement = readyInput({
+    observedAtMs: NOW + 1_000,
+    expiresAtMs: NOW + 61_000,
+  });
+  const observedBody = JSON.stringify({
+    schema: "clockchain.payer-tunnel-health/v1",
+    releaseId: observed.releaseId,
+    repositorySha: observed.repositorySha,
+    sessionId: observed.sessionId,
+    claimFingerprint: observed.claimFingerprint,
+    mcpTlsFingerprint: observed.mcpTlsFingerprint,
+    observedAtMs: String(observed.observedAtMs),
+    expiresAtMs: String(observed.expiresAtMs),
+    paymentMoved: false,
+    status: "READY",
+  }) + "\n";
+  const replacementBody = JSON.stringify({
+    schema: "clockchain.payer-tunnel-health/v1",
+    releaseId: replacement.releaseId,
+    repositorySha: replacement.repositorySha,
+    sessionId: replacement.sessionId,
+    claimFingerprint: replacement.claimFingerprint,
+    mcpTlsFingerprint: replacement.mcpTlsFingerprint,
+    observedAtMs: String(replacement.observedAtMs),
+    expiresAtMs: String(replacement.expiresAtMs),
+    paymentMoved: false,
+    status: "READY",
+  }) + "\n";
+  const fakeFsUrl = pathToFileURL(fakeFsPath).href;
+  const source = readFileSync(
+    new URL(
+      "../src/bilateral/aws/tunnel-health.mjs",
+      import.meta.url,
+    ),
+    "utf8",
+  ).replace(
+    'from "node:fs/promises";',
+    `from ${JSON.stringify(fakeFsUrl)};`,
+  );
+
+  writeFileSync(fakeFsPath, `
+    import { Buffer } from "node:buffer";
+    const stats = (ino, body) => ({
+      ctimeMs: ino,
+      dev: 1,
+      ino,
+      isFile: () => true,
+      isSymbolicLink: () => false,
+      mode: 0o100600,
+      mtimeMs: ino,
+      nlink: 1,
+      size: Buffer.byteLength(body),
+    });
+    const observedBody = ${JSON.stringify(observedBody)};
+    const replacementBody = ${JSON.stringify(replacementBody)};
+    const observedStats = stats(100, observedBody);
+    const replacementStats = stats(200, replacementBody);
+    let lstatCalls = 0;
+    let openedReplacement = false;
+
+    export async function lstat(path) {
+      if (path !== ${JSON.stringify(healthPath)}) {
+        throw Object.assign(new Error("not found"), { code: "ENOENT" });
+      }
+      lstatCalls += 1;
+      return lstatCalls === 1 ? observedStats : replacementStats;
+    }
+
+    export async function open(path) {
+      if (path !== ${JSON.stringify(healthPath)}) {
+        throw Object.assign(new Error("not found"), { code: "ENOENT" });
+      }
+      const body = openedReplacement ? replacementBody : observedBody;
+      const fileStats = openedReplacement ? replacementStats : observedStats;
+      openedReplacement = true;
+      return {
+        async close() {},
+        async readFile() {
+          return Buffer.from(body);
+        },
+        async stat() {
+          return fileStats;
+        },
+      };
+    }
+
+    export async function chmod() {}
+    export async function mkdir() {}
+    export async function rename() {}
+    export async function rm() {}
+  `);
+  writeFileSync(modulePath, source);
+  const { readTunnelHealthProjection: readProjection } =
+    await import(pathToFileURL(modulePath).href);
+
+  assert.deepEqual(
+    await readProjection(healthPath),
+    JSON.parse(replacementBody),
+  );
 });
 
 test("reads a missing tunnel health projection as polling null and fails closed on permissive files", async (t) => {
