@@ -713,3 +713,17 @@ test("permits a Fargate wildcard bind without treating it as a public authority"
   });
   assert.equal(typeof service.start, "function");
 });
+
+test("accepts a 30 minute bootstrap claim lifetime at the real service boundary", () => {
+  const service = createAwsBootstrapService({
+    brokerCapabilityDigest: createHash("sha256")
+      .update(BROKER_CAPABILITY)
+      .digest("hex"),
+    claimExpiresAfterMs: 1_800_000,
+    host: "127.0.0.1",
+    nowMs: () => NOW,
+    port: 0,
+    store: createStore(),
+  });
+  assert.equal(typeof service.start, "function");
+});

@@ -811,7 +811,7 @@ export function createAwsBootstrapService({
     const brokerDigest = brokerCapabilityDigest;
     const expiresAfter = safeInteger(
       claimExpiresAfterMs,
-      { maximum: 10 * 60_000, minimum: 1_000 },
+      { maximum: 30 * 60_000, minimum: 1_000 },
     );
     const bindHost = hostName(host);
     const bindPort = portNumber(port);
