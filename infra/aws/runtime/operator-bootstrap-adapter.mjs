@@ -3,6 +3,7 @@ import {
 } from "node:fs";
 import {
   lstat,
+  mkdir,
   open,
 } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -343,6 +344,29 @@ async function syncDirectory(path) {
   }
 }
 
+async function prepareSecureDirectory(path) {
+  try {
+    await mkdir(path, { mode: 0o700 });
+  } catch (error) {
+    if (error?.code !== "EEXIST") {
+      sanitize(error);
+    }
+  }
+  let info;
+  try {
+    info = await lstat(path);
+  } catch (error) {
+    sanitize(error);
+  }
+  if (
+    !info.isDirectory() ||
+    info.isSymbolicLink() ||
+    (info.mode & 0o777) !== 0o700
+  ) {
+    fail();
+  }
+}
+
 async function readStableFile(path, maximum) {
   let before;
   try {
@@ -434,8 +458,10 @@ async function persistGrant(active, grant) {
   const bytes = canonicalBytes(
     validateTunnelGrantRecord(grant),
   );
+  const parent = dirname(active.tunnelGrantPath);
   let handle;
   try {
+    await prepareSecureDirectory(parent);
     handle = await open(
       active.tunnelGrantPath,
       fsConstants.O_WRONLY |
@@ -448,9 +474,7 @@ async function persistGrant(active, grant) {
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await syncDirectory(
-      dirname(active.tunnelGrantPath),
-    );
+    await syncDirectory(parent);
   } catch (error) {
     await handle?.close();
     if (error?.code !== "EEXIST") {

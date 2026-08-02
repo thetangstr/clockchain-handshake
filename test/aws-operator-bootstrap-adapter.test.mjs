@@ -9,6 +9,7 @@ import {
   chmodSync,
   linkSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -417,6 +418,99 @@ test("approves and seals a Requestor claim using payee role without writing a tu
   assert.throws(
     () => readFileSync(fx.config.tunnelGrantPath),
     /ENOENT/,
+  );
+});
+
+test("creates a missing release grant directory before atomically sealing a Payer grant", async () => {
+  const claim = payerClaim();
+  const claimFingerprint =
+    payerBootstrapClaimFingerprint(claim);
+  const fx = await fixture({
+    claims: [{ claim, role: "payer" }],
+  });
+  const grantsRoot = join(fx.root, "grants");
+  mkdirSync(grantsRoot, { mode: 0o700 });
+  const releaseGrantRoot = join(
+    grantsRoot,
+    RELEASE_ID,
+  );
+  const tunnelGrantPath = join(
+    releaseGrantRoot,
+    "tunnel-grant.json",
+  );
+  const adapter = createAwsOperatorBootstrapAdapter({
+    ...fx.config,
+    tunnelGrantPath,
+  });
+
+  assert.deepEqual(
+    await adapter.approveAndSeal({
+      claimFingerprint,
+      paymentMoved: false,
+      releaseId: RELEASE_ID,
+      repositorySha: REPOSITORY_SHA,
+      role: "payer",
+      sessionId: SESSION_ID,
+    }),
+    { paymentMoved: false, status: "APPROVED" },
+  );
+
+  const releaseDirectory = lstatSync(
+    releaseGrantRoot,
+  );
+  assert.equal(
+    releaseDirectory.isDirectory(),
+    true,
+  );
+  assert.equal(
+    releaseDirectory.isSymbolicLink(),
+    false,
+  );
+  assert.equal(
+    releaseDirectory.mode & 0o777,
+    0o700,
+  );
+  const grantFile = lstatSync(tunnelGrantPath);
+  assert.equal(grantFile.mode & 0o777, 0o600);
+  const grant = validateTunnelGrantRecord(
+    JSON.parse(readFileSync(tunnelGrantPath, "utf8")),
+  );
+  assert.equal(grant.claimFingerprint, claimFingerprint);
+});
+
+test("rejects an unsafe existing release grant directory before sealing a Payer grant", async () => {
+  const claim = payerClaim();
+  const claimFingerprint =
+    payerBootstrapClaimFingerprint(claim);
+  const fx = await fixture({
+    claims: [{ claim, role: "payer" }],
+  });
+  const grantsRoot = join(fx.root, "grants");
+  mkdirSync(grantsRoot, { mode: 0o700 });
+  const releaseGrantRoot = join(
+    grantsRoot,
+    RELEASE_ID,
+  );
+  mkdirSync(releaseGrantRoot, { mode: 0o755 });
+  chmodSync(releaseGrantRoot, 0o755);
+  const tunnelGrantPath = join(
+    releaseGrantRoot,
+    "tunnel-grant.json",
+  );
+
+  await assert.rejects(
+    createAwsOperatorBootstrapAdapter({
+      ...fx.config,
+      tunnelGrantPath,
+    }).approveAndSeal({
+      claimFingerprint,
+      paymentMoved: false,
+      releaseId: RELEASE_ID,
+      repositorySha: REPOSITORY_SHA,
+      role: "payer",
+      sessionId: SESSION_ID,
+    }),
+    /AWS operator bootstrap adapter failed safely/,
   );
 });
 
