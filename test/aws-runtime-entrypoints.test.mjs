@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   execFile,
   execFileSync,
+  spawn,
 } from "node:child_process";
 import {
   createHash,
@@ -651,6 +652,7 @@ function publicBootstrapTestDependencies(overrides = {}) {
     approvedPayerReader: async () =>
       approvedCoordinatorPayerProjection(),
     createPublicReleaseRoot: async () => {},
+    holdLifecycleOpen: async () => {},
     now: () => 2_000_000_000_000,
     publicStagerFactory: () => stager,
     scratchRoot: tmpdir(),
@@ -1350,6 +1352,7 @@ test("coordinator entrypoint stages initial public monitor and opens Requestor d
       AWS_RUNTIME_INPUT:
         coordinatorRuntimeInputWithPublicStaging(),
     },
+    holdLifecycleOpen: async () => {},
     now: () => 2_000_000_000_000,
     publicStagerFactory: (config) => {
       calls.push(["publicStagerFactory", {
@@ -1409,6 +1412,191 @@ test("coordinator entrypoint stages initial public monitor and opens Requestor d
   assert.equal(readyCall[1].approvedPayer.claimFingerprint, "c".repeat(64));
   assert.equal(readyCall[1].tunnelHealth.mcpTlsFingerprint, RELAY_TLS_FINGERPRINT);
   assert.deepEqual(calls.at(-1), ["close"]);
+});
+
+test("coordinator entrypoint stays alive after setup and payer readiness complete", async () => {
+  const operatorKey = ed25519PrivateKeyPem();
+  const calls = [];
+  let releaseHold;
+  let settled = false;
+  const result = coordinatorEntrypoint({
+    ...publicBootstrapTestDependencies({
+      publicStagerFactory: () => ({
+        async close() {
+          calls.push(["close"]);
+        },
+        async stagePayerReady() {
+          calls.push(["stagePayerReady"]);
+        },
+        async stageStart() {
+          calls.push(["stageStart"]);
+        },
+        async stageTerminalFailure() {
+          calls.push(["stageTerminalFailure"]);
+        },
+      }),
+    }),
+    client: {
+      async send(command) {
+        if (
+          command.input.SecretId.endsWith(
+            "clockchain-token",
+          )
+        ) {
+          return {
+            SecretString: "clockchain-token",
+          };
+        }
+        if (
+          command.input.SecretId.endsWith(
+            "operator-key",
+          )
+        ) {
+          return { SecretString: operatorKey };
+        }
+        return {
+          SecretString:
+            "https://ethereum-rpc.publicnode.com/",
+        };
+      },
+    },
+    env: {
+      AWS_RUNTIME_INPUT:
+        coordinatorRuntimeInputWithPublicStaging(),
+    },
+    holdLifecycleOpen: async () =>
+      new Promise((resolve) => {
+        releaseHold = resolve;
+      }),
+    run: async () => {
+      calls.push(["run"]);
+      return 0;
+    },
+  }).then((value) => {
+    settled = true;
+    return value;
+  });
+
+  for (let attempt = 0; attempt < 50 && calls.length < 3; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  assert.deepEqual(
+    calls.map((call) => call[0]),
+    ["stageStart", "run", "stagePayerReady"],
+  );
+  assert.equal(settled, false);
+
+  releaseHold();
+
+  assert.equal(await result, 0);
+  assert.deepEqual(
+    calls.map((call) => call[0]),
+    ["stageStart", "run", "stagePayerReady", "close"],
+  );
+});
+
+test("coordinator entrypoint default hold keeps a subprocess alive until SIGTERM cleanup", async (t) => {
+  const root = await mkdtemp(
+    join(tmpdir(), "clockchain-coordinator-liveness-"),
+  );
+  t.after(() =>
+    rm(root, { force: true, recursive: true }));
+  const script = join(root, "coordinator-liveness.mjs");
+  const entrypointUrl = new URL(
+    "../infra/aws/runtime/coordinator-entrypoint.mjs",
+    import.meta.url,
+  ).href;
+  await writeFile(
+    script,
+    `import { main } from ${JSON.stringify(entrypointUrl)};
+import { tmpdir } from "node:os";
+const operatorKey = ${JSON.stringify(ed25519PrivateKeyPem())};
+const runtimeInput = ${JSON.stringify(coordinatorRuntimeInputWithPublicStaging())};
+const approved = ${JSON.stringify(approvedCoordinatorPayerProjection())};
+const tunnel = ${JSON.stringify(readyCoordinatorTunnelHealth())};
+main({
+  approvedPayerReader: async () => approved,
+  client: {
+    async send(command) {
+      if (command.input.SecretId.endsWith("clockchain-token")) return { SecretString: "clockchain-token" };
+      if (command.input.SecretId.endsWith("operator-key")) return { SecretString: operatorKey };
+      return { SecretString: "https://ethereum-rpc.publicnode.com/" };
+    },
+  },
+  createPublicReleaseRoot: async () => {},
+  env: { AWS_RUNTIME_INPUT: runtimeInput },
+  now: () => 2_000_000_000_000,
+  publicStagerFactory: () => ({
+    async close() { process.stdout.write("CLOSED\\n"); },
+    async stagePayerReady() { process.stdout.write("READY\\n"); },
+    async stageStart() {},
+    async stageTerminalFailure() { process.stdout.write("FAILED\\n"); },
+  }),
+  run: async () => 0,
+  scratchRoot: tmpdir(),
+  sleeper: async () => {},
+  tunnelHealthReader: async () => tunnel,
+}).then((value) => {
+  process.stdout.write(\`RESULT:\${value}\\n\`);
+}).catch((error) => {
+  process.stderr.write(\`\${error?.message ?? error}\\n\`);
+  process.exitCode = 1;
+});
+`,
+  );
+
+  const child = spawn(process.execPath, [script], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const close = new Promise((resolve) => {
+    child.once("close", (code, signal) => {
+      resolve({ code, signal });
+    });
+  });
+  const ready = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`coordinator child did not become ready; stdout=${stdout} stderr=${stderr}`));
+    }, 2_000);
+    child.stdout.on("data", () => {
+      if (stdout.includes("READY\n")) {
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+    child.once("exit", (code, signal) => {
+      if (!stdout.includes("READY\n")) {
+        clearTimeout(timeout);
+        reject(new Error(`coordinator child exited before ready code=${code} signal=${signal} stdout=${stdout} stderr=${stderr}`));
+      }
+    });
+  });
+
+  await ready;
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(child.exitCode, null);
+  assert.equal(child.signalCode, null);
+
+  child.kill("SIGTERM");
+  const exit = await close;
+  assert.deepEqual(exit, { code: 0, signal: null });
+  assert.match(stdout, /CLOSED\nRESULT:0\n$/);
+  assert.equal(stderr, "");
 });
 
 test("coordinator entrypoint terminal-stages public failure when Payer evidence is mismatched", async () => {

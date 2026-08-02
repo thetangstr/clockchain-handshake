@@ -280,6 +280,20 @@ function defaultSleeper(ms, { signal } = {}) {
   return delay(ms, undefined, { signal });
 }
 
+function defaultHoldLifecycleOpen() {
+  return new Promise((resolve) => {
+    const timer = setInterval(() => {}, 2_147_483_647);
+    const cleanup = () => {
+      clearInterval(timer);
+      process.removeListener("SIGINT", cleanup);
+      process.removeListener("SIGTERM", cleanup);
+      resolve();
+    };
+    process.once("SIGINT", cleanup);
+    process.once("SIGTERM", cleanup);
+  });
+}
+
 function validateScratchDir(path) {
   if (
     typeof path !== "string" ||
@@ -765,6 +779,7 @@ export async function main({
   scratchRoot = SCRATCH_ROOT,
   sleeper = defaultSleeper,
   tunnelHealthReader = readTunnelHealthProjection,
+  holdLifecycleOpen = defaultHoldLifecycleOpen,
 } = {}) {
   let failure;
   let operatorKeyPath;
@@ -806,7 +821,8 @@ export async function main({
       CONTROL.test(scratchRoot) ||
       normalize(scratchRoot) !== scratchRoot ||
       typeof sleeper !== "function" ||
-      typeof tunnelHealthReader !== "function"
+      typeof tunnelHealthReader !== "function" ||
+      typeof holdLifecycleOpen !== "function"
     ) {
       fail();
     }
@@ -1021,6 +1037,7 @@ export async function main({
     if (result !== 0) {
       fail();
     }
+    await holdLifecycleOpen();
   } catch (error) {
     runAbort?.abort();
     if (runPromise !== undefined) {
