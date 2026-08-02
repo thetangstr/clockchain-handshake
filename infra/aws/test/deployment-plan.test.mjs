@@ -143,7 +143,7 @@ test("deployment plan uses image digests and fixed account without deleting lega
       "oIcoZqI/cqzG4UbXcaV+k1fxwt8EBb+9S+XNcb9pq3k=",
     region: "us-west-2",
     relayTlsCertificatePem:
-      RELAY_TLS_CERTIFICATE_PEM,
+      RELAY_TLS_CERTIFICATE_PEM.trimEnd(),
     relayPublicHostname:
       "relay.clockchain.net",
     relayTlsFingerprint:
@@ -179,6 +179,10 @@ test("deployment plan uses image digests and fixed account without deleting lega
   assert.equal(
     plan.relayTlsSecretArn,
     "arn:aws:secretsmanager:us-west-2:570035913370:secret:clockchain-relay-tls-AbCdEf",
+  );
+  assert.equal(
+    plan.relayTlsCertificatePem,
+    RELAY_TLS_CERTIFICATE_PEM,
   );
   assert.equal(
     plan.receiptSenderEmail,

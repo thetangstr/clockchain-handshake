@@ -248,7 +248,8 @@ export function createDeploymentPlan({
     region,
     relayPublicHostname,
     repositorySha,
-    relayTlsCertificatePem,
+    relayTlsCertificatePem:
+      relayTlsCertificate.toString(),
     relayTlsFingerprint,
     relayTlsSecretArn,
     receiptSenderEmail,
