@@ -42,6 +42,9 @@ const BILATERAL_COMPATIBILITY_DOCUMENTS = Object.freeze([
 const BILATERAL_SUPPORTING_DOCUMENTS = Object.freeze([
   "docs/runbooks/payer-mcp-external-relay.md",
 ]);
+const HYBRID_LOCAL_DOCUMENTS = Object.freeze([
+  "docs/runbooks/hybrid-local-stakeholder-demo.md",
+]);
 const SUPPORT_FILES = Object.freeze([
   "package.json",
   "bin/handshake-demo.mjs",
@@ -99,6 +102,7 @@ async function temporaryDocumentationFixture(t) {
     ...BILATERAL_PUBLIC_DOCUMENTS,
     ...BILATERAL_COMPATIBILITY_DOCUMENTS,
     ...BILATERAL_SUPPORTING_DOCUMENTS,
+    ...HYBRID_LOCAL_DOCUMENTS,
     ...SUPPORT_FILES,
   ]) {
     const destination = join(directory, relativePath);
@@ -261,8 +265,9 @@ supersededLocalBilateralContract("bilateral prompts and runbook are first-class 
       BILATERAL_PUBLIC_DOCUMENTS.length +
       BILATERAL_COMPATIBILITY_DOCUMENTS.length +
       BILATERAL_SUPPORTING_DOCUMENTS.length +
+      HYBRID_LOCAL_DOCUMENTS.length +
       SUPPORT_FILES.filter((path) => path === "invites/README.md").length,
-    10,
+    11,
   );
   for (const [relativePath, contents] of documents) {
     assert.match(contents, /Clockchain(?:®)?/);
@@ -2964,6 +2969,22 @@ move no scenario money, and must not be reused outside this exercise.`;
   });
 });
 
+test("publishes one operator command and one Requestor command for the hybrid demo", async () => {
+  const runbook = await readFile(
+    join(ROOT_DIRECTORY, "docs/runbooks/hybrid-local-stakeholder-demo.md"),
+    "utf8",
+  );
+  assert.match(runbook, /Yang\/Codex runs the real Payer and operator/);
+  assert.match(runbook, /npm run bilateral:local-operator/);
+  assert.match(runbook, /npm run bilateral:request-payment/);
+  assert.match(runbook, /REQUESTOR_HANDOFF_READY/);
+  assert.match(runbook, /PROPOSED[\s\S]*ACCEPTED[\s\S]*ACKNOWLEDGED/);
+  assert.match(runbook, /exactly three independently re-verifiable Clockchain anchors/);
+  assert.match(runbook, /Only a fresh aggregate verifier may output `AUTHORIZED`/);
+  assert.match(runbook, /paymentMoved:false/);
+  assert.doesNotMatch(runbook, /127\.0\.0\.1|localhost/);
+});
+
 test("reports the true gated document count", async () => {
   const stdout = memoryOutput();
   const stderr = memoryOutput();
@@ -2978,6 +2999,6 @@ test("reports the true gated document count", async () => {
   assert.equal(exitCode, 0);
   assert.equal(
     stdout.text(),
-    "Documentation checks passed (10 gated documents).\n",
+    "Documentation checks passed (11 gated documents).\n",
   );
 });

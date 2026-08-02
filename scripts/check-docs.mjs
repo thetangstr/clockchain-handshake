@@ -35,6 +35,9 @@ const BILATERAL_COMPATIBILITY_DOCUMENTS = Object.freeze([
 const BILATERAL_SUPPORTING_DOCUMENTS = Object.freeze([
   "docs/runbooks/payer-mcp-external-relay.md",
 ]);
+const HYBRID_LOCAL_DOCUMENTS = Object.freeze([
+  "docs/runbooks/hybrid-local-stakeholder-demo.md",
+]);
 const SUPPORTING_DOCUMENTS = Object.freeze([
   "invites/README.md",
 ]);
@@ -87,6 +90,10 @@ const REQUIRED_LINKS = Object.freeze({
     "https://clockchain-research.vercel.app/handshake/run",
   ]),
   "docs/runbooks/payer-mcp-external-relay.md": Object.freeze([]),
+  "docs/runbooks/hybrid-local-stakeholder-demo.md": Object.freeze([
+    "../../README.md",
+    "https://clockchain-research.vercel.app/handshake/run",
+  ]),
 });
 const FAILURE_CODE_DOCUMENT = "DEMO.md";
 const FAILURE_CODE_ROW_PATTERN =
@@ -227,6 +234,12 @@ const CANONICAL_SAFETY_SECTIONS = Object.freeze({
     }),
   ]),
   "docs/runbooks/bilateral-demo-live-handoff.md": Object.freeze([
+    Object.freeze({
+      label: "bilateral safety summary",
+      text: BILATERAL_SAFETY_SECTION,
+    }),
+  ]),
+  "docs/runbooks/hybrid-local-stakeholder-demo.md": Object.freeze([
     Object.freeze({
       label: "bilateral safety summary",
       text: BILATERAL_SAFETY_SECTION,
@@ -1787,6 +1800,44 @@ function awsBilateralContractFailures(
   return failures;
 }
 
+function hybridLocalContractFailures(relativePath, contents) {
+  const failures = [];
+  const require = (label, pattern) => {
+    if (!pattern.test(contents)) {
+      failures.push(`${relativePath}: missing hybrid local ${label}.`);
+    }
+  };
+  for (const [label, pattern] of [
+    ["operator command", /npm run bilateral:local-operator -- \\\n\s+--config \.context\/hybrid-demo\/operator\.json \\\n\s+--state \/absolute\/private\/new-state-root/],
+    ["single Requestor command", /npm run bilateral:request-payment -- \\\n\s+--discovery-url "\$REQUESTOR_DISCOVERY_URL" \\\n\s+--state "\$REQUESTOR_STATE_ROOT"/],
+    ["Yang Payer ownership", /Yang\/Codex runs the real Payer and operator/i],
+    ["installed local agents", /installed (?:ChatGPT )?Codex[\s\S]*Claude Code[\s\S]*Hermes[\s\S]*macOS,\s+Windows,\s+or\s+Linux/i],
+    ["web exclusion", /(?:browser-only|web-only)[\s\S]*(?:not supported|unsupported)/i],
+    ["ordered sequence", /relay -> coordinator -> console -> bootstrap broker -> public edge -> Payer MCP\/supervisor -> PAYER_MCP_READY -> signed Requestor discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> bootstrap approval -> funding batch -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> public receipts/i],
+    ["three anchors", /exactly\s+three\s+independently\s+re-verifiable\s+Clockchain\s+anchors/i],
+    ["verifier authority", /only a fresh aggregate verifier may output\s+`AUTHORIZED`/i],
+    ["payment false", /paymentMoved:false|paymentMoved:\s+false/],
+    ["funding replay safety", /funds exactly four fresh addresses with\s+`0\.01 Sepolia ETH` each[\s\S]*replay-safe journal/i],
+    ["monitor history email", /latest\.json[\s\S]*runs\/index\.json[\s\S]*runs\/\{runId\}\.json[\s\S]*verified HTML receipt email/i],
+    ["failure conditions", /missing, duplicate, reordered, expired, malformed, replayed, or mismatched evidence fails closed/i],
+    ["deferred AWS", /AWS stakeholder-Payer hosting is deferred hardening/i],
+  ]) {
+    require(label, pattern);
+  }
+  for (const [label, pattern] of [
+    ["certificate attachment", /\battach(?:ed|ment)?\b[^.\n]*(?:certificate|manifest|token|invitation|capability)/i],
+    ["private path sharing", /\bstakeholder\b[^.\n]*(?:private path|private key|capability|token|manifest|invitation)/i],
+    ["AWS credential sharing", /\bstakeholder\b[^.\n]*AWS credential/i],
+    ["local-only endpoint", /127\.0\.0\.1|localhost/],
+    ["stakeholder Payer prompt", /stakeholder[^.\n]*Payer prompt/i],
+  ]) {
+    if (pattern.test(contents)) {
+      failures.push(`${relativePath}: contains forbidden hybrid local ${label}.`);
+    }
+  }
+  return failures;
+}
+
 function awsReadmeRoleplayFailures(contents) {
   const failures = [];
   const requirements = [
@@ -2571,6 +2622,7 @@ export async function checkDocumentation({
     ...BILATERAL_PUBLIC_DOCUMENTS,
     ...BILATERAL_COMPATIBILITY_DOCUMENTS,
     ...BILATERAL_SUPPORTING_DOCUMENTS,
+    ...HYBRID_LOCAL_DOCUMENTS,
   ]) {
     const path = await canonicalRegularFile(
       root,
@@ -2669,6 +2721,15 @@ export async function checkDocumentation({
         ),
       );
     }
+    if (HYBRID_LOCAL_DOCUMENTS.includes(relativePath)) {
+      failures.push(
+        ...hybridLocalContractFailures(relativePath, contents),
+        ...bilateralNamingAndMovementFailures(
+          relativePath,
+          contents,
+        ),
+      );
+    }
     failures.push(
       ...structuredSafetyFailures(relativePath, contents),
       ...(PUBLIC_DOCUMENTS.includes(relativePath)
@@ -2749,6 +2810,7 @@ export async function main({
       BILATERAL_PUBLIC_DOCUMENTS.length +
       BILATERAL_COMPATIBILITY_DOCUMENTS.length +
       BILATERAL_SUPPORTING_DOCUMENTS.length +
+      HYBRID_LOCAL_DOCUMENTS.length +
       SUPPORTING_DOCUMENTS.length
     } gated documents).\n`,
   );
