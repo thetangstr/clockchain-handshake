@@ -1668,9 +1668,9 @@ export class ClockchainHandshakeStack extends Stack {
             operatorKeySecretArn:
               operatorKey.secretArn,
             payeeLaunchManifestPath:
-              `/var/lib/clockchain/operator/releases/${releaseId}/requestor-launch-manifest.json`,
+              `/var/lib/clockchain/operator/releases/${releaseId}/payee.launch.json`,
             payerLaunchManifestPath:
-              `/var/lib/clockchain/operator/releases/${releaseId}/payer-launch-manifest.json`,
+              `/var/lib/clockchain/operator/releases/${releaseId}/payer.launch.json`,
             publicMcpHostname:
               props.relayPublicHostname,
             tunnelGrantPath:

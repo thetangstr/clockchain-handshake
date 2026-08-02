@@ -827,6 +827,28 @@ test("configures long-lived bootstrap and publisher startup inputs", () => {
     operatorRuntime,
     /\\"publicMonitorControlKey\\":\\"control\.json\\"/,
   );
+  const operatorRuntimeValue = JSON.parse(
+    rendered(operatorRuntimeInput?.Value),
+  ) as {
+    operator: {
+      bootstrap: {
+        payeeLaunchManifestPath: string;
+        payerLaunchManifestPath: string;
+      };
+    };
+  };
+  const operatorReleaseRoot =
+    `/var/lib/clockchain/operator/releases/${RELEASE_ID}`;
+  assert.equal(
+    operatorRuntimeValue.operator.bootstrap
+      .payerLaunchManifestPath,
+    `${operatorReleaseRoot}/payer.launch.json`,
+  );
+  assert.equal(
+    operatorRuntimeValue.operator.bootstrap
+      .payeeLaunchManifestPath,
+    `${operatorReleaseRoot}/payee.launch.json`,
+  );
 });
 
 test("configures trusted public staging inputs without leaking private tunnel key material", () => {
