@@ -67,6 +67,34 @@ test("tunnel image is Node 22, non-root, nologin, fixed-port, and read-only-root
   assert.equal(/COPY .*?(?:\.key|secret|token|keystore)/i.test(dockerfile), false);
 });
 
+test("tunnel login user matches the EFS access point ownership contract", () => {
+  const dockerfile = read(
+    "infra/aws/docker/tunnel.Dockerfile",
+  );
+  const config = read(
+    "infra/aws/docker/sshd_config",
+  );
+  assert.match(
+    dockerfile,
+    /groupadd[^\n]+(?:--gid|-g) 1107[^\n]+clockchain-tunnel/,
+  );
+  assert.match(
+    dockerfile,
+    /useradd[^\n]+(?:--uid|-u) 1107[^\n]+(?:--gid|-g) 1107[^\n]+(?:nologin|false)[^\n]+clockchain-tunnel/,
+  );
+  assert.match(
+    dockerfile,
+    /chown clockchain-tunnel:clockchain-tunnel \/run\/clockchain/,
+  );
+  assert.match(
+    dockerfile,
+    /chmod 0700 \/run\/clockchain/,
+  );
+  assert.match(config, /^AllowUsers clockchain-tunnel$/m);
+  assert.doesNotMatch(config, /^StrictModes no$/m);
+  assert.match(config, /^AuthorizedKeysFile \/run\/clockchain\/authorized_keys$/m);
+});
+
 test("both images rely on prevalidated source provenance and never require Git metadata", () => {
   for (const path of [
     "infra/aws/docker/control-plane.Dockerfile",

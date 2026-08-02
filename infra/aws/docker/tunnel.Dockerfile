@@ -4,7 +4,8 @@ ARG REPOSITORY_SHA
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends openssh-server ca-certificates \
-    && useradd --system --create-home --home-dir /var/empty/clockchain-tunnel --shell /usr/sbin/nologin clockchain-tunnel \
+    && groupadd --gid 1107 clockchain-tunnel \
+    && useradd --uid 1107 --gid 1107 --create-home --home-dir /var/empty/clockchain-tunnel --shell /usr/sbin/nologin clockchain-tunnel \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/clockchain/source
