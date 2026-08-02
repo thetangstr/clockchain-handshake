@@ -775,17 +775,21 @@ test("every AWS task entrypoint is present and no production entrypoint is a pla
 
 test("operator bootstrap approval entrypoint validates revision but sends only authority fields to adapter", async () => {
   const calls = [];
+  const configs = [];
   const result =
     await operatorBootstrapApprovalEntrypoint({
-      createAdapter: () => ({
-        approveAndSeal: async (input) => {
-          calls.push(input);
-          return {
-            paymentMoved: false,
-            status: "APPROVED",
-          };
-        },
-      }),
+      createAdapter: (config) => {
+        configs.push(config);
+        return {
+          approveAndSeal: async (input) => {
+            calls.push(input);
+            return {
+              paymentMoved: false,
+              status: "APPROVED",
+            };
+          },
+        };
+      },
       createClients: async () => ({
         secrets: {
           async send(command) {
@@ -825,6 +829,24 @@ test("operator bootstrap approval entrypoint validates revision but sends only a
     paymentMoved: false,
     status: "APPROVED",
   });
+  assert.deepEqual(
+    Reflect.ownKeys(configs[0]),
+    [
+      "bootstrapStatePath",
+      "payerLaunchManifestPath",
+      "payeeLaunchManifestPath",
+      "tunnelGrantPath",
+      "releaseId",
+      "repositorySha",
+      "sessionId",
+      "operatorKeyId",
+      "publicMcpHostname",
+      "bootstrapBrokerUrl",
+      "bootstrapBrokerCapability",
+      "operatorPrivateKeyPem",
+      "nowMs",
+    ],
+  );
   assert.deepEqual(calls, [
     {
       claimFingerprint: "b".repeat(64),

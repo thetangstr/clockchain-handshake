@@ -165,25 +165,25 @@ export async function main({
     });
   const adapter =
     createAdapter({
-      bootstrapBrokerCapability,
-      bootstrapBrokerUrl:
-        input.bootstrapBrokerUrl,
       bootstrapStatePath:
         input.bootstrapStatePath,
-      nowMs,
-      operatorKeyId: input.operatorKeyId,
-      operatorPrivateKeyPem,
-      payeeLaunchManifestPath:
-        input.payeeLaunchManifestPath,
       payerLaunchManifestPath:
         input.payerLaunchManifestPath,
-      publicMcpHostname:
-        input.publicMcpHostname,
+      payeeLaunchManifestPath:
+        input.payeeLaunchManifestPath,
+      tunnelGrantPath:
+        input.tunnelGrantPath,
       releaseId: input.releaseId,
       repositorySha: input.repositorySha,
       sessionId: input.sessionId,
-      tunnelGrantPath:
-        input.tunnelGrantPath,
+      operatorKeyId: input.operatorKeyId,
+      publicMcpHostname:
+        input.publicMcpHostname,
+      bootstrapBrokerUrl:
+        input.bootstrapBrokerUrl,
+      bootstrapBrokerCapability,
+      operatorPrivateKeyPem,
+      nowMs,
     }, {
       publishApprovedPayer: async (projectionInput) =>
         publishApprovedPayer(
