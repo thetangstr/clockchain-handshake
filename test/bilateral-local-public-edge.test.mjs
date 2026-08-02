@@ -39,7 +39,7 @@ function fixedFailure(error) {
   return true;
 }
 
-async function tlsFixture(t) {
+async function tlsFixture(t, { closeConnection = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "clockchain-public-edge-"));
   t.after(() => rm(root, { force: true, recursive: true }));
   const certificatePath = join(root, "server.crt");
@@ -59,6 +59,9 @@ async function tlsFixture(t) {
   const server = https.createServer({ cert: certificate, key }, (request, response) => {
     response.setHeader("content-type", "application/json");
     response.setHeader("cache-control", "no-store");
+    if (closeConnection) {
+      response.setHeader("connection", "close");
+    }
     if (request.method === "GET" && request.url === "/mcp") {
       response.statusCode = 405;
       response.setHeader("allow", "POST, DELETE");
@@ -202,6 +205,32 @@ test("proves Payer MCP and relay readiness over exact certificate pins", async (
       return true;
     },
   );
+});
+
+test("pins the certificate on every probe even when the client agent resumes TLS sessions", async (t) => {
+  const fixture = await tlsFixture(t, { closeConnection: true });
+  const first = await probePinnedTlsEndpoint({
+    expectedFingerprint: fixture.fingerprint,
+    host: fixture.host,
+    path: `/v1/sessions/${SESSION_ID}/enrollment-readiness?waitMs=0`,
+    port: fixture.port,
+  });
+  const second = await probePinnedTlsEndpoint({
+    expectedFingerprint: fixture.fingerprint,
+    host: fixture.host,
+    path: `/v1/sessions/${SESSION_ID}/enrollment-readiness?waitMs=0`,
+    port: fixture.port,
+  });
+  const third = await probePinnedTlsEndpoint({
+    expectedFingerprint: fixture.fingerprint,
+    host: fixture.host,
+    path: "/mcp",
+    port: fixture.port,
+  });
+
+  assert.deepEqual(first, { paymentMoved: false, ready: true });
+  assert.deepEqual(second, { paymentMoved: false, ready: true });
+  assert.deepEqual(third, { paymentMoved: false, ready: true });
 });
 
 test("fails boundedly on connection refusal, stalled TLS, and unsupported probe paths", async (t) => {

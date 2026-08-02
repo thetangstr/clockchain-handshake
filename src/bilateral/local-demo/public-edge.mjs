@@ -270,6 +270,7 @@ function requestProbe(input, httpsModule = https) {
       operation(value);
     };
     const request = httpsModule.request({
+      agent: false,
       headers: Object.freeze({ Accept: "application/json" }),
       host: input.host,
       method: "GET",
