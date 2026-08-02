@@ -19,6 +19,9 @@ import {
   PAYER_BOOTSTRAP_CLI_FLAGS,
 } from "../bin/handshake-payer-bootstrap.mjs";
 import {
+  createLaunchManifest,
+} from "../src/bilateral/coordination/manifest.mjs";
+import {
   runPayerBootstrap,
 } from "../src/bilateral/local-mcp/payer-bootstrap.mjs";
 import * as payerBootstrapProduction from
@@ -62,6 +65,29 @@ function certificatePem() {
 }
 
 const CERTIFICATE_PEM = certificatePem();
+
+function representativePayerLaunchManifestBytes() {
+  const { manifest } = createLaunchManifest({
+    expectedTlsFingerprint: createHash("sha256")
+      .update(new X509Certificate(CERTIFICATE_PEM).raw)
+      .digest("hex"),
+    nowMs: 2_000_000_000_000,
+    operatorKeyId: "operator",
+    payerMcpIntakeCapabilityDigest: "e".repeat(64),
+    randomBytes: () => Buffer.alloc(32, 9),
+    relayUrl: "https://relay.clockchain.network:8443",
+    releaseId: RELEASE_ID,
+    repositorySha: REPOSITORY_SHA,
+    role: "payer",
+    sessionId: SESSION_ID,
+    tlsCertificatePem: CERTIFICATE_PEM,
+  });
+  assert.equal(
+    Object.hasOwn(manifest, "paymentMoved"),
+    false,
+  );
+  return Buffer.from(JSON.stringify(manifest), "utf8");
+}
 
 function sshString(value) {
   const bytes = Buffer.from(value);
@@ -169,7 +195,7 @@ function fixtureDependencies({
     verifyAndOpenPackage: step("verify-and-open-package", {
       bootstrapBrokerCapability: SECRET_CANARY,
       bootstrapBrokerUrl: "https://bootstrap.internal.example/v1/requestor-claims",
-      launchManifestBytes: Buffer.from('{"paymentMoved":false}'),
+      launchManifestBytes: representativePayerLaunchManifestBytes(),
       paymentMoved: false,
       tunnelGrantBytes: Buffer.from('{"paymentMoved":false}'),
     }),

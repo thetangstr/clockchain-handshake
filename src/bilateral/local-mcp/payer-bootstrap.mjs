@@ -311,18 +311,22 @@ function openedPackageSnapshot(value) {
     invalid();
   }
   httpsUrl(value.bootstrapBrokerUrl);
-  for (const bytes of [
-    value.launchManifestBytes,
-    value.tunnelGrantBytes,
-  ]) {
-    let parsed;
-    try {
-      parsed = JSON.parse(bytes.toString("utf8"));
-    } catch {
-      invalid();
-    }
-    if (parsed?.paymentMoved !== false) invalid();
+  try {
+    JSON.parse(
+      value.launchManifestBytes.toString("utf8"),
+    );
+  } catch {
+    invalid();
   }
+  let tunnelGrant;
+  try {
+    tunnelGrant = JSON.parse(
+      value.tunnelGrantBytes.toString("utf8"),
+    );
+  } catch {
+    invalid();
+  }
+  if (tunnelGrant?.paymentMoved !== false) invalid();
   return value;
 }
 
