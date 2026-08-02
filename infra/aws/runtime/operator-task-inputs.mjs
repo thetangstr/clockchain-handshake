@@ -22,6 +22,7 @@ const COORDINATOR_KEYS = Object.freeze([
   "operatorKeyId",
   "operatorKeySecretArn",
   "paymentMoved",
+  "provenance",
   "publicStaging",
   "releaseId",
   "releaseRoot",
@@ -84,6 +85,9 @@ const SESSION =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA40 = /^[0-9a-f]{40}$/;
 const SHA64 = /^[0-9a-f]{64}$/;
+const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const RAW_ED25519_PUBLIC_KEY =
+  /^[A-Za-z0-9+/]{43}=$/;
 const IMAGE =
   /^[0-9]{12}\.dkr\.ecr\.[a-z]{2}-[a-z]+-[1-9]\.amazonaws\.com\/[a-z0-9][a-z0-9._/-]{0,254}@sha256:[0-9a-f]{64}$/;
 const ISO_INSTANT =
@@ -491,6 +495,33 @@ function publicStaging(value, scope) {
   });
 }
 
+function provenance(value, scope, image) {
+  const input = exact(value, [
+    "imageDigest",
+    "operatorPublicKey",
+    "repositorySha",
+    "sourceTreeSha256",
+  ]);
+  const publicKey = input.operatorPublicKey;
+  if (
+    !IMAGE_DIGEST.test(input.imageDigest) ||
+    input.imageDigest !== image.split("@")[1] ||
+    !RAW_ED25519_PUBLIC_KEY.test(publicKey) ||
+    Buffer.from(publicKey, "base64").length !== 32 ||
+    Buffer.from(publicKey, "base64").toString("base64") !== publicKey ||
+    input.repositorySha !== scope.repositorySha ||
+    !SHA64.test(input.sourceTreeSha256)
+  ) {
+    fail();
+  }
+  return Object.freeze({
+    imageDigest: input.imageDigest,
+    operatorPublicKey: publicKey,
+    repositorySha: input.repositorySha,
+    sourceTreeSha256: input.sourceTreeSha256,
+  });
+}
+
 function certificatePem(value, fingerprint) {
   try {
     if (
@@ -548,6 +579,10 @@ export function buildCoordinatorRuntimeInput(
       input.releaseRoot,
       operatorRoot,
     );
+    const stagedPublic = publicStaging(
+      input.publicStaging,
+      scope,
+    );
     return topLevel("coordinator", {
       clockchainTokenSecretArn: secretArn(
         input.clockchainTokenSecretArn,
@@ -558,10 +593,12 @@ export function buildCoordinatorRuntimeInput(
       operatorKeySecretArn: secretArn(
         input.operatorKeySecretArn,
       ),
-      publicStaging: publicStaging(
-        input.publicStaging,
+      provenance: provenance(
+        input.provenance,
         scope,
+        stagedPublic.imageDigest,
       ),
+      publicStaging: stagedPublic,
       releaseIdentity: Object.freeze({
         releaseId: scope.releaseId,
         sessionId: scope.sessionId,

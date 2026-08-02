@@ -7,6 +7,7 @@ import {
 import {
   createHash,
   createPrivateKey,
+  createPublicKey,
   X509Certificate,
 } from "node:crypto";
 import {
@@ -65,6 +66,7 @@ const COORDINATOR_INPUT_KEYS = Object.freeze([
   "clockchainTokenSecretArn",
   "operatorKeyId",
   "operatorKeySecretArn",
+  "provenance",
   "publicStaging",
   "releaseIdentity",
   "releaseRoot",
@@ -105,6 +107,7 @@ const CONTROL = /[\u0000-\u001f\u007f]/;
 const FINGERPRINT = /^[0-9a-f]{64}$/;
 const IMAGE =
   /^[0-9]{12}\.dkr\.ecr\.[a-z]{2}-[a-z]+-[1-9]\.amazonaws\.com\/[a-z0-9][a-z0-9._/-]{0,254}@sha256:[0-9a-f]{64}$/;
+const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const HOST =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const OPERATOR_KEY_ID =
@@ -115,6 +118,9 @@ const SECRET_ARN =
 const SESSION =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA40 = /^[0-9a-f]{40}$/;
+const SHA64 = /^[0-9a-f]{64}$/;
+const RAW_ED25519_PUBLIC_KEY =
+  /^[A-Za-z0-9+/]{43}=$/;
 const TOKEN = /^[\x20-\x7e]{1,4096}$/;
 const SSH_SHA256_FINGERPRINT =
   /^SHA256:[A-Za-z0-9+/]{43}$/;
@@ -522,12 +528,55 @@ function validateCoordinatorInput(value) {
   ) {
     fail();
   }
+  const publicStaging = validatePublicStaging(
+    coordinator.publicStaging,
+    releaseIdentity,
+  );
+  const provenance = exact(
+    coordinator.provenance,
+    [
+      "imageDigest",
+      "operatorPublicKey",
+      "repositorySha",
+      "sourceTreeSha256",
+    ],
+  );
+  if (
+    !IMAGE_DIGEST.test(provenance.imageDigest) ||
+    provenance.imageDigest !==
+      publicStaging.imageDigest.split("@")[1] ||
+    !RAW_ED25519_PUBLIC_KEY.test(
+      provenance.operatorPublicKey,
+    ) ||
+    Buffer.from(
+      provenance.operatorPublicKey,
+      "base64",
+    ).length !== 32 ||
+    Buffer.from(
+      provenance.operatorPublicKey,
+      "base64",
+    ).toString("base64") !==
+      provenance.operatorPublicKey ||
+    provenance.repositorySha !==
+      coordinator.repositorySha ||
+    !SHA64.test(provenance.sourceTreeSha256)
+  ) {
+    fail();
+  }
   return Object.freeze({
     clockchainTokenSecretArn:
       coordinator.clockchainTokenSecretArn,
     operatorKeyId: coordinator.operatorKeyId,
     operatorKeySecretArn:
       coordinator.operatorKeySecretArn,
+    provenance: Object.freeze({
+      imageDigest: provenance.imageDigest,
+      operatorPublicKey:
+        provenance.operatorPublicKey,
+      repositorySha: provenance.repositorySha,
+      sourceTreeSha256:
+        provenance.sourceTreeSha256,
+    }),
     releaseIdentity,
     releaseRoot: validateReleaseRoot(
       coordinator.releaseRoot,
@@ -541,10 +590,7 @@ function validateCoordinatorInput(value) {
       coordinator.tlsFingerprint,
     ),
     tlsFingerprint: coordinator.tlsFingerprint,
-    publicStaging: validatePublicStaging(
-      coordinator.publicStaging,
-      releaseIdentity,
-    ),
+    publicStaging,
   });
 }
 
@@ -765,6 +811,49 @@ export async function main({
     });
     const operatorPrivateKeyObject =
       createPrivateKey(operatorPrivateKey);
+    const operatorPublicKey = createPublicKey(
+      operatorPrivateKeyObject,
+    )
+      .export({ format: "der", type: "spki" })
+      .subarray(-32)
+      .toString("base64");
+    if (
+      operatorPublicKey !==
+      coordinator.provenance.operatorPublicKey
+    ) {
+      fail();
+    }
+    const taskProvenance = Object.freeze({
+      imageDigest:
+        coordinator.provenance.imageDigest,
+      operatorPublicKey,
+      repositorySha:
+        coordinator.provenance.repositorySha,
+      sourceTreeSha256:
+        coordinator.provenance.sourceTreeSha256,
+    });
+    const provenanceProvider = Object.freeze({
+      async assertRepository(value) {
+        if (
+          value?.repositorySha !==
+          taskProvenance.repositorySha
+        ) {
+          throw new Error();
+        }
+        return taskProvenance;
+      },
+      async verify(value) {
+        if (
+          value?.operatorKeyId !==
+            coordinator.operatorKeyId ||
+          value?.repositorySha !==
+            taskProvenance.repositorySha
+        ) {
+          throw new Error();
+        }
+        return taskProvenance;
+      },
+    });
     await createPublicReleaseRoot(
       coordinator.publicStaging.releaseRoot,
     );
@@ -872,6 +961,7 @@ export async function main({
     runPromise = Promise.resolve(
       run(argv, {
         abortSignal: runAbort.signal,
+        provenanceProvider,
         releaseIdentity:
           coordinator.releaseIdentity,
         publicStager,

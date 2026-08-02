@@ -1422,6 +1422,15 @@ export class ClockchainHandshakeStack extends Stack {
             "clockchain-demo-2026",
           operatorKeySecretArn:
             operatorKey.secretArn,
+          provenance: {
+            imageDigest:
+              props.controlPlaneImage.split("@")[1],
+            operatorPublicKey:
+              props.operatorPublicKey,
+            repositorySha: props.repositorySha,
+            sourceTreeSha256:
+              props.sourceTreeSha256,
+          },
           publicStaging: {
             approvedPayerPublicPath,
             bootstrapPayerClaimUrl:
@@ -1742,6 +1751,16 @@ export class ClockchainHandshakeStack extends Stack {
               "clockchain-demo-2026",
             operatorKeySecretArn:
               operatorKey.secretArn,
+            provenance: {
+              imageDigest:
+                props.controlPlaneImage.split("@")[1],
+              operatorPublicKey:
+                props.operatorPublicKey,
+              repositorySha:
+                props.repositorySha,
+              sourceTreeSha256:
+                props.sourceTreeSha256,
+            },
             publicStaging: {
               approvedPayerPublicPath,
               bootstrapPayerClaimUrl:

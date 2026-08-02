@@ -52,6 +52,9 @@ const TUNNEL_HOST_PUBLIC_KEY =
   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILzWMEVEge8QmmJQH5at7CDm9iuX7O4hop0rjeJ95xnC";
 const TUNNEL_HOST_KEY_FINGERPRINT =
   "SHA256:UgP8WeC7EtU7Ik6LFbMNeUckAOfLBKJvnaP1ez/1MwU";
+const OPERATOR_PUBLIC_KEY =
+  Buffer.alloc(32, 7).toString("base64");
+const SOURCE_TREE_SHA256 = "b".repeat(64);
 
 function certificatePem() {
   const root = mkdtempSync(
@@ -104,6 +107,12 @@ function coordinatorInput(overrides = {}) {
     operatorKeySecretArn:
       "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key",
     paymentMoved: false,
+    provenance: {
+      imageDigest: `sha256:${"a".repeat(64)}`,
+      operatorPublicKey: OPERATOR_PUBLIC_KEY,
+      repositorySha: REPOSITORY_SHA,
+      sourceTreeSha256: SOURCE_TREE_SHA256,
+    },
     publicStaging: publicStaging(),
     releaseId: RELEASE_ID,
     releaseRoot: OPERATOR_RELEASE_ROOT,
@@ -289,6 +298,12 @@ test("builds exact canonical coordinator, funding, and verifier runtime inputs a
         "operator-key-release-bd7662a5eeb41614",
       operatorKeySecretArn:
         "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key",
+      provenance: {
+        imageDigest: `sha256:${"a".repeat(64)}`,
+        operatorPublicKey: OPERATOR_PUBLIC_KEY,
+        repositorySha: REPOSITORY_SHA,
+        sourceTreeSha256: SOURCE_TREE_SHA256,
+      },
       publicStaging: publicStaging(),
       releaseIdentity: {
         releaseId: RELEASE_ID,
@@ -398,6 +413,31 @@ test("canonicalizes the relay certificate for the exact coordinator startup vali
     runtime.coordinator.tlsCertificatePem,
     CANONICAL_RELAY_CERTIFICATE_PEM,
   );
+});
+
+test("rejects coordinator provenance that is not bound to the exact release", () => {
+  for (const provenance of [
+    {
+      ...coordinatorInput().provenance,
+      imageDigest: `sha256:${"c".repeat(64)}`,
+    },
+    {
+      ...coordinatorInput().provenance,
+      repositorySha: "c".repeat(40),
+    },
+    {
+      ...coordinatorInput().provenance,
+      sourceTreeSha256: "not-a-digest",
+    },
+  ]) {
+    assert.throws(
+      () =>
+        buildCoordinatorRuntimeInput(
+          coordinatorInput({ provenance }),
+        ),
+      /AWS operator task input failed safely/,
+    );
+  }
 });
 
 test("coordinator builder emits the exact validated public staging contract", () => {

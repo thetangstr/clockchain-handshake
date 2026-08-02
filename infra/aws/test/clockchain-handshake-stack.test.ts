@@ -936,6 +936,16 @@ test("configures trusted public staging inputs without leaking private tunnel ke
       operatorKeySecretArn:
         "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key-AbCdEf",
       paymentMoved: false,
+      provenance: {
+        imageDigest:
+          STACK_PROPS.controlPlaneImage.split("@")[1],
+        operatorPublicKey:
+          STACK_PROPS.operatorPublicKey,
+        repositorySha:
+          STACK_PROPS.repositorySha,
+        sourceTreeSha256:
+          STACK_PROPS.sourceTreeSha256,
+      },
       publicStaging: emittedPublicStaging,
       releaseId: RELEASE_ID,
       releaseRoot:

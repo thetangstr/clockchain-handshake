@@ -5,6 +5,8 @@ import {
 } from "node:child_process";
 import {
   createHash,
+  createPrivateKey,
+  createPublicKey,
   generateKeyPairSync,
   X509Certificate,
 } from "node:crypto";
@@ -107,14 +109,25 @@ test("private runtime installation creates a strict missing parent directory", a
   );
 });
 
+let cachedEd25519PrivateKeyPem;
+
 function ed25519PrivateKeyPem() {
-  const { privateKey } = generateKeyPairSync(
-    "ed25519",
-  );
-  return privateKey.export({
-    format: "pem",
-    type: "pkcs8",
-  });
+  cachedEd25519PrivateKeyPem ??=
+    generateKeyPairSync("ed25519")
+      .privateKey.export({
+        format: "pem",
+        type: "pkcs8",
+      });
+  return cachedEd25519PrivateKeyPem;
+}
+
+function coordinatorOperatorPublicKey() {
+  return createPublicKey(
+    createPrivateKey(ed25519PrivateKeyPem()),
+  )
+    .export({ format: "der", type: "spki" })
+    .subarray(-32)
+    .toString("base64");
 }
 
 function relayTlsMaterial() {
@@ -420,6 +433,14 @@ function operatorProductionRuntimeInput(overrides = {}) {
       operatorKeyId: "clockchain-demo-2026",
       operatorKeySecretArn:
         "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key",
+      provenance: {
+        imageDigest: `sha256:${"a".repeat(64)}`,
+        operatorPublicKey:
+          coordinatorOperatorPublicKey(),
+        repositorySha:
+          "abcdef0123456789abcdef0123456789abcdef01",
+        sourceTreeSha256: "b".repeat(64),
+      },
       publicStaging:
         operatorPublicStaging(),
       relayUrl:
@@ -500,6 +521,14 @@ function coordinatorRuntimeInput(overrides = {}) {
     operatorKeyId: "clockchain-demo-2026",
     operatorKeySecretArn:
       "arn:aws:secretsmanager:us-west-2:123456789012:secret:operator-key",
+    provenance: {
+      imageDigest: `sha256:${"a".repeat(64)}`,
+      operatorPublicKey:
+        coordinatorOperatorPublicKey(),
+      repositorySha:
+        "abcdef0123456789abcdef0123456789abcdef01",
+      sourceTreeSha256: "b".repeat(64),
+    },
     publicStaging: coordinatorPublicStaging(),
     releaseIdentity: {
       releaseId: COORDINATOR_RELEASE_ID,
@@ -873,6 +902,21 @@ test("coordinator entrypoint materializes validated secrets into unique private 
           dependencies,
           values,
         });
+        assert.deepEqual(
+          await dependencies.provenanceProvider.verify({
+            operatorKeyId: "clockchain-demo-2026",
+            repositorySha:
+              "abcdef0123456789abcdef0123456789abcdef01",
+          }),
+          {
+            imageDigest: `sha256:${"a".repeat(64)}`,
+            operatorPublicKey:
+              coordinatorOperatorPublicKey(),
+            repositorySha:
+              "abcdef0123456789abcdef0123456789abcdef01",
+            sourceTreeSha256: "b".repeat(64),
+          },
+        );
         assert.equal(
           (await lstat(
             values["--clockchain-token-file"],
@@ -1016,6 +1060,54 @@ test("coordinator entrypoint materializes validated secrets into unique private 
       ],
     ),
   );
+});
+
+test("coordinator entrypoint rejects an operator key that does not match deployment provenance", async () => {
+  let ran = false;
+  await assert.rejects(
+    coordinatorEntrypoint({
+      ...publicBootstrapTestDependencies(),
+      client: {
+        async send(command) {
+          if (
+            command.input.SecretId.endsWith(
+              "clockchain-token",
+            )
+          ) {
+            return { SecretString: "clockchain-token" };
+          }
+          if (
+            command.input.SecretId.endsWith(
+              "operator-key",
+            )
+          ) {
+            const { privateKey } =
+              generateKeyPairSync("ed25519");
+            return {
+              SecretString: privateKey.export({
+                format: "pem",
+                type: "pkcs8",
+              }),
+            };
+          }
+          return {
+            SecretString:
+              "https://ethereum-rpc.publicnode.com/",
+          };
+        },
+      },
+      env: {
+        AWS_RUNTIME_INPUT:
+          coordinatorRuntimeInput(),
+      },
+      run: async () => {
+        ran = true;
+        return 0;
+      },
+    }),
+    /AWS coordinator entrypoint failed safely/,
+  );
+  assert.equal(ran, false);
 });
 
 test("coordinator entrypoint stages initial public monitor and opens Requestor discovery only after exact Payer evidence", async () => {

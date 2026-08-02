@@ -418,6 +418,7 @@ function validateProductionOperator(value) {
     "containerName",
     "operatorKeyId",
     "operatorKeySecretArn",
+    "provenance",
     "publicStaging",
     "relayUrl",
     "rpcSecretArn",
@@ -453,6 +454,7 @@ function validateProductionOperator(value) {
       operatorKeySecretArn:
         coordinator.operatorKeySecretArn,
       paymentMoved: false,
+      provenance: coordinator.provenance,
       publicStaging:
         coordinator.publicStaging,
       releaseId: base.releaseId,
@@ -513,6 +515,8 @@ function validateProductionOperator(value) {
         coordinator.operatorKeyId,
       operatorKeySecretArn:
         coordinator.operatorKeySecretArn,
+      provenance:
+        coordinatorRuntime.coordinator.provenance,
       publicStaging:
         coordinatorRuntime.coordinator
           .publicStaging,
@@ -819,6 +823,9 @@ function createProductionBuildTransitions({
                         operator.coordinator
                           .operatorKeySecretArn,
                       paymentMoved: false,
+                      provenance:
+                        operator.coordinator
+                          .provenance,
                       publicStaging:
                         operator.coordinator
                           .publicStaging,
