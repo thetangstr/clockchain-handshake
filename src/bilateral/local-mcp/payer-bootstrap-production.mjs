@@ -84,6 +84,9 @@ const GIT_PREFIX = Object.freeze([
 const MAX_HTTP_BYTES = 262_144;
 const POLL_INTERVAL_MS = 2_000;
 const MAX_POLL_MS = 1_800_000;
+const TUNNEL_STARTUP_WINDOW_MS = 60_000;
+const TUNNEL_STARTUP_STABILITY_MS = 1_500;
+const TUNNEL_RESTART_MAX_DELAY_MS = 3_000;
 const MCP_CERTIFICATE_COMMON_NAME =
   "clockchain-payer-mcp";
 const ED25519_SPKI_PREFIX = Buffer.from(
@@ -603,6 +606,24 @@ export async function createProductionPayerBootstrapDependencies(
     typeof input?.submitHttpRequest === "function"
       ? input.submitHttpRequest
       : requestJson;
+  const now =
+    typeof input?.now === "function"
+      ? input.now
+      : Date.now;
+  const setTimer =
+    typeof input?.setTimeout === "function"
+      ? input.setTimeout
+      : setTimeout;
+  const tunnelStartupWindowMs =
+    Number.isSafeInteger(input?.tunnelStartupWindowMs) &&
+    input.tunnelStartupWindowMs > 0
+      ? input.tunnelStartupWindowMs
+      : TUNNEL_STARTUP_WINDOW_MS;
+  const tunnelStartupStabilityMs =
+    Number.isSafeInteger(input?.tunnelStartupStabilityMs) &&
+    input.tunnelStartupStabilityMs > 0
+      ? input.tunnelStartupStabilityMs
+      : TUNNEL_STARTUP_STABILITY_MS;
   let prerequisites;
   let operatorPublicKey;
   let privateState;
@@ -795,16 +816,16 @@ export async function createProductionPayerBootstrapDependencies(
     }) {
       const deadline = Math.min(
         Number(expiresAtMs),
-        Date.now() + MAX_POLL_MS,
+        now() + MAX_POLL_MS,
       );
       const pollUrl =
         `${payerClaimUrl}/${claimFingerprint}`;
       const waitForNextPoll = async () => {
-        if (Date.now() + POLL_INTERVAL_MS > deadline) {
+        if (now() + POLL_INTERVAL_MS > deadline) {
           fail();
         }
         await new Promise((resolvePromise) =>
-          setTimeout(resolvePromise, POLL_INTERVAL_MS));
+          setTimer(resolvePromise, POLL_INTERVAL_MS));
       };
       for (;;) {
         let response;
@@ -891,7 +912,6 @@ export async function createProductionPayerBootstrapDependencies(
     }) {
       let stopped = false;
       let child = null;
-      let attempts = 0;
       let rejectFatal;
       const fatal = new Promise(
         (_resolvePromise, rejectPromise) => {
@@ -905,33 +925,37 @@ export async function createProductionPayerBootstrapDependencies(
           paths,
           sshIdentity,
         });
-      const launch = async () => {
-        child = await childReady(
-          prerequisites.openssh.command,
-          arguments_,
-          {
-            env: childEnvironment(),
-            stdio: ["ignore", "ignore", "ignore"],
-          },
-        );
-        attempts += 1;
-        child.once("close", () => {
-          if (
-            !stopped &&
-            attempts < 4 &&
-            Date.now() <
-              Number(discovery.expiresAtMs)
-          ) {
-            setTimeout(() => {
-              void launch().catch(rejectFatal);
-            }, Math.min(1_000 * attempts, 3_000));
-          } else if (!stopped) {
-            rejectFatal(failure());
-          }
+      const discoveryDeadline = Number(discovery.expiresAtMs);
+      if (!Number.isFinite(discoveryDeadline)) fail();
+      const wait = (milliseconds) =>
+        new Promise((resolvePromise) => {
+          setTimer(resolvePromise, milliseconds);
         });
-      };
-      await launch();
-      activeTunnel = {
+      const waitForStableChild = (candidate) =>
+        new Promise((resolvePromise) => {
+          let settled = false;
+          const settle = (value) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            candidate.off("close", onClose);
+            resolvePromise(value);
+          };
+          const onClose = () => settle("closed");
+          candidate.once("close", onClose);
+          const timer = setTimer(() => {
+            if (
+              candidate.exitCode === null &&
+              candidate.signalCode === null
+            ) {
+              settle("stable");
+            } else {
+              settle("closed");
+            }
+          }, tunnelStartupStabilityMs);
+          timer?.unref?.();
+        });
+      const activeHandle = {
         fatal,
         get child() {
           return child;
@@ -941,7 +965,70 @@ export async function createProductionPayerBootstrapDependencies(
           await stopChild(child);
         },
       };
-      return activeTunnel;
+      activeTunnel = activeHandle;
+      const launchChild = async () => {
+        const candidate = await childReady(
+          prerequisites.openssh.command,
+          arguments_,
+          {
+            env: childEnvironment(),
+            stdio: ["ignore", "ignore", "ignore"],
+          },
+        );
+        if (stopped) {
+          await stopChild(candidate);
+          fail();
+        }
+        child = candidate;
+      };
+      const launchStableChild = async () => {
+        let attempts = 0;
+        const startupDeadline = Math.min(
+          discoveryDeadline,
+          now() + tunnelStartupWindowMs,
+        );
+        if (now() >= startupDeadline) fail();
+        await launchChild();
+        for (;;) {
+          if (stopped) fail();
+          attempts += 1;
+          const state = await waitForStableChild(child);
+          if (state === "stable") {
+            if (now() >= startupDeadline) {
+              await stopChild(child);
+              fail();
+            }
+            return;
+          }
+          if (stopped) fail();
+          const delay = Math.min(
+            1_000 * attempts,
+            TUNNEL_RESTART_MAX_DELAY_MS,
+          );
+          if (now() + delay > startupDeadline) {
+            fail();
+          }
+          await wait(delay);
+          if (stopped) fail();
+          if (now() >= startupDeadline) fail();
+          await launchChild();
+        }
+      };
+      const reconnect = async () => {
+        try {
+          await launchStableChild();
+          child.once("close", () => {
+            if (!stopped) void reconnect();
+          });
+        } catch {
+          if (!stopped) rejectFatal(failure());
+        }
+      };
+      await launchStableChild();
+      child.once("close", () => {
+        if (!stopped) void reconnect();
+      });
+      return activeHandle;
     },
 
     async stopPayerSupervisor(handle) {
@@ -1063,7 +1150,7 @@ export async function createProductionPayerBootstrapDependencies(
         expectedRepositorySha:
           discovery.repositorySha,
         expectedSessionId: discovery.sessionId,
-        nowMs: Date.now(),
+        nowMs: now(),
         operatorPublicKey: operatorPublicKey.key,
         payerPrivateKey,
         response: approved.packageResponse,

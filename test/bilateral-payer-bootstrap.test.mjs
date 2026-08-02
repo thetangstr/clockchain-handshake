@@ -6,12 +6,15 @@ import {
   X509Certificate,
 } from "node:crypto";
 import {
+  chmodSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -580,6 +583,462 @@ test("production Payer approval polling retries a transient request failure befo
   assert.equal(requests, 4);
   assert.equal(clockMs, startMs + 6_000);
   assert.deepEqual(sleeps, [2_000, 2_000, 2_000]);
+});
+
+test("production Payer tunnel startup returns only after a stable child survives early exits", async (t) => {
+  const realPath = process.env.PATH;
+  const realNow = Date.now;
+  const realSetTimeout = globalThis.setTimeout;
+  const root = mkdtempSync(join(tmpdir(), "payer-tunnel-startup-"));
+  const bin = join(root, "bin");
+  const attemptsPath = join(root, "ssh-attempts");
+  let clockMs = 2_000_000_000_000;
+  const timers = [];
+  t.after(() => {
+    process.env.PATH = realPath;
+    Date.now = realNow;
+    globalThis.setTimeout = realSetTimeout;
+    rmSync(root, { force: true, recursive: true });
+  });
+
+  mkdirSync(bin);
+  const writeExecutable = (name, source) => {
+    const path = join(bin, name);
+    writeFileSync(path, source, { mode: 0o700 });
+    chmodSync(path, 0o700);
+  };
+  writeExecutable("git", "#!/bin/sh\nprintf 'git version 2.50.0\\n'\n");
+  writeExecutable("npm", "#!/bin/sh\nprintf '10.9.0\\n'\n");
+  writeExecutable("openssl", "#!/bin/sh\nprintf 'OpenSSL 3.5.0 1 Jan 2026\\n'\n");
+  writeExecutable("ssh-keygen", "#!/bin/sh\nexit 0\n");
+  writeExecutable("ssh", `#!/bin/sh
+if [ "$1" = "-V" ]; then
+  printf 'OpenSSH_9.9, LibreSSL 3.3.6\\n' >&2
+  exit 0
+fi
+count="$(cat '${attemptsPath}' 2>/dev/null || printf '0')"
+count="$((count + 1))"
+printf '%s\\n' "$count" > '${attemptsPath}'
+if [ "$count" -le 5 ]; then
+  exit 255
+fi
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+`);
+  process.env.PATH = `${bin}${delimiter}${realPath}`;
+  Date.now = () => clockMs;
+  globalThis.setTimeout = (callback, ms) => {
+    if (ms === 250) {
+      const realTimer = realSetTimeout(() => {
+        clockMs += ms;
+        callback();
+      }, 25);
+      const realUnref = realTimer.unref;
+      realTimer.ms = ms;
+      realTimer.unrefCalled = false;
+      realTimer.unref = function unref() {
+        this.unrefCalled = true;
+        return realUnref.call(this);
+      };
+      timers.push(realTimer);
+      return realTimer;
+    }
+    const timer = {
+      ms,
+      unrefCalled: false,
+      unref() {
+        this.unrefCalled = true;
+      },
+    };
+    timers.push(timer);
+    clockMs += ms;
+    queueMicrotask(callback);
+    return timer;
+  };
+  const attemptsText = () => {
+    try {
+      return readFileSync(attemptsPath, "utf8");
+    } catch (error) {
+      if (error?.code === "ENOENT") return "0\n";
+      throw error;
+    }
+  };
+
+  const dependencies =
+    await payerBootstrapProduction.createProductionPayerBootstrapDependencies({
+      now: () => clockMs,
+      setTimeout: globalThis.setTimeout,
+      tunnelStartupStabilityMs: 250,
+      tunnelStartupWindowMs: 20_000,
+    });
+  await dependencies.inspectPrerequisites();
+
+  const tunnel = await dependencies.startRestrictedTunnel({
+    discovery: {
+      expiresAtMs: String(clockMs + 20_000),
+      tunnelHost: "tunnel.clockchain.network",
+      tunnelPort: 443,
+    },
+    paths: {
+      knownHostsPath: `${STATE_ROOT}/known_hosts`,
+    },
+    sshIdentity: {
+      privateKeyPath: `${STATE_ROOT}/payer-tunnel.ed25519`,
+    },
+  });
+
+  assert.equal(attemptsText().trim(), "6");
+  assert.equal(tunnel.child.exitCode, null);
+  assert.equal(tunnel.child.signalCode, null);
+  assert.equal(
+    timers.every((timer) => timer.ms <= 3_000),
+    true,
+  );
+  assert.equal(
+    timers
+      .filter((timer) => timer.ms !== 250)
+      .every((timer) => timer.unrefCalled === false),
+    true,
+  );
+  await dependencies.stopRestrictedTunnel(tunnel);
+  const attemptsAfterStop = attemptsText();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(attemptsText(), attemptsAfterStop);
+});
+
+test("production Payer tunnel startup stops a child that becomes stable after expiry", async (t) => {
+  const realPath = process.env.PATH;
+  const realNow = Date.now;
+  const realSetTimeout = globalThis.setTimeout;
+  const root = mkdtempSync(join(tmpdir(), "payer-tunnel-expiry-"));
+  const bin = join(root, "bin");
+  const pidPath = join(root, "ssh-pid");
+  let clockMs = 2_000_000_050_000;
+  let dependencies;
+  let tunnel;
+  t.after(async () => {
+    if (dependencies !== undefined && tunnel !== undefined) {
+      await dependencies.stopRestrictedTunnel(tunnel);
+    }
+    process.env.PATH = realPath;
+    Date.now = realNow;
+    globalThis.setTimeout = realSetTimeout;
+    rmSync(root, { force: true, recursive: true });
+  });
+
+  mkdirSync(bin);
+  const writeExecutable = (name, source) => {
+    const path = join(bin, name);
+    writeFileSync(path, source, { mode: 0o700 });
+    chmodSync(path, 0o700);
+  };
+  writeExecutable("git", "#!/bin/sh\nprintf 'git version 2.50.0\\n'\n");
+  writeExecutable("npm", "#!/bin/sh\nprintf '10.9.0\\n'\n");
+  writeExecutable("openssl", "#!/bin/sh\nprintf 'OpenSSL 3.5.0 1 Jan 2026\\n'\n");
+  writeExecutable("ssh-keygen", "#!/bin/sh\nexit 0\n");
+  writeExecutable("ssh", `#!/bin/sh
+if [ "$1" = "-V" ]; then
+  printf 'OpenSSH_9.9, LibreSSL 3.3.6\\n' >&2
+  exit 0
+fi
+printf '%s\\n' "$$" > '${pidPath}'
+trap 'exit 0' TERM INT
+while :; do sleep 0.1; done
+`);
+  process.env.PATH = `${bin}${delimiter}${realPath}`;
+  Date.now = () => clockMs;
+  globalThis.setTimeout = (callback, ms) => {
+    if (ms === 250) {
+      return realSetTimeout(() => {
+        clockMs += ms;
+        callback();
+      }, 25);
+    }
+    clockMs += ms;
+    queueMicrotask(callback);
+    return { unref() {} };
+  };
+
+  dependencies =
+    await payerBootstrapProduction.createProductionPayerBootstrapDependencies({
+      now: () => clockMs,
+      setTimeout: globalThis.setTimeout,
+      tunnelStartupStabilityMs: 250,
+      tunnelStartupWindowMs: 20_000,
+    });
+  await dependencies.inspectPrerequisites();
+  let startError;
+  try {
+    tunnel = await dependencies.startRestrictedTunnel({
+      discovery: {
+        expiresAtMs: String(clockMs + 100),
+        tunnelHost: "tunnel.clockchain.network",
+        tunnelPort: 443,
+      },
+      paths: {
+        knownHostsPath: `${STATE_ROOT}/known_hosts`,
+      },
+      sshIdentity: {
+        privateKeyPath: `${STATE_ROOT}/payer-tunnel.ed25519`,
+      },
+    });
+  } catch (error) {
+    startError = error;
+  } finally {
+    if (tunnel !== undefined) {
+      await dependencies.stopRestrictedTunnel(tunnel);
+      tunnel = undefined;
+    }
+  }
+
+  assert.match(
+    startError?.message ?? "",
+    /Payer production bootstrap failed safely/,
+  );
+  const pid = Number(readFileSync(pidPath, "utf8"));
+  assert.throws(() => process.kill(pid, 0), {
+    code: "ESRCH",
+  });
+});
+
+test("production Payer tunnel stop during spawn does not leak a resolved child", async (t) => {
+  const realPath = process.env.PATH;
+  const realNow = Date.now;
+  const realSetTimeout = globalThis.setTimeout;
+  const root = mkdtempSync(join(tmpdir(), "payer-tunnel-stop-spawn-"));
+  const bin = join(root, "bin");
+  const pidPath = join(root, "ssh-pid");
+  let clockMs = 2_000_000_075_000;
+  let dependencies;
+  let removeSignalHandlers;
+  t.after(async () => {
+    removeSignalHandlers?.();
+    process.env.PATH = realPath;
+    Date.now = realNow;
+    globalThis.setTimeout = realSetTimeout;
+    try {
+      process.kill(Number(readFileSync(pidPath, "utf8")), "SIGKILL");
+    } catch {
+      // The assertion below verifies the intended cleanup path.
+    }
+    rmSync(root, { force: true, recursive: true });
+  });
+
+  mkdirSync(bin);
+  const writeExecutable = (name, source) => {
+    const path = join(bin, name);
+    writeFileSync(path, source, { mode: 0o700 });
+    chmodSync(path, 0o700);
+  };
+  writeExecutable("git", "#!/bin/sh\nprintf 'git version 2.50.0\\n'\n");
+  writeExecutable("npm", "#!/bin/sh\nprintf '10.9.0\\n'\n");
+  writeExecutable("openssl", "#!/bin/sh\nprintf 'OpenSSL 3.5.0 1 Jan 2026\\n'\n");
+  writeExecutable("ssh-keygen", "#!/bin/sh\nexit 0\n");
+  writeExecutable("ssh", `#!/bin/sh
+if [ "$1" = "-V" ]; then
+  printf 'OpenSSH_9.9, LibreSSL 3.3.6\\n' >&2
+  exit 0
+fi
+printf '%s\\n' "$$" > '${pidPath}'
+trap 'exit 0' TERM INT
+while :; do sleep 0.1; done
+`);
+  process.env.PATH = `${bin}${delimiter}${realPath}`;
+  Date.now = () => clockMs;
+  globalThis.setTimeout = (callback, ms) => {
+    if (ms === 250) {
+      return realSetTimeout(() => {
+        clockMs += ms;
+        callback();
+      }, 25);
+    }
+    clockMs += ms;
+    queueMicrotask(callback);
+    return { unref() {} };
+  };
+  const waitForPidOrAbsence = () =>
+    new Promise((resolvePromise, rejectPromise) => {
+      const deadline = realNow() + 1_500;
+      const check = () => {
+        try {
+          resolvePromise(Number(readFileSync(pidPath, "utf8")));
+        } catch {
+          if (realNow() >= deadline) {
+            resolvePromise(null);
+            return;
+          }
+          realSetTimeout(check, 5);
+        }
+      };
+      realSetTimeout(() => {
+        rejectPromise(new Error("spawn cleanup observation timed out"));
+      }, 1_750);
+      check();
+    });
+
+  dependencies =
+    await payerBootstrapProduction.createProductionPayerBootstrapDependencies({
+      now: () => clockMs,
+      setTimeout: globalThis.setTimeout,
+      tunnelStartupStabilityMs: 250,
+      tunnelStartupWindowMs: 20_000,
+    });
+  await dependencies.inspectPrerequisites();
+  removeSignalHandlers = dependencies.installSignalHandlers(() => {});
+  const startPromise = dependencies.startRestrictedTunnel({
+    discovery: {
+      expiresAtMs: String(clockMs + 20_000),
+      tunnelHost: "tunnel.clockchain.network",
+      tunnelPort: 443,
+    },
+    paths: {
+      knownHostsPath: `${STATE_ROOT}/known_hosts`,
+    },
+    sshIdentity: {
+      privateKeyPath: `${STATE_ROOT}/payer-tunnel.ed25519`,
+    },
+  });
+  process.emit("SIGTERM");
+
+  await assert.rejects(
+    startPromise,
+    /Payer production bootstrap failed safely/,
+  );
+  const pid = await waitForPidOrAbsence();
+  if (pid !== null) {
+    assert.throws(() => process.kill(pid, 0), {
+      code: "ESRCH",
+    });
+  }
+});
+
+test("production Payer tunnel reconnects after one stable child closes", async (t) => {
+  const realPath = process.env.PATH;
+  const realNow = Date.now;
+  const realSetTimeout = globalThis.setTimeout;
+  const root = mkdtempSync(join(tmpdir(), "payer-tunnel-reconnect-"));
+  const bin = join(root, "bin");
+  const attemptsPath = join(root, "ssh-attempts");
+  let clockMs = 2_000_000_100_000;
+  const timers = [];
+  let dependencies;
+  let tunnel;
+  t.after(async () => {
+    if (dependencies !== undefined && tunnel !== undefined) {
+      await dependencies.stopRestrictedTunnel(tunnel);
+    }
+    process.env.PATH = realPath;
+    Date.now = realNow;
+    globalThis.setTimeout = realSetTimeout;
+    rmSync(root, { force: true, recursive: true });
+  });
+
+  mkdirSync(bin);
+  const writeExecutable = (name, source) => {
+    const path = join(bin, name);
+    writeFileSync(path, source, { mode: 0o700 });
+    chmodSync(path, 0o700);
+  };
+  writeExecutable("git", "#!/bin/sh\nprintf 'git version 2.50.0\\n'\n");
+  writeExecutable("npm", "#!/bin/sh\nprintf '10.9.0\\n'\n");
+  writeExecutable("openssl", "#!/bin/sh\nprintf 'OpenSSL 3.5.0 1 Jan 2026\\n'\n");
+  writeExecutable("ssh-keygen", "#!/bin/sh\nexit 0\n");
+  writeExecutable("ssh", `#!/bin/sh
+if [ "$1" = "-V" ]; then
+  printf 'OpenSSH_9.9, LibreSSL 3.3.6\\n' >&2
+  exit 0
+fi
+count="$(cat '${attemptsPath}' 2>/dev/null || printf '0')"
+count="$((count + 1))"
+printf '%s\\n' "$count" > '${attemptsPath}'
+trap 'exit 0' TERM INT
+while :; do sleep 0.1; done
+`);
+  process.env.PATH = `${bin}${delimiter}${realPath}`;
+  Date.now = () => clockMs;
+  globalThis.setTimeout = (callback, ms) => {
+    timers.push(ms);
+    if (ms === 250) {
+      return realSetTimeout(() => {
+        clockMs += ms;
+        callback();
+      }, 25);
+    }
+    clockMs += ms;
+    queueMicrotask(callback);
+    return { unref() {} };
+  };
+  const attemptsText = () => {
+    try {
+      return readFileSync(attemptsPath, "utf8");
+    } catch (error) {
+      if (error?.code === "ENOENT") return "0\n";
+      throw error;
+    }
+  };
+  const waitForAttempts = (expected) =>
+    new Promise((resolvePromise, rejectPromise) => {
+      const check = () => {
+        if (attemptsText().trim() === String(expected)) {
+          resolvePromise();
+          return;
+        }
+        realSetTimeout(check, 5);
+      };
+      realSetTimeout(() => {
+        rejectPromise(new Error("reconnect attempt not observed"));
+      }, 1_500);
+      check();
+    });
+
+  dependencies =
+    await payerBootstrapProduction.createProductionPayerBootstrapDependencies({
+      now: () => clockMs,
+      setTimeout: globalThis.setTimeout,
+      tunnelStartupStabilityMs: 250,
+      tunnelStartupWindowMs: 20_000,
+    });
+  await dependencies.inspectPrerequisites();
+  tunnel = await dependencies.startRestrictedTunnel({
+    discovery: {
+      expiresAtMs: String(clockMs + 20_000),
+      tunnelHost: "tunnel.clockchain.network",
+      tunnelPort: 443,
+    },
+    paths: {
+      knownHostsPath: `${STATE_ROOT}/known_hosts`,
+    },
+    sshIdentity: {
+      privateKeyPath: `${STATE_ROOT}/payer-tunnel.ed25519`,
+    },
+  });
+
+  assert.equal(attemptsText().trim(), "1");
+  const firstChild = tunnel.child;
+  firstChild.kill("SIGTERM");
+  await Promise.race([
+    tunnel.fatal.then(
+      () => assert.fail("fatal unexpectedly resolved"),
+      () => assert.fail("fatal rejected before reconnect failed"),
+    ),
+    waitForAttempts(2),
+  ]);
+  assert.notStrictEqual(tunnel.child, firstChild);
+  assert.equal(tunnel.child.exitCode, null);
+  assert.equal(tunnel.child.signalCode, null);
+  assert.equal(
+    timers.every((value) => value <= 3_000),
+    true,
+  );
+  const secondChild = tunnel.child;
+  await dependencies.stopRestrictedTunnel(tunnel);
+  tunnel = undefined;
+  const attemptsAfterStop = attemptsText();
+  secondChild.kill("SIGTERM");
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(attemptsText(), attemptsAfterStop);
 });
 
 test("fails safely, cleans up children, and zeroizes bootstrap material at every boundary", async () => {
