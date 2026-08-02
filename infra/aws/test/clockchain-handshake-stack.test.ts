@@ -659,6 +659,36 @@ test("pins every AWS workload to its role-specific production entrypoint", () =>
   );
 });
 
+test("runs the coordinator as the operator access-point owner", () => {
+  const output = template();
+  output.hasResourceProperties(
+    "AWS::EFS::AccessPoint",
+    {
+      PosixUser: {
+        Gid: "1104",
+        Uid: "1104",
+      },
+      RootDirectory: {
+        Path: "/clockchain/operator",
+      },
+    },
+  );
+  output.hasResourceProperties(
+    "AWS::ECS::TaskDefinition",
+    {
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({
+          Command: [
+            "node",
+            "infra/aws/runtime/coordinator-entrypoint.mjs",
+          ],
+          User: "1104:1104",
+        }),
+      ]),
+    },
+  );
+});
+
 test("emits relay runtime keys in the entrypoint's exact canonical order", () => {
   const resources = template().toJSON()
     .Resources as Record<

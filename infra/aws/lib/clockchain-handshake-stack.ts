@@ -808,6 +808,7 @@ export class ClockchainHandshakeStack extends Stack {
       ],
       ports: [],
       service: false,
+      user: "1104:1104",
       vpc,
     });
     for (const secret of [
