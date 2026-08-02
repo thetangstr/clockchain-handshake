@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  observeImmutableRunSummary,
+} from "../src/bilateral/aws/public-history.mjs";
+import {
+  renderVerifiedReceiptEmail,
+} from "../src/bilateral/aws/receipt-email.mjs";
+import {
   buildAwsWatcherPublicMonitorSnapshot,
   buildPublicMonitorSnapshot,
   buildUnavailablePublicMonitorSnapshot,
@@ -288,6 +294,207 @@ test("publisher timestamps a verified snapshot after the console observation", a
   assert.equal(snapshot.anchors.length, 3);
   assert.equal(snapshot.verifier.status, "VERIFIED");
   assert.deepEqual(uploads, [snapshot]);
+});
+
+test("publisher preserves a verified terminal snapshot as immutable public history", async () => {
+  const puts = [];
+  const snapshot = await publishOnce(
+    {
+      bucket: "clockchain-public-monitor",
+      consoleUrl: "http://127.0.0.1:8788/v1/console/session",
+      intervalMs: 2_000,
+      payerMcpHost: "127.0.0.1",
+      payerMcpPort: 9_443,
+      region: "us-west-2",
+    },
+    {
+      fetch: async () => ({
+        json: async () => projection(),
+        ok: true,
+      }),
+      now: () => PUBLISHED_AT_MS + 500,
+      probeTcp: async () => true,
+      publicObjectUrl: ({ key }) =>
+        `https://monitor.example/${key}`,
+      readRunIndex: async () => null,
+      putObject: async (entry) => {
+        puts.push(entry);
+        return { status: "CREATED" };
+      },
+    },
+  );
+
+  assert.equal(snapshot.runStatus, "VERIFIED");
+  assert.deepEqual(
+    puts.map(({ key }) => key),
+    [
+      "latest.json",
+      `runs/${snapshot.runId}.json`,
+      "runs/index.json",
+    ],
+  );
+  const latest = observePublicMonitorSnapshot(
+    JSON.parse(puts[0].body),
+    { nowMs: PUBLISHED_AT_MS + 500 },
+  );
+  assert.equal(latest.runStatus, "VERIFIED");
+  assert.equal(latest.paymentMoved, false);
+  const summary = observeImmutableRunSummary(
+    JSON.parse(puts[1].body),
+  );
+  assert.equal(summary.runId, snapshot.runId);
+  assert.equal(summary.runStatus, "VERIFIED");
+  assert.equal(summary.paymentMoved, false);
+  assert.equal(summary.anchors.length, 3);
+  assert.deepEqual(
+    summary.anchors.map(({ explorerUrl }) => explorerUrl),
+    EXPLORER_URLS,
+  );
+  const index = JSON.parse(puts[2].body);
+  assert.equal(index.schema, "clockchain.aws-public-run-index/v2");
+  assert.equal(index.paymentMoved, false);
+  assert.equal(index.entries.length, 1);
+  assert.equal(index.entries[0].runId, snapshot.runId);
+
+  const receipt = renderVerifiedReceiptEmail(summary);
+  assert.match(receipt.html, new RegExp(snapshot.runId));
+  for (const expected of [
+    "Payer",
+    "Requestor",
+    "PROPOSED",
+    "ACCEPTED",
+    "ACKNOWLEDGED",
+    ...EXPLORER_URLS,
+    "No represented payment moved.",
+  ]) {
+    assert.match(receipt.html, new RegExp(expected));
+  }
+});
+
+test("publisher updates only latest for nonterminal or unverified snapshots", async () => {
+  const cases = [
+    {
+      name: "unavailable",
+      response: async () => {
+        throw new Error("console down");
+      },
+    },
+    {
+      name: "nonterminal",
+      response: async () => {
+        const source = projection();
+        source.verifier = {
+          advisory: true,
+          publicationDigest: null,
+          status: "PENDING",
+        };
+        source.anchors = source.anchors.slice(0, 2);
+        return source;
+      },
+    },
+    {
+      name: "unvalidated verifier",
+      response: async () => {
+        const source = projection();
+        source.verifier = {
+          advisory: true,
+          publicationDigest: null,
+          status: "VERIFICATION_PASSED",
+        };
+        return source;
+      },
+    },
+    {
+      name: "wrong cardinality",
+      response: async () => {
+        const source = projection();
+        source.anchors[1] = {
+          ...source.anchors[1],
+          cardinality: "2",
+        };
+        return source;
+      },
+    },
+    {
+      name: "stale",
+      response: async () => {
+        const source = projection();
+        source.deadline.nowMs =
+          PUBLISHED_AT_MS - 20_000;
+        return source;
+      },
+    },
+  ];
+
+  for (const candidate of cases) {
+    const puts = [];
+    await publishOnce(
+      {
+        bucket: "clockchain-public-monitor",
+        consoleUrl: "http://127.0.0.1:8788/v1/console/session",
+        intervalMs: 2_000,
+        payerMcpHost: "127.0.0.1",
+        payerMcpPort: 9_443,
+        region: "us-west-2",
+      },
+      {
+        fetch: async () => ({
+          json: candidate.response,
+          ok: true,
+        }),
+        now: () => PUBLISHED_AT_MS + 500,
+        probeTcp: async () => true,
+        publicObjectUrl: ({ key }) =>
+          `https://monitor.example/${key}`,
+        readRunIndex: async () => null,
+        putObject: async (entry) => {
+          puts.push(entry);
+          return { status: "CREATED" };
+        },
+      },
+    );
+    assert.deepEqual(
+      puts.map(({ key }) => key),
+      ["latest.json"],
+      candidate.name,
+    );
+  }
+});
+
+test("publisher fails visibly when verified immutable history cannot be preserved", async () => {
+  const writes = [];
+  await assert.rejects(
+    publishOnce(
+      {
+        bucket: "clockchain-public-monitor",
+        consoleUrl: "http://127.0.0.1:8788/v1/console/session",
+        intervalMs: 2_000,
+        payerMcpHost: "127.0.0.1",
+        payerMcpPort: 9_443,
+        region: "us-west-2",
+      },
+      {
+        fetch: async () => ({ json: async () => projection(), ok: true }),
+        now: () => PUBLISHED_AT_MS + 500,
+        probeTcp: async () => true,
+        publicObjectUrl: ({ key }) => `https://monitor.example/${key}`,
+        readObject: async () => '{"different":"immutable receipt"}\n',
+        readRunIndex: async () => null,
+        putObject: async (entry) => {
+          writes.push(entry.key);
+          if (entry.key.startsWith("runs/run-")) {
+            const error = new Error("summary already exists");
+            error.code = "OBJECT_EXISTS";
+            throw error;
+          }
+          return { status: "CREATED" };
+        },
+      },
+    ),
+  );
+  assert.equal(writes[0], "latest.json");
+  assert.match(writes[1], /^runs\/run-[0-9a-f]{16}\.json$/);
+  assert.equal(writes.length, 2);
 });
 
 test("publishes only the authenticated Payer-Requestor-Payer prefix", () => {
