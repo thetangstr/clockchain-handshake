@@ -92,6 +92,8 @@ const RELAY_FINGERPRINT = createHash("sha256")
     new X509Certificate(RELAY_CERTIFICATE_PEM).raw,
   )
   .digest("hex");
+const CANONICAL_RELAY_CERTIFICATE_PEM =
+  new X509Certificate(RELAY_CERTIFICATE_PEM).toString();
 
 function coordinatorInput(overrides = {}) {
   return {
@@ -382,6 +384,20 @@ test("builds exact canonical coordinator, funding, and verifier runtime inputs a
     },
   });
   assertCanonicalRuntimeInput(verifier);
+});
+
+test("canonicalizes the relay certificate for the exact coordinator startup validator", () => {
+  const runtime = buildCoordinatorRuntimeInput(
+    coordinatorInput({
+      tlsCertificatePem:
+        RELAY_CERTIFICATE_PEM.trimEnd(),
+    }),
+  );
+
+  assert.equal(
+    runtime.coordinator.tlsCertificatePem,
+    CANONICAL_RELAY_CERTIFICATE_PEM,
+  );
 });
 
 test("coordinator builder emits the exact validated public staging contract", () => {

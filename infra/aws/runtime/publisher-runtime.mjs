@@ -220,24 +220,56 @@ export async function runAwsPublisherOnce(
         ifNoneMatch,
         key,
       }) {
-        const result = await s3.send(
-          new PutObjectCommand({
-            Body: body,
-            Bucket: input.bucketName,
-            CacheControl: cacheControl,
-            ContentType: contentType,
-            ...(ifMatch === undefined
-              ? {}
-              : { IfMatch: ifMatch }),
-            ...(ifNoneMatch === undefined
-              ? {}
-              : {
-                  IfNoneMatch:
-                    ifNoneMatch,
-                }),
-            Key: key,
-          }),
-        );
+        let result;
+        try {
+          result = await s3.send(
+            new PutObjectCommand({
+              Body: body,
+              Bucket: input.bucketName,
+              CacheControl: cacheControl,
+              ContentType: contentType,
+              ...(ifMatch === undefined
+                ? {}
+                : { IfMatch: ifMatch }),
+              ...(ifNoneMatch === undefined
+                ? {}
+                : {
+                    IfNoneMatch:
+                      ifNoneMatch,
+                  }),
+              Key: key,
+            }),
+          );
+        } catch (error) {
+          const preconditionFailed =
+            ifNoneMatch === "*" &&
+            (
+              error?.name ===
+                "PreconditionFailed" ||
+              error?.code ===
+                "PreconditionFailed" ||
+              error?.$metadata
+                ?.httpStatusCode === 412
+            );
+          if (!preconditionFailed) throw error;
+          const existing = await s3.send(
+            new GetObjectCommand({
+              Bucket: input.bucketName,
+              Key: key,
+            }),
+          );
+          if (
+            await bodyText(existing.Body) !== body ||
+            existing.CacheControl !==
+              cacheControl ||
+            existing.ContentType !==
+              contentType ||
+            typeof existing.ETag !== "string"
+          ) {
+            fail();
+          }
+          result = existing;
+        }
         return {
           etag: result.ETag,
           ...(result.VersionId === undefined

@@ -173,6 +173,67 @@ test("publishes one sanitized projection to the exact private S3 bucket", async 
   );
 });
 
+test("accepts an identical immutable S3 object as a restart-safe replay", async () => {
+  const body = '{"runId":"run-0123456789abcdef"}\n';
+  const commands = [];
+  const result = await runAwsPublisherOnce(INPUT, {
+    publish: async (_input, dependencies) =>
+      await dependencies.putObject({
+        body,
+        cacheControl:
+          "public,max-age=31536000,immutable",
+        contentType: "application/json",
+        ifNoneMatch: "*",
+        key: "runs/run-0123456789abcdef.json",
+      }),
+    readFile: async () =>
+      Buffer.from(
+        `${JSON.stringify(publicationInput())}\n`,
+      ),
+    s3: {
+      async send(command) {
+        commands.push(command.constructor.name);
+        if (
+          command.constructor.name ===
+          "PutObjectCommand"
+        ) {
+          throw Object.assign(
+            new Error("precondition failed"),
+            {
+              name: "PreconditionFailed",
+              $metadata: {
+                httpStatusCode: 412,
+              },
+            },
+          );
+        }
+        return {
+          Body: {
+            async transformToString() {
+              return body;
+            },
+          },
+          CacheControl:
+            "public,max-age=31536000,immutable",
+          ContentType: "application/json",
+          ETag: '"existing"',
+          VersionId: "version-1",
+        };
+      },
+    },
+    writeRecord: async () => {},
+  });
+
+  assert.deepEqual(result, {
+    etag: '"existing"',
+    versionId: "version-1",
+  });
+  assert.deepEqual(commands, [
+    "PutObjectCommand",
+    "GetObjectCommand",
+  ]);
+});
+
 test("rejects traversal, public bucket URLs, and non-false runtime state", async () => {
   for (const value of [
     {

@@ -509,7 +509,7 @@ function certificatePem(value, fingerprint) {
     ) {
       fail();
     }
-    return value;
+    return certificate.toString();
   } catch (error) {
     if (
       error instanceof
