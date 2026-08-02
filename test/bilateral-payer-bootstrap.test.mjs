@@ -392,6 +392,7 @@ test("production Payer approval polling continues for the 30 minute demo window"
   const startMs = 2_000_000_000_000;
   let clockMs = startMs;
   const sleeps = [];
+  const statuses = [];
   const claimFingerprint = "b".repeat(64);
   t.after(() => {
     Date.now = realNow;
@@ -407,19 +408,27 @@ test("production Payer approval polling continues for the 30 minute demo window"
   const dependencies =
     await payerBootstrapProduction.createProductionPayerBootstrapDependencies({
       async httpsRequest() {
-        return clockMs >= startMs + 302_000
-          ? {
-              claimFingerprint,
-              packageResponse: {
-                sealed: true,
-              },
-              paymentMoved: false,
-              status: "SEALED",
-            }
-          : {
-              paymentMoved: false,
-              status: "PENDING",
-            };
+        const status =
+          clockMs >= startMs + 302_000
+            ? "SEALED"
+            : clockMs >= startMs + 300_000
+              ? "APPROVED"
+              : "PENDING";
+        statuses.push(status);
+        if (status === "SEALED") {
+          return {
+            claimFingerprint,
+            packageResponse: {
+              sealed: true,
+            },
+            paymentMoved: false,
+            status: "SEALED",
+          };
+        }
+        return {
+          paymentMoved: false,
+          status,
+        };
       },
     });
 
@@ -444,6 +453,37 @@ test("production Payer approval polling continues for the 30 minute demo window"
     sleeps.every((value) => value === 2_000),
     true,
   );
+  assert.deepEqual(statuses.slice(-3), [
+    "PENDING",
+    "APPROVED",
+    "SEALED",
+  ]);
+});
+
+test("production Payer approval polling rejects terminal and malformed non-sealed statuses", async () => {
+  for (const response of [
+    { paymentMoved: false, status: "REJECTED" },
+    { paymentMoved: false, status: "EXPIRED" },
+    { paymentMoved: false, status: "CONSUMED" },
+    { paymentMoved: true, status: "APPROVED" },
+    { paymentMoved: false, status: "SEALED" },
+  ]) {
+    const dependencies =
+      await payerBootstrapProduction.createProductionPayerBootstrapDependencies({
+        async httpsRequest() {
+          return response;
+        },
+      });
+    await assert.rejects(
+      dependencies.pollApprovedPackage({
+        claimFingerprint: "b".repeat(64),
+        expiresAtMs: String(Date.now() + 60_000),
+        payerClaimUrl: "https://127.0.0.1/v1/payer-claims",
+        pollCapability: SECRET_CANARY,
+      }),
+      /Payer production bootstrap failed safely/,
+    );
+  }
 });
 
 test("fails safely, cleans up children, and zeroizes bootstrap material at every boundary", async () => {

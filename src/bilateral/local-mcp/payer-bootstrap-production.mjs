@@ -805,16 +805,15 @@ export async function createProductionPayerBootstrapDependencies(
           method: "GET",
           url: pollUrl,
         });
-        if (
-          response?.paymentMoved !== false ||
-          !["PENDING", "SEALED"].includes(
-            response.status,
-          )
-        ) {
+        if (response?.paymentMoved !== false) {
           fail();
         }
         if (response.status === "SEALED") {
+          if (response.packageResponse === undefined) fail();
           return response;
+        }
+        if (!["PENDING", "APPROVED"].includes(response.status)) {
+          fail();
         }
         if (Date.now() + POLL_INTERVAL_MS > deadline) {
           fail();
