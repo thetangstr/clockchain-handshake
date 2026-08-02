@@ -949,6 +949,7 @@ export class ClockchainHandshakeStack extends Stack {
         this,
         "PublicNlb",
         {
+          crossZoneEnabled: true,
           internetFacing: true,
           securityGroups: [publicNlbGroup],
           vpc,

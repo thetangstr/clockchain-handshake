@@ -361,6 +361,19 @@ test("exposes only the fixed raw TCP and private bootstrap listener topology", (
       Type: "network",
     },
   );
+  output.hasResourceProperties(
+    "AWS::ElasticLoadBalancingV2::LoadBalancer",
+    {
+      LoadBalancerAttributes: Match.arrayWith([
+        {
+          Key: "load_balancing.cross_zone.enabled",
+          Value: "true",
+        },
+      ]),
+      Scheme: "internet-facing",
+      Type: "network",
+    },
+  );
 });
 
 test("creates the exact bootstrap routes and a separate Cognito-authorized operator API", () => {

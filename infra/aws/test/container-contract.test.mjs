@@ -46,6 +46,14 @@ test("tunnel image is Node 22, non-root, nologin, fixed-port, and read-only-root
   assert.match(dockerfile, /^VOLUME \["\/run\/clockchain"\]$/m);
   assert.match(
     dockerfile,
+    /mkdir -p \/opt\/clockchain \/run\/clockchain \/run\/sshd/,
+  );
+  assert.match(
+    dockerfile,
+    /chmod 0755 \/run\/sshd/,
+  );
+  assert.match(
+    dockerfile,
     /npm ci --prefix infra\/aws --omit=dev --ignore-scripts/,
   );
   assert.match(
