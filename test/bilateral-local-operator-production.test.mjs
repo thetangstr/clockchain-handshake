@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
 
-import { createProductionHybridOperatorDependencies } from "../src/bilateral/local-demo/operator-production.mjs";
+import {
+  BOOTSTRAP_CLAIM_WAIT_MS,
+  createProductionHybridOperatorDependencies,
+  waitForPendingBootstrapClaim,
+} from "../src/bilateral/local-demo/operator-production.mjs";
 import { HybridPublicEdgeError } from "../src/bilateral/local-demo/public-edge.mjs";
 
 const REPOSITORY_SHA = "b".repeat(40);
@@ -343,4 +347,64 @@ test("probeCoordinationEdge stops safely after bounded attempts", async (t) => {
   );
   assert.equal(attempts > 1 && attempts <= 40, true);
   assert.equal(attempts, 40);
+});
+
+test("requestor claim wait uses the full 30-minute human-paced window", () => {
+  assert.equal(BOOTSTRAP_CLAIM_WAIT_MS, 1_800_000);
+});
+
+test("requestor claim wait fails closed only after the full window elapses", async (t) => {
+  const privateRoot = await mkdtemp(join(tmpdir(), "clockchain-claim-window-"));
+  t.after(() => rm(privateRoot, { force: true, recursive: true }));
+  const journalPath = join(privateRoot, "bootstrap-broker-journal.json");
+  await writeFile(
+    journalPath,
+    `${JSON.stringify({
+      claims: {},
+      repositorySha: REPOSITORY_SHA,
+      schema: "clockchain.requestor-bootstrap-broker-journal/v1",
+    })}\n`,
+    { mode: 0o600 },
+  );
+  const clock = [0, 0, BOOTSTRAP_CLAIM_WAIT_MS - 1, BOOTSTRAP_CLAIM_WAIT_MS];
+  const sleeps = [];
+  await assert.rejects(
+    waitForPendingBootstrapClaim(
+      { stateRoot: privateRoot },
+      {
+        now: () => clock.shift(),
+        sleep: async (delayMs) => {
+          sleeps.push(delayMs);
+        },
+      },
+    ),
+  );
+  assert.equal(clock.length, 0);
+  assert.deepEqual(sleeps, [100, 100]);
+});
+
+test("requestor claim wait returns the pending claim fingerprint", async (t) => {
+  const privateRoot = await mkdtemp(join(tmpdir(), "clockchain-claim-pending-"));
+  t.after(() => rm(privateRoot, { force: true, recursive: true }));
+  const claimFingerprint = "d".repeat(64);
+  const journalPath = join(privateRoot, "bootstrap-broker-journal.json");
+  await writeFile(
+    journalPath,
+    `${JSON.stringify({
+      claims: {
+        [claimFingerprint]: {
+          claimFingerprint,
+          status: "PENDING_APPROVAL",
+        },
+      },
+      repositorySha: REPOSITORY_SHA,
+      schema: "clockchain.requestor-bootstrap-broker-journal/v1",
+    })}\n`,
+    { mode: 0o600 },
+  );
+  const result = await waitForPendingBootstrapClaim(
+    { stateRoot: privateRoot },
+    { now: () => 0, sleep: async () => assert.fail("must not sleep") },
+  );
+  assert.equal(result, claimFingerprint);
 });

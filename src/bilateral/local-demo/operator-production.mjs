@@ -22,6 +22,7 @@ const SESSION_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_LINE_BYTES = 16 * 1024;
 const DEFAULT_WAIT_MS = 120_000;
+export const BOOTSTRAP_CLAIM_WAIT_MS = 1_800_000;
 const BROKER_PORT = 9555;
 
 class HybridOperatorProductionError extends Error {
@@ -472,8 +473,15 @@ async function startBootstrapBroker(
   });
 }
 
-async function waitForPendingBootstrapClaim({ stateRoot }) {
-  const deadline = Date.now() + DEFAULT_WAIT_MS;
+export async function waitForPendingBootstrapClaim(
+  { stateRoot },
+  {
+    deadlineMs = BOOTSTRAP_CLAIM_WAIT_MS,
+    now = Date.now,
+    sleep = (delayMs) => new Promise((resolvePromise) => setTimeout(resolvePromise, delayMs)),
+  } = {},
+) {
+  const deadline = now() + deadlineMs;
   for (;;) {
     try {
       const journal = JSON.parse(await readFile(join(stateRoot, "bootstrap-broker-journal.json"), "utf8"));
@@ -488,8 +496,8 @@ async function waitForPendingBootstrapClaim({ stateRoot }) {
       if (error instanceof HybridOperatorProductionError) throw error;
       // Keep polling until the Requestor submits its exact bootstrap claim.
     }
-    if (Date.now() >= deadline) fail();
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+    if (now() >= deadline) fail();
+    await sleep(100);
   }
 }
 
