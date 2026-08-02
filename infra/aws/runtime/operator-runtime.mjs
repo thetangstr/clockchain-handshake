@@ -412,6 +412,86 @@ function isConditionalCheckFailed(error) {
   );
 }
 
+function expectedClaimFingerprintValue(value) {
+  if (
+    value === null ||
+    (typeof value === "string" && SHA64.test(value))
+  ) {
+    return value;
+  }
+  fail();
+}
+
+async function synchronizeReleaseControlContext({
+  context,
+  documentClient,
+  input,
+}) {
+  if (
+    context.state.status === "EMPTY" ||
+    context.state.sessionId === null
+  ) {
+    return context;
+  }
+  const releaseKey = contextKey({
+    releaseId: input.releaseId,
+    sessionId: null,
+  });
+  const sessionKey = contextKey({
+    releaseId: input.releaseId,
+    sessionId: context.state.sessionId,
+  });
+  const condition =
+    "#recordType = :recordType AND #control.#state = :state";
+  const names = {
+    "#control": "controlContext",
+    "#recordType": "recordType",
+    "#state": "state",
+  };
+  const values = {
+    ":recordType": "CONTROL_CONTEXT",
+    ":state": context.state,
+  };
+  const controlContext = {
+    expectedClaimFingerprint:
+      context.expectedClaimFingerprint,
+    state: context.state,
+  };
+  await documentClient.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Put: {
+            ConditionExpression: condition,
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+            Item: {
+              actionId: releaseKey,
+              controlContext,
+              recordType: "CONTROL_CONTEXT",
+            },
+            TableName: input.actionTableName,
+          },
+        },
+        {
+          Put: {
+            ConditionExpression: condition,
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+            Item: {
+              actionId: sessionKey,
+              controlContext,
+              recordType: "CONTROL_CONTEXT",
+            },
+            TableName: input.actionTableName,
+          },
+        },
+      ],
+    }),
+  );
+  return context;
+}
+
 function allowedActionsFor({
   expectedClaimFingerprint,
   status,
@@ -635,12 +715,14 @@ async function readStoredControlContext({
         stored: result.Item.controlContext,
       });
     const expectedClaimFingerprint =
-      await transitions
-        .readExpectedClaimFingerprint({
-          releaseId,
-          sessionId,
-          state: stored.state,
-        });
+      expectedClaimFingerprintValue(
+        await transitions
+          .readExpectedClaimFingerprint({
+            releaseId,
+            sessionId,
+            state: stored.state,
+          }),
+      );
     return {
       expectedClaimFingerprint,
       state: stored.state,
@@ -662,16 +744,29 @@ async function readStoredControlContext({
   const effectiveSessionId =
     stored.state.sessionId;
   const expectedClaimFingerprint =
-    await transitions
-      .readExpectedClaimFingerprint({
-        releaseId,
-        sessionId: effectiveSessionId,
-        state: stored.state,
-      });
-  return {
+    expectedClaimFingerprintValue(
+      await transitions
+        .readExpectedClaimFingerprint({
+          releaseId,
+          sessionId: effectiveSessionId,
+          state: stored.state,
+        }),
+    );
+  const context = {
     expectedClaimFingerprint,
     state: stored.state,
   };
+  if (
+    stored.expectedClaimFingerprint ===
+    expectedClaimFingerprint
+  ) {
+    return context;
+  }
+  return await synchronizeReleaseControlContext({
+    context,
+    documentClient,
+    input,
+  });
 }
 
 async function resolveReleaseControlContext({
@@ -706,16 +801,30 @@ async function initializeReleaseControlContext({
       };
     }
     const expectedClaimFingerprint =
-      await transitions
-        .readExpectedClaimFingerprint({
-          releaseId: input.releaseId,
-          sessionId: existing.state.sessionId,
-          state: existing.state,
-        });
-    return {
+      expectedClaimFingerprintValue(
+        await transitions
+          .readExpectedClaimFingerprint({
+            releaseId: input.releaseId,
+            sessionId:
+              existing.state.sessionId,
+            state: existing.state,
+          }),
+      );
+    const context = {
       expectedClaimFingerprint,
       state: existing.state,
     };
+    if (
+      existing.expectedClaimFingerprint ===
+      expectedClaimFingerprint
+    ) {
+      return context;
+    }
+    return await synchronizeReleaseControlContext({
+      context,
+      documentClient,
+      input,
+    });
   }
   try {
     await seedInitialControlContext({
@@ -909,6 +1018,15 @@ export async function runAwsOperatorOnce(
         nextState,
         previousRevision,
       }) {
+        const expectedClaimFingerprint =
+          expectedClaimFingerprintValue(
+            await transitions
+              .readExpectedClaimFingerprint({
+                releaseId: action.releaseId,
+                sessionId: nextState.sessionId,
+                state: nextState,
+              }),
+          );
         const releaseKey =
           contextKey({
             releaseId:
@@ -923,7 +1041,7 @@ export async function runAwsOperatorOnce(
               nextState.sessionId,
           });
         const controlContext = {
-          expectedClaimFingerprint: null,
+          expectedClaimFingerprint,
           state: nextState,
         };
         const condition =

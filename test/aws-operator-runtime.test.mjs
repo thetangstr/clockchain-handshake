@@ -26,6 +26,13 @@ const CONFIG = Object.freeze({
     "11111111-1111-4111-8111-111111111111",
 });
 
+const START_RUN_ACTION = Object.freeze({
+  actionDigest: "b".repeat(64),
+  actionId:
+    "33333333-3333-4333-8333-333333333333",
+  type: "START_RUN",
+});
+
 function runtimeTransitions(
   expectedClaimFingerprint = null,
 ) {
@@ -76,6 +83,77 @@ async function runWithStoredControlState(state) {
     },
   });
   return { publications, result };
+}
+
+function startedControlState(overrides = {}) {
+  return {
+    actionHistory: [START_RUN_ACTION],
+    paymentMoved: false,
+    releaseId: CONFIG.releaseId,
+    repositorySha: CONFIG.repositorySha,
+    revision: 1,
+    schema: "clockchain.aws-control-state/v1",
+    sessionId: CONFIG.sessionId,
+    status: "RUN_STARTED",
+    ...overrides,
+  };
+}
+
+function startRunAction() {
+  return {
+    ...START_RUN_ACTION,
+    paymentMoved: false,
+    releaseId: CONFIG.releaseId,
+    repositorySha: CONFIG.repositorySha,
+    sessionId: CONFIG.sessionId,
+  };
+}
+
+async function commitStartRun(dependencies) {
+  await dependencies.commitControlState({
+    action: startRunAction(),
+    nextState: startedControlState(),
+    previousRevision: 0,
+  });
+}
+
+function commandIndex(calls, kind, name) {
+  return calls.findIndex(
+    ([actualKind, actualName]) =>
+      actualKind === kind && actualName === name,
+  );
+}
+
+function commandInput(calls, kind, name) {
+  const call = calls.find(
+    ([actualKind, actualName]) =>
+      actualKind === kind && actualName === name,
+  );
+  assert.ok(call);
+  return call[2];
+}
+
+function transactionFingerprints(calls) {
+  return commandInput(
+    calls,
+    "dynamo",
+    "TransactWriteCommand",
+  ).TransactItems.map(
+    ({ Put }) =>
+      Put.Item.controlContext
+        .expectedClaimFingerprint,
+  );
+}
+
+function publishedSnapshot(calls) {
+  const publish = commandInput(
+    calls,
+    "s3",
+    "PutObjectCommand",
+  );
+  return JSON.parse(
+    Buffer.from(publish.Body).toString("utf8"),
+  );
 }
 
 test("long-polls one exact FIFO action and passes only bounded dependencies to the authority adapter", async () => {
@@ -796,7 +874,7 @@ test("operator loop seeds initial control context only during startup", async ()
   );
 });
 
-test("operator restart reads active release context before publishing control snapshot", async () => {
+test("operator ongoing idle pass syncs claim fingerprint before publishing pending approval", async () => {
   const calls = [];
   const claimFingerprint = "a".repeat(64);
   await runAwsOperatorOnce(CONFIG, {
@@ -833,26 +911,7 @@ test("operator restart reads active release context before publishing control sn
               controlContext: {
                 expectedClaimFingerprint:
                   null,
-                state: {
-                  actionHistory: [
-                    {
-                      actionDigest:
-                        "b".repeat(64),
-                      actionId:
-                        "33333333-3333-4333-8333-333333333333",
-                      type: "START_RUN",
-                    },
-                  ],
-                  paymentMoved: false,
-                  releaseId: CONFIG.releaseId,
-                  repositorySha:
-                    CONFIG.repositorySha,
-                  revision: 1,
-                  schema:
-                    "clockchain.aws-control-state/v1",
-                  sessionId: CONFIG.sessionId,
-                  status: "RUN_STARTED",
-                },
+                state: startedControlState(),
               },
             },
           };
@@ -880,6 +939,7 @@ test("operator restart reads active release context before publishing control sn
         return { Messages: [] };
       },
     },
+    initializeControlContext: false,
   });
   assert.equal(
     calls.some(
@@ -889,13 +949,53 @@ test("operator restart reads active release context before publishing control sn
     ),
     false,
   );
-  const publish = calls.find(
-    ([kind, name]) =>
-      kind === "s3" &&
-      name === "PutObjectCommand",
-  )[2];
-  const snapshot = JSON.parse(
-    Buffer.from(publish.Body).toString("utf8"),
+  const transactionIndex = commandIndex(
+    calls,
+    "dynamo",
+    "TransactWriteCommand",
+  );
+  const publishIndex = commandIndex(
+    calls,
+    "s3",
+    "PutObjectCommand",
+  );
+  assert.notEqual(transactionIndex, -1);
+  assert.notEqual(publishIndex, -1);
+  assert.equal(transactionIndex < publishIndex, true);
+  const transaction = calls[transactionIndex][2];
+  assert.deepEqual(
+    transactionFingerprints(calls),
+    [claimFingerprint, claimFingerprint],
+  );
+  for (const { Put } of transaction.TransactItems) {
+    assert.equal(
+      Put.ConditionExpression,
+      "#recordType = :recordType AND #control.#state = :state",
+    );
+    assert.deepEqual(
+      Put.ExpressionAttributeNames,
+      {
+        "#control": "controlContext",
+        "#recordType": "recordType",
+        "#state": "state",
+      },
+    );
+    assert.deepEqual(
+      Put.ExpressionAttributeValues,
+      {
+        ":recordType": "CONTROL_CONTEXT",
+        ":state": startedControlState(),
+      },
+    );
+  }
+  const snapshot = publishedSnapshot(calls);
+  assert.equal(
+    commandIndex(
+      calls,
+      "sqs",
+      "ReceiveMessageCommand",
+    ) < transactionIndex,
+    true,
   );
   assert.equal(
     snapshot.runId,
@@ -915,6 +1015,127 @@ test("operator restart reads active release context before publishing control sn
       status: "WAITING",
     },
   });
+});
+
+test("operator idle pass clears stale persisted claim fingerprints before publishing", async () => {
+  const calls = [];
+  await runAwsOperatorOnce(CONFIG, {
+    buildTransitions: () =>
+      runtimeTransitions(null),
+    documentClient: {
+      async send(command) {
+        calls.push([
+          "dynamo",
+          command.constructor.name,
+          command.input,
+        ]);
+        if (
+          command.constructor.name ===
+          "GetCommand"
+        ) {
+          return {
+            Item: {
+              controlContext: {
+                expectedClaimFingerprint:
+                  "a".repeat(64),
+                state: startedControlState(),
+              },
+            },
+          };
+        }
+        return {};
+      },
+    },
+    s3: {
+      async send(command) {
+        calls.push([
+          "s3",
+          command.constructor.name,
+          command.input,
+        ]);
+        return {};
+      },
+    },
+    sqs: {
+      async send(command) {
+        calls.push([
+          "sqs",
+          command.constructor.name,
+          command.input,
+        ]);
+        return { Messages: [] };
+      },
+    },
+    initializeControlContext: false,
+  });
+  assert.deepEqual(
+    transactionFingerprints(calls),
+    [null, null],
+  );
+  const snapshot = publishedSnapshot(calls);
+  assert.deepEqual(
+    snapshot.control.allowedActions,
+    ["ABORT"],
+  );
+  assert.equal(
+    snapshot.control.claims.payer.fingerprint,
+    null,
+  );
+});
+
+test("operator idle claim fingerprint sync fails closed on a state race before publishing approval", async () => {
+  const claimFingerprint = "a".repeat(64);
+  await assert.rejects(
+    runAwsOperatorOnce(CONFIG, {
+      buildTransitions: () =>
+        runtimeTransitions(claimFingerprint),
+      documentClient: {
+        async send(command) {
+          if (
+            command.constructor.name ===
+            "GetCommand"
+          ) {
+            return {
+            Item: {
+              controlContext: {
+                expectedClaimFingerprint:
+                  null,
+                  state: startedControlState(),
+                },
+              },
+            };
+          }
+          if (
+            command.constructor.name ===
+            "TransactWriteCommand"
+          ) {
+            throw Object.assign(
+              new Error("race"),
+              {
+                name:
+                  "ConditionalCheckFailedException",
+              },
+            );
+          }
+          return {};
+        },
+      },
+      s3: {
+        async send() {
+          assert.fail(
+            "raced sync must not publish approval snapshot",
+          );
+        },
+      },
+      sqs: {
+        async send() {
+          return { Messages: [] };
+        },
+      },
+      initializeControlContext: false,
+    }),
+    /AWS operator runtime failed safely/,
+  );
 });
 
 test("operator snapshot derives claim approval status from action history after abort", async () => {
@@ -1228,6 +1449,229 @@ test("operator runtime rejects forged stored control states before publishing", 
       /AWS operator runtime failed safely/,
     );
   }
+});
+
+test("committed control context persists the current authoritative claim fingerprint", async () => {
+  const claimFingerprint = "a".repeat(64);
+  const calls = [];
+  await runAwsOperatorOnce(CONFIG, {
+    buildTransitions: () =>
+      runtimeTransitions(claimFingerprint),
+    documentClient: {
+      async send(command) {
+        calls.push([
+          "dynamo",
+          command.constructor.name,
+          command.input,
+        ]);
+        if (
+          command.constructor.name ===
+          "GetCommand"
+        ) {
+          return {
+            Item: {
+              controlContext: {
+                expectedClaimFingerprint:
+                  null,
+                state:
+                  createInitialControlState(),
+              },
+            },
+          };
+        }
+        return {};
+      },
+    },
+    processMessage: async (
+      _message,
+      dependencies,
+    ) => {
+      await commitStartRun(dependencies);
+      return {
+        paymentMoved: false,
+        status: "COMMITTED",
+      };
+    },
+    s3: {
+      async send(command) {
+        calls.push([
+          "s3",
+          command.constructor.name,
+          command.input,
+        ]);
+        return {};
+      },
+    },
+    sqs: {
+      async send(command) {
+        calls.push([
+          "sqs",
+          command.constructor.name,
+          command.input,
+        ]);
+        if (
+          command.constructor.name ===
+          "ReceiveMessageCommand"
+        ) {
+          return {
+            Messages: [
+              {
+                Body: "{}",
+                MessageId: "message-1",
+                ReceiptHandle: "receipt-1",
+              },
+            ],
+          };
+        }
+        return {};
+      },
+    },
+  });
+  assert.deepEqual(
+    transactionFingerprints(calls),
+    [claimFingerprint, claimFingerprint],
+  );
+});
+
+test("committed control context clears absent authoritative claim fingerprints", async () => {
+  const calls = [];
+  await runAwsOperatorOnce(CONFIG, {
+    buildTransitions: () =>
+      runtimeTransitions(null),
+    documentClient: {
+      async send(command) {
+        calls.push([
+          "dynamo",
+          command.constructor.name,
+          command.input,
+        ]);
+        if (
+          command.constructor.name ===
+          "GetCommand"
+        ) {
+          return {
+            Item: {
+              controlContext: {
+                expectedClaimFingerprint:
+                  "a".repeat(64),
+                state:
+                  createInitialControlState(),
+              },
+            },
+          };
+        }
+        return {};
+      },
+    },
+    processMessage: async (
+      _message,
+      dependencies,
+    ) => {
+      await commitStartRun(dependencies);
+      return {
+        paymentMoved: false,
+        status: "COMMITTED",
+      };
+    },
+    s3: {
+      async send(command) {
+        calls.push([
+          "s3",
+          command.constructor.name,
+          command.input,
+        ]);
+        return {};
+      },
+    },
+    sqs: {
+      async send(command) {
+        calls.push([
+          "sqs",
+          command.constructor.name,
+          command.input,
+        ]);
+        if (
+          command.constructor.name ===
+          "ReceiveMessageCommand"
+        ) {
+          return {
+            Messages: [
+              {
+                Body: "{}",
+                MessageId: "message-1",
+                ReceiptHandle: "receipt-1",
+              },
+            ],
+          };
+        }
+        return {};
+      },
+    },
+  });
+  assert.deepEqual(
+    transactionFingerprints(calls),
+    [null, null],
+  );
+});
+
+test("committed control context rejects malformed authoritative claim fingerprints", async () => {
+  await assert.rejects(
+    runAwsOperatorOnce(CONFIG, {
+      buildTransitions: () =>
+        runtimeTransitions("not-a-sha"),
+      documentClient: {
+        async send(command) {
+          if (
+            command.constructor.name ===
+            "GetCommand"
+          ) {
+            return {
+              Item: {
+                controlContext: {
+                  expectedClaimFingerprint:
+                    null,
+                  state:
+                    createInitialControlState(),
+                },
+              },
+            };
+          }
+          return {};
+        },
+      },
+      processMessage: async (
+        _message,
+        dependencies,
+      ) => {
+        await commitStartRun(dependencies);
+      },
+      s3: {
+        async send() {
+          return {};
+        },
+      },
+      sqs: {
+        async send(command) {
+          if (
+            command.constructor.name ===
+            "ReceiveMessageCommand"
+          ) {
+            return {
+              Messages: [
+                {
+                  Body: "{}",
+                  MessageId: "message-1",
+                  ReceiptHandle: "receipt-1",
+                },
+              ],
+            };
+          }
+          return {};
+        },
+      },
+    }),
+    /AWS operator runtime failed safely/,
+  );
 });
 
 test("returns an idle result without inventing an action", async () => {
