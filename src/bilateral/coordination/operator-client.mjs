@@ -375,6 +375,11 @@ export function createOperatorRelayClient(input) {
   const transport = exact(data.transport, ["request"]);
   if (typeof transport.request !== "function") invalid();
   let appendQueue = Promise.resolve();
+  const requestSignal = (signal) => {
+    if (signal === undefined) return Object.freeze({});
+    assertSignal(signal);
+    return Object.freeze({ signal });
+  };
   const request = async (value, contentType) => {
     const canonical = assertOperatorRoute(value);
     let response;
@@ -382,11 +387,17 @@ export function createOperatorRelayClient(input) {
     return exactResponse(response, contentType);
   };
   const readEvents = async (value) => {
-    const inputValue = exact(value, ["after", "waitMs"]);
+    const inputValue = exact(
+      value,
+      isPlainObject(value) && Object.hasOwn(value, "signal")
+        ? ["after", "signal", "waitMs"]
+        : ["after", "waitMs"],
+    );
     if (inputValue.after !== null || !Number.isSafeInteger(inputValue.waitMs) || inputValue.waitMs < 0 || inputValue.waitMs > 30_000) invalid();
-    const enrollmentBytes = await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/enrollments` }, "application/json");
+    const signal = requestSignal(inputValue.signal);
+    const enrollmentBytes = await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/enrollments`, ...signal }, "application/json");
     const roleKeys = validateEnrollmentBytes(enrollmentBytes, context);
-    const parsed = canonicalJson(await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/events?waitMs=${inputValue.waitMs}` }, "application/json"));
+    const parsed = canonicalJson(await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/events?waitMs=${inputValue.waitMs}`, ...signal }, "application/json"));
     if (!Array.isArray(parsed) || parsed.length > 4096 || Reflect.ownKeys(parsed).length !== parsed.length + 1) invalid();
     const events = parsed.map((event) => validateEvent(event, context, identity, roleKeys));
     validateSenderChains(events);
@@ -455,8 +466,10 @@ export function createOperatorRelayClient(input) {
     },
     readEvents,
     async readSessionView(value) {
-      if (value !== undefined) invalid();
-      const view = exact(canonicalJson(await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/view` }, "application/json")), VIEW_KEYS);
+      const signal = value === undefined
+        ? requestSignal(undefined)
+        : requestSignal(exact(value, ["signal"]).signal);
+      const view = exact(canonicalJson(await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/view`, ...signal }, "application/json")), VIEW_KEYS);
       if (view.paymentMoved !== false || view.releaseId !== context.releaseId || view.repositorySha !== context.repositorySha || view.sessionId !== context.sessionId || !RELEASE_STATES.includes(view.state)) invalid();
       const template = initialReleaseView(context);
       // The view is advisory, but still must be a closed, non-secret shape.

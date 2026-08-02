@@ -39,6 +39,9 @@ import {
   invitationProofPreimage,
 } from "../src/bilateral/coordination/enrollment.mjs";
 import {
+  initialReleaseView,
+} from "../src/bilateral/coordination/lifecycle.mjs";
+import {
   createOperatorRelayClient,
   createPinnedOperatorHttpsTransport,
   createPinnedOperatorHttpsTransportForTesting,
@@ -809,6 +812,26 @@ test("readEvents accepts a signed global log and rejects signer, authority, chai
     await assert.rejects(built.client.readEvents({ after: null, waitMs: 0 }), { code: "COORDINATION_OPERATOR_CLIENT_INVALID" });
   }
   assert.ok(requests.every((path) => path.includes("/enrollments") || path.includes("/events?waitMs=0")));
+});
+
+test("operator client forwards coordinator abort signals to advisory reads", async () => {
+  const { set } = await signedLogFixture();
+  const signal = new AbortController().signal;
+  const observed = [];
+  const { client } = fixture(async (request) => {
+    observed.push(request.signal);
+    if (request.path.endsWith("/enrollments")) return response(set);
+    if (request.path.includes("/events?")) return response(Buffer.from("[]", "utf8"));
+    return canonicalResponse(initialReleaseView({
+      releaseId: RELEASE_ID,
+      repositorySha: REPOSITORY_SHA,
+      sessionId: SESSION_ID,
+    }));
+  });
+
+  assert.equal((await client.readSessionView({ signal })).state, "BOOTSTRAPPING");
+  assert.deepEqual(await client.readEvents({ after: null, signal, waitMs: 0 }), []);
+  assert.deepEqual(observed, [signal, signal, signal]);
 });
 
 test("artifact and advisory-view methods fail closed on hostile route responses", async () => {
