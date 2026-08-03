@@ -106,6 +106,8 @@ WAIT_ALLOWLIST=(
   "src/core/clockchain.mjs:HTTP client bounds — ported, byte-pinned by port:check"
   "src/core/deadline.mjs:M0 budget constants — reviewed two-regime derivation"
   "src/core/roles-core.mjs:ported wait plumbing — byte-pinned by port:check"
+  "src/relay/server.mjs:long-poll waiter cap (MAX_POLL_WAIT_MS) and waiter timers — reviewed relay cadence"
+  "src/relay/client.mjs:HTTP request timeout and long-poll slack — reviewed client bounds"
 )
 wait_allowlisted_file() {
   local file="$1" entry
