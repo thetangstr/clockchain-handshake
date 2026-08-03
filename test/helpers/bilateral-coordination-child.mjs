@@ -1688,9 +1688,10 @@ async function runProductionCoordinatorChild(input) {
       current = Object.freeze({ ...current, ...next });
       const returnedState = coordinatorState(current);
       const persistedState = await runDependencies.readState({ releaseRoot: config.releaseRoot.path });
-      const expectedPersistedState = returnedState.state === "COMPLETE"
-        ? Object.freeze({ ...returnedState, state: "STAKEHOLDER_VERIFIED" })
-        : returnedState;
+      // The coordinator durably persists COMPLETE before returning it so the
+      // operator terminal gate survives process exit; the durable state must
+      // equal the returned state on every turn.
+      const expectedPersistedState = returnedState;
       if (
         canonicalJson(JSON.parse(JSON.stringify(persistedState))) !==
         canonicalJson(JSON.parse(JSON.stringify(expectedPersistedState)))

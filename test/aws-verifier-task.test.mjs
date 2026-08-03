@@ -225,6 +225,13 @@ test("keeps the authorization literal out of every production surface except the
       "src/bilateral/local-demo/operator-runtime.mjs",
       'serialized.includes("AUTHORIZED")',
     ],
+    // The public monitor CLI heartbeats refuse any line containing the
+    // literal so the authorization verdict can never leak to the public
+    // feed; it never emits the value.
+    [
+      "bin/handshake-public-monitor.mjs",
+      'line.includes("AUTHORIZED")',
+    ],
   ]);
   const matched = [];
   for (const file of files) {
