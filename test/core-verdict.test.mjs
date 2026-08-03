@@ -819,6 +819,77 @@ test("emits only the exact independently verified bilateral authorization verdic
   );
 });
 
+test("accepts in-memory party packages byte-equivalent to the directory form", async (t) => {
+  const fixture = await completeFixture(t);
+  const directoryVerdict = await verifyBilateralAuthorization(
+    fixture.input,
+  );
+
+  const readPackage = async (directory, encoding) => ({
+    json: await readFile(join(directory, "party-result.json"), encoding),
+    markdown: await readFile(join(directory, "PARTY-RESULT.md"), encoding),
+    marker: await readFile(
+      join(directory, ".party-result.complete.json"),
+      encoding,
+    ),
+  });
+  const {
+    payerDirectory: _payerDirectory,
+    payeeDirectory: _payeeDirectory,
+    ...withoutDirectories
+  } = fixture.input;
+  const memoryVerdict = await verifyBilateralAuthorization({
+    ...withoutDirectories,
+    payerPackage: await readPackage(fixture.payerDirectory, "utf8"),
+    payeePackage: await readPackage(fixture.payeeDirectory),
+  });
+
+  assert.deepEqual(memoryVerdict, directoryVerdict);
+});
+
+test("rejects mixed, missing, oversized, and digest-mismatched in-memory party packages", async (t) => {
+  const fixture = await completeFixture(t);
+  const readPackage = async (directory) => ({
+    json: await readFile(join(directory, "party-result.json")),
+    markdown: await readFile(join(directory, "PARTY-RESULT.md")),
+    marker: await readFile(
+      join(directory, ".party-result.complete.json"),
+    ),
+  });
+  const payerPackage = await readPackage(fixture.payerDirectory);
+  const payeePackage = await readPackage(fixture.payeeDirectory);
+  const {
+    payerDirectory: _payerDirectory,
+    payeeDirectory: _payeeDirectory,
+    ...withoutDirectories
+  } = fixture.input;
+
+  await assertVerdictFailure(
+    { ...fixture.input, payerPackage, payeePackage },
+    "FAILED",
+  );
+  await assertVerdictFailure({ ...withoutDirectories }, "FAILED");
+  await assertVerdictFailure(
+    {
+      ...withoutDirectories,
+      payerPackage: { ...payerPackage, marker: "x".repeat(2049) },
+      payeePackage,
+    },
+    "FAILED",
+  );
+  await assertVerdictFailure(
+    {
+      ...withoutDirectories,
+      payerPackage: {
+        ...payerPackage,
+        json: Buffer.from(payerPackage.json).reverse(),
+      },
+      payeePackage,
+    },
+    "FAILED",
+  );
+});
+
 test("snapshots Clockchain method receivers before an earlier await", async (t) => {
   const fixture = await completeFixture(t);
   const calls = { replacement: 0 };

@@ -88,7 +88,9 @@ const INPUT_KEYS = new Set([
   "mandateEnvelope",
   "ownerOf",
   "payeeDirectory",
+  "payeePackage",
   "payerDirectory",
+  "payerPackage",
   "requestEnvelope",
   "repositoryPublicKeyResolver",
 ]);
@@ -97,8 +99,6 @@ const REQUIRED_INPUT_KEYS = Object.freeze([
   "descriptorEnvelope",
   "mandateEnvelope",
   "ownerOf",
-  "payeeDirectory",
-  "payerDirectory",
   "requestEnvelope",
   "repositoryPublicKeyResolver",
 ]);
@@ -122,6 +122,11 @@ const PARTY_RESULT_FILES = Object.freeze({
   markdown: "PARTY-RESULT.md",
   marker: ".party-result.complete.json",
 });
+const PARTY_PACKAGE_KEYS = Object.freeze([
+  "json",
+  "markdown",
+  "marker",
+]);
 const VERDICT_COMPLETION_MARKER_SCHEMA =
   "clockchain.bilateral-authorization-verdict-completion/v2";
 const VERDICT_COMPLETION_MARKER_KEYS = Object.freeze([
@@ -311,6 +316,44 @@ function callableDataMethod(value, key) {
   return method;
 }
 
+function snapshotPackageBytes(value, maxBytes) {
+  if (typeof value === "string") {
+    const bytes = Buffer.from(value, "utf8");
+    if (bytes.length > maxBytes) {
+      fail();
+    }
+    return bytes;
+  }
+  if (value instanceof Uint8Array && !types.isProxy(value)) {
+    if (value.length > maxBytes) {
+      fail();
+    }
+    return Buffer.from(
+      value.buffer,
+      value.byteOffset,
+      value.byteLength,
+    );
+  }
+  fail();
+}
+
+function snapshotPartyPackage(value) {
+  if (!hasExactKeys(value, PARTY_PACKAGE_KEYS)) {
+    fail();
+  }
+  return Object.freeze({
+    json: snapshotPackageBytes(ownData(value, "json"), MAX_JSON_BYTES),
+    markdown: snapshotPackageBytes(
+      ownData(value, "markdown"),
+      MAX_MARKDOWN_BYTES,
+    ),
+    marker: snapshotPackageBytes(
+      ownData(value, "marker"),
+      MAX_MARKER_BYTES,
+    ),
+  });
+}
+
 function validateInput(input) {
   if (!isPlainObject(input)) {
     fail();
@@ -345,21 +388,42 @@ function validateInput(input) {
   ) {
     fail();
   }
-  const payerDirectory = ownData(input, "payerDirectory");
-  const payeeDirectory = ownData(input, "payeeDirectory");
+  const hasPayerDirectory = keys.includes("payerDirectory");
+  const hasPayeeDirectory = keys.includes("payeeDirectory");
+  const hasPayerPackage = keys.includes("payerPackage");
+  const hasPayeePackage = keys.includes("payeePackage");
   if (
-    typeof payerDirectory !== "string" ||
-    payerDirectory.length === 0 ||
-    payerDirectory.length > 4096 ||
-    payerDirectory.includes("\0") ||
-    typeof payeeDirectory !== "string" ||
-    payeeDirectory.length === 0 ||
-    payeeDirectory.length > 4096 ||
-    payeeDirectory.includes("\0") ||
-    payerDirectory === payeeDirectory
+    hasPayerDirectory !== hasPayeeDirectory ||
+    hasPayerPackage !== hasPayeePackage ||
+    hasPayerDirectory === hasPayerPackage
   ) {
     fail();
   }
+  let payerDirectory;
+  let payeeDirectory;
+  if (hasPayerDirectory) {
+    payerDirectory = ownData(input, "payerDirectory");
+    payeeDirectory = ownData(input, "payeeDirectory");
+    if (
+      typeof payerDirectory !== "string" ||
+      payerDirectory.length === 0 ||
+      payerDirectory.length > 4096 ||
+      payerDirectory.includes("\0") ||
+      typeof payeeDirectory !== "string" ||
+      payeeDirectory.length === 0 ||
+      payeeDirectory.length > 4096 ||
+      payeeDirectory.includes("\0") ||
+      payerDirectory === payeeDirectory
+    ) {
+      fail();
+    }
+  }
+  const payerPackage = hasPayerPackage
+    ? snapshotPartyPackage(ownData(input, "payerPackage"))
+    : undefined;
+  const payeePackage = hasPayeePackage
+    ? snapshotPartyPackage(ownData(input, "payeePackage"))
+    : undefined;
   let fileSystem = DEFAULT_FILE_SYSTEM;
   if (keys.includes("fileSystem")) {
     const supplied = ownData(input, "fileSystem");
@@ -382,7 +446,9 @@ function validateInput(input) {
     ),
     ownerOf,
     payeeDirectory,
+    payeePackage,
     payerDirectory,
+    payerPackage,
     requestEnvelope: detachedSnapshot(
       ownData(input, "requestEnvelope"),
     ),
@@ -667,29 +733,42 @@ async function loadPartyPackages(
   canaries,
 ) {
   const directories = [payerDirectory, payeeDirectory];
-  const markers = [];
+  const packages = [];
   for (const directory of directories) {
-    const bytes = await readBoundedRegularFile(
-      fileSystem,
-      join(directory, PARTY_RESULT_FILES.marker),
-      MAX_MARKER_BYTES,
-    );
-    markers.push(parseMarker(bytes, canaries));
+    packages.push({
+      marker: await readBoundedRegularFile(
+        fileSystem,
+        join(directory, PARTY_RESULT_FILES.marker),
+        MAX_MARKER_BYTES,
+      ),
+    });
   }
-
-  const artifacts = [];
   for (let index = 0; index < directories.length; index += 1) {
     const directory = directories[index];
-    const json = await readBoundedRegularFile(
-      fileSystem,
-      join(directory, PARTY_RESULT_FILES.json),
-      MAX_JSON_BYTES,
-    );
-    const markdown = await readBoundedRegularFile(
-      fileSystem,
-      join(directory, PARTY_RESULT_FILES.markdown),
-      MAX_MARKDOWN_BYTES,
-    );
+    packages[index] = {
+      json: await readBoundedRegularFile(
+        fileSystem,
+        join(directory, PARTY_RESULT_FILES.json),
+        MAX_JSON_BYTES,
+      ),
+      markdown: await readBoundedRegularFile(
+        fileSystem,
+        join(directory, PARTY_RESULT_FILES.markdown),
+        MAX_MARKDOWN_BYTES,
+      ),
+      marker: packages[index].marker,
+    };
+  }
+  return checkPartyPackages(packages, canaries);
+}
+
+function checkPartyPackages(packages, canaries) {
+  const markers = packages.map(({ marker }) =>
+    parseMarker(marker, canaries),
+  );
+  const artifacts = [];
+  for (let index = 0; index < packages.length; index += 1) {
+    const { json, markdown } = packages[index];
     if (
       sha256(json) !== markers[index].jsonSha256 ||
       sha256(markdown) !== markers[index].markdownSha256
@@ -1205,12 +1284,17 @@ export async function verifyBilateralAuthorization(input) {
       snapshot.requestEnvelope,
     );
 
-    const [payer, payee] = await loadPartyPackages(
-      snapshot.fileSystem,
-      snapshot.payerDirectory,
-      snapshot.payeeDirectory,
-      snapshot.canaries,
-    );
+    const [payer, payee] = snapshot.payerPackage === undefined
+      ? await loadPartyPackages(
+        snapshot.fileSystem,
+        snapshot.payerDirectory,
+        snapshot.payeeDirectory,
+        snapshot.canaries,
+      )
+      : checkPartyPackages(
+        [snapshot.payerPackage, snapshot.payeePackage],
+        snapshot.canaries,
+      );
 
     const live = await verifyLiveTransitions(
       snapshot.clockchain,
