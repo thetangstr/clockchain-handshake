@@ -47,7 +47,10 @@ import {
   McpNetworkError,
   McpRateLimitedError,
 } from "./clockchain.mjs";
-import { assertSecretFree } from "./redact.mjs";
+import {
+  SecretMaterialDetectedError,
+  assertSecretFree,
+} from "./redact.mjs";
 
 export const VERDICT_SCHEMA =
   "clockchain.bilateral-authorization-verdict/v2";
@@ -715,14 +718,17 @@ function parseMarker(bytes, canaries) {
       !HASH_PATTERN.test(marker.markdownSha256) ||
       `${canonicalBytes(marker).toString("utf8")}\n` !== text
     ) {
-      fail();
+      fail("MALFORMED");
     }
     return marker;
   } catch (error) {
     if (error instanceof BilateralVerdictError) {
       throw error;
     }
-    fail();
+    if (error instanceof SecretMaterialDetectedError) {
+      fail();
+    }
+    fail("MALFORMED");
   }
 }
 
@@ -794,14 +800,17 @@ function checkPartyPackages(packages, canaries) {
         `${JSON.stringify(canonical, null, 2)}\n` !== jsonText ||
         renderPartyResultMarkdown(party) !== markdownText
       ) {
-        fail();
+        fail("MALFORMED");
       }
       return party;
     } catch (error) {
       if (error instanceof BilateralVerdictError) {
         throw error;
       }
-      fail();
+      if (error instanceof SecretMaterialDetectedError) {
+        fail();
+      }
+      fail("MALFORMED");
     }
   });
 }

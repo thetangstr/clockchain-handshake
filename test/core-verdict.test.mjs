@@ -925,6 +925,108 @@ test("gates the authorizing verdict on the stakeholder subjectRun and never emit
   assert.equal(verdict.outcome, "AUTHORIZED");
 });
 
+test("reports shape-broken party packages as MALFORMED", async (t) => {
+  const fixture = await completeFixture(t);
+  const readPackage = async (directory) => ({
+    json: await readFile(join(directory, "party-result.json")),
+    markdown: await readFile(join(directory, "PARTY-RESULT.md")),
+    marker: await readFile(
+      join(directory, ".party-result.complete.json"),
+    ),
+  });
+  const payerPackage = await readPackage(fixture.payerDirectory);
+  const payeePackage = await readPackage(fixture.payeeDirectory);
+  const {
+    payerDirectory: _payerDirectory,
+    payeeDirectory: _payeeDirectory,
+    ...withoutDirectories
+  } = fixture.input;
+
+  await assertVerdictFailure(
+    {
+      ...withoutDirectories,
+      payerPackage: { ...payerPackage, marker: "not json" },
+      payeePackage,
+    },
+    "MALFORMED",
+  );
+  await assertVerdictFailure(
+    {
+      ...withoutDirectories,
+      payerPackage: {
+        ...payerPackage,
+        marker: `${JSON.stringify({
+          jsonSha256: "not-a-hash",
+          markdownSha256: "not-a-hash",
+          schema: "clockchain.bilateral-party-result-completion/v1",
+        })}\n`,
+      },
+      payeePackage,
+    },
+    "MALFORMED",
+  );
+
+  const compactJson = JSON.stringify(
+    JSON.parse(payerPackage.json.toString("utf8")),
+  );
+  await assertVerdictFailure(
+    {
+      ...withoutDirectories,
+      payerPackage: {
+        json: compactJson,
+        markdown: payerPackage.markdown,
+        marker: `${JSON.stringify({
+          jsonSha256: createHash("sha256")
+            .update(compactJson)
+            .digest("hex"),
+          markdownSha256: createHash("sha256")
+            .update(payerPackage.markdown)
+            .digest("hex"),
+          schema: "clockchain.bilateral-party-result-completion/v1",
+        })}\n`,
+      },
+      payeePackage,
+    },
+    "MALFORMED",
+  );
+});
+
+test("keeps the fail() default as FAILED and every tagged site within the frozen public reason set", async () => {
+  const source = await readFile(
+    new URL("../src/core/verdict.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /function fail\(terminalCode = "FAILED"\)/,
+  );
+  const frozen = new Set([
+    "RENDEZVOUS_UNAVAILABLE",
+    "EXPIRED",
+    "MISSING",
+    "DUPLICATE",
+    "REORDERED",
+    "MALFORMED",
+    "AMBIGUOUS_WRITE",
+    "BINDING_MISMATCH",
+    "ANCHOR_UNVERIFIED",
+    "ROLE_ALREADY_BOUND",
+    "RATE_BLOCKED",
+    "AMOUNT_UNRESOLVED",
+    "FUNDING_REPLAYED",
+    "FAILED",
+  ]);
+  const tagged = [
+    ...source.matchAll(/\bfail\("([A-Z_]+)"\)/g),
+  ].map((match) => match[1]);
+  assert.ok(tagged.length > 0);
+  for (const code of tagged) {
+    assert.ok(frozen.has(code), `unexpected terminal code ${code}`);
+  }
+  const bareCount = (source.match(/^\s*fail\(\);$/gm) ?? []).length;
+  assert.equal(bareCount, 61);
+});
+
 test("snapshots Clockchain method receivers before an earlier await", async (t) => {
   const fixture = await completeFixture(t);
   const calls = { replacement: 0 };
@@ -1445,7 +1547,7 @@ test("rejects duplicated roles and payment/advisory field smuggling", async (t) 
     })}\n`,
     "utf8",
   );
-  await assertVerdictFailure(fixture.input, "FAILED");
+  await assertVerdictFailure(fixture.input, "MALFORMED");
 });
 
 test("requires direct ownerOf, signature, descriptor, and resolveAgent owner agreement", async (t) => {
