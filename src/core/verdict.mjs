@@ -1242,7 +1242,40 @@ function createVerdict(descriptor, sessionDigest, live, bounds) {
   });
 }
 
+const REHEARSAL_RESULT_SCHEMA =
+  "clockchain.bilateral-rehearsal-result/v1";
+
+function createRehearsalResult(descriptor, sessionDigest, live) {
+  return Object.freeze({
+    mandateDigest: descriptor.mandateDigest,
+    outcome: "REHEARSAL_PASSED",
+    paymentMoved: false,
+    repositorySha: descriptor.repositorySha,
+    requestDigest: descriptor.requestDigest,
+    schema: REHEARSAL_RESULT_SCHEMA,
+    sessionDigest,
+    transitions: Object.freeze(
+      live.map(({ message, verified }) =>
+        Object.freeze({
+          blockHeight: verified.blockHeight,
+          digest: transitionDigest(message),
+          kind: message.kind,
+          ledgerId: verified.ledgerId,
+        }),
+      ),
+    ),
+  });
+}
+
 export async function verifyBilateralAuthorization(input) {
+  return verifyBilateral(input, "stakeholder");
+}
+
+export async function verifyRehearsal(input) {
+  return verifyBilateral(input, "rehearsal");
+}
+
+async function verifyBilateral(input, requiredSubjectRun) {
   try {
     const snapshot = validateInput(input);
     const descriptor = snapshot.descriptorEnvelope.descriptor;
@@ -1365,12 +1398,21 @@ export async function verifyBilateralAuthorization(input) {
     if (payerOwner === payeeOwner) {
       fail();
     }
-    return createVerdict(
-      descriptor,
-      sessionDigest,
-      live,
-      bounds,
-    );
+    if (
+      snapshot.mandateEnvelope.mandate.subjectRun !==
+      requiredSubjectRun
+    ) {
+      fail();
+    }
+    if (requiredSubjectRun === "stakeholder") {
+      return createVerdict(
+        descriptor,
+        sessionDigest,
+        live,
+        bounds,
+      );
+    }
+    return createRehearsalResult(descriptor, sessionDigest, live);
   } catch (error) {
     if (error instanceof BilateralVerdictError) {
       throw error;

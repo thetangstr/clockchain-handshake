@@ -72,6 +72,7 @@ import {
   renderBilateralVerdictMarkdown,
   validatePublishedBilateralVerdict,
   verifyBilateralAuthorization,
+  verifyRehearsal,
 } from "../src/core/verdict.mjs";
 import {
   createFakeBilateralClockchain,
@@ -338,7 +339,7 @@ function descriptorFixture({
   };
 }
 
-async function intentEnvelopes() {
+async function intentEnvelopes({ subjectRun = "stakeholder" } = {}) {
   const sessionId = "00112233-4455-6677-8899-aabbccddeeff";
   const mandate = {
     amount: { currency: "USD", value: "100" },
@@ -357,7 +358,7 @@ async function intentEnvelopes() {
     requestEndpoint: `/v1/sessions/${sessionId}/payment-requests`,
     schema: "clockchain.bilateral-payer-mandate/v1",
     sessionId,
-    subjectRun: "rehearsal",
+    subjectRun,
   };
   const mandateEnvelope = await signPayerMandate({
     mandate,
@@ -478,9 +479,9 @@ function partyResult({
   };
 }
 
-async function completeFixture(t) {
+async function completeFixture(t, { subjectRun } = {}) {
   const { mandateEnvelope, requestEnvelope } =
-    await intentEnvelopes();
+    await intentEnvelopes({ subjectRun });
   const descriptor = descriptorFixture({
     mandateDigest: payerMandateDigest(mandateEnvelope),
     requestDigest: paymentRequestDigest(requestEnvelope),
@@ -888,6 +889,40 @@ test("rejects mixed, missing, oversized, and digest-mismatched in-memory party p
     },
     "FAILED",
   );
+});
+
+test("gates the authorizing verdict on the stakeholder subjectRun and never emits it from rehearsal verification", async (t) => {
+  const rehearsalFixture = await completeFixture(t, {
+    subjectRun: "rehearsal",
+  });
+  await assertVerdictFailure(rehearsalFixture.input, "FAILED");
+
+  const rehearsal = await verifyRehearsal(rehearsalFixture.input);
+  assert.equal(
+    rehearsal.schema,
+    "clockchain.bilateral-rehearsal-result/v1",
+  );
+  assert.equal(rehearsal.outcome, "REHEARSAL_PASSED");
+  assert.equal(rehearsal.paymentMoved, false);
+  assert.equal(rehearsal.transitions.length, 3);
+  assert.equal(
+    JSON.stringify(rehearsal).includes("AUTHORIZED"),
+    false,
+  );
+
+  const stakeholderFixture = await completeFixture(t);
+  await assert.rejects(
+    () => verifyRehearsal(stakeholderFixture.input),
+    (error) => {
+      assert.ok(error instanceof BilateralVerdictError);
+      assert.equal(error.terminalCode, "FAILED");
+      return true;
+    },
+  );
+  const verdict = await verifyBilateralAuthorization(
+    stakeholderFixture.input,
+  );
+  assert.equal(verdict.outcome, "AUTHORIZED");
 });
 
 test("snapshots Clockchain method receivers before an earlier await", async (t) => {
