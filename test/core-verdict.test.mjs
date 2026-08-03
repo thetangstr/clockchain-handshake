@@ -1121,6 +1121,7 @@ test("rejects unbound descriptor and intent envelopes before package or Clockcha
           },
         },
       },
+      terminalCode: "FAILED",
     },
     {
       name: "mutated request digest",
@@ -1133,18 +1134,22 @@ test("rejects unbound descriptor and intent envelopes before package or Clockcha
           },
         },
       },
+      terminalCode: "FAILED",
     },
     {
       name: "malformed descriptor envelope",
       overrides: { descriptorEnvelope: {} },
+      terminalCode: "MALFORMED",
     },
     {
       name: "malformed payer mandate envelope",
       overrides: { mandateEnvelope: {} },
+      terminalCode: "MALFORMED",
     },
     {
       name: "malformed payment request envelope",
       overrides: { requestEnvelope: {} },
+      terminalCode: "MALFORMED",
     },
   ];
   for (const scenario of scenarios) {
@@ -1153,7 +1158,7 @@ test("rejects unbound descriptor and intent envelopes before package or Clockcha
         fixture,
         scenario.overrides,
       );
-      await assertVerdictFailure(input, "FAILED");
+      await assertVerdictFailure(input, scenario.terminalCode);
       assert.equal(calls.files, 0);
       assert.equal(calls.clockchain, 0);
     });

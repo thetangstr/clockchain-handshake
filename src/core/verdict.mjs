@@ -15,14 +15,17 @@ import {
 } from "./blocktime.mjs";
 import { canonicalBytes } from "./canonical.mjs";
 import {
+  DescriptorValidationError,
   dSession,
   operatorPublicKeyPath,
   verifyDescriptorEnvelope,
 } from "./descriptor.mjs";
 import {
+  PayerMandateError,
   payerMandateDigest,
 } from "./payer-mandate.mjs";
 import {
+  PaymentRequestError,
   paymentRequestDigest,
   verifyPaymentRequest,
 } from "./payment-request.mjs";
@@ -867,6 +870,17 @@ function normalizeProtocolError(error) {
   fail();
 }
 
+function mapEnvelopeShapeFailure(error) {
+  if (
+    error instanceof DescriptorValidationError ||
+    error instanceof PayerMandateError ||
+    error instanceof PaymentRequestError
+  ) {
+    fail("MALFORMED");
+  }
+  throw error;
+}
+
 async function verifyLiveTransitions(clockchain, descriptor) {
   const sessionDigest = dSession(descriptor);
   let proposalDigest;
@@ -1288,11 +1302,20 @@ async function verifyBilateral(input, requiredSubjectRun) {
   try {
     const snapshot = validateInput(input);
     const descriptor = snapshot.descriptorEnvelope.descriptor;
+    if (!isPlainObject(descriptor)) {
+      fail("MALFORMED");
+    }
+    let mandateDigest;
+    let requestDigest;
+    try {
+      mandateDigest = payerMandateDigest(snapshot.mandateEnvelope);
+      requestDigest = paymentRequestDigest(snapshot.requestEnvelope);
+    } catch (error) {
+      mapEnvelopeShapeFailure(error);
+    }
     if (
-      descriptor.mandateDigest !==
-        payerMandateDigest(snapshot.mandateEnvelope) ||
-      descriptor.requestDigest !==
-        paymentRequestDigest(snapshot.requestEnvelope)
+      descriptor.mandateDigest !== mandateDigest ||
+      descriptor.requestDigest !== requestDigest
     ) {
       fail();
     }
@@ -1307,12 +1330,17 @@ async function verifyBilateral(input, requiredSubjectRun) {
     if (typeof repositoryPublicKey !== "string") {
       fail();
     }
-    const verifiedEnvelope = verifyDescriptorEnvelope(
-      snapshot.descriptorEnvelope,
-      {
-        repositoryPublicKey: repositoryPublicKey.trim(),
-      },
-    );
+    let verifiedEnvelope;
+    try {
+      verifiedEnvelope = verifyDescriptorEnvelope(
+        snapshot.descriptorEnvelope,
+        {
+          repositoryPublicKey: repositoryPublicKey.trim(),
+        },
+      );
+    } catch (error) {
+      mapEnvelopeShapeFailure(error);
+    }
     const sessionDigest = dSession(descriptor);
     if (
       verifiedEnvelope.dSession !== sessionDigest ||
