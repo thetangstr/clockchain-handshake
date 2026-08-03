@@ -21,7 +21,7 @@
     "bilateral:bootstrap-broker": "node bin/handshake-bootstrap-broker.mjs",
     "bilateral:fund": "node scripts/fund-bilateral-addresses.mjs",
     "bilateral:payer": "node bin/handshake-payer-bootstrap.mjs",
-    "bilateral:public-monitor": "node scripts/publish-public-monitor.mjs",
+    "bilateral:public-monitor": "node bin/handshake-public-monitor.mjs",
     "bilateral:publish-payer-discovery": "node scripts/publish-payer-bootstrap-discovery.mjs",
     "bilateral:publish-requestor-discovery": "node scripts/publish-requestor-discovery.mjs",
     "bilateral:request-payment": "node bin/handshake-request-payment.mjs",
