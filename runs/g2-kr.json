@@ -1,0 +1,12 @@
+{
+  "schema": "handshake-run-record/v1",
+  "runId": "g2-kr",
+  "date": "2026-08-03",
+  "repositorySha": "c015b83fd8149c5f3e7260ad3c08b230d0d862b9",
+  "branch": "handshake-codex",
+  "requestor": { "kind": "cli", "killRestart": "relay-kill-9-mid-session" },
+  "rehearsalSessionId": "99e2517f-05cc-4c20-bffd-9cb79b22a3cc",
+  "stakeholderSessionId": "8f12bbde-adc0-4609-873b-f514f67dc072",
+  "verdict": { "outcome": "AUTHORIZED", "paymentMoved": false, "verifierKeyId": "g1a-live-1" },
+  "note": "Relay kill -9 mid-session; all roles failed closed and resumed to verdict after restarts."
+}

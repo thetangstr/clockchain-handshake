@@ -69,3 +69,14 @@ and `MCP_TOKEN_MINT_PER_HOUR` 10→240 for the demo window; both reversible.
 
 - Full gate suite after both live-fix commits: `npm run verify` →
   **820/820** plus all invariant sweeps clean.
+
+## Kill/restart matrix (live, 2026-08-03, release c015b83)
+
+| Kill | Point of impact | Result |
+|---|---|---|
+| `kill -9` relay mid-session (g2-kr, session `8f12bbde-adc0-4609-873b-f514f67dc072`) | All roles polling when the relay died | Roles **failed closed** (`REQUESTOR_FAILED`, `PAYER_FAILED`, `OPERATOR_FAILED ROLE_EXITED`) — no corruption, no partial state acted on. Relay restarted with the same state dir; operator restarted → `OPERATOR_SUBRUN_ADOPTED` for the completed rehearsal, same stakeholder session retained; requestor restarted → same identity, checkpoint intact. Session ran to **VERDICT_PUBLISHED AUTHORIZED**. |
+| `kill -9` requestor in the anchor window (g2-kr3, session `38649a7c-934b-41dd-a3d9-b1b17a6b7fba`) | Killed 0.2 s after `REQUESTOR_DESCRIPTOR_VERIFIED`, before its ACCEPTED anchor | Restart resumed: same identity (`0x0aa435fc…`, balance 0.00936 = funding minus registration gas), ERC-8004 checkpoint adopted (agentId 9369), **identical requestDigest regenerated deterministically** (`2aec944e…`), relay reads deduped. Anchored ACCEPTED, observed ACKNOWLEDGED, **VERDICT_PUBLISHED AUTHORIZED**. |
+
+In-window timing: funding batch ≈ 90 s; payer registration ≈ 30 s; sub-run
+mandate→anchors ≈ 60–90 s; verifier ≈ 15 s. Human-paced waits are
+unbounded-with-heartbeat; no role acted on stale or partial evidence.

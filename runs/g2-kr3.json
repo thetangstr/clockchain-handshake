@@ -1,0 +1,12 @@
+{
+  "schema": "handshake-run-record/v1",
+  "runId": "g2-kr3",
+  "date": "2026-08-03",
+  "repositorySha": "c015b83fd8149c5f3e7260ad3c08b230d0d862b9",
+  "branch": "handshake-codex",
+  "requestor": { "kind": "cli", "killRestart": "requestor-kill-9-in-anchor-window", "agentId": "9369" },
+  "rehearsalSessionId": "80a42b99-2a1b-4189-b589-fa9bed6f08bf",
+  "stakeholderSessionId": "38649a7c-934b-41dd-a3d9-b1b17a6b7fba",
+  "verdict": { "outcome": "AUTHORIZED", "paymentMoved": false, "verifierKeyId": "g1a-live-1" },
+  "note": "Requestor kill -9 0.2s after descriptor verification; deterministic resume (identical requestDigest), checkpoint-adopted registration, session completed to verdict."
+}
