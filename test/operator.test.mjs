@@ -437,18 +437,19 @@ test(
       assert.match(stdout.text(), /OPERATOR_RUN_COMPLETE/);
       assert.match(stdout.text(), /REQUESTOR_HANDOFF/);
 
-      // Two funding batches: batch A covers the four generated
-      // keys; batch B leads with the announced requestor address.
+      // Two funding batches: batch A covers four generated keys;
+      // batch B leads with the announced requestor address followed
+      // by three fresh reserves — active participants can never
+      // reappear because funding records require nonce 0.
       assert.equal(calls.fund.length, 2);
       assert.equal(calls.fund[0].addresses.length, 4);
       assert.equal(
         calls.fund[1].addresses[0],
         PAYEE.address.toLowerCase(),
       );
-      assert.deepEqual(
-        calls.fund[1].addresses.slice(1),
-        calls.fund[0].addresses.slice(0, 3),
-      );
+      for (const address of calls.fund[1].addresses.slice(1)) {
+        assert.ok(!calls.fund[0].addresses.includes(address));
+      }
 
       // Both payer identities registered once each.
       assert.equal(calls.register.length, 2);

@@ -124,11 +124,25 @@ const FUNDING_SCRIPT = join(
 const PROMPT_FILE = join(REPO_ROOT, "prompts", "requestor.md");
 
 const SUB_RUNS = Object.freeze(["rehearsal", "stakeholder"]);
-const KEY_SLOTS = Object.freeze([
+// Funding records require exactly four nonce-0 participants. Batch A
+// funds the three role keys plus one reserve before any identity
+// exists. Batch B funds the live requestor plus three fresh reserves;
+// already-active participants can never appear in a later record
+// because the ported funding validation rejects any nonce > 0.
+const BATCH_A_SLOTS = Object.freeze([
   "rehearsal-payer",
   "rehearsal-stub",
   "stakeholder-payer",
   "reserve",
+]);
+const BATCH_B_RESERVE_SLOTS = Object.freeze([
+  "reserve-b-1",
+  "reserve-b-2",
+  "reserve-b-3",
+]);
+const KEY_SLOTS = Object.freeze([
+  ...BATCH_A_SLOTS,
+  ...BATCH_B_RESERVE_SLOTS,
 ]);
 const MAX_CONFIG_BYTES = 65_536;
 const MAX_SESSION_STATE_BYTES = 1_048_576;
@@ -883,9 +897,9 @@ async function runSubRun({
       await fundBatch({
         addresses: [
           address,
-          keys["rehearsal-payer"].address,
-          keys["rehearsal-stub"].address,
-          keys["stakeholder-payer"].address,
+          ...BATCH_B_RESERVE_SLOTS.map(
+            (slot) => keys[slot].address,
+          ),
         ],
         batchName: "batch-b",
         config,
@@ -1125,7 +1139,7 @@ export async function runOperator({
   }
 
   await fundBatch({
-    addresses: KEY_SLOTS.map((slot) => keys[slot].address),
+    addresses: BATCH_A_SLOTS.map((slot) => keys[slot].address),
     batchName: "batch-a",
     config,
     deps: activeDeps,
