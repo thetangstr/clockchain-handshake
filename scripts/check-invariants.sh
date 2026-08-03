@@ -108,6 +108,7 @@ WAIT_ALLOWLIST=(
   "src/core/roles-core.mjs:ported wait plumbing — byte-pinned by port:check"
   "src/relay/server.mjs:long-poll waiter cap (MAX_POLL_WAIT_MS) and waiter timers — reviewed relay cadence"
   "src/relay/client.mjs:HTTP request timeout and long-poll slack — reviewed client bounds"
+  "src/roles/common.mjs:relay long-poll cadence, status heartbeat interval, and heartbeat timer — reviewed human-paced wait plumbing"
 )
 wait_allowlisted_file() {
   local file="$1" entry
