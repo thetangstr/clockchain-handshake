@@ -1,0 +1,44 @@
+{
+  "name": "@clockchain/handshake-aws",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "deploy": "node scripts/deploy.mjs",
+    "deploy:plan": "node scripts/deploy.mjs --plan",
+    "images:bootstrap": "cdk deploy ClockchainHandshakeImages --require-approval never",
+    "images:plan": "node scripts/build-and-push.mjs --plan",
+    "images:push": "node scripts/build-and-push.mjs",
+    "integration:check": "node scripts/run-integration-checks.mjs",
+    "synth": "cdk synth ClockchainHandshakeImages",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudwatch-logs": "3.1100.0",
+    "@aws-sdk/client-dynamodb": "3.1100.0",
+    "@aws-sdk/client-ecr": "3.1100.0",
+    "@aws-sdk/client-ecs": "3.1100.0",
+    "@aws-sdk/client-efs": "3.1100.0",
+    "@aws-sdk/client-iam": "3.1100.0",
+    "@aws-sdk/client-s3": "3.1100.0",
+    "@aws-sdk/client-secrets-manager": "3.1100.0",
+    "@aws-sdk/client-sesv2": "3.1100.0",
+    "@aws-sdk/client-sqs": "3.1100.0",
+    "@aws-sdk/client-sts": "3.1100.0",
+    "@aws-sdk/lib-dynamodb": "3.1100.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "aws-cdk": "2.1134.0",
+    "aws-cdk-lib": "2.262.2",
+    "constructs": "10.8.0",
+    "esbuild": "0.28.1",
+    "tsx": "4.23.1",
+    "typescript": "7.0.2"
+  }
+}

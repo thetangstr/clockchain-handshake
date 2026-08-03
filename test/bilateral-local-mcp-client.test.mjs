@@ -9,9 +9,12 @@ import { test } from "node:test";
 import { canonicalBytes } from "../src/bilateral/canonical.mjs";
 import {
   REQUESTOR_MCP_INTAKE_FILE_NAME,
+  requestBootstrapThroughPayerMcp as requestBootstrapThroughPayerMcpProduction,
   readRequestorMcpIntake,
-  requestPaymentThroughPayerMcp,
+  requestPaymentThroughPayerMcp as requestPaymentThroughPayerMcpProduction,
 } from "../src/bilateral/local-mcp/client.mjs";
+import { bootstrapClaimFingerprint } from "../src/bilateral/local-mcp/bootstrap-broker.mjs";
+import { createRequestorBootstrapKey } from "../src/bilateral/local-mcp/bootstrap-envelope.mjs";
 import { createPayerMcpIntakeStore } from "../src/bilateral/local-mcp/intake-store.mjs";
 import {
   PAYMENT_INTAKE_TOOL_DESCRIPTOR,
@@ -27,6 +30,23 @@ const CAPABILITY_DIGEST = createHash("sha256")
   .digest("hex");
 const INTAKE_REQUEST_ID = "00000000-0000-4000-8000-000000000000";
 const SESSION_ID = "BwcHBwcHBwcHBwcHBwcHBw";
+const BOOTSTRAP_SCHEMA = "clockchain.requestor-bootstrap-broker-response/v1";
+
+function requestBootstrapThroughPayerMcp(input, dependencies = {}) {
+  const { allowTestAddresses: _ignoredTestFlag, ...publicInput } = input;
+  return requestBootstrapThroughPayerMcpProduction(
+    publicInput,
+    { ...dependencies, allowTestAddresses: true },
+  );
+}
+
+function requestPaymentThroughPayerMcp(input, dependencies = {}) {
+  const { allowTestAddresses: _ignoredTestFlag, ...publicInput } = input;
+  return requestPaymentThroughPayerMcpProduction(
+    publicInput,
+    { ...dependencies, allowTestAddresses: true },
+  );
+}
 
 function paymentInput(overrides = {}) {
   return {
@@ -39,6 +59,139 @@ function paymentInput(overrides = {}) {
     ...overrides,
   };
 }
+
+function bootstrapClaim(overrides = {}) {
+  return {
+    claimNonce: "11111111-1111-4111-8111-111111111111",
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    requestorPublicKey: createRequestorBootstrapKey().publicKey,
+    ...overrides,
+  };
+}
+
+function sealedBootstrapResponse(claim, overrides = {}) {
+  return {
+    claimFingerprint: bootstrapClaimFingerprint(claim),
+    context: {
+      claimNonce: claim.claimNonce,
+      paymentMoved: false,
+      releaseId: "release-validator",
+      repositorySha: REPOSITORY_SHA,
+      sessionId: "22222222-2222-4222-8222-222222222222",
+    },
+    envelope: {
+      algorithm: "X25519-HKDF-SHA256-AES-256-GCM",
+      ciphertextBase64url: Buffer.from("sealed-manifest").toString("base64url"),
+      ephemeralPublicKey: Buffer.alloc(32, 1).toString("base64url"),
+      ivBase64url: Buffer.alloc(12, 2).toString("base64url"),
+      paymentMoved: false,
+      schema: "clockchain.requestor-bootstrap-envelope/v1",
+      tagBase64url: Buffer.alloc(16, 3).toString("base64url"),
+    },
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    schema: BOOTSTRAP_SCHEMA,
+    signature: {
+      algorithm: "ed25519",
+      keyId: "operator",
+      value: Buffer.alloc(64, 4).toString("base64"),
+    },
+    status: "SEALED",
+    ...overrides,
+  };
+}
+
+test("public Requestor bootstrap client posts exact claims without bearer over pinned TLS", async (t) => {
+  const pinned = await makeServer(t);
+  const claim = bootstrapClaim();
+  const response = {
+    claimFingerprint: bootstrapClaimFingerprint(claim),
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    schema: BOOTSTRAP_SCHEMA,
+    status: "PENDING_APPROVAL",
+  };
+  const requests = [];
+  const result = await requestBootstrapThroughPayerMcp({
+    allowTestAddresses: true,
+    bootstrapUrl: "https://127.0.0.1:4443/bootstrap",
+    claim,
+    requestJsonRpc: async ({ body, headers, method, url }) => {
+      requests.push({ body, headers, method, url: url.href });
+      return {
+        body: response,
+        headers: { "content-type": "application/json" },
+        statusCode: 202,
+        text: JSON.stringify(response),
+      };
+    },
+    repositorySha: REPOSITORY_SHA,
+    tlsCertificatePem: pinned.tlsCertificatePem,
+    tlsFingerprint: pinned.fingerprint,
+  });
+  assert.deepEqual(result, response);
+  assert.deepEqual(requests, [{
+    body: claim,
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Host: "127.0.0.1:4443",
+    },
+    method: "POST",
+    url: "https://127.0.0.1:4443/bootstrap",
+  }]);
+});
+
+test("public Requestor bootstrap client fails closed on malformed claims and broker responses", async (t) => {
+  const pinned = await makeServer(t);
+  const claim = bootstrapClaim();
+  const valid = {
+    claimFingerprint: bootstrapClaimFingerprint(claim),
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    schema: BOOTSTRAP_SCHEMA,
+    status: "PENDING_APPROVAL",
+  };
+  for (const candidate of [
+    { input: { claim: bootstrapClaim({ extra: true }) } },
+    { input: { claim: bootstrapClaim({ repositorySha: "b".repeat(40) }) } },
+    { response: { ...valid, paymentMoved: true } },
+    { response: { ...valid, claimFingerprint: "0".repeat(64) } },
+    { response: { ...valid, repositorySha: "b".repeat(40) } },
+    { response: { ...valid, status: "APPROVED" } },
+    { response: { ...valid, extra: true } },
+    { httpStatus: 200, response: valid },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { envelope: { ...sealedBootstrapResponse(claim).envelope, algorithm: "AES-GCM" } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { envelope: { ...sealedBootstrapResponse(claim).envelope, schema: "other" } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { envelope: { ...sealedBootstrapResponse(claim).envelope, ephemeralPublicKey: Buffer.alloc(31).toString("base64url") } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { envelope: { ...sealedBootstrapResponse(claim).envelope, ivBase64url: Buffer.alloc(11).toString("base64url") } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { envelope: { ...sealedBootstrapResponse(claim).envelope, tagBase64url: Buffer.alloc(15).toString("base64url") } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { envelope: { ...sealedBootstrapResponse(claim).envelope, ciphertextBase64url: `${Buffer.from("x").toString("base64url")}=` } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { signature: { algorithm: "ed25519", keyId: "operator", value: Buffer.alloc(63).toString("base64") } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { signature: { algorithm: "rsa", keyId: "operator", value: Buffer.alloc(64).toString("base64") } }) },
+    { httpStatus: 200, response: sealedBootstrapResponse(claim, { signature: { algorithm: "ed25519", keyId: "Operator", value: Buffer.alloc(64).toString("base64") } }) },
+  ]) {
+    await assert.rejects(
+      requestBootstrapThroughPayerMcp({
+        allowTestAddresses: true,
+        bootstrapUrl: "https://127.0.0.1:4443/bootstrap",
+        claim,
+        requestJsonRpc: async () => ({
+          body: candidate.response ?? valid,
+          headers: { "content-type": "application/json" },
+          statusCode: candidate.httpStatus ?? 202,
+          text: JSON.stringify(candidate.response ?? valid),
+        }),
+        repositorySha: REPOSITORY_SHA,
+        tlsCertificatePem: pinned.tlsCertificatePem,
+        tlsFingerprint: pinned.fingerprint,
+        ...(candidate.input ?? {}),
+      }),
+      /Requestor MCP client failed safely/,
+    );
+  }
+});
 
 async function makeServer(t) {
   const root = await mkdtemp(join(tmpdir(), "requestor-mcp-client-server-"));
@@ -102,6 +255,7 @@ test("pinned Requestor client completes exact MCP lifecycle, persists public int
   });
 
   const result = await requestPaymentThroughPayerMcp({
+    allowTestAddresses: true,
     capability: CAPABILITY,
     intakeRequestId: INTAKE_REQUEST_ID,
     mcpUrl: server.url,
@@ -131,6 +285,7 @@ test("client accepts byte-identical persisted Requestor intake after crash-befor
   await chmod(stateRoot, 0o700);
   t.after(() => rm(stateRoot, { force: true, recursive: true }));
   const input = {
+    allowTestAddresses: true,
     capability: CAPABILITY,
     intakeRequestId: INTAKE_REQUEST_ID,
     mcpUrl: server.url,
@@ -191,6 +346,7 @@ test("client rejects symlink state root before chmod or persistence can mutate t
 
   await assert.rejects(
     requestPaymentThroughPayerMcp({
+      allowTestAddresses: true,
       capability: CAPABILITY,
       intakeRequestId: INTAKE_REQUEST_ID,
       mcpUrl: server.url,
@@ -216,6 +372,7 @@ test("client validates durable canonical readback before returning success", asy
 
   await assert.rejects(
     requestPaymentThroughPayerMcp({
+      allowTestAddresses: true,
       capability: CAPABILITY,
       intakeRequestId: INTAKE_REQUEST_ID,
       mcpUrl: server.url,
@@ -265,6 +422,7 @@ test("client rejects unsafe existing Requestor intake files without modifying th
 
     await assert.rejects(
       requestPaymentThroughPayerMcp({
+        allowTestAddresses: true,
         capability: CAPABILITY,
         intakeRequestId: INTAKE_REQUEST_ID,
         mcpUrl: server.url,
@@ -285,6 +443,7 @@ test("client rejects transport, lifecycle, schema, result, duplicate-key, and cl
   await chmod(stateRoot, 0o700);
   t.after(() => rm(stateRoot, { force: true, recursive: true }));
   const good = {
+    allowTestAddresses: true,
     capability: CAPABILITY,
     intakeRequestId: INTAKE_REQUEST_ID,
     mcpUrl: "https://127.0.0.1:4443/mcp",
@@ -293,6 +452,19 @@ test("client rejects transport, lifecycle, schema, result, duplicate-key, and cl
     tlsCertificatePem: "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n",
     tlsFingerprint: "a".repeat(64),
   };
+  const {
+    allowTestAddresses: _testOnly,
+    ...productionInput
+  } = good;
+  await assert.rejects(
+    requestPaymentThroughPayerMcpProduction({
+      ...productionInput,
+      requestJsonRpc: async () => {
+        throw new Error("request should not be reached");
+      },
+    }),
+    /Requestor MCP client failed safely/,
+  );
   const cases = [
     { mcpUrl: "http://127.0.0.1:443/mcp" },
     { mcpUrl: "https://localhost:443/mcp" },
@@ -413,6 +585,7 @@ async function assertMockedClientFails(t, { overrides = {}, repositorySha = REPO
   const requests = [];
   await assert.rejects(
     requestPaymentThroughPayerMcp({
+      allowTestAddresses: true,
       capability: CAPABILITY,
       intakeRequestId: INTAKE_REQUEST_ID,
       mcpUrl: "https://127.0.0.1:4443/mcp",

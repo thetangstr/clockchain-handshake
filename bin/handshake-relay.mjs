@@ -36,6 +36,9 @@ import {
   operatorPublicKeyPath,
 } from "../src/bilateral/descriptor.mjs";
 import {
+  validatePublicEndpoint,
+} from "../src/bilateral/network-endpoint.mjs";
+import {
   ARTIFACT_POLICIES,
 } from "../src/bilateral/coordination/artifact.mjs";
 import {
@@ -89,6 +92,7 @@ const GIT_REPOSITORY_ARGUMENTS = Object.freeze([
   "core.untrackedCache=false",
 ]);
 const FLAGS = Object.freeze([
+  "--advertised-host",
   "--host",
   "--port",
   "--repository-sha",
@@ -97,11 +101,20 @@ const FLAGS = Object.freeze([
   "--tls-private-key",
 ]);
 const MAIN_DEPENDENCY_KEYS = Object.freeze([
+  "allowTestAddresses",
   "checkoutProbe",
+  "ownerLease",
+  "provenanceProvider",
 ]);
 const CHECKOUT_RESULT_KEYS = Object.freeze([
   "clean",
   "repositorySha",
+]);
+const PROVENANCE_RESULT_KEYS = Object.freeze([
+  "imageDigest",
+  "operatorPublicKey",
+  "repositorySha",
+  "sourceTreeSha256",
 ]);
 const ENROLLMENT_READINESS_KEYS = Object.freeze([
   "paymentMoved",
@@ -283,7 +296,21 @@ function isCanonicalIpText(value) {
   }
 }
 
-function parseArguments(arguments_) {
+function validateAdvertisedHost(value, allowTestAddresses) {
+  try {
+    const authority = isIP(value) === 6 ? `[${value}]` : value;
+    return validatePublicEndpoint(`https://${authority}:8443/`, {
+      allowedPaths: ["/"],
+      allowTestAddresses,
+      defaultPort: 8443,
+      protocols: ["https:"],
+    }).hostname;
+  } catch {
+    invalid();
+  }
+}
+
+function parseArguments(arguments_, { allowTestAddresses = false } = {}) {
   if (
     !Array.isArray(arguments_) ||
     arguments_.length !== FLAGS.length * 2
@@ -312,13 +339,13 @@ function parseArguments(arguments_) {
   if (!FLAGS.every((flag) => Object.hasOwn(values, flag))) {
     invalid();
   }
+  const advertisedHost = values["--advertised-host"];
   const host = values["--host"];
   const portText = values["--port"];
   const repositorySha = values["--repository-sha"];
   if (
+    typeof allowTestAddresses !== "boolean" ||
     !isCanonicalIpText(host) ||
-    host === "0.0.0.0" ||
-    host === "::" ||
     !PORT_PATTERN.test(portText) ||
     Number(portText) > 65_535 ||
     !REPOSITORY_SHA_PATTERN.test(repositorySha)
@@ -326,6 +353,11 @@ function parseArguments(arguments_) {
     invalid();
   }
   return Object.freeze({
+    advertisedHost:
+      validateAdvertisedHost(
+        advertisedHost,
+        allowTestAddresses,
+      ),
     certificatePath: resolve(
       values["--tls-certificate"],
     ),
@@ -488,6 +520,41 @@ function readCheckoutResult(value, expectedSha) {
   ) {
     invalid();
   }
+}
+
+function readTaskProvenance(value, expectedSha) {
+  const data = readExactData(
+    value,
+    PROVENANCE_RESULT_KEYS,
+  );
+  let decoded;
+  try {
+    decoded = Buffer.from(
+      data.operatorPublicKey,
+      "base64",
+    );
+  } catch {
+    invalid();
+  }
+  if (
+    data.repositorySha !== expectedSha ||
+    !REPOSITORY_SHA_PATTERN.test(data.repositorySha) ||
+    !SHA256_PATTERN.test(data.sourceTreeSha256) ||
+    !(
+      data.imageDigest === null ||
+      /^sha256:[0-9a-f]{64}$/.test(data.imageDigest)
+    ) ||
+    typeof data.operatorPublicKey !== "string" ||
+    !/^[A-Za-z0-9+/]{43}=$/.test(
+      data.operatorPublicKey,
+    ) ||
+    decoded.length !== 32 ||
+    decoded.toString("base64") !==
+      data.operatorPublicKey
+  ) {
+    invalid();
+  }
+  return data;
 }
 
 function createReceiptSigner(
@@ -792,11 +859,11 @@ function parseRawQuery(query, allowed) {
   return result;
 }
 
-export function createRelayRequestHandler(service, host, port, expectedRepositorySha = null) {
+export function createRelayRequestHandler(service, advertisedHost, port, expectedRepositorySha = null) {
   const expectedHost =
-    isIP(host) === 6
-      ? `[${host}]:${port}`
-      : `${host}:${port}`;
+    isIP(advertisedHost) === 6
+      ? `[${advertisedHost}]:${port}`
+      : `${advertisedHost}:${port}`;
   return async (request, response) => {
     const requestController = new AbortController();
     const abortRequest = () => {
@@ -1099,23 +1166,63 @@ export async function main(arguments_, dependencies = {}) {
   let store;
   let server;
   try {
+    let dependencyKeys;
+    try {
+      const ownKeys = Reflect.ownKeys(dependencies);
+      dependencyKeys = MAIN_DEPENDENCY_KEYS.filter((key) =>
+        ownKeys.includes(key),
+      );
+    } catch {
+      invalid();
+    }
     const dependencyData = readExactData(
       dependencies,
-      Object.keys(dependencies).length === 0
-        ? []
-        : MAIN_DEPENDENCY_KEYS,
+      dependencyKeys,
     );
+    const allowTestAddresses =
+      dependencyData.allowTestAddresses ?? false;
     const checkoutProbe =
       dependencyData.checkoutProbe ??
       productionCheckoutProbe;
-    if (typeof checkoutProbe !== "function") {
+    const ownerLease = dependencyData.ownerLease;
+    const provenanceProvider =
+      dependencyData.provenanceProvider;
+    if (
+      provenanceProvider === undefined &&
+      typeof checkoutProbe !== "function"
+    ) {
       invalid();
     }
-    const options = parseArguments(arguments_);
-    readCheckoutResult(
-      await checkoutProbe(),
-      options.repositorySha,
-    );
+    if (
+      provenanceProvider !== undefined &&
+      (
+        !isPlainObject(provenanceProvider) ||
+        typeof provenanceProvider.assertRepository !==
+          "function" ||
+        typeof provenanceProvider.verify !== "function"
+      )
+    ) {
+      invalid();
+    }
+    if (typeof allowTestAddresses !== "boolean") {
+      invalid();
+    }
+    const options = parseArguments(arguments_, {
+      allowTestAddresses,
+    });
+    if (provenanceProvider === undefined) {
+      readCheckoutResult(
+        await checkoutProbe(),
+        options.repositorySha,
+      );
+    } else {
+      readTaskProvenance(
+        await provenanceProvider.assertRepository({
+          repositorySha: options.repositorySha,
+        }),
+        options.repositorySha,
+      );
+    }
     await assertPrivateStateRoot(options.statePath);
     const [certificateBytes, privateKeyBytes] =
       await Promise.all([
@@ -1139,6 +1246,20 @@ export async function main(arguments_, dependencies = {}) {
       if (!certificate.checkPrivateKey(privateKey)) {
         invalid();
       }
+      const certificateIdentity =
+        isIP(options.advertisedHost) === 0
+          ? certificate.checkHost(
+              options.advertisedHost,
+            )
+          : certificate.checkIP(
+              options.advertisedHost,
+            );
+      if (
+        certificateIdentity !==
+        options.advertisedHost
+      ) {
+        invalid();
+      }
     } catch (error) {
       if (error instanceof CoordinationRelayStartupError) {
         throw error;
@@ -1150,13 +1271,40 @@ export async function main(arguments_, dependencies = {}) {
       privateKey,
     );
     store = await openCoordinationStore({
+      ...(ownerLease === undefined
+        ? {}
+        : { ownerLease }),
       repositorySha: options.repositorySha,
       root: options.statePath,
     });
+    const repositoryPublicKeyResolver =
+      provenanceProvider === undefined
+        ? gitShowPublicKey
+        : async (context) => {
+            const expectedPath =
+              operatorPublicKeyPath(context.keyId);
+            if (
+              context.repositoryPath !==
+                expectedPath ||
+              context.repositorySha !==
+                options.repositorySha
+            ) {
+              invalid();
+            }
+            const provenance = readTaskProvenance(
+              await provenanceProvider.verify({
+                operatorKeyId: context.keyId,
+                repositorySha:
+                  context.repositorySha,
+              }),
+              options.repositorySha,
+            );
+            return `${provenance.operatorPublicKey}\n`;
+          };
     const service = createRelayService({
       frozenRepositorySha: options.repositorySha,
       receiptSigner,
-      repositoryPublicKeyResolver: gitShowPublicKey,
+      repositoryPublicKeyResolver,
       store,
     });
     server = https.createServer({
@@ -1196,7 +1344,7 @@ export async function main(arguments_, dependencies = {}) {
     const port = bound.port;
     server.on(
       "request",
-      createRelayRequestHandler(service, options.host, port, options.repositorySha),
+      createRelayRequestHandler(service, options.advertisedHost, port, options.repositorySha),
     );
     let closePromise;
     const running = Object.freeze({

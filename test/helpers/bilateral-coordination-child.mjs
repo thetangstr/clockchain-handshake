@@ -2,7 +2,7 @@
 // Test-only process driver. It imports production parsers/builders while
 // injecting the localhost fake only through explicit test configuration.
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, createPrivateKey, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -12,15 +12,34 @@ import { toHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import { canonicalBytes } from "../../src/bilateral/canonical.mjs";
+import { canonicalizeReceiptEventValue } from "../../src/canonical.mjs";
 import { buildDefaultRoleInput, runPayerRole, runPayeeRole } from "../../src/bilateral/roles.mjs";
 import { CHAIN_ID, REGISTRY_ADDRESS } from "../../src/constants.mjs";
 import { createRecovery, createRegistrationIntent, withMetadataTransaction } from "../../src/registration-internal.mjs";
 import { createRoleSupervisor } from "../../src/bilateral/coordination/supervisor.mjs";
 import { createGitInspector, createProductionSupervisorDependencies } from "../../src/bilateral/coordination/supervisor-runtime.mjs";
 import { createCoordinatorRuntimeDependencies, loadOrCreateCoordinatorRelease, parseCoordinatorArguments, readCoordinatorRuntimeConfig } from "../../src/bilateral/coordination/coordinator-runtime.mjs";
+import { createPinnedOperatorHttpsTransportForTesting } from "../../src/bilateral/coordination/operator-client.mjs";
 import { runCoordinator as runProductionCoordinator } from "../../src/bilateral/coordination/coordinator.mjs";
+import {
+  createLaunchManifest,
+  readLaunchManifest,
+  writeLaunchManifest,
+} from "../../src/bilateral/coordination/manifest.mjs";
 import { validateRelayArtifactWithFacts } from "../../src/bilateral/coordination/artifact.mjs";
-import { requestPaymentThroughPayerMcp } from "../../src/bilateral/local-mcp/client.mjs";
+import {
+  approveBootstrapClaim,
+  BOOTSTRAP_BROKER_JOURNAL_FILE,
+  createBootstrapBroker,
+} from "../../src/bilateral/local-mcp/bootstrap-broker.mjs";
+import {
+  requestBootstrapThroughPayerMcp,
+  requestPaymentThroughPayerMcp,
+} from "../../src/bilateral/local-mcp/client.mjs";
+import {
+  createSignedRequestorDiscovery,
+  REQUESTOR_DISCOVERY_SCHEMA,
+} from "../../scripts/publish-requestor-discovery.mjs";
 import { main as proposeMain } from "../../bin/handshake-propose.mjs";
 import { main as acceptMain } from "../../bin/handshake-accept.mjs";
 import { main as requestPaymentMain } from "../../bin/handshake-request-payment.mjs";
@@ -37,6 +56,12 @@ const STOP_GRACE_MS = 1_000;
 const BARRIER_DEADLINE_MS = 90_000;
 const ROLE_SCHEMA = "clockchain.bilateral-coordination-process-supervisor/v1";
 const COORDINATOR_SCHEMA = "clockchain.bilateral-coordination-process-coordinator/v1";
+const LOCAL_OPERATOR_REQUEST_TIMING = Object.freeze({
+  bodyMs: 5_000,
+  connectMs: 5_000,
+  headerMs: 5_000,
+  totalMs: 45_000,
+});
 const PROCESS_SCENARIOS = new Set([
   "success",
   "missing-mandate",
@@ -61,6 +86,31 @@ let failurePhase = "dispatch";
 
 function fail() {
   throw new Error("process child rejected its configuration");
+}
+
+function createLocalOperatorTransport(config) {
+  let endpoint;
+  try {
+    endpoint = new URL(config.relayUrl);
+  } catch {
+    fail();
+  }
+  if (
+    endpoint.protocol !== "https:" ||
+    endpoint.hostname !== "127.0.0.1" ||
+    endpoint.pathname !== "/" ||
+    endpoint.search !== "" ||
+    endpoint.hash !== "" ||
+    !/^[1-9][0-9]*$/.test(endpoint.port)
+  ) {
+    fail();
+  }
+  return createPinnedOperatorHttpsTransportForTesting({
+    expectedFingerprint: config.tlsFingerprint,
+    relayUrl: config.relayUrl,
+    requestTiming: LOCAL_OPERATOR_REQUEST_TIMING,
+    tlsCertificatePem: config.tlsCertificatePem,
+  });
 }
 
 function exact(value, keys) {
@@ -177,7 +227,10 @@ function validFake(value) {
 }
 
 function validPayerMcpServer(value) {
-  return value === null || exact(value, ["host", "port", "tlsCertificatePath", "tlsPrivateKeyPath"])
+  return value === null || exact(value, ["bootstrapBrokerCapabilityFile", "bootstrapBrokerUrl", "host", "port", "tlsCertificatePath", "tlsPrivateKeyPath"])
+    && absolute(value.bootstrapBrokerCapabilityFile)
+    && typeof value.bootstrapBrokerUrl === "string"
+    && value.bootstrapBrokerUrl.startsWith("http://127.0.0.1:")
     && value.host === "127.0.0.1"
     && Number.isInteger(value.port)
     && value.port >= 0
@@ -187,13 +240,11 @@ function validPayerMcpServer(value) {
 }
 
 function validRequestPayment(value) {
-  return value === null || exact(value, ["intakeRequestId", "mcpUrl", "tlsCertificatePath", "tlsFingerprint"])
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.intakeRequestId)
-    && typeof value.mcpUrl === "string"
-    && value.mcpUrl.startsWith("https://127.0.0.1:")
-    && value.mcpUrl.endsWith("/mcp")
-    && absolute(value.tlsCertificatePath)
-    && /^[0-9a-f]{64}$/.test(value.tlsFingerprint);
+  return value === null || exact(value, ["discoveryUrl", "intakeRequestId"])
+    && typeof value.discoveryUrl === "string"
+    && value.discoveryUrl.startsWith("https://127.0.0.1:")
+    && value.discoveryUrl.endsWith("/requestor-discovery.json")
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.intakeRequestId);
 }
 
 function validRoleConfiguration(value, role) {
@@ -202,7 +253,7 @@ function validRoleConfiguration(value, role) {
     || value.role !== role
     || !validFake(value.fake)
     || !validFake(value.preflightFake)
-    || !absolute(value.launchManifestPath)
+    || !((role === "payer" && absolute(value.launchManifestPath)) || (role === "payee" && value.launchManifestPath === null))
     || !absolute(value.repositoryRoot)
     || !absolute(value.stateRoot)
     || !exact(value.startBarrier, ["ready", "release"])
@@ -460,13 +511,6 @@ function supervisorLauncher(value, role, owners, inspector) {
 async function runSupervisorRole(value, role) {
   const configuration = validRoleConfiguration(value, role);
   const tokenPath = await ensureRoleToken(configuration);
-  const production = await createProductionSupervisorDependencies({
-    launchManifestPath: configuration.launchManifestPath,
-    ...(configuration.payerMcpServer === null ? {} : { payerMcpServerOptions: configuration.payerMcpServer }),
-    repositoryRoot: configuration.repositoryRoot,
-    sepoliaRpc: async () => "0x0",
-    stateRoot: configuration.stateRoot,
-  });
   const owners = Object.create(null);
   let replayRequestBytes = null;
   const inspector = createGitInspector(configuration.repositoryRoot);
@@ -534,105 +578,134 @@ async function runSupervisorRole(value, role) {
     }
     return immediate;
   };
-  // Production dependencies are frozen.  Copying the surface makes every test
-  // substitution explicit and keeps the TLS/enrollment/replay implementation.
-  const dependencies = {
-    ...production,
-    createCoordinationClient: (input) => scenarioClient(production.createCoordinationClient(input)),
-    createResumedCoordinationClient: async (input) => scenarioClient(await production.createResumedCoordinationClient(input)),
-    async ensureToken({ role: requestedRole }) {
-      if (requestedRole !== role) fail();
-      return Object.freeze({ tokenPath });
-    },
-    nowMs: () => configuration.clockMs,
-    async verifyFundingInputs() { return Object.freeze({ paymentMoved: false }); },
-    launcher: supervisorLauncher(configuration, role, owners, inspector),
-  };
-  if (["forged-iris-signature", "expired-mandate"].includes(configuration.scenario) && role === "payer") {
-    dependencies.signPayerMandate = async (input) => {
-      const changed = structuredClone(input);
-      if (configuration.scenario === "expired-mandate") {
-        changed.mandate = structuredClone(input.mandate);
-        changed.mandate.expiresAtMs = String(
-          Number(changed.mandate.issuedAtMs) + 1,
-        );
-        if (
-          !/^(?:0|[1-9][0-9]*)$/.test(changed.mandate.issuedAtMs) ||
-          !/^(?:0|[1-9][0-9]*)$/.test(changed.mandate.expiresAtMs) ||
-          !(
-            Number(changed.mandate.issuedAtMs) <
-              Number(changed.mandate.expiresAtMs) &&
-            Number(changed.mandate.expiresAtMs) <=
-              configuration.clockMs
-          )
-        ) {
-          fail();
+  const createDependencies = async (launchManifestPath) => {
+    if (!absolute(launchManifestPath)) fail();
+    const production = await createProductionSupervisorDependencies({
+      allowTestAddresses: true,
+      launchManifestPath,
+      ...(configuration.payerMcpServer === null ? {} : { payerMcpServerOptions: configuration.payerMcpServer }),
+      repositoryRoot: configuration.repositoryRoot,
+      sepoliaRpc: async () => "0x0",
+      stateRoot: configuration.stateRoot,
+    });
+    // Production dependencies are frozen.  Copying the surface makes every test
+    // substitution explicit and keeps the TLS/enrollment/replay implementation.
+    const dependencies = {
+      ...production,
+      createCoordinationClient: (input) => scenarioClient(production.createCoordinationClient(input)),
+      createResumedCoordinationClient: async (input) => scenarioClient(await production.createResumedCoordinationClient(input)),
+      async ensureToken({ role: requestedRole }) {
+        if (requestedRole !== role) fail();
+        return Object.freeze({ tokenPath });
+      },
+      nowMs: () => configuration.clockMs,
+      async verifyFundingInputs() { return Object.freeze({ paymentMoved: false }); },
+      launcher: supervisorLauncher(configuration, role, owners, inspector),
+    };
+    if (["forged-iris-signature", "expired-mandate"].includes(configuration.scenario) && role === "payer") {
+      dependencies.signPayerMandate = async (input) => {
+        const changed = structuredClone(input);
+        if (configuration.scenario === "expired-mandate") {
+          changed.mandate = structuredClone(input.mandate);
+          changed.mandate.expiresAtMs = String(
+            Number(changed.mandate.issuedAtMs) + 1,
+          );
+          if (
+            !/^(?:0|[1-9][0-9]*)$/.test(changed.mandate.issuedAtMs) ||
+            !/^(?:0|[1-9][0-9]*)$/.test(changed.mandate.expiresAtMs) ||
+            !(
+              Number(changed.mandate.issuedAtMs) <
+                Number(changed.mandate.expiresAtMs) &&
+              Number(changed.mandate.expiresAtMs) <=
+                configuration.clockMs
+            )
+          ) {
+            fail();
+          }
+          return production.signPayerMandate(changed);
         }
-        return production.signPayerMandate(changed);
-      }
-      const envelope = structuredClone(await production.signPayerMandate(changed));
-      const last = envelope.signature.value.at(-1);
-      envelope.signature.value = `${envelope.signature.value.slice(0, -1)}${last === "0" ? "1" : "0"}`;
-      return envelope;
-    };
-  }
-  if (["wrong-billie-signer", "invoice-prefix-mismatch", "expired-request", "request-replay-changed-bytes"].includes(configuration.scenario) && role === "payee") {
-    dependencies.signPaymentRequest = async (input) => {
-      if (configuration.scenario === "wrong-billie-signer") {
-        const other = privateKeyToAccount(`0x${"42".repeat(32)}`);
-        const request = structuredClone(input.request);
-        return Object.freeze({
-          request: Object.freeze(request),
-          schema: "clockchain.bilateral-payment-request-envelope/v1",
-          signature: Object.freeze({
-            address: other.address,
-            algorithm: "eip191",
-            value: await other.signMessage({ message: { raw: toHex(canonicalBytes(request)) } }),
-          }),
-        });
-      }
-      const changed = structuredClone(input);
-      changed.request = structuredClone(input.request);
-      if (configuration.scenario === "invoice-prefix-mismatch") {
-        changed.request.invoiceReference = `WRONG-${changed.request.invoiceReference}`;
-      } else if (configuration.scenario === "expired-request") {
-        changed.request.expiresAtMs = String(Number(changed.request.createdAtMs) + 1);
-      } else {
-        const replay = structuredClone(input);
-        replay.request = structuredClone(input.request);
-        replay.request.invoiceReference = `${replay.request.invoiceReference}-REPLAY`;
-        replayRequestBytes = canonicalBytes(await production.signPaymentRequest(replay));
-      }
-      return production.signPaymentRequest(changed);
-    };
-  }
+        const envelope = structuredClone(await production.signPayerMandate(changed));
+        const last = envelope.signature.value.at(-1);
+        envelope.signature.value = `${envelope.signature.value.slice(0, -1)}${last === "0" ? "1" : "0"}`;
+        return envelope;
+      };
+    }
+    if (["wrong-billie-signer", "invoice-prefix-mismatch", "expired-request", "request-replay-changed-bytes"].includes(configuration.scenario) && role === "payee") {
+      dependencies.signPaymentRequest = async (input) => {
+        if (configuration.scenario === "wrong-billie-signer") {
+          const other = privateKeyToAccount(`0x${"42".repeat(32)}`);
+          const request = structuredClone(input.request);
+          return Object.freeze({
+            request: Object.freeze(request),
+            schema: "clockchain.bilateral-payment-request-envelope/v1",
+            signature: Object.freeze({
+              address: other.address,
+              algorithm: "eip191",
+              value: await other.signMessage({ message: { raw: toHex(canonicalBytes(request)) } }),
+            }),
+          });
+        }
+        const changed = structuredClone(input);
+        changed.request = structuredClone(input.request);
+        if (configuration.scenario === "invoice-prefix-mismatch") {
+          changed.request.invoiceReference = `WRONG-${changed.request.invoiceReference}`;
+        } else if (configuration.scenario === "expired-request") {
+          changed.request.expiresAtMs = String(Number(changed.request.createdAtMs) + 1);
+        } else {
+          const replay = structuredClone(input);
+          replay.request = structuredClone(input.request);
+          replay.request.invoiceReference = `${replay.request.invoiceReference}-REPLAY`;
+          replayRequestBytes = canonicalBytes(await production.signPaymentRequest(replay));
+        }
+        return production.signPaymentRequest(changed);
+      };
+    }
+    return dependencies;
+  };
   if (role === "payee" && configuration.requestPayment !== null) {
     const requestArguments = [
-      "--launch-manifest", configuration.launchManifestPath,
-      "--intake-request-id", configuration.requestPayment.intakeRequestId,
-      "--mcp-url", configuration.requestPayment.mcpUrl,
+      "--discovery-url", configuration.requestPayment.discoveryUrl,
       "--state", configuration.stateRoot,
-      "--tls-certificate", configuration.requestPayment.tlsCertificatePath,
-      "--tls-fingerprint", configuration.requestPayment.tlsFingerprint,
     ];
     await requestPaymentMain(requestArguments, {
+      async fetchJson(url) {
+        if (url !== configuration.requestPayment.discoveryUrl) fail();
+        return JSON.parse(await readFile(join(configuration.stateRoot, "requestor-discovery.json"), "utf8"));
+      },
+      async fetchCertificate(url) {
+        const discovery = JSON.parse(await readFile(join(configuration.stateRoot, "requestor-discovery.json"), "utf8"));
+        if (url !== discovery.certificateUrl) fail();
+        return readFile(join(configuration.stateRoot, "payer-mcp-public.crt"), "utf8");
+      },
+      async inspectRepository(repositoryRoot) {
+        if (repositoryRoot !== configuration.repositoryRoot) fail();
+        const state = await inspector.probe();
+        if (state.head !== undefined) return Object.freeze({ clean: state.clean, detached: true, head: state.head });
+        fail();
+      },
+      async readOperatorPublicKey(repositorySha, keyId) {
+        return inspector.operatorKey(repositorySha, keyId);
+      },
+      async readLaunchManifest(path) {
+        return readLaunchManifest(path, undefined, { allowTestAddresses: true });
+      },
+      async requestBootstrap(input) {
+        return requestBootstrapThroughPayerMcp(input, { allowTestAddresses: true });
+      },
+      async requestPayment(input) {
+        return requestPaymentThroughPayerMcp(input, { allowTestAddresses: true });
+      },
+      nowMs: () => configuration.clockMs,
+      async sleep() {
+        await sleep(20);
+      },
       runSupervisor: async ({ launchManifestPath, stateRoot }) => {
-        if (launchManifestPath !== configuration.launchManifestPath || stateRoot !== configuration.stateRoot) fail();
-        const manifest = await production.readLaunchManifest(configuration.launchManifestPath);
-        const retry = await requestPaymentThroughPayerMcp({
-          capability: manifest.payerMcpIntakeCapability,
-          intakeRequestId: configuration.requestPayment.intakeRequestId,
-          mcpUrl: configuration.requestPayment.mcpUrl,
-          repositorySha: manifest.repositorySha,
-          stateRoot: configuration.stateRoot,
-          tlsCertificatePem: await readFile(configuration.requestPayment.tlsCertificatePath, "utf8"),
-          tlsFingerprint: configuration.requestPayment.tlsFingerprint,
-        });
-        if (retry?.paymentMoved !== false || retry.status !== "HANDSHAKE_REQUIRED") fail();
+        if (launchManifestPath === configuration.launchManifestPath || stateRoot !== configuration.stateRoot) fail();
         process.stdout.write(`${canonicalJson({ paymentMoved: false, status: "REQUESTOR_SUPERVISOR_START" })}\n`);
+        const dependencies = await createDependencies(launchManifestPath);
         const supervisor = await createRoleSupervisor({
           dependencies,
-          launchManifestPath: configuration.launchManifestPath,
+          launchManifestPath,
           stateRoot: configuration.stateRoot,
         });
         await supervisor.bootstrap();
@@ -646,6 +719,7 @@ async function runSupervisorRole(value, role) {
     });
     return;
   }
+  const dependencies = await createDependencies(configuration.launchManifestPath);
   const supervisor = await createRoleSupervisor({
     dependencies,
     launchManifestPath: configuration.launchManifestPath,
@@ -1080,18 +1154,21 @@ async function waitForLaunchManifests(release) {
   }
 }
 
-function supervisorConfiguration(value, role, release, requestPayment = null) {
+function supervisorConfiguration(value, role, release, requestPayment = null, bootstrapBroker = null) {
   const child = value.children[role];
   const manifest = release.manifests?.find((entry) => entry.role === role);
   if (!manifest || !absolute(manifest.path)) fail();
+  if ((role === "payer") !== (bootstrapBroker !== null)) fail();
   return Object.freeze({
     agentIds: child.agentIds,
     clockMs: value.clockMs,
     controlBarrier: value.barrier,
     fake: value.fake,
     fault: value.fault?.role === role ? value.fault : null,
-    launchManifestPath: manifest.path,
+    launchManifestPath: role === "payee" && requestPayment !== null ? null : manifest.path,
     payerMcpServer: role === "payer" ? Object.freeze({
+      bootstrapBrokerCapabilityFile: bootstrapBroker.capabilityFile,
+      bootstrapBrokerUrl: bootstrapBroker.url,
       host: value.payerMcp.host,
       port: 0,
       tlsCertificatePath: value.payerMcp.certificatePath,
@@ -1163,6 +1240,39 @@ async function waitForRequestorSupervisorStart(path, child) {
   return seen[0];
 }
 
+async function waitForBootstrapBrokerClaim(stateRoot, repositorySha, child) {
+  const deadline = Date.now() + BARRIER_DEADLINE_MS;
+  while (Date.now() < deadline) {
+    const journalPath = join(stateRoot, BOOTSTRAP_BROKER_JOURNAL_FILE);
+    const journalText = await readFile(journalPath, "utf8").catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    });
+    if (journalText !== null) {
+      const journal = JSON.parse(journalText);
+      if (
+        journal?.schema !== "clockchain.requestor-bootstrap-broker-journal/v1" ||
+        journal.repositorySha !== repositorySha ||
+        journal.claims === null ||
+        typeof journal.claims !== "object" ||
+        Array.isArray(journal.claims)
+      ) {
+        fail();
+      }
+      const pending = Object.values(journal.claims).filter((entry) => entry?.status === "PENDING_APPROVAL");
+      if (pending.length > 1) fail();
+      if (pending.length === 1) {
+        const [{ claimFingerprint, paymentMoved }] = pending;
+        if (paymentMoved !== false || typeof claimFingerprint !== "string" || !/^[0-9a-f]{64}$/.test(claimFingerprint)) fail();
+        return claimFingerprint;
+      }
+    }
+    if (childExited(child)) fail();
+    await sleep(20);
+  }
+  fail();
+}
+
 function expectedPartyCompletion(role) {
   if (!["payer", "payee"].includes(role)) fail();
   return Object.freeze({
@@ -1230,6 +1340,7 @@ async function runProductionCoordinatorChild(input) {
   let runtime;
   let payerProcess = null;
   let payeeProcess = null;
+  let bootstrapBroker = null;
   const monitorRoleExits = value.scenario === "success";
   const roleExitWatchers = [];
   const mcpMilestones = [];
@@ -1267,6 +1378,20 @@ async function runProductionCoordinatorChild(input) {
       admittedFundingAddresses.set(address, facts);
     };
     runtime = createCoordinatorRuntimeDependencies(config, {
+      createLaunchManifest: (input) =>
+        createLaunchManifest(
+          input,
+          { allowTestAddresses: true },
+        ),
+      writeLaunchManifest:
+        (path, manifest) =>
+          writeLaunchManifest(
+            path,
+            manifest,
+            undefined,
+            { allowTestAddresses: true },
+          ),
+      createTransport: () => createLocalOperatorTransport(config),
       createFundingAdmissionClient,
       repositoryRoot: value.repositoryRoot,
       now: () => value.clockMs + (
@@ -1289,6 +1414,60 @@ async function runProductionCoordinatorChild(input) {
       if (!Array.isArray(release.manifests) || release.manifests.length !== 2) fail();
       await waitForLaunchManifests(release);
     }
+    const bootstrapBrokerState = join(value.children.payer.stateRoot, "requestor-bootstrap-broker");
+    const bootstrapBrokerCapabilityFile = join(value.children.payer.stateRoot, "requestor-bootstrap-broker.capability");
+    if (!resumed) {
+      const payeeManifest = release.manifests?.find((entry) => entry.role === "payee");
+      if (!payeeManifest || !absolute(payeeManifest.path)) fail();
+      const payeeManifestValue = JSON.parse(await readFile(payeeManifest.path, "utf8"));
+      const manifestLifetimeMs = Number(payeeManifestValue.expiresAtMs) - Number(payeeManifestValue.issuedAtMs);
+      if (!Number.isSafeInteger(manifestLifetimeMs) || manifestLifetimeMs <= 0) fail();
+      const brokerIssuedAtMs = Date.now();
+      const brokerPayeeManifestPath = join(bootstrapBrokerState, "payee.launch-for-broker.json");
+      await mkdir(bootstrapBrokerState, { mode: 0o700, recursive: true });
+      await writeFile(
+        brokerPayeeManifestPath,
+        Buffer.from(JSON.stringify(canonicalizeReceiptEventValue(Object.freeze({
+          ...payeeManifestValue,
+          expiresAtMs: String(brokerIssuedAtMs + manifestLifetimeMs),
+          issuedAtMs: String(brokerIssuedAtMs),
+        }))), "utf8"),
+        { flag: "wx", mode: 0o600 },
+      );
+      try {
+        await writeFile(bootstrapBrokerCapabilityFile, `${randomBytes(32).toString("hex")}\n`, {
+          encoding: "utf8",
+          flag: "wx",
+          mode: 0o600,
+        });
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+      }
+      bootstrapBroker = createBootstrapBroker(
+        {
+          capabilityFile:
+            bootstrapBrokerCapabilityFile,
+          host: "127.0.0.1",
+          manifestPath:
+            brokerPayeeManifestPath,
+          operatorKeyId:
+            config.operatorIdentity.keyId,
+          operatorPrivateKeyPath:
+            config.operatorPrivateKeyPath,
+          port: 0,
+          repositorySha:
+            config.repositorySha,
+          stateRoot: bootstrapBrokerState,
+        },
+        { allowTestAddresses: true },
+      );
+      const bootstrapBrokerListening = await bootstrapBroker.start();
+      value.payerMcp.bootstrapBroker = Object.freeze({
+        capabilityFile: bootstrapBrokerCapabilityFile,
+        stateRoot: bootstrapBrokerState,
+        url: bootstrapBrokerListening.url,
+      });
+    }
     const coordinatorDependencies = runtime.runDependencies(release);
     const firstRunDependencies = value.coordinatorFirst
       ? coordinatorFirstReadinessDependencies(coordinatorDependencies)
@@ -1303,7 +1482,7 @@ async function runProductionCoordinatorChild(input) {
     const guardRoleExits = (promise) => raceRoleExit(promise, roleExitWatchers, markRoleExit);
     await phase("coordinator-role-start");
     if (!resumed) {
-      await writeOrReuseExact(value.children.payer.configPath, supervisorConfiguration(value, "payer", release));
+      await writeOrReuseExact(value.children.payer.configPath, supervisorConfiguration(value, "payer", release, null, value.payerMcp.bootstrapBroker));
       payerProcess = await start({ logs: value.children.payer.logs, mode: "payer", path: value.children.payer.configPath });
       active.add(payerProcess);
       if (monitorRoleExits) {
@@ -1318,11 +1497,32 @@ async function runProductionCoordinatorChild(input) {
       await writeOrReuseExact(privateRoleBarrier(value, "payer").release, { release: true });
       const payerMcpReady = await guardRoleExits(waitForPayerMcpReady(value.children.payer.logs.stdout, payerProcess));
       mcpMilestones.push(Object.freeze({ paymentMoved: false, sequence: "0", stage: "PAYER_MCP_READY", url: payerMcpReady.url }));
+      const requestorDiscoveryUrl = payerMcpReady.url.replace(/\/mcp$/, "/requestor-discovery.json");
+      const requestorCertificateUrl = payerMcpReady.url.replace(/\/mcp$/, "/payer-mcp.crt");
+      const requestorDiscovery = createSignedRequestorDiscovery({
+        schema: REQUESTOR_DISCOVERY_SCHEMA,
+        paymentMoved: false,
+        imageDigest: `570035913370.dkr.ecr.us-west-2.amazonaws.com/clockchain-handshake@sha256:${"a".repeat(64)}`,
+        releaseId: release.releaseId,
+        sessionId: release.sessionId,
+        repositorySha: config.repositorySha,
+        publicUrl: payerMcpReady.url,
+        certificateUrl: requestorCertificateUrl,
+        certificateFingerprint: value.payerMcp.fingerprint,
+        operatorKeyId: config.operatorIdentity.keyId,
+        runMode: "local-two-run",
+        expiresAtMs: String(value.clockMs + 300_000),
+        operatorPrivateKey: createPrivateKey(config.operatorIdentity.privateKeyPem),
+      });
+      await writeFile(join(value.children.payee.stateRoot, "requestor-discovery.json"), `${JSON.stringify(requestorDiscovery)}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      });
+      await writeFile(join(value.children.payee.stateRoot, "payer-mcp-public.crt"), await readFile(value.payerMcp.certificatePath), { mode: 0o600 });
       const requestPayment = Object.freeze({
+        discoveryUrl: requestorDiscoveryUrl,
         intakeRequestId: value.payerMcp.intakeRequestId,
-        mcpUrl: payerMcpReady.url,
-        tlsCertificatePath: value.payerMcp.certificatePath,
-        tlsFingerprint: value.payerMcp.fingerprint,
       });
       await writeOrReuseExact(value.children.payee.configPath, supervisorConfiguration(value, "payee", release, requestPayment));
       payeeProcess = await start({ logs: value.children.payee.logs, mode: "payee", path: value.children.payee.configPath });
@@ -1334,6 +1534,9 @@ async function runProductionCoordinatorChild(input) {
           role: "payee",
         }));
       }
+      const claimFingerprint = await guardRoleExits(waitForBootstrapBrokerClaim(bootstrapBrokerState, config.repositorySha, payeeProcess));
+      const approval = await approveBootstrapClaim({ claimFingerprint, stateRoot: bootstrapBrokerState });
+      if (approval?.paymentMoved !== false || approval.status !== "APPROVED" || approval.claimFingerprint !== claimFingerprint) fail();
       await guardRoleExits(waitForRequestorSupervisorStart(value.children.payee.logs.stdout, payeeProcess));
       await guardRoleExits(waitForRoleBootstrap(privateRoleBarrier(value, "payee").ready, "payee"));
       mcpMilestones.push(
@@ -1427,6 +1630,7 @@ async function runProductionCoordinatorChild(input) {
         ? { createWatcherClient: () => createFakeBilateralClockchainHttpClient(value.fake) }
         : { watchBilateralSession: boundedWatcher }),
       createFundingAdmissionClient,
+      createTransport: () => createLocalOperatorTransport(config),
       repositoryRoot: value.repositoryRoot,
       now: base.now,
       sleeper: (delay) => guardRoleExits(base.sleeper(delay)),
@@ -1484,9 +1688,10 @@ async function runProductionCoordinatorChild(input) {
       current = Object.freeze({ ...current, ...next });
       const returnedState = coordinatorState(current);
       const persistedState = await runDependencies.readState({ releaseRoot: config.releaseRoot.path });
-      const expectedPersistedState = returnedState.state === "COMPLETE"
-        ? Object.freeze({ ...returnedState, state: "STAKEHOLDER_VERIFIED" })
-        : returnedState;
+      // The coordinator durably persists COMPLETE before returning it so the
+      // operator terminal gate survives process exit; the durable state must
+      // equal the returned state on every turn.
+      const expectedPersistedState = returnedState;
       if (
         canonicalJson(JSON.parse(JSON.stringify(persistedState))) !==
         canonicalJson(JSON.parse(JSON.stringify(expectedPersistedState)))
@@ -1565,6 +1770,7 @@ async function runProductionCoordinatorChild(input) {
     });
   } finally {
     await drainWatchers().catch(() => {});
+    await bootstrapBroker?.stop?.().catch(() => {});
     await Promise.all([...active].map((child) => terminate(child).catch(() => {})));
     await config?.releaseRoot?.handle?.close?.().catch(() => {});
   }

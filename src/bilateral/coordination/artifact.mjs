@@ -145,7 +145,9 @@ const SECP256K1_HALF_ORDER = SECP256K1_ORDER / 2n;
 const PREFLIGHT_PLAN_SCHEMA =
   "clockchain.bilateral-preflight-plan/v1";
 const PREFLIGHT_CADENCE_MS = "20000";
-const MAX_PREFLIGHT_DURATION_MS = 480_000;
+// Recorded preflight timings must tolerate slow testnet confirmation during
+// staggered stakeholder demos; align with the 30-minute discovery expiry.
+const MAX_PREFLIGHT_DURATION_MS = 1_800_000;
 const MAX_PREFLIGHT_ROUNDS = 25;
 const OBSERVATION_CHANNELS = new Set([
   "derived-reference-id", "digest-hash", "cross-channel", "ledger-height",

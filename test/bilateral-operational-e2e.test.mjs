@@ -1289,7 +1289,7 @@ function transitionClient(fake, overrides = {}) {
   };
 }
 
-test("writer crash recovery is discovery-only after one ambiguous dispatch", async (t) => {
+test("writer crash recovery adopts the landed anchor after one ambiguous dispatch", async (t) => {
   const root = await operationalRoot(t);
   const signed = await signedDescriptorFixture();
   const proposal = buildProposal({
@@ -1308,18 +1308,13 @@ test("writer crash recovery is discovery-only after one ambiguous dispatch", asy
     },
   });
 
-  await assert.rejects(
-    () =>
-      writeOrAdoptTransition({
-        client: ambiguousClient,
-        markerPath,
-        message: proposal,
-      }),
-    (error) =>
-      error instanceof ProtocolFailureError &&
-      error.terminalCode === "AMBIGUOUS_WRITE" &&
-      !error.message.includes("simulated post-write crash"),
-  );
+  const recovered = await writeOrAdoptTransition({
+    client: ambiguousClient,
+    markerPath,
+    message: proposal,
+  });
+  assert.equal(recovered.source, "adopted");
+  assert.equal(recovered.markerCreated, true);
   const resumed = await writeOrAdoptTransition({
     client: ambiguousClient,
     markerPath,
@@ -1448,7 +1443,7 @@ const FOCUSED_MATRIX_CITATIONS = Object.freeze([
     file: "test/bilateral-runner.test.mjs",
     row: 20,
     test:
-      "transport and unknown write outcomes are permanently discovery-only",
+      "transport and unknown write outcomes retry after confirmed-absent discovery, then stay discovery-only",
   }),
   Object.freeze({
     file: "test/bilateral-runner.test.mjs",

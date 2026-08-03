@@ -1,0 +1,10 @@
+node_modules
+infra/aws/node_modules
+infra/aws/cdk.out
+.context
+.omx
+.env
+.env.*
+*.key
+*.keystore
+*.token

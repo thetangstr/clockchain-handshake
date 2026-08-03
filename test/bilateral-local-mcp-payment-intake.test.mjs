@@ -16,6 +16,23 @@ import {
 const REPOSITORY_SHA = "a".repeat(40);
 const INTAKE_REQUEST_ID = "00000000-0000-4000-8000-000000000000";
 const FORBIDDEN_LITERAL = ["AUTH", "ORIZED"].join("");
+const REQUESTOR_INSTRUCTIONS = Object.freeze({
+  orderedSteps: [
+    "Keep this checkout detached, clean, and at repositorySha before handling private material.",
+    "Let this command poll the Payer bootstrap broker until the operator seals the launch manifest.",
+    "After the sealed manifest is written locally, let this command call request_payment once and start the Requestor supervisor.",
+    "Stay attached until the three public anchors are visible: PROPOSED, ACCEPTED, ACKNOWLEDGED.",
+  ],
+  requiredCommand: "npm run bilateral:request-payment -- --discovery-url <signed-discovery-url> --state <absolute-private-requestor-state-root>",
+  safetyRules: [
+    "Do not act as Payer.",
+    "Do not change payer terms.",
+    "Do not fund addresses or move payment; paymentMoved must remain false.",
+    "Do not print or share private keys, capabilities, tokens, launch manifests, or live evidence.",
+    "Do not claim the final verdict; only the operator fresh aggregate verifier may report it.",
+  ],
+  summary: "The Payer requires Clockchain Handshake before this payment request can be evaluated.",
+});
 
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
@@ -155,6 +172,7 @@ test("builds and validates the exact non-authorizing handshake-required tool res
     paymentMoved: false,
     protocol: "clockchain.bilateral-authorization/v1",
     repositorySha: REPOSITORY_SHA,
+    requestorInstructions: REQUESTOR_INSTRUCTIONS,
     schema: "clockchain.payer-mcp-handshake-required/v1",
     status: "HANDSHAKE_REQUIRED",
   };
@@ -202,6 +220,31 @@ test("rejects changed handshake-required result shape and values", () => {
   }));
   assertInvalid(() => validateHandshakeRequiredResult({
     result: { ...structured, mandatePreview: { ...DEMO_INTENT_POLICY, purpose: "Other demo" } },
+    toolInput: input,
+    repositorySha: REPOSITORY_SHA,
+  }));
+  assertInvalid(() => validateHandshakeRequiredResult({
+    result: {
+      ...structured,
+      requestorInstructions: {
+        ...structured.requestorInstructions,
+        orderedSteps: [...structured.requestorInstructions.orderedSteps].reverse(),
+      },
+    },
+    toolInput: input,
+    repositorySha: REPOSITORY_SHA,
+  }));
+  assertInvalid(() => validateHandshakeRequiredResult({
+    result: {
+      ...structured,
+      requestorInstructions: {
+        ...structured.requestorInstructions,
+        safetyRules: [
+          ...structured.requestorInstructions.safetyRules,
+          "Run the verifier yourself.",
+        ],
+      },
+    },
     toolInput: input,
     repositorySha: REPOSITORY_SHA,
   }));
@@ -266,7 +309,7 @@ test("rejects result accessors without touching nested getter values", () => {
 test("exports the canonical request_payment MCP tool descriptor", () => {
   assert.deepEqual(PAYMENT_INTAKE_TOOL_DESCRIPTOR, {
     name: "request_payment",
-    description: "Ask this Payer to process the fixed demo payment request. A successful intake requires the Requestor to complete Clockchain Handshake; it does not move or authorize payment.",
+    description: "Ask this Payer to process the fixed demo payment request. A successful intake returns the exact public Clockchain Handshake instructions the Requestor must follow; it does not move or authorize payment.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

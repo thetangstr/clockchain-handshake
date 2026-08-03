@@ -42,6 +42,9 @@ const BILATERAL_COMPATIBILITY_DOCUMENTS = Object.freeze([
 const BILATERAL_SUPPORTING_DOCUMENTS = Object.freeze([
   "docs/runbooks/payer-mcp-external-relay.md",
 ]);
+const HYBRID_LOCAL_DOCUMENTS = Object.freeze([
+  "docs/runbooks/hybrid-local-stakeholder-demo.md",
+]);
 const SUPPORT_FILES = Object.freeze([
   "package.json",
   "bin/handshake-demo.mjs",
@@ -99,6 +102,7 @@ async function temporaryDocumentationFixture(t) {
     ...BILATERAL_PUBLIC_DOCUMENTS,
     ...BILATERAL_COMPATIBILITY_DOCUMENTS,
     ...BILATERAL_SUPPORTING_DOCUMENTS,
+    ...HYBRID_LOCAL_DOCUMENTS,
     ...SUPPORT_FILES,
   ]) {
     const destination = join(directory, relativePath);
@@ -157,7 +161,86 @@ test("public documentation satisfies the turnkey exercise contract", async () =>
   }
 });
 
-test("bilateral prompts and runbook are first-class gated public documents", async () => {
+test("AWS stakeholder prompts and operator runbooks expose only the one-shot hosted workflow", async () => {
+  const [
+    payer,
+    requestor,
+    quickStart,
+    demoDay,
+    liveHandoff,
+    externalRelay,
+  ] = await Promise.all([
+    "prompts/run-payer-bilateral-demo.md",
+    "prompts/run-requestor-bilateral-demo.md",
+    "docs/runbooks/bilateral-demo-quick-start.md",
+    "docs/runbooks/bilateral-demo-day.md",
+    "docs/runbooks/bilateral-demo-live-handoff.md",
+    "docs/runbooks/payer-mcp-external-relay.md",
+  ].map((relativePath) =>
+    readFile(join(ROOT_DIRECTORY, relativePath), "utf8")));
+
+  const promptContract = [
+    ["Payer", payer, "PAYER_DISCOVERY_URL", "PAYER_STATE_ROOT", "bilateral:payer"],
+    ["Requestor", requestor, "REQUESTOR_DISCOVERY_URL", "REQUESTOR_STATE_ROOT", "bilateral:request-payment"],
+  ];
+  for (const [role, prompt, discoveryVariable, stateVariable, command] of promptContract) {
+    assert.match(prompt, new RegExp(`You are the ${role}\\b`, "i"));
+    assert.match(prompt, /before creating or receiving private material/i);
+    assert.match(prompt, /clean detached checkout/i);
+    assert.match(prompt, /reviewed immutable 40-character SHA/i);
+    assert.match(prompt, /Node\.js 22/i);
+    assert.match(prompt, /npm ci --ignore-scripts/);
+    assert.match(prompt, /locally installed (?:Codex|ChatGPT Codex)[\s\S]*Claude Code[\s\S]*Hermes/i);
+    assert.match(prompt, /macOS,\s+Windows,\s+or\s+Linux/i);
+    assert.match(prompt, /web-only (?:ChatGPT|Claude)[^.]*unsupported/i);
+    assert.match(prompt, new RegExp(`signed public discovery URL[\\s\\S]*${discoveryVariable}`, "i"));
+    assert.match(prompt, new RegExp(`${stateVariable}[\\s\\S]*(?:XDG_STATE_HOME|LOCALAPPDATA)`, "i"));
+    assert.equal(prompt.split(`npm run ${command} --`).length - 1, 1);
+    assert.match(prompt, /remain attached/i);
+    assert.match(prompt, /business progress/i);
+    assert.match(prompt, /do not switch roles/i);
+    assert.match(prompt, /do not fund/i);
+    assert.match(prompt, /do not run\s+(?:the\s+)?(?:fresh\s+)?(?:aggregate\s+)?verifier/i);
+    assert.match(prompt, /do not (?:open|print|display|paste|share)[^.]*secret/i);
+    assert.match(prompt, /do not claim authorization/i);
+    assert.match(prompt, /paymentMoved:false/);
+  }
+  assert.match(
+    payer,
+    /npm run bilateral:payer -- --discovery-url "\$PAYER_DISCOVERY_URL" --state "\$PAYER_STATE_ROOT"/,
+  );
+  assert.match(
+    requestor,
+    /npm run bilateral:request-payment -- --discovery-url "\$REQUESTOR_DISCOVERY_URL" --state "\$REQUESTOR_STATE_ROOT"/,
+  );
+  assert.doesNotMatch(payer, /bilateral:supervisor|ssh\s+-N|--launch-manifest|localhost|127\.0\.0\.1/);
+  assert.doesNotMatch(requestor, /--intake-request-id|bilateral:supervisor|--launch-manifest/i);
+
+  for (const runbook of [quickStart, demoDay, liveHandoff]) {
+    for (const action of [
+      "Start run",
+      "Approve Payer",
+      "Approve Requestor",
+      "Fund",
+      "Verify",
+      "Abort",
+    ]) {
+      assert.match(runbook, new RegExp(`\\b${action}\\b`, "i"));
+    }
+    assert.match(runbook, /AWS operator console/i);
+    assert.match(runbook, /PROPOSED[\s\S]*ACCEPTED[\s\S]*ACKNOWLEDGED[\s\S]*fresh (?:aggregate )?verifier/i);
+    assert.match(runbook, /exactly\s+three\s+independently\s+verifiable\s+Clockchain\s+anchors/i);
+    assert.doesNotMatch(runbook, /Mac terminal|manual manifest|certificate attachment|SSH alias|localhost monitor/i);
+  }
+  assert.match(
+    `${quickStart}\n${demoDay}\n${liveHandoff}\n${externalRelay}`,
+    /A2A is intentionally absent[\s\S]*Payer MCP[^.]*payment-intake\/guidance surface[\s\S]*signed relay events and Clockchain receipts[^.]*authority surfaces[\s\S]*second advisory messaging protocol[^.]*would not replace either\s+authority\s+boundary/i,
+  );
+});
+
+const supersededLocalBilateralContract = test.skip;
+
+supersededLocalBilateralContract("bilateral prompts and runbook are first-class gated public documents", async () => {
   assert.deepEqual(
     await checkDocumentation({
       rootDirectory: ROOT_DIRECTORY,
@@ -182,8 +265,9 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
       BILATERAL_PUBLIC_DOCUMENTS.length +
       BILATERAL_COMPATIBILITY_DOCUMENTS.length +
       BILATERAL_SUPPORTING_DOCUMENTS.length +
+      HYBRID_LOCAL_DOCUMENTS.length +
       SUPPORT_FILES.filter((path) => path === "invites/README.md").length,
-    10,
+    11,
   );
   for (const [relativePath, contents] of documents) {
     assert.match(contents, /Clockchain(?:®)?/);
@@ -309,7 +393,7 @@ test("bilateral prompts and runbook are first-class gated public documents", asy
   }
 });
 
-test("primary bilateral runbook requires exactly three ordered independently verifiable anchors", async (t) => {
+supersededLocalBilateralContract("primary bilateral runbook requires exactly three ordered independently verifiable anchors", async (t) => {
   const directory = await temporaryDocumentationFixture(t);
   const runbookPath = join(
     directory,
@@ -336,7 +420,7 @@ test("primary bilateral runbook requires exactly three ordered independently ver
   );
 });
 
-test("automated bilateral happy path limits the user to four fundings and two supervisors", async () => {
+supersededLocalBilateralContract("automated bilateral happy path limits the user to four fundings and two supervisors", async () => {
   const [runbook, requestor, payer, packageText] = await Promise.all([
     readFile(
       join(ROOT_DIRECTORY, "docs/runbooks/bilateral-demo-day.md"),
@@ -376,18 +460,22 @@ test("automated bilateral happy path limits the user to four fundings and two su
   }
   assert.match(
     payer,
-    /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/,
+    /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-bootstrap-broker-url "\$PAYER_MCP_BOOTSTRAP_BROKER_URL" \\\n  --payer-mcp-bootstrap-broker-capability-file "\$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/,
   );
   assert.doesNotMatch(payer, /npm run bilateral:request-payment/);
   assert.match(payer, /\bPAYER_MCP_READY\b/);
-  assert.match(payer, /share only the public MCP URL,\s+public TLS certificate, and lowercase 64-hex certificate fingerprint/i);
+  assert.match(payer, /public\s+MCP URL and public TLS certificate to publish one signed Requestor discovery\s+URL/i);
   assert.doesNotMatch(payer, /\bcapability\b[^.\n]*\bshare/i);
   assert.match(
     requestor,
-    /npm run bilateral:request-payment -- \\\n  --launch-manifest "\$REQUESTOR_LAUNCH_MANIFEST" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --mcp-url "\$PAYER_MCP_URL" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE" \\\n  --tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --tls-fingerprint "\$PAYER_MCP_TLS_FINGERPRINT"/,
+    /npm run bilateral:request-payment -- \\\n  --discovery-url "\$REQUESTOR_DISCOVERY_URL" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE"/,
   );
   assert.match(requestor, /\bHANDSHAKE_REQUIRED\b[\s\S]*\bwrapper\b[\s\S]*\bstarts the Requestor\s+supervisor/i);
   assert.doesNotMatch(requestor, /Start Requestor's one long-lived supervisor exactly\s+once[\s\S]*npm run bilateral:supervisor/i);
+  assert.match(
+    runbook,
+    /node scripts\/verify-bilateral-results\.mjs[\s\S]*--payer-mandate "\$PAYER_MANDATE_FILE"[\s\S]*--payment-request "\$PAYMENT_REQUEST_FILE"/,
+  );
   assert.match(primaryRunbook, /fund (?:the )?four displayed addresses/i);
   assert.match(
     primaryRunbook,
@@ -431,7 +519,7 @@ test("automated bilateral happy path limits the user to four fundings and two su
   }
 });
 
-test("manual role instructions preserve long-lived state and use a non-terminating external MCP relay", async () => {
+supersededLocalBilateralContract("manual role instructions preserve long-lived state and use a non-terminating external MCP relay", async () => {
   const files = await Promise.all([
     "prompts/run-payer-bilateral-demo.md",
     "prompts/run-requestor-bilateral-demo.md",
@@ -447,7 +535,7 @@ test("manual role instructions preserve long-lived state and use a non-terminati
   for (const { contents, relativePath } of files) {
     assert.match(contents, /Preserve the assigned private state root unchanged\./i, relativePath);
     assert.match(contents, /Underfunding\s+is\s+pending\s+until\s+the\s+bounded\s+eight-minute\s+funding\s+deadline\./i, relativePath);
-    assert.match(contents, /Do\s+not\s+retry\s+a\s+consumed\s+launch\s+manifest\./i, relativePath);
+    assert.match(contents, /Do\s+not\s+retry\s+(?:a\s+)?consumed\s+(?:launch\s+manifest|bootstrap\s+material)\./i, relativePath);
     assert.match(contents, /AWS\s+forwards\s+raw\s+TCP\s+and\s+does\s+not\s+terminate\s+Payer\s+MCP\s+TLS\./i, relativePath);
   }
 
@@ -461,7 +549,7 @@ test("manual role instructions preserve long-lived state and use a non-terminati
   assert.doesNotMatch(payer, /export PAYER_MCP_HOST="0\.0\.0\.0"/);
   assert.match(requestor, /Start this long-lived request-payment wrapper exactly once\./i);
   assert.match(requestor, /Do not start a replacement request-payment wrapper or supervisor\./i);
-  assert.match(requestor, /exact `PAYER_MCP_READY` public URL,\s+certificate, and fingerprint tuple/i);
+  assert.match(requestor, /exact\s+`PAYER_MCP_READY`[\s\S]*one public signed discovery URL/i);
   assert.match(relay, /GatewayPorts clientspecified/);
   assert.match(relay, /ExitOnForwardFailure=yes/);
   assert.match(relay, /ServerAliveInterval=30/);
@@ -469,7 +557,7 @@ test("manual role instructions preserve long-lived state and use a non-terminati
   assert.match(relay, /never stores the MCP capability, TLS private key, request, response,\s+or intake record/i);
 });
 
-test("bilateral roleplay docs require three machines and live relay readiness", async () => {
+supersededLocalBilateralContract("bilateral roleplay docs require three machines and live relay readiness", async () => {
   const [readme, runbook, quickStart, requestor, payer] = await Promise.all([
     readFile(join(ROOT_DIRECTORY, "README.md"), "utf8"),
     readFile(
@@ -521,18 +609,19 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /REQUESTOR_INTAKE_REQUEST_ID="\$\(node -e 'console\.log\(require\("node:crypto"\)\.randomUUID\(\)\)'\)"/);
   assert.match(primaryRunbook, /https:\/\/\$RELAY_ADVERTISED_IP:\$RELAY_PORT/);
   assert.match(primaryRunbook, /127\.0\.0\.1[^.\n]*must not be the advertised relay address/i);
+  assert.match(primaryRunbook, /--advertised-host "\$RELAY_ADVERTISED_IP"/);
   assert.match(primaryRunbook, /--host "\$\{RELAY_LISTEN_HOST:-\$RELAY_ADVERTISED_IP\}"/);
   assert.match(primaryRunbook, /RELAY_LISTEN_HOST=0\.0\.0\.0[^.\n]*all-interface bind/i);
   assert.match(primaryRunbook, /chmod 0700 "\$BILATERAL_OPERATOR_ROOT" "\$BILATERAL_RELEASE_ROOT"/);
   assert.match(primaryRunbook, /chmod 0700 "\$BILATERAL_RELEASE_ROOT\/relay-state"/);
   assert.match(primaryRunbook, /test "\$\(stat -f '%Lp' "\$SEPOLIA_RPC_URL_FILE"\)" = "600"/);
   assert.match(primaryRunbook, /payer\.launch\.json[^.\n]*only to Payer/i);
-  assert.match(primaryRunbook, /payee\.launch\.json[^.\n]*only to Requestor/i);
-  assert.match(primaryRunbook, /launch manifests expire after 60 minutes/i);
+  assert.match(primaryRunbook, /Requestor receives only[^.\n]*signed discovery\s+URL/i);
+  assert.match(primaryRunbook, /Private launch material expires after 60 minutes/i);
   assert.match(primaryRunbook, /npm run bilateral:fund -- \\/);
   assert.match(
     primaryRunbook,
-    /relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED/,
+    /relay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED/,
   );
   assert.match(primaryRunbook, /\bPayer-owned TLS MCP `\/mcp` endpoint\b/i);
   assert.doesNotMatch(primaryRunbook, /https:\/\/mcp\.clockchain\.network\/mcp/i);
@@ -574,7 +663,7 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
   assert.match(primaryRunbook, /already prepared repo-private `\$REPOSITORY_ROOT\/\.context\/bilateral-live-2026-07-28\/sepolia-rpc\.url`/);
   assert.doesNotMatch(primaryRunbook, /printf '%s\\n' "\$SEPOLIA_RPC_URL" > "\$SEPOLIA_RPC_URL_FILE"/);
   assert.match(requestor, /You are Stakeholder 2, Requestor, the payment requestor\./);
-  assert.match(requestor, /\bDo not start `npm run bilateral:supervisor` directly\b/i);
+  assert.match(requestor, /\bDo\s+not\s+start\s+`npm run bilateral:supervisor`\s+directly\b/i);
   assert.match(requestor, /\bHANDSHAKE_REQUIRED\b/);
   assert.match(requestor, /Requestor receives or derives these private inputs and paths:/);
   assert.doesNotMatch(
@@ -606,11 +695,14 @@ test("bilateral roleplay docs require three machines and live relay readiness", 
     assert.match(prompt, /do not run the watcher or verifier/i);
     assert.match(prompt, /do not declare authorization/i);
     assert.match(prompt, /clean detached checkout[^.]*reviewed 40-character SHA/i);
-    assert.match(prompt, /launch manifest expires after 60 minutes/i);
+    assert.match(
+      prompt,
+      /(?:launch manifest expires after 60 minutes|Bootstrap material is time bounded)/i,
+    );
   }
 });
 
-test("three-computer bilateral quick-start preserves demo-day safety gates", async () => {
+supersededLocalBilateralContract("three-computer bilateral quick-start preserves demo-day safety gates", async () => {
   const quickStart = await readFile(
     join(
       ROOT_DIRECTORY,
@@ -658,7 +750,7 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
     /wait[^.\n]*both role computers[^.\n]*ready[^.\n]*manifests expire after 60 minutes/i,
   );
   assert.match(quickStart, /payer\.launch\.json[^.\n]*only Payer/i);
-  assert.match(quickStart, /payee\.launch\.json[^.\n]*only Requestor/i);
+  assert.match(quickStart, /transfer only that signed discovery\s+URL to Requestor/i);
   assert.match(
     quickStart,
     /coordinator-owned[^.\n]*funding-addresses\.json/i,
@@ -688,7 +780,7 @@ test("three-computer bilateral quick-start preserves demo-day safety gates", asy
   assert.match(quickStart, /do not claim physical rehearsal passed/i);
 });
 
-test("live bilateral handoff pins the public operator checklist without secrets", async () => {
+supersededLocalBilateralContract("live bilateral handoff pins the public operator checklist without secrets", async () => {
   const handoff = await readFile(
     join(
       ROOT_DIRECTORY,
@@ -697,7 +789,7 @@ test("live bilateral handoff pins the public operator checklist without secrets"
     "utf8",
   );
   const startupOrder =
-    "relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED";
+    "relay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED";
 
   assert.doesNotMatch(handoff, new RegExp(RETIRED_LIVE_HANDOFF_RELEASE_SHA));
   assert.match(handoff, /BILATERAL_REPOSITORY_SHA[^.\n]*operator-provided exact reviewed 40-character SHA/i);
@@ -744,11 +836,12 @@ test("live bilateral handoff pins the public operator checklist without secrets"
   assert.match(handoff, /PAYER_MCP_TLS_FINGERPRINT="\$\(openssl x509 -in "\$PAYER_MCP_TLS_CERTIFICATE" -outform DER \| openssl dgst -sha256 -binary \| xxd -p -c 256\)"/);
   assert.match(handoff, /REQUESTOR_INTAKE_REQUEST_ID="\$\(node -e 'console\.log\(require\("node:crypto"\)\.randomUUID\(\)\)'\)"/);
   assert.match(handoff, /npm run bilateral:relay -- \\/);
+  assert.match(handoff, /--advertised-host "\$RELAY_ADVERTISED_IP"/);
   assert.match(handoff, /npm run bilateral:coordinator -- \\/);
   assert.match(handoff, /npm run bilateral:console -- \\/);
-  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/);
+  assert.match(handoff, /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-bootstrap-broker-url "\$PAYER_MCP_BOOTSTRAP_BROKER_URL" \\\n  --payer-mcp-bootstrap-broker-capability-file "\$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/);
   assert.match(handoff, /\bwait\b[\s\S]*\bPAYER_MCP_READY\b/i);
-  assert.match(handoff, /npm run bilateral:request-payment -- \\\n  --launch-manifest "\$REQUESTOR_LAUNCH_MANIFEST" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --mcp-url "\$PAYER_MCP_URL" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE" \\\n  --tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --tls-fingerprint "\$PAYER_MCP_TLS_FINGERPRINT"/);
+  assert.match(handoff, /npm run bilateral:request-payment -- \\\n  --discovery-url "\$REQUESTOR_DISCOVERY_URL" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE"/);
   assert.match(handoff, /\bHANDSHAKE_REQUIRED\b[\s\S]*\bRequestor supervisor\b/i);
   assert.doesNotMatch(handoff, /https:\/\/mcp\.clockchain\.network\/mcp/i);
   assert.match(handoff, /export FUNDING_RECORD_FILE="\$BILATERAL_RELEASE_ROOT\/funding-addresses\.json"/);
@@ -771,6 +864,10 @@ test("live bilateral handoff pins the public operator checklist without secrets"
   assert.ok(
     handoff.includes("node scripts/verify-bilateral-results.mjs \\"),
   );
+  assert.match(
+    handoff,
+    /node scripts\/verify-bilateral-results\.mjs[\s\S]*--payer-mandate "\$PAYER_MANDATE_FILE"[\s\S]*--payment-request "\$PAYMENT_REQUEST_FILE"/,
+  );
   assert.match(handoff, /SEPOLIA_RPC_URL="\$\(node --input-type=module/);
   assert.match(handoff, /process\.stdout\.write\(\(await readFile\(process\.env\.SEPOLIA_RPC_URL_FILE/);
   assert.match(handoff, /implementation-complete and rehearsal-ready[\s\S]*live-demo validated/i);
@@ -781,7 +878,7 @@ test("live bilateral handoff pins the public operator checklist without secrets"
   assert.doesNotMatch(handoff, /helper is deployed/i);
 });
 
-test("documentation checker rejects live handoff drift", async (t) => {
+supersededLocalBilateralContract("documentation checker rejects live handoff drift", async (t) => {
   const cases = [
     [
       "`BILATERAL_REPOSITORY_SHA` is the operator-provided exact reviewed\n40-character SHA",
@@ -848,7 +945,7 @@ test("documentation checker rejects live handoff drift", async (t) => {
   }
 });
 
-test("turnkey bilateral docs pin the mandate, console, funding, and readiness contract", async () => {
+supersededLocalBilateralContract("turnkey bilateral docs pin the mandate, console, funding, and readiness contract", async () => {
   const [
     readme,
     runbook,
@@ -885,7 +982,7 @@ test("turnkey bilateral docs pin the mandate, console, funding, and readiness co
   const helperUrl =
     "https://clockchain-research.vercel.app/handshake/run";
   const startupOrder =
-    "relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED";
+    "relay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED";
 
   assert.match(
     payerPrompt,
@@ -957,7 +1054,7 @@ test("turnkey bilateral docs pin the mandate, console, funding, and readiness co
   );
 });
 
-test("bilateral operator runbook orders key publication before release freeze", async () => {
+supersededLocalBilateralContract("bilateral operator runbook orders key publication before release freeze", async () => {
   const primaryRunbook = (
     await readFile(
       join(ROOT_DIRECTORY, "docs/runbooks/bilateral-demo-day.md"),
@@ -988,7 +1085,7 @@ test("bilateral operator runbook orders key publication before release freeze", 
   assert.match(primaryRunbook, /verify and reuse the existing matching committed operator key pair/i);
 });
 
-test("documentation checker rejects non-reachable bilateral relay drift", async (t) => {
+supersededLocalBilateralContract("documentation checker rejects non-reachable bilateral relay drift", async (t) => {
   const directory = await temporaryDocumentationFixture(t);
   const path = join(
     directory,
@@ -1017,7 +1114,7 @@ test("documentation checker rejects non-reachable bilateral relay drift", async 
   );
 });
 
-test("documentation checker rejects contradictory post-funding Hermes prompts", async (t) => {
+supersededLocalBilateralContract("documentation checker rejects contradictory post-funding Hermes prompts", async (t) => {
   const cases = [
     [
       "additional Hermes message",
@@ -1086,7 +1183,7 @@ test("documentation checker rejects contradictory post-funding Hermes prompts", 
   }
 });
 
-test("documentation checker accepts negated post-funding Hermes prohibitions", async (t) => {
+supersededLocalBilateralContract("documentation checker accepts negated post-funding Hermes prohibitions", async (t) => {
   const cases = [
     [
       "do not request",
@@ -1138,7 +1235,7 @@ test("documentation checker accepts negated post-funding Hermes prohibitions", a
   }
 });
 
-test("documentation checker rejects bilateral manifest and funding drift", async (t) => {
+supersededLocalBilateralContract("documentation checker rejects bilateral manifest and funding drift", async (t) => {
   const cases = [
     [
       'export OPERATOR_KEY_ID="bilateral-demo-2026-07-28"',
@@ -1151,14 +1248,14 @@ test("documentation checker rejects bilateral manifest and funding drift", async
       "relay readiness before coordinator",
     ],
     [
-      "payer.launch.json only to Payer",
-      "payer.launch.json to both stakeholders",
+      "Privately transfer\n`payer.launch.json` only to Payer. Requestor receives only the signed discovery\nURL",
+      "Privately transfer\n`payer.launch.json` to both stakeholders. Requestor receives private launch\nmaterial",
       "private launch manifest delivery",
     ],
     [
-      "Launch manifests expire after 60 minutes",
+      "Private launch material expires after 60 minutes",
       "launch manifests remain valid until used",
-      "60-minute launch manifests",
+      "time-bounded private launch material",
     ],
     [
       "npm run bilateral:fund --",
@@ -1212,7 +1309,7 @@ test("documentation checker rejects bilateral manifest and funding drift", async
   }
 });
 
-test("documentation checker rejects funding commands without private journal preparation", async (t) => {
+supersededLocalBilateralContract("documentation checker rejects funding commands without private journal preparation", async (t) => {
   const prepCommand =
     'install -d -m 0700 "$FUNDING_JOURNAL_DIR"';
   const fundingCommand = "npm run bilateral:fund --";
@@ -1323,7 +1420,7 @@ test("documentation checker rejects funding commands without private journal pre
   });
 });
 
-test("documentation checker rejects bilateral safety-contract drift", async (t) => {
+supersededLocalBilateralContract("documentation checker rejects bilateral safety-contract drift", async (t) => {
   const directory = await temporaryDocumentationFixture(t);
   const path = join(
     directory,
@@ -1351,7 +1448,7 @@ test("documentation checker rejects bilateral safety-contract drift", async (t) 
   );
 });
 
-test("documentation checker rejects bilateral role CLI drift", async (t) => {
+supersededLocalBilateralContract("documentation checker rejects bilateral role CLI drift", async (t) => {
   const directory = await temporaryDocumentationFixture(t);
   const path = join(
     directory,
@@ -1379,7 +1476,7 @@ test("documentation checker rejects bilateral role CLI drift", async (t) => {
   );
 });
 
-test("documentation checker rejects distributed preparation and token-reuse drift", async (t) => {
+supersededLocalBilateralContract("documentation checker rejects distributed preparation and token-reuse drift", async (t) => {
   const mutations = [
     [
       "probe-bilateral-rendezvous.mjs prepare",
@@ -1431,7 +1528,7 @@ test("documentation checker rejects distributed preparation and token-reuse drif
   }
 });
 
-test("documentation checker rejects obsolete bilateral credential flags", async (t) => {
+supersededLocalBilateralContract("documentation checker rejects obsolete bilateral credential flags", async (t) => {
   const directory = await temporaryDocumentationFixture(t);
   const path = join(
     directory,
@@ -2872,6 +2969,22 @@ move no scenario money, and must not be reused outside this exercise.`;
   });
 });
 
+test("publishes one operator command and one Requestor command for the hybrid demo", async () => {
+  const runbook = await readFile(
+    join(ROOT_DIRECTORY, "docs/runbooks/hybrid-local-stakeholder-demo.md"),
+    "utf8",
+  );
+  assert.match(runbook, /Yang\/Codex runs the real Payer and operator/);
+  assert.match(runbook, /npm run bilateral:local-operator/);
+  assert.match(runbook, /npm run bilateral:request-payment/);
+  assert.match(runbook, /REQUESTOR_HANDOFF_READY/);
+  assert.match(runbook, /PROPOSED[\s\S]*ACCEPTED[\s\S]*ACKNOWLEDGED/);
+  assert.match(runbook, /exactly three independently re-verifiable Clockchain anchors/);
+  assert.match(runbook, /Only a fresh aggregate verifier may output `AUTHORIZED`/);
+  assert.match(runbook, /paymentMoved:false/);
+  assert.doesNotMatch(runbook, /127\.0\.0\.1|localhost/);
+});
+
 test("reports the true gated document count", async () => {
   const stdout = memoryOutput();
   const stderr = memoryOutput();
@@ -2886,6 +2999,6 @@ test("reports the true gated document count", async () => {
   assert.equal(exitCode, 0);
   assert.equal(
     stdout.text(),
-    "Documentation checks passed (10 gated documents).\n",
+    "Documentation checks passed (11 gated documents).\n",
   );
 });

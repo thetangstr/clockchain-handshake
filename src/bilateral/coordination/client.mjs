@@ -6,9 +6,6 @@ import {
 } from "node:crypto";
 import https from "node:https";
 import {
-  isIP,
-} from "node:net";
-import {
   checkServerIdentity as checkTlsServerIdentity,
 } from "node:tls";
 
@@ -18,6 +15,11 @@ import {
 import {
   canonicalBytes,
 } from "../canonical.mjs";
+import {
+  createResolvedLookup,
+  resolvePublicEndpoint,
+  validatePublicEndpoint,
+} from "../network-endpoint.mjs";
 import {
   paymentRequestDigest,
   validatePaymentRequest,
@@ -71,6 +73,10 @@ const TRANSPORT_KEYS = Object.freeze([
   "expectedFingerprint",
   "relayUrl",
   "tlsCertificatePem",
+]);
+const TRANSPORT_DEPENDENCY_KEYS = Object.freeze([
+  "allowTestAddresses",
+  "lookup",
 ]);
 const TRANSPORT_REQUEST_KEYS = Object.freeze([
   "body",
@@ -254,8 +260,6 @@ const LOCALLY_SUPPORTED_ARTIFACT_TYPES = new Set([
   "signed-descriptor",
   "token-commitment",
 ]);
-const RELAY_URL_PATTERN =
-  /^https:\/\/(\[[0-9a-fA-F:.]+\]|[0-9.]+):([0-9]{1,5})$/;
 const ED25519_SPKI_PREFIX = Buffer.from(
   "302a300506032b6570032100",
   "hex",
@@ -408,25 +412,8 @@ function expectedParty(value) {
   return Object.freeze({ address: data.address, agentId: data.agentId });
 }
 
-function assertRelayUrl(value) {
+function assertRelayUrl(value, { allowTestAddresses = false } = {}) {
   if (typeof value !== "string") {
-    invalid();
-  }
-  const match = RELAY_URL_PATTERN.exec(value);
-  if (match === null) {
-    invalid();
-  }
-  const hostname = match[1].startsWith("[")
-    ? match[1].slice(1, -1)
-    : match[1];
-  const port = Number(match[2]);
-  if (
-    isIP(hostname) === 0 ||
-    port < 1 ||
-    port > 65_535 ||
-    hostname === "0.0.0.0" ||
-    hostname === "::"
-  ) {
     invalid();
   }
   let parsed;
@@ -435,22 +422,25 @@ function assertRelayUrl(value) {
   } catch {
     invalid();
   }
-  if (
-    parsed.origin !== value ||
-    parsed.pathname !== "/" ||
-    parsed.search !== "" ||
-    parsed.hash !== "" ||
-    parsed.username !== "" ||
-    parsed.password !== ""
-  ) {
+  if (parsed.port === "") {
     invalid();
   }
-  return Object.freeze({
-    authority: value.slice("https://".length),
-    hostname,
-    port,
-    url: value,
-  });
+  try {
+    const endpoint = validatePublicEndpoint(`${value}/`, {
+      allowedPaths: ["/"],
+      allowTestAddresses,
+      defaultPort: Number(parsed.port),
+      protocols: ["https:"],
+    });
+    return Object.freeze({
+      ...endpoint,
+      url: endpoint.url.slice(0, -1),
+      authority:
+        endpoint.url.slice("https://".length, -1),
+    });
+  } catch {
+    invalid();
+  }
 }
 
 function assertFingerprint(value) {
@@ -713,9 +703,33 @@ function validateResponseMetadata(
   });
 }
 
-export function createPinnedHttpsTransport(input) {
+export function createPinnedHttpsTransport(input, dependencies = {}) {
   const data = readExactData(input, TRANSPORT_KEYS);
-  const endpoint = assertRelayUrl(data.relayUrl);
+  let dependencyKeys;
+  try {
+    const ownKeys = Reflect.ownKeys(dependencies);
+    dependencyKeys = TRANSPORT_DEPENDENCY_KEYS.filter((key) =>
+      ownKeys.includes(key),
+    );
+  } catch {
+    invalid();
+  }
+  const dependencyData = readExactData(
+    dependencies,
+    dependencyKeys,
+  );
+  const allowTestAddresses =
+    dependencyData.allowTestAddresses ?? false;
+  const lookup = dependencyData.lookup;
+  if (
+    typeof allowTestAddresses !== "boolean" ||
+    (lookup !== undefined && typeof lookup !== "function")
+  ) {
+    invalid();
+  }
+  const endpoint = assertRelayUrl(data.relayUrl, {
+    allowTestAddresses,
+  });
   const expectedFingerprint = assertFingerprint(
     data.expectedFingerprint,
   );
@@ -756,6 +770,28 @@ export function createPinnedHttpsTransport(input) {
     if (requestInput.signal?.aborted === true) {
       aborted();
     }
+    let resolvedEndpoint;
+    try {
+      resolvedEndpoint = await resolvePublicEndpoint(
+        {
+          hostname: endpoint.hostname,
+          path: endpoint.path,
+          port: endpoint.port,
+          protocol: endpoint.protocol,
+          url: endpoint.url,
+        },
+        {
+          allowTestAddresses,
+          ...(lookup === undefined ? {} : { lookup }),
+        },
+      );
+    } catch {
+      invalid();
+    }
+    const pinnedLookup = createResolvedLookup(
+      resolvedEndpoint,
+      { allowTestAddresses },
+    );
     return new Promise((resolve, reject) => {
       let settled = false;
       let secure = false;
@@ -885,6 +921,7 @@ export function createPinnedHttpsTransport(input) {
             },
             headers,
             hostname: endpoint.hostname,
+            lookup: pinnedLookup,
             method: requestInput.method,
             path: requestInput.path,
             port: endpoint.port,
@@ -1333,6 +1370,7 @@ function createCoordinationClientCore({
   identity,
   initialState,
   launchState,
+  networkOptions,
   transport,
 }) {
   try {
@@ -1513,12 +1551,16 @@ function createCoordinationClientCore({
           invalid();
         }
         const activeLaunchState =
-          await createActiveLaunchState({
-            coordinationIdentity: identity,
-            enrollment,
-            manifest,
-            receiptBytes: authoritativeResponse,
-          });
+          await createActiveLaunchState(
+            {
+              coordinationIdentity: identity,
+              enrollment,
+              manifest,
+              receiptBytes:
+                authoritativeResponse,
+            },
+            networkOptions,
+          );
         const result = Object.freeze({
           activeLaunchState,
           receipt,
@@ -2240,11 +2282,41 @@ function createCoordinationClientCore({
   }
 }
 
-export function createCoordinationClient(input) {
+function clientNetworkOptions(
+  dependencies,
+) {
+  if (dependencies === undefined) {
+    return Object.freeze({
+      allowTestAddresses: false,
+    });
+  }
+  if (
+    !isPlainObject(dependencies) ||
+    Reflect.ownKeys(dependencies).length !== 1 ||
+    Reflect.ownKeys(dependencies)[0] !==
+      "allowTestAddresses" ||
+    typeof dependencies.allowTestAddresses !==
+      "boolean"
+  ) {
+    invalid();
+  }
+  return Object.freeze({
+    allowTestAddresses:
+      dependencies.allowTestAddresses,
+  });
+}
+
+export function createCoordinationClient(
+  input,
+  dependencies,
+) {
   try {
+    const networkOptions =
+      clientNetworkOptions(dependencies);
     const data = readExactData(input, CLIENT_KEYS);
     const manifest = validateLaunchManifest(
       data.manifest,
+      networkOptions,
     );
     const identity = validateIdentity(
       data.coordinationIdentity,
@@ -2260,6 +2332,7 @@ export function createCoordinationClient(input) {
       identity,
       initialState: validateSenderState(undefined),
       launchState: manifest,
+      networkOptions,
       transport: validateTransport(data.transport),
     });
   } catch (error) {
@@ -2272,8 +2345,11 @@ export function createCoordinationClient(input) {
 
 export async function createResumedCoordinationClient(
   input,
+  dependencies,
 ) {
   try {
+    const networkOptions =
+      clientNetworkOptions(dependencies);
     const data = readExactData(
       input,
       RESUMED_CLIENT_KEYS,
@@ -2281,6 +2357,7 @@ export async function createResumedCoordinationClient(
     const activeLaunchState =
       await validateActiveLaunchState(
         data.activeLaunchState,
+        networkOptions,
       );
     const identity = validateIdentity(
       data.coordinationIdentity,
@@ -2308,6 +2385,7 @@ export async function createResumedCoordinationClient(
         data.senderState,
       ),
       launchState: activeLaunchState,
+      networkOptions,
       transport: validateTransport(data.transport),
     });
   } catch (error) {

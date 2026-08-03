@@ -1,735 +1,95 @@
-# Bilateral Clockchain demo-day runbook
-
-This operator runbook coordinates the [Payer prompt](../../prompts/run-payer-bilateral-demo.md),
-the [Requestor prompt](../../prompts/run-requestor-bilateral-demo.md), and the
-[repository overview](../../README.md). It covers preparation, rehearsal, and
-stakeholder execution; it does not replace deterministic verification.
-For the three-computer operator path, start with the
-[three-computer quick-start](./bilateral-demo-quick-start.md), then return here
-for full command detail and recovery boundaries. Use the
-[external Payer MCP relay runbook](./payer-mcp-external-relay.md) for the
-cross-network MCP setup. The public
-[live-demo helper](https://clockchain-research.vercel.app/handshake/run)
-provides a shareable start surface but never receives live session evidence.
+# AWS bilateral demo-day operator runbook
 
 This is an Ethereum Sepolia and Clockchain® single-validator testnet exercise.
 No money moves. Do not install or use AgentDash. Do not invent success states.
 It is not mainnet, court-grade, consensus-secure, trustless, production-ready,
 or multi-validator. Every protocol and verdict artifact preserves paymentMoved: false.
 
-Runner local state is not operator authorization. For a session that the fresh
-aggregate verifier marks `AUTHORIZED`, the verified evidence establishes that
-Requestor followed Payer's signed mandate, Payer anchored `PROPOSED` and
-`ACKNOWLEDGED`, and Requestor anchored `ACCEPTED`. The protocol does not download message bytes from Clockchain.
-
-This demo uses a Payer-owned TLS MCP `/mcp` endpoint for payment intake. It
-binds only to Payer loopback. AWS forwards raw TCP and does not terminate Payer
-MCP TLS. The hosted Clockchain MCP server is not used for `request_payment`.
-Requestor asks Payer's MCP for payment, receives exact `HANDSHAKE_REQUIRED`, and
-only then the Requestor wrapper starts the supervisor that follows Payer's
-signed mandate.
-
-Preserve the assigned private state root unchanged. Underfunding is pending
-until the bounded eight-minute funding deadline. Do not retry a consumed launch
-manifest.
-
-No additional Hermes message is required after operator funding. Payer remains attached until `{"paymentMoved":false,"role":"payer","state":"ACKNOWLEDGED","status":"PARTY_COMPLETE"}`. Requestor remains attached until `{"paymentMoved":false,"role":"payee","state":"ACCEPTED","status":"PARTY_COMPLETE"}`. These role-local completions are not authorization; only the fresh aggregate verifier may emit `AUTHORIZED`.
-
-Only the operator's fresh aggregate-verifier process may issue the final
-`AUTHORIZED` verdict after independently refetching all three Clockchain
-anchors. Payer's local `ACKNOWLEDGED`, Requestor's local `ACCEPTED`, watcher output,
-a submitted transaction, or a narrative is never that verdict.
-
-## Automated primary flow
-
-Role cards are fixed for the whole release:
-
-- Stakeholder 1 — Payer — payer.
-- Stakeholder 2 - Requestor - requestor.
-- Human operator - relay, coordinator, read-only console, watcher, funding wallet, fresh aggregate verifier.
-
-Passing repository checks makes this release rehearsal-ready, not
-live-validated. Only a funded physical run whose fresh aggregate verifier
-publishes independently re-verifiable evidence is live-validated.
-
-The startup control order is exactly:
-`relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED`.
-The funding readiness stage validates and arms the reusable Sepolia treasury
-lane before either role starts; the actual funding batch waits for the
-coordinator's signed four-address record.
-
-All three computers use Node.js 22, `npm ci --ignore-scripts`, and a clean
-detached checkout of one reviewed 40-character SHA. Stop if any worktree is
-dirty, if `git rev-parse HEAD` differs, if the relay IP is not reachable by both
-role computers, or if any private input is missing, readable by the wrong user,
-or delivered to the wrong role.
-
-Use the existing stable public key pattern and a dated explicit key ID; do not
-derive the key ID from the release SHA.
-
-```sh
-export OPERATOR_KEY_ID="bilateral-demo-2026-07-28"
-export OPERATOR_PRIVATE_KEY_FILE=".context/operator-keys/$OPERATOR_KEY_ID.ed25519.pem"
-test -f "$OPERATOR_PRIVATE_KEY_FILE"
-test -f "docs/operator-keys/$OPERATOR_KEY_ID.pub"
-```
-
-On this Mac, verify and reuse the existing matching committed operator key pair for this prepared release. For a demo-day rerun, do not run keygen against existing files.
-
-Initial provisioning only, before the public-key commit:
-
-```sh
-node scripts/create-session.mjs keygen --key-id "$OPERATOR_KEY_ID"
-```
-
-Commit only `docs/operator-keys/$OPERATOR_KEY_ID.pub`. Review that public-key
-commit, run `npm run verify`, then freeze `BILATERAL_REPOSITORY_SHA` from the
-reviewed commit:
-
-```sh
-export BILATERAL_REPOSITORY_SHA="$(git rev-parse HEAD)"
-printf '%s\n' "$BILATERAL_REPOSITORY_SHA" | grep -Eq '^[0-9a-f]{40}$'
-
-export REPOSITORY_ROOT="$(pwd)"
-export BILATERAL_OPERATOR_ROOT="$HOME/.clockchain/bilateral/$BILATERAL_REPOSITORY_SHA"
-export BILATERAL_RELEASE_ROOT="$BILATERAL_OPERATOR_ROOT/release"
-mkdir -p "$BILATERAL_OPERATOR_ROOT" "$BILATERAL_RELEASE_ROOT" "$BILATERAL_RELEASE_ROOT/relay-state"
-chmod 0700 "$BILATERAL_OPERATOR_ROOT" "$BILATERAL_RELEASE_ROOT"
-chmod 0700 "$BILATERAL_RELEASE_ROOT/relay-state"
-
-export SEPOLIA_RPC_URL_FILE="$REPOSITORY_ROOT/.context/bilateral-live-2026-07-28/sepolia-rpc.url"
-test -f "$SEPOLIA_RPC_URL_FILE"
-test -s "$SEPOLIA_RPC_URL_FILE"
-test "$(stat -f '%Lp' "$SEPOLIA_RPC_URL_FILE")" = "600"
-
-export SEPOLIA_TREASURY_KEYSTORE="$REPOSITORY_ROOT/.context/sepolia-funding/funding-wallet.json"
-export SEPOLIA_TREASURY_PUBLIC_METADATA="$REPOSITORY_ROOT/.context/sepolia-funding/funding-wallet.public.json"
-test -f "$SEPOLIA_TREASURY_KEYSTORE"
-test -f "$SEPOLIA_TREASURY_PUBLIC_METADATA"
-test "$(stat -f '%Lp' "$SEPOLIA_TREASURY_KEYSTORE")" = "600"
-test "$(stat -f '%Lp' "$SEPOLIA_TREASURY_PUBLIC_METADATA")" = "600"
-
-export OPERATOR_CLOCKCHAIN_TOKEN_FILE="$BILATERAL_OPERATOR_ROOT/operator.clockchain-token"
-node scripts/mint-bilateral-token.mjs \
-  --role operator \
-  --output "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \
-  --repository-sha "$BILATERAL_REPOSITORY_SHA"
-```
-
-The Sepolia RPC endpoint is the already prepared repo-private `$REPOSITORY_ROOT/.context/bilateral-live-2026-07-28/sepolia-rpc.url`; it must be a regular nonempty mode-`0600` file. Do not rewrite it from ambient `SEPOLIA_RPC_URL`.
-
-The treasury keystore and adjacent public metadata are strict private files:
-`.context/sepolia-funding/funding-wallet.json` and
-`.context/sepolia-funding/funding-wallet.public.json` both stay mode `0600`,
-under the repo-root absolute path derived from `pwd`, and out of Git.
-
-Choose one advertised numeric relay endpoint for the two role computers.
-`RELAY_ADVERTISED_IP` must be a numeric IP reachable by both role computers;
-127.0.0.1 must not be the advertised relay address. The relay process may bind
-that advertised interface or, when the host firewall is constrained,
-`RELAY_LISTEN_HOST=0.0.0.0` as an explicitly documented all-interface bind.
-The TLS certificate subject alternative name must contain the exact advertised
-IP, and the coordinator must pin the matching certificate fingerprint:
-
-```sh
-export RELAY_ADVERTISED_IP="192.0.2.10"
-export RELAY_PORT="8443"
-export RELAY_URL="https://$RELAY_ADVERTISED_IP:$RELAY_PORT"
-export RELAY_TLS_CERTIFICATE="$BILATERAL_RELEASE_ROOT/relay.crt"
-export RELAY_TLS_PRIVATE_KEY="$BILATERAL_RELEASE_ROOT/relay.key"
-
-openssl req -x509 -newkey rsa:3072 -nodes \
-  -keyout "$RELAY_TLS_PRIVATE_KEY" \
-  -out "$RELAY_TLS_CERTIFICATE" \
-  -subj "/CN=$RELAY_ADVERTISED_IP" \
-  -addext "subjectAltName=IP:$RELAY_ADVERTISED_IP" \
-  -days 1
-chmod 0600 "$RELAY_TLS_PRIVATE_KEY"
-RELAY_TLS_FINGERPRINT="$(openssl x509 -in "$RELAY_TLS_CERTIFICATE" -outform DER | openssl dgst -sha256 -binary | xxd -p -c 256)"
-```
-
-Payer, not the operator, generates the Payer MCP TLS private key on the Payer
-machine in a Payer-owned sibling TLS root. The operator never creates, receives,
-reads, prints, or stores that private key. Keeping TLS material outside
-`PAYER_SUPERVISOR_STATE` preserves supervisor restart scanning while operator
-never handles the key.
-
-Start the relay and coordinator from the operator Mac in separate terminals.
-Keep both processes attached and stop on any nonzero exit.
-
-Terminal 1 - relay:
-
-```sh
-npm run bilateral:relay -- \
-  --host "${RELAY_LISTEN_HOST:-$RELAY_ADVERTISED_IP}" \
-  --port "$RELAY_PORT" \
-  --repository-sha "$BILATERAL_REPOSITORY_SHA" \
-  --state "$BILATERAL_RELEASE_ROOT/relay-state" \
-  --tls-certificate "$RELAY_TLS_CERTIFICATE" \
-  --tls-private-key "$RELAY_TLS_PRIVATE_KEY"
-```
-
-Start Terminal 2 only after Terminal 1 prints relay readiness with the expected
-host, port, repository SHA, and `paymentMoved: false`.
-
-Terminal 2 - coordinator:
-
-```sh
-npm run bilateral:coordinator -- \
-  --clockchain-token-file "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \
-  --operator-key-id "$OPERATOR_KEY_ID" \
-  --operator-private-key "$OPERATOR_PRIVATE_KEY_FILE" \
-  --release-root "$BILATERAL_RELEASE_ROOT" \
-  --relay-url "https://$RELAY_ADVERTISED_IP:$RELAY_PORT" \
-  --repository-sha "$BILATERAL_REPOSITORY_SHA" \
-  --rpc-url-file "$SEPOLIA_RPC_URL_FILE" \
-  --tls-certificate "$RELAY_TLS_CERTIFICATE" \
-  --tls-fingerprint "$RELAY_TLS_FINGERPRINT"
-```
-
-Terminal 3 - read-only operator console:
-
-```sh
-npm run bilateral:console -- \
-  --state-root "$BILATERAL_RELEASE_ROOT"
-```
-
-Open `http://127.0.0.1:8787` only on the operator Mac. The operator console is
-read-only and advisory: it projects sanitized validated state but cannot
-control the relay, change commercial terms, or authorize a session. Relay and
-watcher observations remain advisory even when displayed there.
-
-Before either role process starts, validate the already configured reusable
-Sepolia treasury paths and keep the funding command staged. Do not send a
-transfer until the coordinator publishes the signed address record:
-
-```sh
-test -f "$SEPOLIA_TREASURY_KEYSTORE"
-test -f "$SEPOLIA_TREASURY_PUBLIC_METADATA"
-test -f "$SEPOLIA_RPC_URL_FILE"
-```
-
-The coordinator publishes two private launch manifests under the release root.
-Launch manifests expire after 60 minutes. Privately transfer payer.launch.json only to Payer.
-Privately transfer payee.launch.json only to Requestor through a separate private
-channel. Never transfer the other role's manifest, an invitation, a token, a
-private key, the Sepolia RPC URL, or the treasury keystore. Each role machine
-uses its prompt, one manifest, one private state directory, and the same clean
-detached checkout of the reviewed 40-character SHA.
-
-The user has exactly two kinds of demo-day action:
-
-1. Start exactly two role sessions: Payer once with `payer.launch.json` and
-   Requestor once with `payee.launch.json`.
-2. Fund the four displayed addresses with the reusable Sepolia treasury command.
-
-Start Payer first and do not start Requestor until Payer prints exact
-`PAYER_MCP_READY`. Payer machine:
-
-```sh
-export PAYER_MCP_HOST="127.0.0.1"
-export PAYER_MCP_PORT="9443"
-export PAYER_MCP_PUBLIC_IP="${PAYER_MCP_PUBLIC_IP:?set operator-provided AWS Elastic IP}"
-export PAYER_MCP_PUBLIC_PORT="${PAYER_MCP_PUBLIC_PORT:?set operator-provided public relay port}"
-export PAYER_MCP_PUBLIC_URL="https://$PAYER_MCP_PUBLIC_IP:$PAYER_MCP_PUBLIC_PORT/mcp"
-export PAYER_MCP_RELAY_SSH_HOST="${PAYER_MCP_RELAY_SSH_HOST:?set preconfigured Payer-owned SSH host alias}"
-export PAYER_MCP_TLS_ROOT="${PAYER_SUPERVISOR_STATE%/}.payer-mcp-tls"
-mkdir -p "$PAYER_MCP_TLS_ROOT"
-chmod 0700 "$PAYER_MCP_TLS_ROOT"
-export PAYER_MCP_TLS_CERTIFICATE="$PAYER_MCP_TLS_ROOT/payer-mcp.crt"
-export PAYER_MCP_TLS_PRIVATE_KEY="$PAYER_MCP_TLS_ROOT/payer-mcp.key"
-printf '%s\n' "$PAYER_MCP_PUBLIC_IP" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
-openssl req -x509 -newkey rsa:3072 -nodes \
-  -keyout "$PAYER_MCP_TLS_PRIVATE_KEY" \
-  -out "$PAYER_MCP_TLS_CERTIFICATE" \
-  -subj "/CN=$PAYER_MCP_PUBLIC_IP" \
-  -addext "subjectAltName=IP:$PAYER_MCP_PUBLIC_IP" \
-  -days 1
-chmod 0600 "$PAYER_MCP_TLS_PRIVATE_KEY"
-chmod 0600 "$PAYER_MCP_TLS_CERTIFICATE"
-PAYER_MCP_TLS_FINGERPRINT="$(openssl x509 -in "$PAYER_MCP_TLS_CERTIFICATE" -outform DER | openssl dgst -sha256 -binary | xxd -p -c 256)"
-printf '%s\n' "$PAYER_MCP_TLS_FINGERPRINT" | grep -Eq '^[0-9a-f]{64}$'
-
-ssh -N \
-  -o ExitOnForwardFailure=yes \
-  -o ServerAliveInterval=30 \
-  -o ServerAliveCountMax=3 \
-  -R "0.0.0.0:${PAYER_MCP_PUBLIC_PORT}:127.0.0.1:${PAYER_MCP_PORT}" \
-  "$PAYER_MCP_RELAY_SSH_HOST"
-```
-
-Keep the tunnel attached. In a second Payer terminal, start this long-lived
-process exactly once:
-
-```sh
-npm run bilateral:supervisor -- \
-  --launch-manifest "$PAYER_LAUNCH_MANIFEST" \
-  --state "$PAYER_SUPERVISOR_STATE" \
-  --payer-mcp-host "$PAYER_MCP_HOST" \
-  --payer-mcp-port "$PAYER_MCP_PORT" \
-  --payer-mcp-public-url "$PAYER_MCP_PUBLIC_URL" \
-  --payer-mcp-tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
-  --payer-mcp-tls-private-key "$PAYER_MCP_TLS_PRIVATE_KEY"
-```
-
-Payer MCP binds only to `127.0.0.1`; never bind it to `0.0.0.0`. The certificate
-SAN matches the stable `PAYER_MCP_PUBLIC_IP`, while the raw-TCP relay preserves
-end-to-end Payer TLS. The private key stays on Payer and is never read or
-printed. The sibling TLS root preserves supervisor restart scanning because it
-is outside `PAYER_SUPERVISOR_STATE`, while operator and AWS never handle the
-key. Do not start a replacement supervisor.
-
-After exact `PAYER_MCP_READY`, transfer only the public MCP URL, public TLS
-certificate, and lowercase 64-hex certificate fingerprint to Requestor. Never
-transfer the MCP capability, manifest contents, TLS private key, invitation,
-token, participant key, checkpoint bytes, or live evidence.
-
-Requestor machine:
-
-```sh
-REQUESTOR_INTAKE_REQUEST_ID="$(node -e 'console.log(require("node:crypto").randomUUID())')"
-npm run bilateral:request-payment -- \
-  --launch-manifest "$REQUESTOR_LAUNCH_MANIFEST" \
-  --intake-request-id "$REQUESTOR_INTAKE_REQUEST_ID" \
-  --mcp-url "$PAYER_MCP_URL" \
-  --state "$REQUESTOR_SUPERVISOR_STATE" \
-  --tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \
-  --tls-fingerprint "$PAYER_MCP_TLS_FINGERPRINT"
-```
-
-Requestor must visibly receive exact `HANDSHAKE_REQUIRED`; the wrapper alone
-then starts the Requestor supervisor and stays attached. Requestor must not run
-`npm run bilateral:supervisor` directly. Start this long-lived request-payment
-wrapper exactly once. Do not start a replacement wrapper or supervisor.
-
-The same Payer and Requestor processes remain alive across both runs. Each supervisor
-creates two invitations and one token per role for both runs. After both
-authenticated enrollments, the coordinator displays exactly four signed public
-addresses and continuously checks their balances and nonce-zero status; there
-is no human “funding complete” signal.
-
-The long-lived supervisors automatically create the Payer-signed mandate and
-the matching Requestor-signed request. No operator-authored commercial terms,
-manual intent-artifact copy, or extra role session belongs in the primary flow.
-The Requestor request must match the Payer mandate before the sequence may continue:
-`PROPOSED` -> `ACCEPTED` -> `ACKNOWLEDGED`.
-
-Use the coordinator-owned `$BILATERAL_RELEASE_ROOT/funding-addresses.json` file
-directly; do not copy or rewrite the funding record. Save the coordinator-owned `$BILATERAL_RELEASE_ROOT/funding-addresses.json` as the mode-`0600` record file for the funding command. Create the funding journal directory once before the batch, preserve the funding journal for replay/recovery, and never delete or recreate the funding journal after any funding attempt.
-
-```sh
-export FUNDING_RECORD_FILE="$BILATERAL_RELEASE_ROOT/funding-addresses.json"
-export FUNDING_JOURNAL_DIR="$BILATERAL_OPERATOR_ROOT/funding-journal"
-install -d -m 0700 "$FUNDING_JOURNAL_DIR"
-
-npm run bilateral:fund -- \
-  --funding-record "$FUNDING_RECORD_FILE" \
-  --journal-directory "$FUNDING_JOURNAL_DIR" \
-  --keystore "$SEPOLIA_TREASURY_KEYSTORE" \
-  --rpc-url-file "$SEPOLIA_RPC_URL_FILE"
-```
-
-0.05 Sepolia ETH covers exactly four `0.01 Sepolia ETH` allocations plus ordinary treasury
-transfer gas for one clean rehearsal-plus-stakeholder release. The demo transactions spend gas from participant balances but never move the represented USD payment, so every protocol and verdict artifact remains `paymentMoved: false`. A second `0.05` drip is a recovery reserve because an ambiguous or
-consumed invitation cannot be reused. Fresh invitations and a newly reviewed release are required after an unrecoverable write.
-
-The coordinator then runs one signed physical-machine preflight for both runs,
-registers the rehearsal identities, creates the signed USD 100 descriptor,
-starts Payer before Requestor, collects both marker-complete role packages, and
-launches a fresh aggregate verifier. Only a fresh aggregate verifier may output `AUTHORIZED`;
-no role, relay, watcher, coordinator, console, or narrative may do so. An exact
-rehearsal verifier pass unlocks the stakeholder
-run, which uses fresh registration, descriptor, result, and verdict directories
-but the same supervisor keys, tokens, preflight, prompts, release, and
-repository SHA. The coordinator completes rehearsal before it starts the
-stakeholder run; any attempt to overlap the runs stops the release.
-
-Physical separation is attested by the operator, not cryptographically proven.
-Any code or prompt change after preflight aborts the release. Any SHA, key,
-token, invitation, descriptor, output-path, event-chain, or evidence mismatch
-also aborts it.
-Relay, coordinator, watcher, and supervisor states are coordination only. They
-never replace independent verification of exactly three ordered Clockchain
-anchors, and `paymentMoved:false` remains invariant.
-
-## Operator-authorized recovery appendix
-
-The remainder of this document retains low-level preparation, artifact
-transfer, and same-input recovery commands for a diagnosed failure. It is not
-the primary happy path. Never use it to add human phase signals, create a fourth
-role session, or bypass the two-supervisor workflow.
-
-## Authority boundary
-
-User/operator-only actions are funding the four public addresses, custody and
-private delivery of secret files, attesting that credentials and physical
-machines are separate, publishing the immutable repository SHA, synchronized
-start, artifact transfer, and authorizing a same-directory recovery. Payer and
-Requestor agents may perform metadata-only path checks and invoke only their exact
-preparation and timed-role commands. They must not inspect secret bytes, fund
-wallets, attest separation, run the aggregate verifier, or improvise recovery.
-
-Sol owns release review, shared-file coordination, repository publication, and
-the final verdict. Run every deterministic check before live preparation. No
-live Clockchain or Sepolia write is evidence of protocol success by itself.
-
-## Phase -3: operator key and immutable release
-
-Generate one Ed25519 operator key before freezing the live release:
-
-```sh
-node scripts/create-session.mjs keygen --key-id "$OPERATOR_KEY_ID"
-```
-
-The command writes the private key only under
-`.context/operator-keys/$OPERATOR_KEY_ID.ed25519.pem` and the public key under
-`docs/operator-keys/$OPERATOR_KEY_ID.pub`. Commit only the public file. Never
-commit, print, paste, or transfer the private key outside the operator's private
-channel.
-
-Review that commit, run `npm run verify`, and record its exact 40-character
-lowercase SHA as `BILATERAL_REPOSITORY_SHA`. The public operator key must exist
-at that exact Git object. Both role machines and the operator machine use a
-clean detached checkout of that SHA, Node.js 22, and
-`npm ci --ignore-scripts`. Abort on any SHA, dependency, test, or worktree
-difference. Never substitute a branch, tag, abbreviated revision, or newer
-commit.
-
-Assign roles once:
-
-- Requestor machine: requestor.
-- Payer machine: payer.
-- Human operator machine: preparation, read-only watcher, artifact custody, and
-  fresh aggregate verification.
-
-Use the official ERC-8004 Identity Registry at
-`0x8004A818BFB912233c491871b3d84c89A494BD9e`.
-
-## Phase -2: four funded addresses, invitations, and operator funding gate
-
-Create exactly four distinct single-run invitations in canonically separate
-public and secret directories:
-
-```sh
-node scripts/create-invitations.mjs \
-  --output-public "$INVITATION_PUBLIC_DIR" \
-  --output-secret "$INVITATION_SECRET_DIR" \
-  --ids "requestor-rehearsal,payer-rehearsal,requestor-stakeholder,payer-stakeholder" \
-  --names "Requestor Rehearsal,Payer Rehearsal,Requestor Stakeholder,Payer Stakeholder"
-```
-
-The JSON report contains only the four public addresses. Secret
-`*.secret.json` files are mode `0600`; public `*.enc.json` files contain no
-decryption code. Do not use `--force`. Do not open a secret invitation with an
-agent or general-purpose tool.
-
-The user/operator funds each public address with 0.005 through 0.02 Sepolia ETH
-inclusive. Before registration, require nonce zero and the funded balance
-inside that band. Registration intentionally consumes the nonce. Stop until all
-four addresses are funded:
-
-1. Requestor rehearsal.
-2. Payer rehearsal.
-3. Requestor stakeholder.
-4. Payer stakeholder.
-
-Each invitation contains the one role signing key for its reserved run. The
-approved registration CLI and later timed role may open that same invitation
-during that one lifecycle. It is never copied into a second raw-key file and is
-never reused for a different attempt after any transaction or ambiguous write.
-
-After funding, publish the immutable reviewed SHA and start one agent session
-on each physical role machine with its machine prompt and private inputs.
-
-## Phase -1: distributed two-client rendezvous
-
-The operator prepares one signed public plan and two ephemeral participant
-keys:
-
-```sh
-node scripts/probe-bilateral-rendezvous.mjs prepare \
-  --operator-private-key "$OPERATOR_PRIVATE_KEY_FILE" \
-  --operator-key-id "$OPERATOR_KEY_ID" \
-  --repository-sha "$BILATERAL_REPOSITORY_SHA" \
-  --output "$PREFLIGHT_PREP_DIR"
-```
-
-This creates `probe-plan.json`, `payer-participant.ed25519.pem`, and
-`payee-participant.ed25519.pem`. Deliver the same plan and only the matching
-participant key to each physical machine through a separate private channel.
-
-Mint one role token on each role machine and one dedicated operator token. The
-operator uses its token only for watcher and verifier reads; the minting API does
-not prove a capability-level read-only scope. Each output path and its intent
-marker must be absent, and each parent directory must be mode `0700`.
-
-Requestor machine:
-
-```sh
-node scripts/mint-bilateral-token.mjs \
-  --role payee \
-  --output "$REQUESTOR_CLOCKCHAIN_TOKEN_FILE" \
-  --repository-sha "$BILATERAL_REPOSITORY_SHA"
-```
-
-Payer machine:
-
-```sh
-node scripts/mint-bilateral-token.mjs \
-  --role payer \
-  --output "$PAYER_CLOCKCHAIN_TOKEN_FILE" \
-  --repository-sha "$BILATERAL_REPOSITORY_SHA"
-```
-
-Human operator machine:
-
-```sh
-node scripts/mint-bilateral-token.mjs \
-  --role operator \
-  --output "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \
-  --repository-sha "$BILATERAL_REPOSITORY_SHA"
-```
-
-Do not rerun a token mint after its durable intent exists. An interrupted mint
-is ambiguous and requires a new reviewed release plan, not another token call.
-
-Run one participant process on each physical machine. These are the only two
-pre-approved throwaway writes.
-
-Requestor machine:
-
-```sh
-node scripts/probe-bilateral-rendezvous.mjs participant \
-  --role payee \
-  --plan "$PREFLIGHT_PLAN_FILE" \
-  --token-file "$REQUESTOR_CLOCKCHAIN_TOKEN_FILE" \
-  --participant-private-key "$REQUESTOR_PREFLIGHT_PRIVATE_KEY_FILE" \
-  --output "$REQUESTOR_PREFLIGHT_RESULT_DIR"
-```
-
-Payer machine:
-
-```sh
-node scripts/probe-bilateral-rendezvous.mjs participant \
-  --role payer \
-  --plan "$PREFLIGHT_PLAN_FILE" \
-  --token-file "$PAYER_CLOCKCHAIN_TOKEN_FILE" \
-  --participant-private-key "$PAYER_PREFLIGHT_PRIVATE_KEY_FILE" \
-  --output "$PAYER_PREFLIGHT_RESULT_DIR"
-```
-
-Each role sends its marker-complete `participant-report.json` directory to the
-operator. The operator alone runs:
-
-```sh
-node scripts/probe-bilateral-rendezvous.mjs aggregate \
-  --plan "$PREFLIGHT_PLAN_FILE" \
-  --payer-report-dir "$PAYER_PREFLIGHT_RESULT_DIR" \
-  --payee-report-dir "$REQUESTOR_PREFLIGHT_RESULT_DIR" \
-  --operator-private-key "$OPERATOR_PRIVATE_KEY_FILE" \
-  --output "$PREFLIGHT_AGGREGATE_DIR" \
-  --attest-separate-credentials \
-  --attest-separate-machines
-```
-
-Set the attestation flags only after the operator personally verifies distinct
-credentials and two physical machines. Continue only when the marker-complete
-aggregate report says `RENDEZVOUS_OK` with the derived-reference channel and the
-process exits zero. Digest-only, mixed, asymmetric, unattested, malformed, or
-unavailable discovery fails closed. Never repeat the two-write probe.
-
-The same per-machine Clockchain token used for preflight is reused unchanged by
-that machine's timed role. Do not mint a replacement token between phases.
-
-## Phase 0: registration and signed descriptor
-
-Registration happens before the descriptor is created and before timed M1.
-Each role machine runs its approved registration command.
-
-Requestor machine:
-
-```sh
-node scripts/register-bilateral-identity.mjs \
-  --invitation "$REQUESTOR_INVITATION_FILE" \
-  --output "$REQUESTOR_REGISTRATION_DIR" \
-  --repository-sha "$BILATERAL_REPOSITORY_SHA" \
-  --i-understand-this-writes-to-sepolia
-```
-
-Payer machine:
-
-```sh
-node scripts/register-bilateral-identity.mjs \
-  --invitation "$PAYER_INVITATION_FILE" \
-  --output "$PAYER_REGISTRATION_DIR" \
-  --repository-sha "$BILATERAL_REPOSITORY_SHA" \
-  --i-understand-this-writes-to-sepolia
-```
-
-Each command must publish `identity.json` and `.identity.complete.json`.
-Registration is crash-recoverable only with the exact invitation, repository
-SHA, command, and output directory. Never delete or edit
-`registration-checkpoint.json`; never choose a new directory after a possible
-transaction.
-
-Transfer only the marker-complete, secret-free identity directories to the
-operator. Record the address, agent ID, and display name from each verified
-artifact. Do not transfer invitations or tokens.
-
-Compute the prompt-bundle digest from the exact committed Requestor and Payer prompt
-bytes:
-
-```sh
-BILATERAL_PROMPT_SHA256="$(node scripts/hash-bilateral-prompts.mjs --repository-sha "$BILATERAL_REPOSITORY_SHA")"
-```
-
-Create one descriptor for exactly USD 100:
-
-```sh
-node scripts/create-session.mjs create \
-  --amounts "USD:100" \
-  --key-id "$OPERATOR_KEY_ID" \
-  --output "$BILATERAL_DESCRIPTOR_FILE" \
-  --payer-address "$PAYER_ADDRESS" \
-  --payer-agent-id "$PAYER_AGENT_ID" \
-  --payer-name "$PAYER_DISPLAY_NAME" \
-  --payee-address "$REQUESTOR_ADDRESS" \
-  --payee-agent-id "$REQUESTOR_AGENT_ID" \
-  --payee-name "$REQUESTOR_DISPLAY_NAME" \
-  --prompt-sha256 "$BILATERAL_PROMPT_SHA256" \
-  --repository-sha "$BILATERAL_REPOSITORY_SHA"
-```
-
-Distribute the identical signed descriptor bytes to Payer, Requestor, the watcher,
-and the verifier. Compare the descriptor digest on all three machines. The
-descriptor, identities, role assignment, amount, prompt bundle, and repository
-SHA are immutable for that session.
-
-## Phase 1: watcher and synchronized timed start
-
-Start the read-only watcher on the operator machine:
-
-```sh
-node scripts/watch-bilateral-session.mjs \
-  --descriptor-file "$BILATERAL_DESCRIPTOR_FILE" \
-  --token-file "$OPERATOR_CLOCKCHAIN_TOKEN_FILE"
-```
-
-Watcher JSON lines are advisory. They may display derived keys, cardinality,
-verified block heights/times, deadline, and non-authorizing runner states.
-Health, cached timestamps, and record status are disclosure only. The watcher
-never writes or authorizes.
-
-Confirm the same UTC clock, descriptor digest, and clean immutable checkout.
-For the synchronized start, start Payer first, then start Requestor immediately without waiting for Payer completion.
-
-Requestor machine:
-
-```sh
-node bin/handshake-accept.mjs \
-  --descriptor "$BILATERAL_DESCRIPTOR_FILE" \
-  --invitation "$REQUESTOR_INVITATION_FILE" \
-  --clockchain-token-file "$REQUESTOR_CLOCKCHAIN_TOKEN_FILE" \
-  --output "$REQUESTOR_RESULT_DIR" \
-  --i-understand-this-writes-to-clockchain
-```
-
-Payer machine:
-
-```sh
-node bin/handshake-propose.mjs \
-  --descriptor "$BILATERAL_DESCRIPTOR_FILE" \
-  --invitation "$PAYER_INVITATION_FILE" \
-  --clockchain-token-file "$PAYER_CLOCKCHAIN_TOKEN_FILE" \
-  --output "$PAYER_RESULT_DIR" \
-  --i-understand-this-writes-to-clockchain
-```
-
-Fresh role result paths may be absent or empty owner-controlled mode-`0700`
-directories. Do not alter arguments, run a second writer, or manually advance a
-state. Expected local endpoints are Payer `ACKNOWLEDGED` and Requestor `ACCEPTED`;
-neither is authorization.
-
-## Phase 2: artifact transfer
-
-Each role must publish exactly:
-
-- `party-result.json`
-- `PARTY-RESULT.md`
-- `.party-result.complete.json`
-
-Stop if the completion marker is absent. Transfer each whole result directory
-through an authenticated private channel. Keep Payer and Requestor separate. Record
-and compare SHA-256 inventories before and after transfer. Never edit, rename,
-regenerate, or merge files. Do not transfer invitations, participant keys,
-tokens, checkpoints, secret canaries, or partial temporary files.
-
-## Phase 3: fresh aggregate verifier
-
-Close any earlier verifier process. In a clean checkout whose HEAD equals the
-descriptor repository SHA, use an independent Sepolia RPC endpoint and a fresh
-nonexistent verifier output directory:
-
-```sh
-node scripts/verify-bilateral-results.mjs \
-  --clockchain-token-file "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \
-  --descriptor "$BILATERAL_DESCRIPTOR_FILE" \
-  --output "$VERDICT_OUTPUT_DIR" \
-  --payer-results "$PAYER_TRANSFERRED_RESULT_DIR" \
-  --payee-results "$REQUESTOR_TRANSFERRED_RESULT_DIR" \
-  --rpc-url "$SEPOLIA_RPC_URL"
-```
-
-The verifier loads only marker-complete packages, validates both signatures and
-descriptor bindings, independently refetches the proposed, accepted, and
-acknowledged anchors, enforces order and deadline, and requires
-`paymentMoved: false`. It publishes:
-
-- `bilateral-verdict.json`
-- `BILATERAL-VERDICT.md`
-- `.bilateral-verdict.complete.json`
-
-The hashed completion marker is published last. A session succeeds only when
-this fresh process emits exact `AUTHORIZED` and all three artifacts agree.
-Every other outcome is fixed non-authorization evidence.
-
-## Recovery rules
-
-- Before any write, correct local checkout, install, or path problems and rerun
-  metadata-only checks.
-- After token-mint intent, preflight intent, registration intent, or protocol
-  intent exists, never switch credentials, descriptor, token, or output
-  directory.
-- A role agent stops immediately on ambiguity and preserves the entire
-  directory. Only the operator may authorize rerunning the exact same command
-  in the exact same directory.
-- Registration recovery reuses its validated checkpoint. Timed-role recovery is
-  discovery-first and may adopt only one exact anchor; it never blindly
-  redispatches an unresolved write.
-- Never rerun a marker-complete registration or role package as recovery.
-- If a unique exact anchor cannot be proved, abandon the session.
-- A failed rehearsal consumes its attempted invitations. Correct code through
-  tests, review, and a new immutable SHA; use a newly reserved pair.
-- Never hand-edit evidence or downgrade a verifier failure.
-
-## Abort conditions
-
-Abort on missing, duplicated, reordered, expired, malformed, mismatched,
-secret-bearing, or marker-incomplete evidence; an ambiguous anchor; any
-role/owner/amount/session/predecessor/digest/height/timestamp mismatch; invalid
-signature; dirty/wrong checkout; private value in public output; advisory field
-used as authority; runner/watcher authorizing output; or any `paymentMoved`
-value other than exactly `false`.
-
-On abort, stop writers, preserve sanitized evidence, record only the public
-failure code and stage, and do not improvise success or reuse a consumed
-invitation.
-
-## Rehearsal and stakeholder sequence
-
-Run the full two-machine flow once with the rehearsal pair. Transfer both
-packages and verify from a fresh operator process. Correct deterministic or
-operational defects through tests, review, repeated verification, and a new
-immutable SHA. Only after a clean rehearsal may the operator start the two
-stakeholder agent sessions with the reserved stakeholder pair and repeat every
-gate without shortcuts.
+This runbook is for the human operator. Stakeholders follow the public
+[Payer prompt](../../prompts/run-payer-bilateral-demo.md) and
+[Requestor prompt](../../prompts/run-requestor-bilateral-demo.md). The
+[quick start](./bilateral-demo-quick-start.md), [live handoff](./bilateral-demo-live-handoff.md),
+[managed Payer MCP relay](./payer-mcp-external-relay.md), and
+[public run page](https://clockchain-research.vercel.app/handshake/run) describe
+the same hosted workflow. See the [repository overview](../../README.md) for the
+product boundary.
+
+## Operator preflight
+
+Before admitting either stakeholder, confirm in the AWS operator console:
+
+- the console is authenticated and names the reviewed immutable repository SHA;
+- relay, coordinator, bootstrap service, tunnel service, publisher, and public
+  monitor are healthy;
+- the Payer and Requestor signed discovery URLs are public, unexpired, and bound
+  to that SHA and immutable image digest;
+- the Sepolia treasury has enough gas for four exact `0.01 Sepolia ETH`
+  allocations;
+- no run is already active; and
+- the public monitor is either waiting or clearly stale, never carrying a
+  previous run's success forward.
+
+AWS owns the control plane; each stakeholder machine owns only its private role
+state and receives only public signed discovery.
+
+## The six console controls
+
+Five actions are the normal path and must be used in order:
+
+1. **Start run** — create one session bound to the reviewed release.
+2. **Approve Payer** — compare the exact displayed Payer claim fingerprint
+   with the Payer agent's public claim, then approve once.
+3. **Approve Requestor** — only after `PAYER_MCP_READY` and
+   `HANDSHAKE_REQUIRED`, compare and approve the Requestor fingerprint once.
+4. **Fund** — only after the signed four-address record is ready. The funding
+   task is journaled and replay-safe; ambiguity stops rather than resends.
+5. **Verify** — only after `PROPOSED`, `ACCEPTED`, and `ACKNOWLEDGED` are all
+   present in exact order.
+
+**Abort** is the sixth control. Use it for any mismatch, stale release, process
+exit, claimant ambiguity, funding ambiguity, evidence defect, or operator
+uncertainty. Abort never converts an incomplete run into success.
+
+The console cannot emit the final authorization literal. It submits revision-
+bound control actions only. Every action is authenticated, idempotent, and
+visible in secret-free business language.
+
+## Business progress to narrate
+
+1. Payer is admitted and its machine starts the Payer-owned payment-intake
+   service.
+2. `PAYER_MCP_READY` means the signed mandate is available through Payer MCP.
+3. Requestor asks for payment. `HANDSHAKE_REQUIRED` means the Payer's process,
+   not an operator-authored instruction, is guiding Requestor.
+4. `PROPOSED` means Payer anchored the authorization terms on Clockchain.
+5. `ACCEPTED` means Requestor anchored acceptance of those exact terms.
+6. `ACKNOWLEDGED` means Payer anchored final acknowledgment.
+7. The fresh aggregate verifier refetches and validates exactly three
+   independently verifiable Clockchain anchors and publishes `VERIFIED`.
+
+The signed mandate and payment request are commercial-intent evidence, not
+authorization anchors. Relay fields, MCP guidance, console state, coordinator
+state, watcher state, and role-local completion are advisory. Only the fresh
+aggregate verifier owns the final verdict. It validates exactly three
+independently verifiable Clockchain anchors. Every public and private artifact
+preserves `paymentMoved:false`.
+
+## Failure and recovery
+
+Stop and select **Abort** for missing, duplicate, reordered, expired, malformed,
+mismatched, or secret-bearing evidence; changed SHA or image digest; a changed
+TLS fingerprint; extra tunnel key or listen port; a stale console revision;
+nonzero participant nonce; ambiguous funding; more or fewer than three anchors;
+or any role, relay, coordinator, publisher, monitor, or verifier exit.
+
+Do not repeat **Fund** after an ambiguous response. Do not repeat **Verify** with
+the same attempt ID. Do not reuse a private state root for another role or run.
+Start a new session only after the failed run is durably closed and the public
+monitor no longer presents it as current.
+
+## Why this does not use A2A
+
+A2A is intentionally absent. Payer MCP is the payment-intake/guidance surface.
+Signed relay events and Clockchain receipts are the authority surfaces. Adding
+a second advisory messaging protocol would not replace either authority
+boundary; it would only add another advisory channel and trust configuration.

@@ -45,7 +45,17 @@ export const RUNNER_OUTCOME_KEYS = Object.freeze([
   "transition",
 ]);
 export const MIN_POLL_INTERVAL_MS = 20_000;
-export const MAX_POLL_DURATION_MS = 8 * 60_000;
+
+// A failed dispatch is ambiguous: the anchor may or may not have landed.
+// Re-dispatch is only safe after discovery confirms the record is absent,
+// and the server deduplicates on the exact idempotency key. Bound the
+// reconciliation so a transient transport failure cannot kill a run, while
+// a persistent one still fails closed well inside the 10-minute expiry.
+export const MAX_WRITE_DISPATCH_ATTEMPTS = 3;
+export const WRITE_RETRY_BACKOFF_MS = Object.freeze([2_000, 5_000]);
+// Role agents poll while the counterparty is still starting; align with the
+// 30-minute signed-discovery expiry for staggered human-driven demos.
+export const MAX_POLL_DURATION_MS = 30 * 60_000;
 
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const UUID_PATTERN =
@@ -65,6 +75,7 @@ const WRITE_INPUT_KEYS = new Set([
   "markerPath",
   "message",
   "proposalDeadlineMs",
+  "sleeper",
   "stateMachine",
 ]);
 const DIRECTORY_METADATA_KEYS = Object.freeze([
@@ -1157,16 +1168,58 @@ export async function writeOrAdoptTransition(input) {
 
     let written;
     await assertPinnedOutputDirectory(directoryPin);
-    try {
-      written = await methods.logAction.call(
-        snapshot.client,
-        exactWriteArgs(binding),
-      );
-    } catch (error) {
-      if (isDefinitePreDispatchRefusal(error)) {
-        throw terminal("FAILED");
+    const sleeper = snapshot.sleeper ?? defaultSleeper;
+    if (typeof sleeper !== "function") {
+      throw terminal("FAILED");
+    }
+    let attempt = 0;
+    while (true) {
+      attempt += 1;
+      try {
+        written = await methods.logAction.call(
+          snapshot.client,
+          exactWriteArgs(binding),
+        );
+        break;
+      } catch (error) {
+        if (isDefinitePreDispatchRefusal(error)) {
+          throw terminal("FAILED");
+        }
+        if (attempt >= MAX_WRITE_DISPATCH_ATTEMPTS) {
+          throw terminal("AMBIGUOUS_WRITE");
+        }
+        // Reconcile before re-dispatch: only a confirmed-absent
+        // discovery proves the anchor never landed. A discovery error
+        // fails closed rather than dispatching blind.
+        let discovered;
+        try {
+          discovered = await searchOnce(
+            snapshot.client,
+            methods,
+            binding,
+          );
+        } catch {
+          throw terminal("AMBIGUOUS_WRITE");
+        }
+        if (discovered !== null) {
+          return await verifiedOutcome({
+            binding,
+            client: snapshot.client,
+            deadlineValue: snapshot.proposalDeadlineMs,
+            markerCreated: true,
+            source: "adopted",
+            stateMachine,
+          });
+        }
+        try {
+          await sleeper(
+            WRITE_RETRY_BACKOFF_MS[attempt - 1] ??
+              WRITE_RETRY_BACKOFF_MS[WRITE_RETRY_BACKOFF_MS.length - 1],
+          );
+        } catch {
+          throw terminal("FAILED");
+        }
       }
-      throw terminal("AMBIGUOUS_WRITE");
     }
     if (
       !isPlainRecord(written) ||

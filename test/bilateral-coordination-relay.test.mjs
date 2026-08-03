@@ -92,7 +92,7 @@ import {
   RELAY_REPOSITORY_ROOT,
   RELAY_TOTAL_TIMEOUT_MS,
   createRelayRequestHandler,
-  main as relayMain,
+  main as relayMainProduction,
   relayReadinessLine,
 } from "../bin/handshake-relay.mjs";
 
@@ -107,16 +107,23 @@ const RECEIPT_SCHEMA =
 const OPERATOR_KEY_ID = "relay-test-operator";
 const PAYER_CAPABILITY = Buffer.alloc(32, 0x41);
 const PAYEE_CAPABILITY = Buffer.alloc(32, 0x42);
+
+function relayMain(arguments_, dependencies = {}) {
+  return relayMainProduction(arguments_, {
+    ...dependencies,
+    allowTestAddresses: true,
+  });
+}
 const execFile = promisify(execFileCallback);
 
-async function invokeRelayHandler(handler, { body = Buffer.alloc(0), contentType = "application/json", method = "POST", url }) {
+async function invokeRelayHandler(handler, { body = Buffer.alloc(0), contentType = "application/json", hostHeader = "127.0.0.1:8443", method = "POST", url }) {
   const request = new PassThrough();
   request.headers = method === "GET"
-    ? { host: "127.0.0.1:8443" }
-    : { host: "127.0.0.1:8443", "content-type": contentType };
+    ? { host: hostHeader }
+    : { host: hostHeader, "content-type": contentType };
   request.rawHeaders = method === "GET"
-    ? ["host", "127.0.0.1:8443"]
-    : ["host", "127.0.0.1:8443", "content-type", contentType];
+    ? ["host", hostHeader]
+    : ["host", hostHeader, "content-type", contentType];
   request.method = method;
   request.url = url;
   const response = new EventEmitter();
@@ -231,6 +238,39 @@ test("routes real service enrollment readiness through the handler validator", a
     schema: "clockchain.bilateral-enrollment-readiness/v1",
     sessionId: SESSION_ID,
   });
+});
+
+test("validates client Host against advertised relay address instead of local bind address", async () => {
+  const handler = createRelayRequestHandler({
+    appendEvent: async () => ({}),
+    appendVerifiedEvent: async () => ({}),
+    bootstrap: async () => ({}),
+    getArtifact: async () => Buffer.alloc(0),
+    putArtifact: async () => ({}),
+    readEnrollmentReadiness: async () => ({
+      paymentMoved: false,
+      ready: false,
+      releaseId: RELEASE_ID,
+      repositorySha: REPOSITORY_SHA,
+      schema: "clockchain.bilateral-enrollment-readiness/v1",
+      sessionId: SESSION_ID,
+    }),
+    readEnrollmentSet: async () => Buffer.alloc(0),
+    readEvents: async () => [],
+    readSessionView: async () => ({}),
+  }, "32.186.198.119", 8443, REPOSITORY_SHA);
+  const accepted = await invokeRelayHandler(handler, {
+    hostHeader: "32.186.198.119:8443",
+    method: "GET",
+    url: `/v1/sessions/${SESSION_ID}/enrollment-readiness?waitMs=0`,
+  });
+  assert.equal(accepted.status, 200);
+  const rejected = await invokeRelayHandler(handler, {
+    hostHeader: "127.0.0.1:8443",
+    method: "GET",
+    url: `/v1/sessions/${SESSION_ID}/enrollment-readiness?waitMs=0`,
+  });
+  assert.equal(rejected.status, 400);
 });
 
 test("routes the exact payer-owned inbox endpoints with canonical bytes", async () => {
@@ -411,6 +451,7 @@ async function storeFixture(t) {
 async function tlsFixture(
   t,
   algorithm = "ed25519",
+  commonName = "127.0.0.1",
 ) {
   const root = await privateRoot(t);
   const certificatePath = join(root, "tls-cert.pem");
@@ -437,9 +478,9 @@ async function tlsFixture(
     "-days",
     "1",
     "-subj",
-    "/CN=127.0.0.1",
+    `/CN=${commonName}`,
     "-addext",
-    "subjectAltName=IP:127.0.0.1",
+    `subjectAltName=${net.isIP(commonName) === 0 ? "DNS" : "IP"}:${commonName}`,
   ]);
   await chmod(privateKeyPath, 0o600);
   await chmod(certificatePath, 0o644);
@@ -533,6 +574,7 @@ async function observeRelayChild(child, host, port) {
 }
 
 function relayArguments({
+  advertisedHost = "127.0.0.1",
   certificatePath,
   host = "127.0.0.1",
   port,
@@ -541,6 +583,8 @@ function relayArguments({
   state,
 }) {
   return [
+    "--advertised-host",
+    advertisedHost,
     "--host",
     host,
     "--port",
@@ -570,6 +614,7 @@ async function httpsRequest({
   method,
   path,
   port,
+  servername,
 }) {
   return new Promise((resolve, reject) => {
     const request = https.request(
@@ -581,6 +626,7 @@ async function httpsRequest({
         path,
         port,
         rejectUnauthorized: true,
+        ...(servername === undefined ? {} : { servername }),
       },
       (response) => {
         const chunks = [];
@@ -3820,6 +3866,10 @@ test("pins fixed HTTPS deadlines and rejects every non-exact CLI flag surface be
     privateKeyPath: "/tmp/private-key.pem",
     state: "/tmp/relay-state",
   });
+  await assert.rejects(
+    relayMainProduction(exact),
+    { code: "COORDINATION_RELAY_STARTUP_INVALID" },
+  );
   for (const arguments_ of [
     [],
     exact.slice(2),
@@ -3901,7 +3951,7 @@ test("pins fixed HTTPS deadlines and rejects every non-exact CLI flag surface be
   );
   assert.match(
     relaySource,
-    /isIP\(host\) === 6\s*\? `\[\$\{host\}\]:\$\{port\}`/,
+    /isIP\(advertisedHost\) === 6\s*\? `\[\$\{advertisedHost\}\]:\$\{port\}`/,
   );
 });
 
@@ -3959,6 +4009,117 @@ test("accepts only canonical port zero and reports the bound relay address witho
     `{"host":"127.0.0.1","paymentMoved":false,"pid":${process.pid},"port":${running.address.port},"schema":"clockchain.bilateral-relay-ready/v1"}\n`,
   );
   await running.close();
+  await running.close();
+});
+
+test("binds relay locally while validating client Host against required advertised address", async (t) => {
+  const tls = await tlsFixture(t);
+  const state = await privateRoot(t);
+  const port = await availablePort();
+  let running;
+  try {
+    running = await relayMain(
+      relayArguments({
+        advertisedHost: "127.0.0.1",
+        certificatePath: tls.certificatePath,
+        host: "127.0.0.1",
+        port,
+        privateKeyPath: tls.privateKeyPath,
+        state,
+      }),
+      { checkoutProbe: cleanCheckoutProbe },
+    );
+  } finally {
+    t.after(() => running?.close().catch(() => {}));
+  }
+  assert.equal(running.address.host, "127.0.0.1");
+  assert.equal(running.address.port, port);
+  const accepted = await httpsRequest({
+    ca: tls.certificate,
+    headers: { host: `127.0.0.1:${port}` },
+    method: "GET",
+    path: `/v1/sessions/${SESSION_ID}/events?waitMs=0`,
+    port,
+  });
+  assert.equal(accepted.statusCode, 200);
+  const rejected = await httpsRequest({
+    ca: tls.certificate,
+    headers: { host: `127.0.0.2:${port}` },
+    method: "GET",
+    path: `/v1/sessions/${SESSION_ID}/events?waitMs=0`,
+    port,
+  });
+  assert.equal(rejected.statusCode, 400);
+  await running.close();
+});
+
+test("accepts a canonical advertised DNS name only when the TLS certificate covers it", async (t) => {
+  const advertisedHost = "relay.example.test";
+  const tls = await tlsFixture(t, "ed25519", advertisedHost);
+  const state = await privateRoot(t);
+  const port = await availablePort();
+  const running = await relayMainProduction(
+    relayArguments({
+      advertisedHost,
+      certificatePath: tls.certificatePath,
+      host: "127.0.0.1",
+      port,
+      privateKeyPath: tls.privateKeyPath,
+      state,
+    }),
+    { checkoutProbe: cleanCheckoutProbe },
+  );
+  t.after(() => running.close().catch(() => {}));
+  const accepted = await httpsRequest({
+    ca: tls.certificate,
+    headers: { host: `${advertisedHost}:${port}` },
+    method: "GET",
+    path: `/v1/sessions/${SESSION_ID}/events?waitMs=0`,
+    port,
+    servername: advertisedHost,
+  });
+  assert.equal(accepted.statusCode, 200);
+  await running.close();
+});
+
+test("allows wildcard bind while still enforcing the concrete advertised Host", async (t) => {
+  const tls = await tlsFixture(t);
+  const state = await privateRoot(t);
+  const port = await availablePort();
+  let running;
+  try {
+    running = await relayMain(
+      relayArguments({
+        advertisedHost: "127.0.0.1",
+        certificatePath: tls.certificatePath,
+        host: "0.0.0.0",
+        port,
+        privateKeyPath: tls.privateKeyPath,
+        state,
+      }),
+      { checkoutProbe: cleanCheckoutProbe },
+    );
+  } finally {
+    t.after(() => running?.close().catch(() => {}));
+  }
+  assert.equal(running.address.host, "0.0.0.0");
+  assert.equal(running.address.port, port);
+  const accepted = await httpsRequest({
+    ca: tls.certificate,
+    headers: { host: `127.0.0.1:${port}` },
+    method: "GET",
+    path: `/v1/sessions/${SESSION_ID}/events?waitMs=0`,
+    port,
+  });
+  assert.equal(accepted.statusCode, 200);
+  const localMismatch = await httpsRequest({
+    ca: tls.certificate,
+    headers: { host: `127.0.0.2:${port}` },
+    method: "GET",
+    path: `/v1/sessions/${SESSION_ID}/events?waitMs=0`,
+    port,
+  });
+  assert.equal(localMismatch.statusCode, 400);
   await running.close();
 });
 
@@ -4273,6 +4434,91 @@ test("rejects dirty and wrong immutable checkouts before opening relay state", a
       { code: "COORDINATION_RELAY_STARTUP_INVALID" },
     );
   }
+});
+
+test("uses immutable task provenance instead of a Git checkout in AWS mode", async (t) => {
+  const tls = await tlsFixture(t);
+  const state = await privateRoot(t);
+  const calls = [];
+  const leaseCalls = [];
+  const ownerLease = {
+    async acquire(input) {
+      leaseCalls.push(["acquire", input]);
+      return {
+        async assertCurrent() {
+          leaseCalls.push(["assert"]);
+        },
+        async release() {
+          leaseCalls.push(["release"]);
+        },
+      };
+    },
+  };
+  const verified = Object.freeze({
+    imageDigest: `sha256:${"b".repeat(64)}`,
+    operatorPublicKey: rawPublicKey(operator),
+    repositorySha: REPOSITORY_SHA,
+    sourceTreeSha256: "c".repeat(64),
+  });
+  const provenanceProvider = {
+    async assertRepository(input) {
+      calls.push(["repository", input]);
+      return verified;
+    },
+    async verify(input) {
+      calls.push(["operator", input]);
+      return verified;
+    },
+  };
+  const running = await relayMain(
+    relayArguments({
+      certificatePath: tls.certificatePath,
+      port: await availablePort(),
+      privateKeyPath: tls.privateKeyPath,
+      state,
+    }),
+    { ownerLease, provenanceProvider },
+  );
+  t.after(() => running.close().catch(() => {}));
+  const registration = capabilityRegistration({
+    capabilities: {
+      payee: {
+        capabilityDigest: sha256(PAYEE_CAPABILITY),
+        expiresAtMs: String(Date.now() + 60_000),
+      },
+      payer: {
+        capabilityDigest: sha256(PAYER_CAPABILITY),
+        expiresAtMs: String(Date.now() + 120_000),
+      },
+    },
+  });
+  const response = await httpsRequest({
+    body: canonicalBytes(registration),
+    ca: tls.certificate,
+    headers: { "content-type": "application/json" },
+    method: "POST",
+    path: "/v1/capabilities",
+    port: running.address.port,
+  });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(calls, [
+    ["repository", { repositorySha: REPOSITORY_SHA }],
+    ["operator", {
+      operatorKeyId: OPERATOR_KEY_ID,
+      repositorySha: REPOSITORY_SHA,
+    }],
+  ]);
+  await running.close();
+  assert.deepEqual(leaseCalls[0], [
+    "acquire",
+    { root: state },
+  ]);
+  assert.equal(
+    leaseCalls.some(([operation]) =>
+      operation === "assert"),
+    true,
+  );
+  assert.deepEqual(leaseCalls.at(-1), ["release"]);
 });
 
 for (const signatureAlgorithm of [

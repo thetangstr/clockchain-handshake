@@ -11,9 +11,9 @@ const base = () => ({
   request: { request: { amount: { currency: "USD", value: "100" }, expiresAtMs: "1785297000000", invoiceReference: "TREL-2026-0001", paymentMoved: false }, requestDigest: digest("f"), tls: "console-canary" },
   nowMs: 1785294300000,
   watcherSnapshot: { descriptorDigest: digest("d"), packageDigests: { payer: digest("b"), payee: digest("c") }, health: "ok", environment: "console-canary", anchors: [
-    { digest: digest("1"), kind: "PROPOSED", block: "10", verified: true },
-    { digest: digest("2"), kind: "ACCEPTED", block: "11", verified: true },
-    { digest: digest("3"), kind: "ACKNOWLEDGED", block: "12", verified: true },
+    { cardinality: "1", digest: digest("1"), kind: "PROPOSED", block: "10", ledgerId: "00000000-0000-4000-8000-000000000001", verified: true },
+    { cardinality: "1", digest: digest("2"), kind: "ACCEPTED", block: "11", ledgerId: "00000000-0000-4000-8000-000000000002", verified: true },
+    { cardinality: "1", digest: digest("3"), kind: "ACKNOWLEDGED", block: "12", ledgerId: "00000000-0000-4000-8000-000000000003", verified: true },
   ] },
   verifierPublication: { markerComplete: true, paymentMoved: false, publicationDigest: digest("a"), releaseId: "release-a", repositorySha: "a".repeat(40), schema: "clockchain.bilateral-verifier-publication/v1", sessionId: "11111111-2222-4333-8444-555555555555", status: "VERIFICATION_PASSED", subjectRun: "stakeholder", descriptorDigest: digest("d"), mandateDigest: digest("e"), requestDigest: digest("f"), packageDigests: { payer: digest("b"), payee: digest("c") }, anchorDigests: [digest("1"), digest("2"), digest("3")] },
 });
@@ -26,6 +26,14 @@ test("projection is closed, redacted, ordered, and labels pre-protocol evidence"
   assert.equal(value.mandate.kind, "pre-protocol");
   assert.equal(value.request.kind, "pre-protocol");
   assert.deepEqual(value.anchors.map((anchor) => anchor.kind), ["PROPOSED", "ACCEPTED", "ACKNOWLEDGED"]);
+  assert.deepEqual(
+    value.anchors.map(({ cardinality, ledgerId, verified }) => ({ cardinality, ledgerId, verified })),
+    [
+      { cardinality: "1", ledgerId: "00000000-0000-4000-8000-000000000001", verified: true },
+      { cardinality: "1", ledgerId: "00000000-0000-4000-8000-000000000002", verified: true },
+      { cardinality: "1", ledgerId: "00000000-0000-4000-8000-000000000003", verified: true },
+    ],
+  );
   assert.equal(value.verifier.status, "VERIFICATION_PASSED");
   assert.equal(JSON.stringify(value).includes("AUTHORIZED"), false);
 });

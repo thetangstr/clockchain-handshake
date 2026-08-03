@@ -991,6 +991,85 @@ async function acquireOwner(root, fileSystem) {
   }
 }
 
+function externalOwnerLease(value) {
+  if (value === undefined) return null;
+  if (
+    !isPlainObject(value) ||
+    Reflect.ownKeys(value).length !== 1 ||
+    typeof value.acquire !== "function"
+  ) {
+    fail();
+  }
+  return value;
+}
+
+function externalOwnerHandle(value) {
+  if (
+    !isPlainObject(value) ||
+    typeof value.assertCurrent !== "function" ||
+    typeof value.release !== "function"
+  ) {
+    fail();
+  }
+  return value;
+}
+
+async function acquireStoreOwner(
+  root,
+  fileSystem,
+  externalLease,
+) {
+  if (externalLease !== null) {
+    const external = externalOwnerHandle(
+      await externalLease.acquire({
+        root: root.path,
+      }),
+    );
+    return Object.freeze({
+      abort: () => external.release(),
+      assertCurrent: () => external.assertCurrent(),
+      release: () => external.release(),
+    });
+  }
+  const local = await acquireOwner(root, fileSystem);
+  let active = true;
+  return Object.freeze({
+    async abort() {
+      if (!active) return;
+      let safeToUnlink = false;
+      try {
+        await assertDirectory(root);
+        await assertOwnerBinding(local, fileSystem);
+        safeToUnlink = true;
+      } catch {
+        // The caller converts this to the fixed storage failure.
+      }
+      await local.handle.close();
+      if (safeToUnlink) {
+        await fileSystem.unlink(local.path);
+        await fileSystem.unlink(local.guardPath);
+        await syncDirectory(root);
+      }
+      active = false;
+    },
+    async assertCurrent() {
+      if (!active) fail();
+      await assertOwnerBinding(local, fileSystem);
+    },
+    async release() {
+      if (!active) return;
+      await assertDirectory(root);
+      await assertOwnerBinding(local, fileSystem);
+      await local.handle.sync();
+      await local.handle.close();
+      await fileSystem.unlink(local.path);
+      await fileSystem.unlink(local.guardPath);
+      await syncDirectory(root);
+      active = false;
+    },
+  });
+}
+
 function emptyState() {
   return {
     capabilitySets: new Map(),
@@ -2948,7 +3027,13 @@ async function readArtifact(
 export async function openCoordinationStore(input) {
   const options = readAllowedData(
     input,
-    ["fileSystem", "now", "repositorySha", "root"],
+    [
+      "fileSystem",
+      "now",
+      "ownerLease",
+      "repositorySha",
+      "root",
+    ],
     ["repositorySha", "root"],
   );
   const repositorySha = assertRepositorySha(
@@ -2958,6 +3043,9 @@ export async function openCoordinationStore(input) {
     options.fileSystem,
   );
   const now = activeNow(options.now);
+  const ownerLease = externalOwnerLease(
+    options.ownerLease,
+  );
   const root = await createOrPinRoot(
     options.root,
     fileSystem,
@@ -2972,7 +3060,11 @@ export async function openCoordinationStore(input) {
         repositorySha,
         fileSystem,
       );
-    owner = await acquireOwner(root, fileSystem);
+    owner = await acquireStoreOwner(
+      root,
+      fileSystem,
+      ownerLease,
+    );
     if (completedInitialization < 4) {
       await initializeStore(
         root,
@@ -3070,13 +3162,13 @@ export async function openCoordinationStore(input) {
         try {
           assertOpen();
           await assertDirectory(root);
-          await assertOwnerBinding(owner, fileSystem);
+          await owner.assertCurrent();
           result = await action();
         } catch (error) {
           actionError = error;
         }
         try {
-          await assertOwnerBinding(owner, fileSystem);
+          await owner.assertCurrent();
           await assertDirectory(root);
         } catch {
           poisoned = true;
@@ -3745,12 +3837,7 @@ export async function openCoordinationStore(input) {
         }
         try {
           await assertDirectory(root);
-          await assertOwnerBinding(owner, fileSystem);
-          await owner.handle.sync();
-          await owner.handle.close();
-          await fileSystem.unlink(owner.path);
-          await fileSystem.unlink(owner.guardPath);
-          await syncDirectory(root);
+          await owner.release();
         } catch {
           closeFailure ??= new CoordinationStorageError();
         }
@@ -3808,27 +3895,10 @@ export async function openCoordinationStore(input) {
     }
   }
   if (owner !== undefined) {
-    let safeToUnlink = false;
     try {
-      await assertDirectory(root);
-      await assertOwnerBinding(owner, fileSystem);
-      safeToUnlink = true;
+      await owner.abort();
     } catch {
       failure ??= new CoordinationStorageError();
-    }
-    try {
-      await owner.handle.close();
-    } catch {
-      failure ??= new CoordinationStorageError();
-    }
-    if (safeToUnlink) {
-      try {
-        await fileSystem.unlink(owner.path);
-        await fileSystem.unlink(owner.guardPath);
-        await syncDirectory(root);
-      } catch {
-        failure ??= new CoordinationStorageError();
-      }
     }
   }
   try {

@@ -9,7 +9,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createPayerMcpServer } from "../src/bilateral/local-mcp/server.mjs";
+import {
+  createAwsRequestorBootstrapBrokerClient,
+  createPayerMcpServer,
+} from "../src/bilateral/local-mcp/server.mjs";
+import { bootstrapClaimFingerprint } from "../src/bilateral/local-mcp/bootstrap-broker.mjs";
+import { createRequestorBootstrapKey } from "../src/bilateral/local-mcp/bootstrap-envelope.mjs";
 import { buildPaymentIntakeToolResult, PAYMENT_INTAKE_TOOL_DESCRIPTOR } from "../src/bilateral/local-mcp/payment-intake.mjs";
 import { createPayerMcpIntakeStore } from "../src/bilateral/local-mcp/intake-store.mjs";
 import { requestPaymentThroughPayerMcp } from "../src/bilateral/local-mcp/client.mjs";
@@ -20,6 +25,7 @@ const CAPABILITY = "ab".repeat(32);
 const CAPABILITY_DIGEST = createHash("sha256").update(Buffer.from(CAPABILITY, "hex")).digest("hex");
 const INTAKE_REQUEST_ID = "00000000-0000-4000-8000-000000000000";
 const GENERIC_UNAUTHORIZED = { error: "PAYER_MCP_PROTOCOL_FAILED", paymentMoved: false };
+const BOOTSTRAP_SCHEMA = "clockchain.requestor-bootstrap-broker-response/v1";
 
 function paymentInput(overrides = {}) {
   return {
@@ -59,6 +65,7 @@ async function makeFixture(t, options = {}) {
   const intakeStore = await createPayerMcpIntakeStore({ repositorySha: REPOSITORY_SHA, stateRoot: root });
   const observed = [];
   const server = createPayerMcpServer({
+    allowTestAddresses: true,
     capabilityDigest: CAPABILITY_DIGEST,
     createHttpsServer: options.createHttpsServer,
     host: options.host ?? "127.0.0.1",
@@ -68,6 +75,7 @@ async function makeFixture(t, options = {}) {
     publicUrl: options.publicUrl,
     randomBytes: options.randomBytes ?? (() => Buffer.alloc(16, 1)),
     repositorySha: REPOSITORY_SHA,
+    ...(options.claimRequestorBootstrap === undefined ? {} : { claimRequestorBootstrap: options.claimRequestorBootstrap }),
     sideEffects: {
       appendRelayEvent: () => observed.push("relay"),
       createVerdict: () => observed.push("verdict"),
@@ -84,6 +92,242 @@ async function makeFixture(t, options = {}) {
   });
   return { ...listening, certificate: tlsCertificatePem, fingerprint: createHash("sha256").update(new X509Certificate(tlsCertificatePem).raw).digest("hex"), observed, root, server };
 }
+
+function bootstrapClaim(overrides = {}) {
+  return {
+    claimNonce: "11111111-1111-4111-8111-111111111111",
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    requestorPublicKey: createRequestorBootstrapKey().publicKey,
+    ...overrides,
+  };
+}
+
+function sealedBootstrapResponse(claim, overrides = {}) {
+  return {
+    claimFingerprint: bootstrapClaimFingerprint(claim),
+    context: {
+      claimNonce: claim.claimNonce,
+      paymentMoved: false,
+      releaseId: "release-validator",
+      repositorySha: REPOSITORY_SHA,
+      sessionId: "22222222-2222-4222-8222-222222222222",
+    },
+    envelope: {
+      algorithm: "X25519-HKDF-SHA256-AES-256-GCM",
+      ciphertextBase64url: Buffer.from("sealed-manifest").toString("base64url"),
+      ephemeralPublicKey: Buffer.alloc(32, 1).toString("base64url"),
+      ivBase64url: Buffer.alloc(12, 2).toString("base64url"),
+      paymentMoved: false,
+      schema: "clockchain.requestor-bootstrap-envelope/v1",
+      tagBase64url: Buffer.alloc(16, 3).toString("base64url"),
+    },
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    schema: BOOTSTRAP_SCHEMA,
+    signature: {
+      algorithm: "ed25519",
+      keyId: "operator",
+      value: Buffer.alloc(64, 4).toString("base64"),
+    },
+    status: "SEALED",
+    ...overrides,
+  };
+}
+
+test("uses a distinct authenticated HTTPS client for the AWS Requestor bootstrap broker", async () => {
+  const claim = bootstrapClaim();
+  const observed = [];
+  const client = createAwsRequestorBootstrapBrokerClient({
+    allowTestAddresses: true,
+    brokerCapability: CAPABILITY,
+    brokerUrl:
+      "https://bootstrap.example.net/v1/requestor-claims",
+    lookup: async (hostname) => {
+      assert.equal(hostname, "bootstrap.example.net");
+      return [{
+        address: "203.0.113.10",
+        family: 4,
+      }];
+    },
+    requestHttps: async (input) => {
+      observed.push(input);
+      return {
+        body: {
+          claimFingerprint:
+            bootstrapClaimFingerprint(claim),
+          paymentMoved: false,
+          repositorySha: REPOSITORY_SHA,
+          schema: BOOTSTRAP_SCHEMA,
+          status: "PENDING_APPROVAL",
+        },
+        headers: {
+          "content-type": "application/json",
+        },
+        statusCode: 202,
+      };
+    },
+  });
+  const result =
+    await client.claimRequestorBootstrap(claim);
+  assert.equal(result.status, "PENDING_APPROVAL");
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0].method, "POST");
+  assert.equal(
+    observed[0].url.href,
+    "https://bootstrap.example.net/v1/requestor-claims",
+  );
+  assert.deepEqual(observed[0].headers, {
+    Accept: "application/json",
+    Authorization: `Bearer ${CAPABILITY}`,
+    "Content-Type": "application/json",
+    Host: "bootstrap.example.net",
+  });
+  assert.deepEqual(observed[0].body, claim);
+  assert.equal(
+    observed[0].resolved.addresses[0].address,
+    "203.0.113.10",
+  );
+
+  for (const brokerUrl of [
+    "http://bootstrap.example.net/v1/requestor-claims",
+    "https://127.0.0.1/v1/requestor-claims",
+    "https://bootstrap.example.net/claim",
+    "https://bootstrap.example.net/v1/requestor-claims?x=1",
+  ]) {
+    assert.throws(
+      () => createAwsRequestorBootstrapBrokerClient({
+        brokerCapability: CAPABILITY,
+        brokerUrl,
+      }),
+      /Payer MCP server failed safely/,
+    );
+  }
+});
+
+test("serves separately armed public bootstrap claims without weakening authenticated MCP", async (t) => {
+  const claims = [];
+  const fixture = await makeFixture(t, {
+    claimRequestorBootstrap: async (claim) => {
+      claims.push(claim);
+      return {
+        claimFingerprint: bootstrapClaimFingerprint(claim),
+        paymentMoved: false,
+        repositorySha: REPOSITORY_SHA,
+        schema: BOOTSTRAP_SCHEMA,
+        status: "PENDING_APPROVAL",
+      };
+    },
+  });
+  const claim = bootstrapClaim();
+
+  const pending = await request({
+    body: claim,
+    fixture,
+    headers: { Authorization: undefined, Accept: "application/json" },
+    path: "/bootstrap",
+  });
+  assert.equal(pending.statusCode, 202);
+  assert.deepEqual(pending.body, {
+    claimFingerprint: bootstrapClaimFingerprint(claim),
+    paymentMoved: false,
+    repositorySha: REPOSITORY_SHA,
+    schema: BOOTSTRAP_SCHEMA,
+    status: "PENDING_APPROVAL",
+  });
+  assert.deepEqual(claims, [claim]);
+
+  assert.equal((await request({
+    body: rpc(1, "initialize", { protocolVersion: PROTOCOL_VERSION }),
+    fixture,
+    headers: { Authorization: undefined },
+  })).statusCode, 401);
+  assert.equal((await request({
+    body: claim,
+    fixture,
+    path: "/bootstrap",
+  })).statusCode, 400);
+});
+
+test("fails closed for unarmed, malformed, duplicate, and mismatched bootstrap claims", async (t) => {
+  const unarmed = await makeFixture(t);
+  assert.equal((await request({
+    body: bootstrapClaim(),
+    fixture: unarmed,
+    headers: { Authorization: undefined, Accept: "application/json" },
+    path: "/bootstrap",
+  })).statusCode, 404);
+
+  const fixture = await makeFixture(t, {
+    claimRequestorBootstrap: async (claim) => ({
+      claimFingerprint: bootstrapClaimFingerprint(claim),
+      paymentMoved: false,
+      repositorySha: REPOSITORY_SHA,
+      schema: BOOTSTRAP_SCHEMA,
+      status: "PENDING_APPROVAL",
+    }),
+  });
+  const mismatchedBroker = await makeFixture(t, {
+    claimRequestorBootstrap: async () => ({
+      claimFingerprint: "0".repeat(64),
+      paymentMoved: false,
+      repositorySha: REPOSITORY_SHA,
+      schema: BOOTSTRAP_SCHEMA,
+      status: "PENDING_APPROVAL",
+    }),
+  });
+  assert.equal((await request({
+    body: bootstrapClaim(),
+    fixture: mismatchedBroker,
+    headers: { Authorization: undefined, Accept: "application/json" },
+    path: "/bootstrap",
+  })).statusCode, 400);
+
+  const sealedClaim = bootstrapClaim();
+  const sealed = sealedBootstrapResponse(sealedClaim);
+  for (const response of [
+    sealedBootstrapResponse(sealedClaim, { envelope: { ...sealed.envelope, algorithm: "AES-GCM" } }),
+    sealedBootstrapResponse(sealedClaim, { envelope: { ...sealed.envelope, schema: "other" } }),
+    sealedBootstrapResponse(sealedClaim, { envelope: { ...sealed.envelope, ephemeralPublicKey: Buffer.alloc(31).toString("base64url") } }),
+    sealedBootstrapResponse(sealedClaim, { envelope: { ...sealed.envelope, ivBase64url: Buffer.alloc(11).toString("base64url") } }),
+    sealedBootstrapResponse(sealedClaim, { envelope: { ...sealed.envelope, tagBase64url: Buffer.alloc(15).toString("base64url") } }),
+    sealedBootstrapResponse(sealedClaim, { envelope: { ...sealed.envelope, ciphertextBase64url: `${Buffer.from("x").toString("base64url")}=` } }),
+    sealedBootstrapResponse(sealedClaim, { signature: { algorithm: "ed25519", keyId: "operator", value: Buffer.alloc(63).toString("base64") } }),
+    sealedBootstrapResponse(sealedClaim, { signature: { algorithm: "rsa", keyId: "operator", value: Buffer.alloc(64).toString("base64") } }),
+    sealedBootstrapResponse(sealedClaim, { signature: { algorithm: "ed25519", keyId: "Operator", value: Buffer.alloc(64).toString("base64") } }),
+  ]) {
+    const malformedSealed = await makeFixture(t, {
+      claimRequestorBootstrap: async () => response,
+    });
+    assert.equal((await request({
+      body: sealedClaim,
+      fixture: malformedSealed,
+      headers: { Authorization: undefined, Accept: "application/json" },
+      path: "/bootstrap",
+    })).statusCode, 400);
+  }
+
+  for (const body of [
+    bootstrapClaim({ extra: true }),
+    bootstrapClaim({ paymentMoved: true }),
+    bootstrapClaim({ repositorySha: "b".repeat(40) }),
+    bootstrapClaim({ claimNonce: "not-a-uuid" }),
+    bootstrapClaim({ requestorPublicKey: "bad" }),
+  ]) {
+    assert.equal((await request({
+      body,
+      fixture,
+      headers: { Authorization: undefined, Accept: "application/json" },
+      path: "/bootstrap",
+    })).statusCode, 400);
+  }
+  assert.equal((await request({
+    fixture,
+    headers: { Authorization: undefined, Accept: "application/json" },
+    path: "/bootstrap",
+    rawBody: `{"claimNonce":"11111111-1111-4111-8111-111111111111","claimNonce":"11111111-1111-4111-8111-111111111111","paymentMoved":false,"repositorySha":"${REPOSITORY_SHA}","requestorPublicKey":"${createRequestorBootstrapKey().publicKey}"}`,
+  })).statusCode, 400);
+});
 
 async function request({ body, fixture, headers = {}, method = "POST", path = "/mcp", rawBody }) {
   const payload = rawBody === undefined
@@ -271,7 +515,7 @@ test("completes pinned request_payment through a raw TCP relay while the MCP rem
     stateRoot: requestorState,
     tlsCertificatePem: fixture.certificate,
     tlsFingerprint: fixture.fingerprint,
-  });
+  }, { allowTestAddresses: true });
   assert.equal(result.status, "HANDSHAKE_REQUIRED");
   assert.equal(result.paymentMoved, false);
   assert.equal(forwardedBytes > 0, true);
@@ -304,6 +548,7 @@ test("rejects unsafe transport boundary, host, path, headers, session, method, a
     }), /Payer MCP server failed safely\./);
   }
   assert.equal(typeof createPayerMcpServer({
+    allowTestAddresses: true,
     capabilityDigest: CAPABILITY_DIGEST,
     host: "::1",
     intakeStore: { writeIntake: async () => undefined },
@@ -353,6 +598,7 @@ test("rejects unsafe transport boundary, host, path, headers, session, method, a
     "subjectAltName=IP:203.0.113.10",
   ], { stdio: "ignore" });
   assert.equal(typeof createPayerMcpServer({
+    allowTestAddresses: true,
     capabilityDigest: CAPABILITY_DIGEST,
     host: "127.0.0.1",
     intakeStore: { writeIntake: async () => undefined },
@@ -361,6 +607,35 @@ test("rejects unsafe transport boundary, host, path, headers, session, method, a
     repositorySha: REPOSITORY_SHA,
     tlsCertificatePem: await readFile(publicCertificatePath, "utf8"),
     tlsPrivateKeyPem: await readFile(publicPrivateKeyPath, "utf8"),
+  }).start, "function");
+  const dnsCertificatePath = join(fixture.root, "dns-cert.pem");
+  const dnsPrivateKeyPath = join(fixture.root, "dns-key.pem");
+  execFileSync("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "ed25519",
+    "-keyout",
+    dnsPrivateKeyPath,
+    "-out",
+    dnsCertificatePath,
+    "-nodes",
+    "-days",
+    "1",
+    "-subj",
+    "/CN=payer.example.net",
+    "-addext",
+    "subjectAltName=DNS:payer.example.net",
+  ], { stdio: "ignore" });
+  assert.equal(typeof createPayerMcpServer({
+    capabilityDigest: CAPABILITY_DIGEST,
+    host: "127.0.0.1",
+    intakeStore: { writeIntake: async () => undefined },
+    port: 0,
+    publicUrl: "https://payer.example.net:19443/mcp",
+    repositorySha: REPOSITORY_SHA,
+    tlsCertificatePem: await readFile(dnsCertificatePath, "utf8"),
+    tlsPrivateKeyPem: await readFile(dnsPrivateKeyPath, "utf8"),
   }).start, "function");
   for (const host of ["2001:0db8::1", "2001:db8:0:0:0:0:0:1", "::0001"]) {
     assert.throws(() => createPayerMcpServer({

@@ -16,9 +16,6 @@ import {
   verify as verifyBytes,
 } from "node:crypto";
 import {
-  isIP,
-} from "node:net";
-import {
   dirname,
   resolve,
 } from "node:path";
@@ -36,6 +33,9 @@ import {
 import {
   canonicalBytes,
 } from "../canonical.mjs";
+import {
+  validatePublicEndpoint,
+} from "../network-endpoint.mjs";
 import {
   parseCoordinationEnrollment,
   verifyCoordinationEnrollment,
@@ -125,8 +125,6 @@ const DECIMAL_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 const PRINTABLE_ASCII_PATTERN = /^[ -~]+$/;
 const BASE64_PATTERN =
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-const RELAY_URL_PATTERN =
-  /^https:\/\/(\[[0-9a-fA-F:.]+\]|[0-9.]+):([0-9]{1,5})$/;
 const ED25519_SPKI_PREFIX = Buffer.from(
   "302a300506032b6570032100",
   "hex",
@@ -312,23 +310,25 @@ function assertReleaseId(value) {
   return value;
 }
 
-function assertRelayUrl(value) {
-  if (typeof value !== "string") {
-    invalid();
+function networkValidationOptions(value) {
+  if (value === undefined) {
+    return Object.freeze({ allowTestAddresses: false });
   }
-  const match = RELAY_URL_PATTERN.exec(value);
-  if (match === null) {
-    invalid();
-  }
-  const host = match[1].startsWith("[")
-    ? match[1].slice(1, -1)
-    : match[1];
-  const port = Number(match[2]);
   if (
-    isIP(host) === 0 ||
-    port < 1 ||
-    port > 65_535
+    !isPlainObject(value) ||
+    Reflect.ownKeys(value).length !== 1 ||
+    Reflect.ownKeys(value)[0] !== "allowTestAddresses" ||
+    typeof value.allowTestAddresses !== "boolean"
   ) {
+    invalid();
+  }
+  return Object.freeze({
+    allowTestAddresses: value.allowTestAddresses,
+  });
+}
+
+function assertRelayUrl(value, options) {
+  if (typeof value !== "string") {
     invalid();
   }
   let parsed;
@@ -337,20 +337,21 @@ function assertRelayUrl(value) {
   } catch {
     invalid();
   }
-  if (
-    parsed.protocol !== "https:" ||
-    parsed.username !== "" ||
-    parsed.password !== "" ||
-    parsed.pathname !== "/" ||
-    parsed.search !== "" ||
-    parsed.hash !== "" ||
-    parsed.origin !== value ||
-    host === "0.0.0.0" ||
-    host === "::"
-  ) {
+  if (parsed.port === "") {
     invalid();
   }
-  return value;
+  try {
+    const endpoint = validatePublicEndpoint(`${value}/`, {
+      allowedPaths: ["/"],
+      allowTestAddresses:
+        networkValidationOptions(options).allowTestAddresses,
+      defaultPort: Number(parsed.port),
+      protocols: ["https:"],
+    });
+    return endpoint.url.slice(0, -1);
+  } catch {
+    invalid();
+  }
 }
 
 function assertCertificateAndFingerprint(
@@ -403,8 +404,9 @@ function assertDecimalMs(value) {
   return number;
 }
 
-export function validateLaunchManifest(value) {
+export function validateLaunchManifest(value, options) {
   try {
+    const endpointOptions = networkValidationOptions(options);
     const role = readDataRole(value);
     const data = readExactData(
       value,
@@ -470,7 +472,7 @@ export function validateLaunchManifest(value) {
       issuedAtMs: data.issuedAtMs,
       operatorKeyId: data.operatorKeyId,
       protocol: data.protocol,
-      relayUrl: assertRelayUrl(data.relayUrl),
+      relayUrl: assertRelayUrl(data.relayUrl, endpointOptions),
       releaseId: assertReleaseId(data.releaseId),
       repositorySha: data.repositorySha,
       role: data.role,
@@ -507,8 +509,9 @@ export function validateLaunchManifest(value) {
   }
 }
 
-export function createLaunchManifest(input) {
+export function createLaunchManifest(input, options) {
   try {
+    const endpointOptions = networkValidationOptions(options);
     if (!isPlainObject(input)) {
       invalid();
     }
@@ -599,7 +602,7 @@ export function createLaunchManifest(input) {
       schema: LAUNCH_MANIFEST_SCHEMA,
       sessionId: data.sessionId,
       tlsCertificatePem: data.tlsCertificatePem,
-    });
+    }, endpointOptions);
     return Object.freeze({
       capabilityDigest: sha256(capability),
       manifest,
@@ -709,7 +712,7 @@ function validateCoordinationIdentity(
   return privateKey;
 }
 
-function assertActiveStateStructure(value) {
+function assertActiveStateStructure(value, options) {
   const role = readDataRole(value);
   const data = readExactData(
     value,
@@ -820,7 +823,7 @@ function assertActiveStateStructure(value) {
     paymentMoved: false,
     protocol: data.protocol,
     receiptBase64: data.receiptBase64,
-    relayUrl: assertRelayUrl(data.relayUrl),
+    relayUrl: assertRelayUrl(data.relayUrl, options),
     releaseId: assertReleaseId(data.releaseId),
     repositorySha: data.repositorySha,
     role: data.role,
@@ -852,10 +855,11 @@ function assertActiveStateStructure(value) {
   });
 }
 
-export async function validateActiveLaunchState(value) {
+export async function validateActiveLaunchState(value, options) {
   try {
+    const endpointOptions = networkValidationOptions(options);
     const { receiptBytes, state } =
-      assertActiveStateStructure(value);
+      assertActiveStateStructure(value, endpointOptions);
     const verifier =
       createReceiptVerifierFromCertificate({
         tlsCertificatePem:
@@ -889,14 +893,16 @@ export async function validateActiveLaunchState(value) {
   }
 }
 
-export async function createActiveLaunchState(input) {
+export async function createActiveLaunchState(input, options) {
   try {
+    const endpointOptions = networkValidationOptions(options);
     const data = readExactData(
       input,
       CREATE_ACTIVE_STATE_KEYS,
     );
     const manifest = validateLaunchManifest(
       data.manifest,
+      endpointOptions,
     );
     if (!Buffer.isBuffer(data.receiptBytes)) {
       invalid();
@@ -998,7 +1004,7 @@ export async function createActiveLaunchState(input) {
       stableBytes(state),
       capability,
     );
-    return await validateActiveLaunchState(state);
+    return await validateActiveLaunchState(state, endpointOptions);
   } catch (error) {
     if (error instanceof LaunchManifestError) {
       throw error;
@@ -1195,6 +1201,7 @@ async function assertUnchangedParent(
 export async function readLaunchManifest(
   path,
   dependencies,
+  options,
 ) {
   let handle;
   let parent;
@@ -1277,7 +1284,10 @@ export async function readLaunchManifest(
       }
       invalid();
     }
-    manifest = validateLaunchManifest(parsed);
+    manifest = validateLaunchManifest(
+      parsed,
+      options,
+    );
   } catch (error) {
     failure =
       error instanceof LaunchManifestError
@@ -1312,6 +1322,7 @@ export async function writeLaunchManifest(
   path,
   value,
   dependencies,
+  options,
 ) {
   let fileHandle;
   let parent;
@@ -1323,7 +1334,10 @@ export async function writeLaunchManifest(
   try {
     fileSystem = readFileSystem(dependencies);
     const normalizedPath = normalizePath(path);
-    const manifest = validateLaunchManifest(value);
+    const manifest = validateLaunchManifest(
+      value,
+      options,
+    );
     const bytes = stableBytes(manifest);
     if (
       bytes.length === 0 ||

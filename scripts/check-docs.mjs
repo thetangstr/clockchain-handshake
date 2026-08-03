@@ -35,6 +35,9 @@ const BILATERAL_COMPATIBILITY_DOCUMENTS = Object.freeze([
 const BILATERAL_SUPPORTING_DOCUMENTS = Object.freeze([
   "docs/runbooks/payer-mcp-external-relay.md",
 ]);
+const HYBRID_LOCAL_DOCUMENTS = Object.freeze([
+  "docs/runbooks/hybrid-local-stakeholder-demo.md",
+]);
 const SUPPORTING_DOCUMENTS = Object.freeze([
   "invites/README.md",
 ]);
@@ -87,6 +90,10 @@ const REQUIRED_LINKS = Object.freeze({
     "https://clockchain-research.vercel.app/handshake/run",
   ]),
   "docs/runbooks/payer-mcp-external-relay.md": Object.freeze([]),
+  "docs/runbooks/hybrid-local-stakeholder-demo.md": Object.freeze([
+    "../../README.md",
+    "https://clockchain-research.vercel.app/handshake/run",
+  ]),
 });
 const FAILURE_CODE_DOCUMENT = "DEMO.md";
 const FAILURE_CODE_ROW_PATTERN =
@@ -227,6 +234,12 @@ const CANONICAL_SAFETY_SECTIONS = Object.freeze({
     }),
   ]),
   "docs/runbooks/bilateral-demo-live-handoff.md": Object.freeze([
+    Object.freeze({
+      label: "bilateral safety summary",
+      text: BILATERAL_SAFETY_SECTION,
+    }),
+  ]),
+  "docs/runbooks/hybrid-local-stakeholder-demo.md": Object.freeze([
     Object.freeze({
       label: "bilateral safety summary",
       text: BILATERAL_SAFETY_SECTION,
@@ -405,8 +418,10 @@ const VERIFIER_COMMAND = `node scripts/verify-bilateral-results.mjs \\
   --clockchain-token-file "$OPERATOR_CLOCKCHAIN_TOKEN_FILE" \\
   --descriptor "$BILATERAL_DESCRIPTOR_FILE" \\
   --output "$VERDICT_OUTPUT_DIR" \\
+  --payer-mandate "$PAYER_MANDATE_FILE" \\
   --payer-results "$PAYER_TRANSFERRED_RESULT_DIR" \\
   --payee-results "$REQUESTOR_TRANSFERRED_RESULT_DIR" \\
+  --payment-request "$PAYMENT_REQUEST_FILE" \\
   --rpc-url "$SEPOLIA_RPC_URL"`;
 const FUNDING_COMMAND = `npm run bilateral:fund -- \\
   --funding-record "$FUNDING_RECORD_FILE" \\
@@ -416,6 +431,7 @@ const FUNDING_COMMAND = `npm run bilateral:fund -- \\
 const FUNDING_JOURNAL_PREP_COMMAND =
   'install -d -m 0700 "$FUNDING_JOURNAL_DIR"';
 const RELAY_COMMAND = `npm run bilateral:relay -- \\
+  --advertised-host "$RELAY_ADVERTISED_IP" \\
   --host "\${RELAY_LISTEN_HOST:-$RELAY_ADVERTISED_IP}" \\
   --port "$RELAY_PORT" \\
   --repository-sha "$BILATERAL_REPOSITORY_SHA" \\
@@ -440,15 +456,14 @@ const PAYER_SUPERVISOR_COMMAND = `npm run bilateral:supervisor -- \\
   --payer-mcp-host "$PAYER_MCP_HOST" \\
   --payer-mcp-port "$PAYER_MCP_PORT" \\
   --payer-mcp-public-url "$PAYER_MCP_PUBLIC_URL" \\
+  --payer-mcp-bootstrap-broker-url "$PAYER_MCP_BOOTSTRAP_BROKER_URL" \\
+  --payer-mcp-bootstrap-broker-capability-file "$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" \\
   --payer-mcp-tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \\
   --payer-mcp-tls-private-key "$PAYER_MCP_TLS_PRIVATE_KEY"`;
 const REQUESTOR_REQUEST_PAYMENT_COMMAND = `npm run bilateral:request-payment -- \\
-  --launch-manifest "$REQUESTOR_LAUNCH_MANIFEST" \\
+  --discovery-url "$REQUESTOR_DISCOVERY_URL" \\
   --intake-request-id "$REQUESTOR_INTAKE_REQUEST_ID" \\
-  --mcp-url "$PAYER_MCP_URL" \\
-  --state "$REQUESTOR_SUPERVISOR_STATE" \\
-  --tls-certificate "$PAYER_MCP_TLS_CERTIFICATE" \\
-  --tls-fingerprint "$PAYER_MCP_TLS_FINGERPRINT"`;
+  --state "$REQUESTOR_SUPERVISOR_STATE"`;
 const PAYER_TERMINAL_ROLE_JSON =
   /\{"paymentMoved":false,"role":"payer","state":"ACKNOWLEDGED","status":"PARTY_COMPLETE"\}/;
 const REQUESTOR_TERMINAL_ROLE_JSON =
@@ -561,6 +576,20 @@ function bilateralContractFailures(relativePath, contents) {
       `${relativePath}: must not claim the operator privately sets Requestor-derived or received MCP request inputs.`,
     );
   }
+  if (relativePath === "prompts/run-requestor-bilateral-demo.md") {
+    for (const [label, pattern] of [
+      ["legacy launch-manifest flag", /--launch-manifest\b/],
+      ["legacy MCP URL flag", /--mcp-url\b/],
+      ["legacy TLS certificate flag", /--tls-certificate\b/],
+      ["legacy TLS fingerprint flag", /--tls-fingerprint\b/],
+      ["legacy Requestor launch manifest variable", /REQUESTOR_LAUNCH_MANIFEST/],
+      ["legacy Payer MCP TLS variable", /PAYER_MCP_TLS_/],
+      ["attachment instruction", /\battach(?:ing)?\s+(?:a\s+)?(?:file|manifest|certificate)|\battachment(?:s)?\b/i],
+      ["manual second prompt", /\bsecond prompt\b/i],
+    ]) {
+      if (pattern.test(contents)) failures.push(`${relativePath}: contains ${label}.`);
+    }
+  }
   for (const { label, pattern } of BILATERAL_COMMON_REQUIREMENTS) {
     if (!pattern.test(contents)) {
       failures.push(
@@ -585,9 +614,9 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact request-payment command",
-        /npm run bilateral:request-payment -- \\\n  --launch-manifest "\$REQUESTOR_LAUNCH_MANIFEST" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --mcp-url "\$PAYER_MCP_URL" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE" \\\n  --tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --tls-fingerprint "\$PAYER_MCP_TLS_FINGERPRINT"/,
+        /npm run bilateral:request-payment -- \\\n  --discovery-url "\$REQUESTOR_DISCOVERY_URL" \\\n  --intake-request-id "\$REQUESTOR_INTAKE_REQUEST_ID" \\\n  --state "\$REQUESTOR_SUPERVISOR_STATE"/,
       ],
-      ["no direct supervisor startup", /\bDo not start `npm run bilateral:supervisor` directly\b/i],
+      ["no direct supervisor startup", /\bDo not start\s+`npm run bilateral:supervisor`\s+directly\b/i],
       ["HANDSHAKE_REQUIRED gate", /\bHANDSHAKE_REQUIRED\b[\s\S]*\bwrapper\b[\s\S]*\bstarts the Requestor\s+supervisor\b/i],
       ["two-run supervisor lifetime", /\bstays alive\b[^.]*\bboth runs\b/i],
       ["closed command policy", /\bmust not improvise commands\b/i],
@@ -618,12 +647,12 @@ function bilateralContractFailures(relativePath, contents) {
         /\bclean detached checkout\b[^.]*\breviewed 40-character SHA\b/i,
       ],
       [
-        "60-minute launch manifests",
-        /\blaunch manifest expires after 60 minutes\b/i,
+        "time-bounded bootstrap material",
+        /\bBootstrap material is time bounded\b/i,
       ],
       [
-        "TLS certificate fingerprint pin",
-        /\bTLS certificate fingerprint\b[\s\S]{0,160}\bpins that fingerprint\b/i,
+        "coordination TLS identity pin",
+        /\bcoordination\s+relay TLS identity\b[\s\S]{0,160}\bpins that binding\b/i,
       ],
       [
         "neutral private input ownership",
@@ -653,12 +682,12 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact supervisor command",
-        /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/,
+        /npm run bilateral:supervisor -- \\\n  --launch-manifest "\$PAYER_LAUNCH_MANIFEST" \\\n  --state "\$PAYER_SUPERVISOR_STATE" \\\n  --payer-mcp-host "\$PAYER_MCP_HOST" \\\n  --payer-mcp-port "\$PAYER_MCP_PORT" \\\n  --payer-mcp-public-url "\$PAYER_MCP_PUBLIC_URL" \\\n  --payer-mcp-bootstrap-broker-url "\$PAYER_MCP_BOOTSTRAP_BROKER_URL" \\\n  --payer-mcp-bootstrap-broker-capability-file "\$PAYER_MCP_BOOTSTRAP_BROKER_CAPABILITY_FILE" \\\n  --payer-mcp-tls-certificate "\$PAYER_MCP_TLS_CERTIFICATE" \\\n  --payer-mcp-tls-private-key "\$PAYER_MCP_TLS_PRIVATE_KEY"/,
       ],
       ["PAYER_MCP_READY gate", /\bPAYER_MCP_READY\b/],
       [
         "safe public MCP handoff",
-        /\bshare only the public MCP URL,\s+public TLS certificate, and lowercase 64-hex certificate fingerprint\b/i,
+        /\bRequestor receives only\b[\s\S]{0,160}\bsigned discovery URL\b/i,
       ],
       ["two-run supervisor lifetime", /\bstays alive\b[^.]*\bboth runs\b/i],
       ["closed command policy", /\bmust not improvise commands\b/i],
@@ -726,7 +755,11 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact startup order",
-        /\brelay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+        /\brelay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+      ],
+      [
+        "requestor discovery publisher command",
+        /\bnpm --silent run bilateral:publish-requestor-discovery --/,
       ],
       [
         "Payer-owned MCP only",
@@ -793,7 +826,11 @@ function bilateralContractFailures(relativePath, contents) {
         /\bRELAY_LISTEN_HOST=0\.0\.0\.0\b[^.\n]*\ball-interface bind\b/i,
       ],
       [
-        "advertised relay bind default",
+        "advertised relay host",
+        /--advertised-host "\$RELAY_ADVERTISED_IP"/,
+      ],
+      [
+        "relay bind default",
         /--host "\$\{RELAY_LISTEN_HOST:-\$RELAY_ADVERTISED_IP\}"/,
       ],
       [
@@ -845,12 +882,12 @@ function bilateralContractFailures(relativePath, contents) {
         /\bpayer\.launch\.json\b[^.\n]*\bonly to Payer\b/i,
       ],
       [
-        "private launch manifest delivery",
-        /\bpayee\.launch\.json\b[^.\n]*\bonly to Requestor\b/i,
+        "signed discovery only Requestor",
+        /\bRequestor receives only\b[^.\n]*\bsigned discovery\s+URL\b/i,
       ],
       [
-        "60-minute launch manifests",
-        /\blaunch manifests expire after 60 minutes\b/i,
+        "time-bounded private launch material",
+        /\bPrivate launch material expires after 60 minutes\b/i,
       ],
       [
         "funding record capture",
@@ -1006,7 +1043,11 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact startup order",
-        /\brelay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+        /\brelay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+      ],
+      [
+        "requestor discovery publisher command",
+        /\bnpm --silent run bilateral:publish-requestor-discovery --/,
       ],
       [
         "Payer-owned MCP only",
@@ -1049,8 +1090,8 @@ function bilateralContractFailures(relativePath, contents) {
         /\bpayer\.launch\.json\b[^.\n]*\bonly Payer\b/i,
       ],
       [
-        "payee manifest only Requestor",
-        /\bpayee\.launch\.json\b[^.\n]*\bonly Requestor\b/i,
+        "signed discovery only Requestor",
+        /\bsigned discovery URL\b[^.\n]*\bRequestor\b/i,
       ],
       [
         "coordinator-owned funding record",
@@ -1170,7 +1211,11 @@ function bilateralContractFailures(relativePath, contents) {
       ],
       [
         "exact startup order",
-        /\brelay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+        /\brelay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP\/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED\b/,
+      ],
+      [
+        "requestor discovery publisher command",
+        /\bnpm --silent run bilateral:publish-requestor-discovery --/,
       ],
       [
         "Payer-owned MCP only",
@@ -1580,7 +1625,7 @@ function readmeRoleplayFailures(contents) {
   }
   if (
     !contents.includes(
-      "relay -> coordinator -> console -> funding readiness -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> Requestor request_payment -> HANDSHAKE_REQUIRED -> Requestor supervisor -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED",
+      "relay -> coordinator -> console -> funding readiness -> production bootstrap broker -> Payer raw-TCP tunnel -> Payer MCP/supervisor -> wait PAYER_MCP_READY -> publish signed discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> wait pending bootstrap claim -> approve exact claim fingerprint -> Requestor supervisor continues -> funding batch when record ready -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> AUTHORIZED",
     )
   ) {
     failures.push(
@@ -1607,6 +1652,28 @@ function readmeRoleplayFailures(contents) {
     );
   }
   if (
+    !/npm run bilateral:request-payment -- --discovery-url <stable signed discovery URL> --intake-request-id <uuidv4> --state <requestor private state>/.test(
+      contents,
+    )
+  ) {
+    failures.push(
+      "README.md: missing exact signed-discovery Requestor command.",
+    );
+  }
+  for (const [label, pattern] of [
+    ["legacy Requestor launch-manifest flag", /npm run bilateral:request-payment[^\n]*--launch-manifest\b/],
+    ["legacy Requestor MCP URL flag", /npm run bilateral:request-payment[^\n]*--mcp-url\b/],
+    ["legacy Requestor TLS certificate flag", /npm run bilateral:request-payment[^\n]*--tls-certificate\b/],
+    ["legacy Requestor TLS fingerprint flag", /npm run bilateral:request-payment[^\n]*--tls-fingerprint\b/],
+  ]) {
+    if (pattern.test(contents)) failures.push(`README.md: contains ${label}.`);
+  }
+  if (!/\bstable signed discovery URL\b[\s\S]{0,240}\bno attachment\b/i.test(contents)) {
+    failures.push(
+      "README.md: missing stable signed discovery URL only/no attachment explanation.",
+    );
+  }
+  if (
     !/\bexactly four\s+`0\.01 Sepolia ETH` allocations\b/i.test(
       contents,
     )
@@ -1614,6 +1681,185 @@ function readmeRoleplayFailures(contents) {
     failures.push(
       "README.md: missing exact four-address Sepolia allocation.",
     );
+  }
+  failures.push(
+    ...bilateralNamingAndMovementFailures(
+      "README.md",
+      contents,
+    ),
+  );
+  return failures;
+}
+
+function awsBilateralContractFailures(
+  relativePath,
+  contents,
+) {
+  const failures = [];
+  const require = (label, pattern) => {
+    if (!pattern.test(contents)) {
+      failures.push(
+        `${relativePath}: missing hosted bilateral ${label}.`,
+      );
+    }
+  };
+  for (const [label, pattern] of [
+    ["reviewed immutable SHA", /reviewed immutable\s+(?:40-character\s+)?(?:repository\s+)?SHA/i],
+    ["exact three-anchor sequence", /PROPOSED[\s\S]*ACCEPTED[\s\S]*ACKNOWLEDGED[\s\S]*fresh (?:aggregate )?verifi/i],
+    ["three independently verifiable anchors", /exactly\s+three\s+independently\s+verifiable\s+Clockchain\s+anchors/i],
+    ["fresh-verifier authority boundary", /only\s+the\s+fresh\s+aggregate\s+verifier/i],
+    ["false payment movement", /paymentMoved:\s?false|paymentMoved:false/],
+  ]) {
+    require(label, pattern);
+  }
+
+  if (relativePath.startsWith("prompts/")) {
+    const payer =
+      relativePath ===
+      "prompts/run-payer-bilateral-demo.md";
+    const role = payer ? "Payer" : "Requestor";
+    const discovery = payer
+      ? "PAYER_DISCOVERY_URL"
+      : "REQUESTOR_DISCOVERY_URL";
+    const state = payer
+      ? "PAYER_STATE_ROOT"
+      : "REQUESTOR_STATE_ROOT";
+    const command = payer
+      ? 'npm run bilateral:payer -- --discovery-url "$PAYER_DISCOVERY_URL" --state "$PAYER_STATE_ROOT"'
+      : 'npm run bilateral:request-payment -- --discovery-url "$REQUESTOR_DISCOVERY_URL" --state "$REQUESTOR_STATE_ROOT"';
+    for (const [label, pattern] of [
+      ["role identity", new RegExp(`You are the ${role}\\b`, "i")],
+      ["pre-private role and SHA check", /before creating or receiving private material/i],
+      ["signed public discovery", new RegExp(`signed public[\\s\\S]*${discovery}`, "i")],
+      ["clean detached checkout", /clean detached checkout/i],
+      ["Node.js 22", /Node\.js 22/i],
+      ["safe install", /npm ci --ignore-scripts/],
+      ["private state root", new RegExp(`${state}[\\s\\S]*(?:XDG_STATE_HOME|LOCALAPPDATA)`, "i")],
+      ["locally installed agents", /locally installed (?:ChatGPT )?Codex[\s\S]*Claude Code[\s\S]*Hermes/i],
+      ["desktop operating systems", /macOS,\s+Windows,\s+or\s+Linux/i],
+      ["web-only exclusion", /web-only (?:ChatGPT|Claude)[^.]*unsupported/i],
+      ["remain attached", /remain attached/i],
+      ["business progress", /business progress/i],
+      ["no role switching", /do not switch roles/i],
+      ["no funding", /do not fund/i],
+      ["no verifier", /do not run\s+(?:the\s+)?(?:fresh\s+)?(?:aggregate\s+)?verifier/i],
+      ["no secret display", /do not (?:open|print|display|paste|share)[^.]*secret/i],
+      ["no authorization claim", /do not claim authorization/i],
+    ]) {
+      require(label, pattern);
+    }
+    if (
+      tokenOccurrences(contents, command).length !== 1
+    ) {
+      failures.push(
+        `${relativePath}: must contain exactly one hosted ${role} command.`,
+      );
+    }
+    for (const [label, pattern] of [
+      ["manual launch manifest", /--launch-manifest\b|_LAUNCH_MANIFEST\b/],
+      ["manual supervisor", /npm run bilateral:supervisor\b/],
+      ["manual SSH", /\bssh\s+-N\b|\bSSH alias\b/i],
+      ["local endpoint", /\blocalhost\b|\b127\.0\.0\.1\b/],
+      ["private attachment", /\battach(?:ment|ed)?\b[^.\n]*(?:manifest|certificate|private|secret)/i],
+    ]) {
+      if (pattern.test(contents)) {
+        failures.push(
+          `${relativePath}: contains obsolete hosted bilateral ${label}.`,
+        );
+      }
+    }
+  } else {
+    for (const [label, pattern] of [
+      ["AWS operator console", /AWS operator console/i],
+      ["Start run action", /\bStart run\b/i],
+      ["Approve Payer action", /\bApprove Payer\b/i],
+      ["Approve Requestor action", /\bApprove Requestor\b/i],
+      ["Fund action", /\bFund\b/i],
+      ["Verify action", /\bVerify\b/i],
+      ["Abort action", /\bAbort\b/i],
+      ["A2A boundary", /A2A is intentionally absent/i],
+      ["Payer MCP guidance", /Payer MCP is the payment-intake\/guidance surface/i],
+      ["authority surfaces", /signed relay events and Clockchain receipts are the authority surfaces/i],
+    ]) {
+      require(label, pattern);
+    }
+    for (const [label, pattern] of [
+      ["Mac terminal", /\bMac terminal\b/i],
+      ["manual manifest", /\bmanual(?:ly)?\b[^.\n]*\bmanifest\b/i],
+      ["certificate attachment", /\bcertificate attachment\b/i],
+      ["SSH alias", /\bSSH alias\b/i],
+      ["localhost monitor", /\blocalhost monitor\b/i],
+    ]) {
+      if (pattern.test(contents)) {
+        failures.push(
+          `${relativePath}: contains obsolete hosted operator ${label}.`,
+        );
+      }
+    }
+  }
+  return failures;
+}
+
+function hybridLocalContractFailures(relativePath, contents) {
+  const failures = [];
+  const require = (label, pattern) => {
+    if (!pattern.test(contents)) {
+      failures.push(`${relativePath}: missing hybrid local ${label}.`);
+    }
+  };
+  for (const [label, pattern] of [
+    ["operator command", /npm run bilateral:local-operator -- \\\n\s+--config \.context\/hybrid-demo\/operator\.json \\\n\s+--state \/absolute\/private\/new-state-root/],
+    ["single Requestor command", /npm run bilateral:request-payment -- \\\n\s+--discovery-url "\$REQUESTOR_DISCOVERY_URL" \\\n\s+--state "\$REQUESTOR_STATE_ROOT"/],
+    ["Yang Payer ownership", /Yang\/Codex runs the real Payer and operator/i],
+    ["installed local agents", /installed (?:ChatGPT )?Codex[\s\S]*Claude Code[\s\S]*Hermes[\s\S]*macOS,\s+Windows,\s+or\s+Linux/i],
+    ["web exclusion", /(?:browser-only|web-only)[\s\S]*(?:not supported|unsupported)/i],
+    ["ordered sequence", /relay -> coordinator -> console -> bootstrap broker -> public edge -> Payer MCP\/supervisor -> PAYER_MCP_READY -> signed Requestor discovery -> Requestor request_payment -> HANDSHAKE_REQUIRED -> bootstrap approval -> funding batch -> PROPOSED -> ACCEPTED -> ACKNOWLEDGED -> fresh verification -> public receipts/i],
+    ["three anchors", /exactly\s+three\s+independently\s+re-verifiable\s+Clockchain\s+anchors/i],
+    ["verifier authority", /only a fresh aggregate verifier may output\s+`AUTHORIZED`/i],
+    ["payment false", /paymentMoved:false|paymentMoved:\s+false/],
+    ["funding replay safety", /funds exactly four fresh addresses with\s+`0\.01 Sepolia ETH` each[\s\S]*replay-safe journal/i],
+    ["monitor history email", /latest\.json[\s\S]*runs\/index\.json[\s\S]*runs\/\{runId\}\.json[\s\S]*verified HTML receipt email/i],
+    ["failure conditions", /missing, duplicate, reordered, expired, malformed, replayed, or mismatched evidence fails closed/i],
+    ["deferred AWS", /AWS stakeholder-Payer hosting is deferred hardening/i],
+  ]) {
+    require(label, pattern);
+  }
+  for (const [label, pattern] of [
+    ["certificate attachment", /\battach(?:ed|ment)?\b[^.\n]*(?:certificate|manifest|token|invitation|capability)/i],
+    ["private path sharing", /\bstakeholder\b[^.\n]*(?:private path|private key|capability|token|manifest|invitation)/i],
+    ["AWS credential sharing", /\bstakeholder\b[^.\n]*AWS credential/i],
+    ["local-only endpoint", /127\.0\.0\.1|localhost/],
+    ["stakeholder Payer prompt", /stakeholder[^.\n]*Payer prompt/i],
+  ]) {
+    if (pattern.test(contents)) {
+      failures.push(`${relativePath}: contains forbidden hybrid local ${label}.`);
+    }
+  }
+  return failures;
+}
+
+function awsReadmeRoleplayFailures(contents) {
+  const failures = [];
+  const requirements = [
+    ["hosted AWS boundary", /bilateral demo is hosted on AWS/i],
+    ["local agent support", /locally installed ChatGPT Codex[\s\S]*Claude Code[\s\S]*Hermes/i],
+    ["web-only exclusion", /web-only agents\s+are\s+unsupported/i],
+    ["Start run action", /\bStart run\b/i],
+    ["Approve Payer action", /\bApprove Payer\b/i],
+    ["Approve Requestor action", /\bApprove Requestor\b/i],
+    ["Fund action", /\bFund\b/i],
+    ["Verify action", /\bVerify\b/i],
+    ["Abort action", /\bAbort\b/i],
+    ["exact three anchors", /exactly\s+three\s+independently\s+verifiable\s+Clockchain\s+anchors/i],
+    ["A2A boundary", /A2A is intentionally absent/i],
+    ["public helper URL", /https:\/\/clockchain-research\.vercel\.app\/handshake\/run/],
+  ];
+  for (const [label, pattern] of requirements) {
+    if (!pattern.test(contents)) {
+      failures.push(
+        `README.md: missing hosted bilateral ${label}.`,
+      );
+    }
   }
   failures.push(
     ...bilateralNamingAndMovementFailures(
@@ -2376,6 +2622,7 @@ export async function checkDocumentation({
     ...BILATERAL_PUBLIC_DOCUMENTS,
     ...BILATERAL_COMPATIBILITY_DOCUMENTS,
     ...BILATERAL_SUPPORTING_DOCUMENTS,
+    ...HYBRID_LOCAL_DOCUMENTS,
   ]) {
     const path = await canonicalRegularFile(
       root,
@@ -2447,7 +2694,7 @@ export async function checkDocumentation({
     }
     if (BILATERAL_PUBLIC_DOCUMENTS.includes(relativePath)) {
       failures.push(
-        ...bilateralContractFailures(relativePath, contents),
+        ...awsBilateralContractFailures(relativePath, contents),
         ...bilateralNamingAndMovementFailures(
           relativePath,
           contents,
@@ -2468,6 +2715,15 @@ export async function checkDocumentation({
     }
     if (BILATERAL_SUPPORTING_DOCUMENTS.includes(relativePath)) {
       failures.push(
+        ...bilateralNamingAndMovementFailures(
+          relativePath,
+          contents,
+        ),
+      );
+    }
+    if (HYBRID_LOCAL_DOCUMENTS.includes(relativePath)) {
+      failures.push(
+        ...hybridLocalContractFailures(relativePath, contents),
         ...bilateralNamingAndMovementFailures(
           relativePath,
           contents,
@@ -2517,7 +2773,7 @@ export async function checkDocumentation({
     failures.push(...promptContractFailures(prompt));
   }
   if (readme !== undefined) {
-    failures.push(...readmeRoleplayFailures(readme));
+    failures.push(...awsReadmeRoleplayFailures(readme));
     const embeddedPrompt = extractReadmePrompt(readme);
     if (embeddedPrompt === null) {
       failures.push(
@@ -2554,6 +2810,7 @@ export async function main({
       BILATERAL_PUBLIC_DOCUMENTS.length +
       BILATERAL_COMPATIBILITY_DOCUMENTS.length +
       BILATERAL_SUPPORTING_DOCUMENTS.length +
+      HYBRID_LOCAL_DOCUMENTS.length +
       SUPPORTING_DOCUMENTS.length
     } gated documents).\n`,
   );

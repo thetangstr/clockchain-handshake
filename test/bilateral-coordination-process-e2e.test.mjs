@@ -13,6 +13,7 @@ import { transitionDigest } from "../src/bilateral/messages.mjs";
 import { sessionKey } from "../src/bilateral/refid.mjs";
 import { createFakeBilateralClockchainHttpClient } from "./helpers/fake-bilateral-clockchain-service.mjs";
 import { COORDINATOR_CLI_FLAGS } from "../src/bilateral/coordination/coordinator-runtime.mjs";
+import { BOOTSTRAP_BROKER_JOURNAL_FILE } from "../src/bilateral/local-mcp/bootstrap-broker.mjs";
 import { decryptInvitation } from "../src/invitation.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -55,6 +56,20 @@ async function within(promise, ms) {
 }
 
 const DIRECT_PROCESS_ROWS = Object.freeze(["relay restart during long poll", "relay crash"]);
+const AWS_TOPOLOGY_CITATIONS = Object.freeze([
+  [
+    "test/aws-control-plane-integration.test.mjs",
+    "runs the deterministic hosted topology through fresh verification",
+  ],
+  [
+    "test/aws-control-plane-restart.test.mjs",
+    "restarts every stateful boundary without replay or regression",
+  ],
+  [
+    "test/aws-control-plane-security.test.mjs",
+    "hostile topology inputs fail closed without public or log leakage",
+  ],
+]);
 const ADVERSARIAL_CITATIONS = Object.freeze([
   ["capability replay", "test/bilateral-coordination-storage.test.mjs", "test", "fails closed on capability expiry, cross-role use, and conflicting replay"],
   ["cross-role capability", "test/bilateral-coordination-storage.test.mjs", "test", "fails closed on capability expiry, cross-role use, and conflicting replay"],
@@ -75,7 +90,7 @@ const ADVERSARIAL_CITATIONS = Object.freeze([
   ["repository change after preflight", "test/bilateral-roles.test.mjs", "test", "default builder fails provenance closed before secrets, clients, or tokens"],
   ["prompt change after preflight", "test/bilateral-roles.test.mjs", "test", "default builder fails provenance closed before secrets, clients, or tokens"],
   ["ambiguous registration write", "test/bilateral-machine-prep.test.mjs", "test", "registration resumes marker publication from matching durable identity bytes without registration rebroadcast"],
-  ["ambiguous Clockchain write", "test/bilateral-operational-e2e.test.mjs", "test", "writer crash recovery is discovery-only after one ambiguous dispatch"],
+  ["ambiguous Clockchain write", "test/bilateral-operational-e2e.test.mjs", "test", "writer crash recovery adopts the landed anchor after one ambiguous dispatch"],
   ["missing protocol anchor", "test/bilateral-operational-e2e.test.mjs", "scenario", "missing proposal anchor"],
   ["duplicate protocol anchor", "test/bilateral-operational-e2e.test.mjs", "scenario", "duplicate proposal anchor"],
   ["reordered protocol anchor", "test/bilateral-operational-e2e.test.mjs", "scenario", "reordered package transitions"],
@@ -314,6 +329,22 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
     join(clone, "test/helpers/bilateral-fixed-clock.mjs"),
   );
   await cp(
+    join(ROOT, "test/helpers/bilateral-relay-child.mjs"),
+    join(clone, "test/helpers/bilateral-relay-child.mjs"),
+  );
+  for (const relative of [
+    "src/bilateral/coordination/client.mjs",
+    "src/bilateral/coordination/coordinator-runtime.mjs",
+    "src/bilateral/coordination/manifest.mjs",
+    "src/bilateral/coordination/supervisor-runtime.mjs",
+    "src/bilateral/local-mcp/bootstrap-broker.mjs",
+  ]) {
+    await cp(
+      join(ROOT, relative),
+      join(clone, relative),
+    );
+  }
+  await cp(
     join(ROOT, "src/bilateral/coordination/artifact.mjs"),
     join(clone, "src/bilateral/coordination/artifact.mjs"),
   );
@@ -336,6 +367,10 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
   await cp(
     join(ROOT, "src/bilateral/runner.mjs"),
     join(clone, "src/bilateral/runner.mjs"),
+  );
+  await cp(
+    join(ROOT, "bin/handshake-request-payment.mjs"),
+    join(clone, "bin/handshake-request-payment.mjs"),
   );
 
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
@@ -393,7 +428,8 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
   const relayState = join(root, "relay-state");
   await mkdir(relayState, { mode: 0o700 });
   const relayArguments = [
-    "bin/handshake-relay.mjs",
+    "test/helpers/bilateral-relay-child.mjs",
+    "--advertised-host", "127.0.0.1",
     "--host", "127.0.0.1",
     "--port", "0",
     "--repository-sha", repositorySha,
@@ -414,16 +450,10 @@ async function createProcessSession(t, { barrier = null, coordinatorFirst = barr
     env: relayEnvironment,
   });
   t.after(() => stop(relay.child));
-  let relayBuffer = "";
-  const relayLine = await new Promise((resolve, reject) => {
-    relay.child.stdout.on("data", (chunk) => {
-      relayBuffer += chunk;
-      const line = relayBuffer.indexOf("\n");
-      if (line >= 0) resolve(relayBuffer.slice(0, line));
-    });
-    relay.child.once("error", reject);
-  });
-  const relayListen = JSON.parse(relayLine);
+  const relayListen = await within(
+    relayReady(relay),
+    5_000,
+  );
 
   const releaseRoot = join(root, "operator-release");
   await mkdir(releaseRoot, { mode: 0o700 });
@@ -615,6 +645,19 @@ test("one long-lived Payer and Requestor span rehearsal and stakeholder with two
     coordinatorReport.mcpMilestones.map(({ stage }) => stage),
     ["PAYER_MCP_READY", "HANDSHAKE_REQUIRED", "REQUESTOR_SUPERVISOR_START"],
   );
+  assert.deepEqual(
+    [
+      coordinatorReport.mcpMilestones[0].stage,
+      coordinatorReport.mcpMilestones[1].stage,
+      payerResult.transitions[0].message.kind === "proposal" ? "PROPOSED" : null,
+      payerResult.transitions[1].message.kind === "acceptance" && payerResult.transitions[1].message.decision === "ACCEPT"
+        ? "ACCEPTED"
+        : null,
+      payerResult.transitions[2].message.outcome,
+      verdict.outcome,
+    ],
+    ["PAYER_MCP_READY", "HANDSHAKE_REQUIRED", "PROPOSED", "ACCEPTED", "ACKNOWLEDGED", "AUTHORIZED"],
+  );
   assert.match(coordinatorReport.release.releaseId, /^release-[0-9a-f]{16}$/);
   assert.equal(coordinatorReport.release.repositorySha, session.repositorySha);
   assert.match(coordinatorReport.release.sessionId, /^[0-9a-f-]{36}$/);
@@ -801,20 +844,36 @@ test("one long-lived Payer and Requestor span rehearsal and stakeholder with two
   assert.equal(payeeStdoutLines.filter((line) => line.state === "ACCEPTED" && line.status !== "PARTY_COMPLETE").length, 2);
   assert.equal(payerCli.state, "ACKNOWLEDGED");
   assert.equal(payeeCli.state, "ACCEPTED");
-  const payerIntakeRecord = JSON.parse(await readFile(join(session.roleRoots.payer, "payer-mcp-intake", `${PAYER_MCP_INTAKE_REQUEST_ID}.json`), "utf8"));
-  assert.deepEqual(await readdir(join(session.roleRoots.payer, "payer-mcp-intake")), [`${PAYER_MCP_INTAKE_REQUEST_ID}.json`]);
   const requestorIntakeResult = JSON.parse(await readFile(join(session.roleRoots.payee, "payer-mcp-handshake-required.json"), "utf8"));
-  assert.equal(payerIntakeRecord.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
-  assert.equal(requestorIntakeResult.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
+  const intakeRequestId = requestorIntakeResult.intakeRequestId;
+  assert.match(intakeRequestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.notEqual(intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
+  const payerIntakeRecord = JSON.parse(await readFile(join(session.roleRoots.payer, "payer-mcp-intake", `${intakeRequestId}.json`), "utf8"));
+  assert.deepEqual(await readdir(join(session.roleRoots.payer, "payer-mcp-intake")), [`${intakeRequestId}.json`]);
+  assert.equal(payerIntakeRecord.intakeRequestId, intakeRequestId);
   assert.equal(payerIntakeRecord.intakeDigest, requestorIntakeResult.intakeDigest);
+  const bootstrapBrokerJournal = JSON.parse(await readFile(join(
+    session.roleRoots.payer,
+    "requestor-bootstrap-broker",
+    BOOTSTRAP_BROKER_JOURNAL_FILE,
+  ), "utf8"));
+  assert.equal(bootstrapBrokerJournal.schema, "clockchain.requestor-bootstrap-broker-journal/v1");
+  assert.equal(bootstrapBrokerJournal.repositorySha, session.repositorySha);
+  const bootstrapBrokerClaims = Object.values(bootstrapBrokerJournal.claims);
+  assert.equal(bootstrapBrokerClaims.length, 1);
+  assert.equal(bootstrapBrokerClaims[0].status, "SEALED");
+  assert.equal(bootstrapBrokerClaims[0].paymentMoved, false);
+  assert.equal(bootstrapBrokerClaims[0].claim.paymentMoved, false);
+  assert.equal(bootstrapBrokerClaims[0].sealedResponse.status, "SEALED");
+  assert.equal(bootstrapBrokerClaims[0].sealedResponse.paymentMoved, false);
   const mandate = JSON.parse(await readFile(join(session.roleRoots.payer, "rehearsal", "payer-mandate.json"), "utf8"));
   const request = JSON.parse(await readFile(join(session.roleRoots.payee, "rehearsal", "payment-request.json"), "utf8"));
   const stakeholderMandate = JSON.parse(await readFile(join(session.roleRoots.payer, "stakeholder", "payer-mandate.json"), "utf8"));
   const stakeholderRequest = JSON.parse(await readFile(join(session.roleRoots.payee, "stakeholder", "payment-request.json"), "utf8"));
-  assert.equal(mandate.mandate.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
-  assert.equal(request.request.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
-  assert.equal(stakeholderMandate.mandate.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
-  assert.equal(stakeholderRequest.request.intakeRequestId, PAYER_MCP_INTAKE_REQUEST_ID);
+  assert.equal(mandate.mandate.intakeRequestId, intakeRequestId);
+  assert.equal(request.request.intakeRequestId, intakeRequestId);
+  assert.equal(stakeholderMandate.mandate.intakeRequestId, intakeRequestId);
+  assert.equal(stakeholderRequest.request.intakeRequestId, intakeRequestId);
   assert.equal(mandate.mandate.intakeDigest, payerIntakeRecord.intakeDigest);
   assert.equal(request.request.intakeDigest, payerIntakeRecord.intakeDigest);
   assert.equal(stakeholderMandate.mandate.intakeDigest, payerIntakeRecord.intakeDigest);
@@ -983,6 +1042,15 @@ test("one long-lived Payer and Requestor span rehearsal and stakeholder with two
   for (const root of Object.values(session.roleRoots)) await assertRoot(root);
   assert.notEqual(session.roleRoots.payer, session.roleRoots.payee);
   const roleConfigurations = [session.configurations.payer, session.configurations.payee];
+  const [payerConfiguration, payeeConfiguration] = await Promise.all(roleConfigurations.map(async (path) => JSON.parse(await readFile(path, "utf8"))));
+  assert.equal(payeeConfiguration.launchManifestPath, null);
+  assert.deepEqual(Object.keys(payeeConfiguration.requestPayment), ["discoveryUrl", "intakeRequestId"]);
+  assert.match(payeeConfiguration.requestPayment.discoveryUrl, /^https:\/\/127\.0\.0\.1:[0-9]+\/requestor-discovery\.json$/);
+  assert.equal(JSON.stringify(payeeConfiguration.requestPayment).includes("launchManifest"), false);
+  assert.equal(JSON.stringify(payeeConfiguration.requestPayment).includes("certificate"), false);
+  assert.equal(JSON.stringify(payeeConfiguration.requestPayment).includes("fingerprint"), false);
+  assert.equal(JSON.stringify(payeeConfiguration.requestPayment).includes("capability"), false);
+  assert.equal(payerConfiguration.payerMcpServer.bootstrapBrokerUrl.startsWith("http://127.0.0.1:"), true);
   const roleTokens = [join(session.roleRoots.payer, "clockchain.token"), join(session.roleRoots.payee, "clockchain.token")];
   const coordinationKeys = [join(session.roleRoots.payer, "payer-coordination.pem"), join(session.roleRoots.payee, "payee-coordination.pem")];
   const preflightKeys = [join(session.roleRoots.payer, "preflight", "preflight.ed25519.pem"), join(session.roleRoots.payee, "preflight", "preflight.ed25519.pem")];
@@ -1160,6 +1228,10 @@ test("relay restart during a pinned long poll fails closed and recovers empty st
   await command("/usr/bin/git", ["init", "--quiet"], { cwd: clone });
   await writeFile(join(clone, ".git/info/exclude"), "node_modules\n");
   await symlink(join(ROOT, "node_modules"), join(clone, "node_modules"));
+  await cp(
+    join(ROOT, "test/helpers/bilateral-relay-child.mjs"),
+    join(clone, "test/helpers/bilateral-relay-child.mjs"),
+  );
   await command("/usr/bin/git", ["add", "--all"], { cwd: clone });
   await command(
     "/usr/bin/git",
@@ -1168,7 +1240,7 @@ test("relay restart during a pinned long poll fails closed and recovers empty st
   );
   const certificate = join(root, "relay-cert.pem");
   const certificateKey = join(root, "relay-key.pem");
-  await command("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", certificateKey, "-out", certificate, "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost", "-days", "1"]);
+  await command("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", certificateKey, "-out", certificate, "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1", "-days", "1"]);
   await chmod(certificateKey, 0o600);
   const ca = await readFile(certificate, "utf8");
   const fingerprint = certificateFingerprint(ca);
@@ -1176,7 +1248,9 @@ test("relay restart during a pinned long poll fails closed and recovers empty st
   await mkdir(state, { mode: 0o700 });
   const port = await availablePort();
   const repositorySha = (await command("/usr/bin/git", ["rev-parse", "HEAD"], { cwd: clone })).stdout.trim();
-  const arguments_ = ["bin/handshake-relay.mjs", "--host", "127.0.0.1", "--port", String(port), "--repository-sha", repositorySha, "--state", state, "--tls-certificate", certificate, "--tls-private-key", certificateKey];
+  await command("/usr/bin/git", ["update-ref", "--no-deref", "HEAD", repositorySha], { cwd: clone });
+  assert.equal((await command("/usr/bin/git", ["status", "--porcelain=v1"], { cwd: clone })).stdout, "");
+  const arguments_ = ["test/helpers/bilateral-relay-child.mjs", "--advertised-host", "127.0.0.1", "--host", "127.0.0.1", "--port", String(port), "--repository-sha", repositorySha, "--state", state, "--tls-certificate", certificate, "--tls-private-key", certificateKey];
   const first = spawned(arguments_, { cwd: clone });
   t.after(() => stop(first.child));
   assert.equal((await relayReady(first)).port, port);
@@ -1279,5 +1353,15 @@ test("adversarial matrix citations name existing focused coverage", async () => 
     const source = await readFile(new URL(`../${file}`, import.meta.url), "utf8");
     const declaration = kind === "test" ? `test(${JSON.stringify(name)}` : `name: ${JSON.stringify(name)}`;
     assert.ok(source.includes(declaration), `${file} must retain exact ${kind} declaration ${name}`);
+  }
+  for (const [file, name] of AWS_TOPOLOGY_CITATIONS) {
+    const source = await readFile(
+      new URL(`../${file}`, import.meta.url),
+      "utf8",
+    );
+    assert.ok(
+      source.includes(`test(${JSON.stringify(name)}`),
+      `${file} must retain the AWS topology test ${name}`,
+    );
   }
 });

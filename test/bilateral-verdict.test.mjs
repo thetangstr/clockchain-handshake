@@ -2234,6 +2234,101 @@ test("pins the exact verifier CLI and publishes a hashed completion marker befor
   });
 });
 
+test("runs a fresh-task publication gate after the durable verdict marker and before authorizing stdout", async (t) => {
+  const fixture = await completeFixture(t);
+  const output = join(
+    fixture.root,
+    "fresh-task-publication-gate",
+  );
+  const stdout = captureStream();
+  const order = [];
+  const arguments_ = [
+    "--clockchain-token-file",
+    "clockchain.token",
+    "--descriptor",
+    "descriptor.json",
+    "--output",
+    output,
+    "--payer-mandate",
+    "payer-mandate.json",
+    "--payee-results",
+    fixture.payeeDirectory,
+    "--payer-results",
+    fixture.payerDirectory,
+    "--payment-request",
+    "payment-request.json",
+    "--rpc-url",
+    "https://rpc.example",
+  ];
+  const exitCode = await runVerifierCli(arguments_, {
+    async beforeAuthorizationOutput(value) {
+      assert.equal(value.output, output);
+      assert.equal(value.verdict.paymentMoved, false);
+      assert.equal(
+        await readFile(
+          join(
+            output,
+            ".bilateral-verdict.complete.json",
+          ),
+          "utf8",
+        ).then((bytes) => bytes.length > 0),
+        true,
+      );
+      assert.equal(stdout.value, "");
+      order.push("gate");
+    },
+    async buildVerifierInput() {
+      return fixture.input;
+    },
+    stderr: captureStream(),
+    stdout: {
+      write(value) {
+        order.push("stdout");
+        stdout.write(value);
+      },
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.deepEqual(order, ["gate", "stdout"]);
+  assert.equal(stdout.value, "AUTHORIZED\n");
+
+  const rejectedOutput = join(
+    fixture.root,
+    "fresh-task-publication-rejected",
+  );
+  const rejectedStdout = captureStream();
+  assert.equal(
+    await runVerifierCli(
+      arguments_.map((value) =>
+        value === output ? rejectedOutput : value),
+      {
+        async beforeAuthorizationOutput() {
+          throw new Error("publication rejected");
+        },
+        async buildVerifierInput() {
+          return fixture.input;
+        },
+        stderr: captureStream(),
+        stdout: rejectedStdout,
+      },
+    ),
+    1,
+  );
+  assert.equal(
+    rejectedStdout.value.includes("AUTHORIZED"),
+    false,
+  );
+  await assert.rejects(
+    lstat(
+      join(
+        rejectedOutput,
+        ".bilateral-verdict.complete.json",
+      ),
+    ),
+    { code: "ENOENT" },
+  );
+});
+
 function publicationFileSystem(trace, failAfter) {
   let step = 0;
   async function observed(label, operation) {

@@ -6,12 +6,16 @@ import {
   X509Certificate,
 } from "node:crypto";
 import https from "node:https";
-import { isIP } from "node:net";
 import { checkServerIdentity } from "node:tls";
 
 import { canonicalizeReceiptEventValue } from "../../canonical.mjs";
 import { canonicalBytes } from "../canonical.mjs";
 import { KEY_ID_PATTERN } from "../descriptor.mjs";
+import {
+  createResolvedLookup,
+  resolvePublicEndpoint,
+  validatePublicEndpoint,
+} from "../network-endpoint.mjs";
 import { validateRelayArtifact } from "./artifact.mjs";
 import {
   createCapabilityRegistration,
@@ -263,12 +267,22 @@ function assertRequestTiming(value) {
   return Object.freeze(data);
 }
 
-function createPinnedOperatorHttpsTransportInternal(input, timing) {
+function createPinnedOperatorHttpsTransportInternal(input, timing, options = Object.freeze({ allowTestAddresses: false, lookup: undefined })) {
   const data = exact(input, ["expectedFingerprint", "relayUrl", "tlsCertificatePem"]);
   if (typeof data.expectedFingerprint !== "string" || !SHA256_PATTERN.test(data.expectedFingerprint) || typeof data.tlsCertificatePem !== "string" || data.tlsCertificatePem.length === 0) invalid();
-  let endpoint;
-  try { endpoint = new URL(data.relayUrl); } catch { invalid(); }
-  if (endpoint.protocol !== "https:" || endpoint.username !== "" || endpoint.password !== "" || endpoint.pathname !== "/" || endpoint.search !== "" || endpoint.hash !== "" || !isIP(endpoint.hostname) || endpoint.port === "" || Number(endpoint.port) > 65_535 || endpoint.origin !== data.relayUrl) invalid();
+  const transportOptions = exact(options, ["allowTestAddresses", "lookup"]);
+  if (typeof transportOptions.allowTestAddresses !== "boolean" || (transportOptions.lookup !== undefined && typeof transportOptions.lookup !== "function")) invalid();
+  let parsed; let endpoint;
+  try {
+    parsed = new URL(data.relayUrl);
+    if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "" || parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "" || parsed.port === "" || Number(parsed.port) > 65_535 || parsed.origin !== data.relayUrl) invalid();
+    endpoint = validatePublicEndpoint(`${data.relayUrl}/`, {
+      allowedPaths: ["/"],
+      allowTestAddresses: transportOptions.allowTestAddresses,
+      defaultPort: Number(parsed.port),
+      protocols: ["https:"],
+    });
+  } catch { invalid(); }
   const expected = Buffer.from(data.expectedFingerprint, "hex");
   try {
     const certificateFingerprint = createHash("sha256").update(new X509Certificate(data.tlsCertificatePem).raw).digest();
@@ -278,12 +292,25 @@ function createPinnedOperatorHttpsTransportInternal(input, timing) {
     async request(value) {
       const request = assertOperatorRoute(value);
       if (request.signal?.aborted) throw new OperatorRelayClientError("COORDINATION_CLIENT_ABORTED");
+      let resolvedEndpoint;
+      try {
+        resolvedEndpoint = await resolvePublicEndpoint(
+          endpoint,
+          {
+            allowTestAddresses: transportOptions.allowTestAddresses,
+            ...(transportOptions.lookup === undefined ? {} : { lookup: transportOptions.lookup }),
+          },
+        );
+      } catch { invalid(); }
+      const pinnedLookup = createResolvedLookup(resolvedEndpoint, {
+        allowTestAddresses: transportOptions.allowTestAddresses,
+      });
       return new Promise((resolve, reject) => {
         let settled = false; let secure = false; let response; let connectTimer; let headerTimer; let bodyTimer; let totalTimer; let handle;
         const clearTimers = () => { clearTimeout(connectTimer); clearTimeout(headerTimer); clearTimeout(bodyTimer); clearTimeout(totalTimer); };
         const fail = (error) => { if (settled) return; settled = true; clearTimers(); response?.destroy(); handle?.destroy(); reject(error); };
         const finish = (answer) => { if (settled) return; settled = true; clearTimers(); resolve(answer); };
-        const headers = { host: endpoint.host };
+        const headers = { host: parsed.host };
         if (request.body !== null) { headers["content-length"] = String(request.body.length); headers["content-type"] = request.method === "PUT" ? "application/octet-stream" : "application/json"; }
         if (request.method === "PUT") headers["x-clockchain-artifact-type"] = request.artifactType;
         totalTimer = setTimeout(() => fail(new OperatorRelayClientError("COORDINATION_TRANSPORT_AMBIGUOUS")), timing.totalMs);
@@ -293,7 +320,7 @@ function createPinnedOperatorHttpsTransportInternal(input, timing) {
           if (normal !== undefined || !Buffer.isBuffer(certificate?.raw)) return new Error("Pinned TLS identity verification failed.");
           const actual = createHash("sha256").update(certificate.raw).digest();
           return actual.length === expected.length && timingSafeEqual(actual, expected) ? undefined : new Error("Pinned TLS identity verification failed.");
-        }, headers, hostname: endpoint.hostname, method: request.method, path: request.path, port: Number(endpoint.port), rejectUnauthorized: true }, (incoming) => {
+        }, headers, hostname: endpoint.hostname, lookup: pinnedLookup, method: request.method, path: request.path, port: endpoint.port, rejectUnauthorized: true }, (incoming) => {
           response = incoming;
           clearTimeout(headerTimer);
           const contentLengths = rawHeaderValues(incoming.rawHeaders, "content-length");
@@ -330,8 +357,15 @@ export function createPinnedOperatorHttpsTransport(input) {
 }
 
 export function createPinnedOperatorHttpsTransportForTesting(input) {
-  const data = exact(input, ["expectedFingerprint", "relayUrl", "requestTiming", "tlsCertificatePem"]);
-  return createPinnedOperatorHttpsTransportInternal({ expectedFingerprint: data.expectedFingerprint, relayUrl: data.relayUrl, tlsCertificatePem: data.tlsCertificatePem }, assertRequestTiming(data.requestTiming));
+  if (!isPlainObject(input)) invalid();
+  const keys = Reflect.ownKeys(input);
+  if (!keys.includes("expectedFingerprint") || !keys.includes("relayUrl") || !keys.includes("requestTiming") || !keys.includes("tlsCertificatePem") || keys.some((key) => typeof key !== "string" || !["expectedFingerprint", "lookup", "relayUrl", "requestTiming", "tlsCertificatePem"].includes(key))) invalid();
+  const data = exact(input, keys);
+  return createPinnedOperatorHttpsTransportInternal(
+    { expectedFingerprint: data.expectedFingerprint, relayUrl: data.relayUrl, tlsCertificatePem: data.tlsCertificatePem },
+    assertRequestTiming(data.requestTiming),
+    { allowTestAddresses: true, lookup: data.lookup },
+  );
 }
 
 export function createOperatorRelayClient(input) {
@@ -341,6 +375,11 @@ export function createOperatorRelayClient(input) {
   const transport = exact(data.transport, ["request"]);
   if (typeof transport.request !== "function") invalid();
   let appendQueue = Promise.resolve();
+  const requestSignal = (signal) => {
+    if (signal === undefined) return Object.freeze({});
+    assertSignal(signal);
+    return Object.freeze({ signal });
+  };
   const request = async (value, contentType) => {
     const canonical = assertOperatorRoute(value);
     let response;
@@ -348,11 +387,17 @@ export function createOperatorRelayClient(input) {
     return exactResponse(response, contentType);
   };
   const readEvents = async (value) => {
-    const inputValue = exact(value, ["after", "waitMs"]);
+    const inputValue = exact(
+      value,
+      isPlainObject(value) && Object.hasOwn(value, "signal")
+        ? ["after", "signal", "waitMs"]
+        : ["after", "waitMs"],
+    );
     if (inputValue.after !== null || !Number.isSafeInteger(inputValue.waitMs) || inputValue.waitMs < 0 || inputValue.waitMs > 30_000) invalid();
-    const enrollmentBytes = await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/enrollments` }, "application/json");
+    const signal = requestSignal(inputValue.signal);
+    const enrollmentBytes = await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/enrollments`, ...signal }, "application/json");
     const roleKeys = validateEnrollmentBytes(enrollmentBytes, context);
-    const parsed = canonicalJson(await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/events?waitMs=${inputValue.waitMs}` }, "application/json"));
+    const parsed = canonicalJson(await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/events?waitMs=${inputValue.waitMs}`, ...signal }, "application/json"));
     if (!Array.isArray(parsed) || parsed.length > 4096 || Reflect.ownKeys(parsed).length !== parsed.length + 1) invalid();
     const events = parsed.map((event) => validateEvent(event, context, identity, roleKeys));
     validateSenderChains(events);
@@ -421,8 +466,10 @@ export function createOperatorRelayClient(input) {
     },
     readEvents,
     async readSessionView(value) {
-      if (value !== undefined) invalid();
-      const view = exact(canonicalJson(await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/view` }, "application/json")), VIEW_KEYS);
+      const signal = value === undefined
+        ? requestSignal(undefined)
+        : requestSignal(exact(value, ["signal"]).signal);
+      const view = exact(canonicalJson(await request({ body: null, method: "GET", path: `/v1/sessions/${context.sessionId}/view`, ...signal }, "application/json")), VIEW_KEYS);
       if (view.paymentMoved !== false || view.releaseId !== context.releaseId || view.repositorySha !== context.repositorySha || view.sessionId !== context.sessionId || !RELEASE_STATES.includes(view.state)) invalid();
       const template = initialReleaseView(context);
       // The view is advisory, but still must be a closed, non-secret shape.

@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createFundingInputVerifier, createGitInspector, createPrivateRoot, createPrivateSupervisorStateStore, createProductionSupervisorDependencies, createSupervisorLauncher, createSupervisorStatusLine, createVerifierPublicationVerifier, scanSupervisorCheckpointDirectories } from "../src/bilateral/coordination/supervisor-runtime.mjs";
+import { SUPERVISOR_FUNDING_DEADLINE_MS, createFundingInputVerifier, createGitInspector, createPrivateRoot, createPrivateSupervisorStateStore, createProductionSupervisorDependencies, createSupervisorLauncher, createSupervisorStatusLine, createVerifierPublicationVerifier, scanSupervisorCheckpointDirectories } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { verifyRepositoryState } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { ensureToken } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { ensureInvitations } from "../src/bilateral/coordination/supervisor-runtime.mjs";
@@ -194,6 +194,10 @@ test("projects supervisor status lines through an exact secret-free allowlist", 
     '{"paymentMoved":false,"role":"payer","state":"ACKNOWLEDGED","status":"PARTY_COMPLETE"}\n',
   );
   assert.equal(
+    createSupervisorStatusLine({ paymentMoved: false, role: "payer", state: "PROPOSED", status: "PARTY_PROGRESS" }),
+    '{"paymentMoved":false,"role":"payer","state":"PROPOSED","status":"PARTY_PROGRESS"}\n',
+  );
+  assert.equal(
     createSupervisorStatusLine({ paymentMoved: false, role: "payee", state: "ACCEPTED", status: "PARTY_COMPLETE" }),
     '{"paymentMoved":false,"role":"payee","state":"ACCEPTED","status":"PARTY_COMPLETE"}\n',
   );
@@ -213,6 +217,8 @@ test("projects supervisor status lines through an exact secret-free allowlist", 
   );
   assert.equal(proxyGetCount, 0);
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: true, role: "payer", status: "WAITING_FOR_PEER" }));
+  assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payee", state: "PROPOSED", status: "PARTY_PROGRESS" }));
+  assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payer", state: "ACKNOWLEDGED", status: "PARTY_PROGRESS" }));
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payer", state: "ACCEPTED", status: "PARTY_COMPLETE" }));
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payee", state: "ACKNOWLEDGED", status: "PARTY_COMPLETE" }));
   assert.throws(() => createSupervisorStatusLine({ paymentMoved: false, role: "payer", state: "AUTHORIZED", status: "PARTY_COMPLETE" }));
@@ -253,6 +259,82 @@ test("supervisor CLI emits only the generic coordination failure line", () => {
       return true;
     },
   );
+});
+
+test("supervisor CLI keeps legacy default run mode unless exact explicit mode is supplied", async () => {
+  const baseArguments = [
+    "--launch-manifest",
+    "/private/launch.json",
+    "--state",
+    "/private/state",
+  ];
+  const calls = [];
+  await supervisorMain(baseArguments, {
+    async runSupervisor(input) {
+      calls.push(input);
+      return { paymentMoved: false };
+    },
+  });
+  assert.equal(Object.hasOwn(calls[0], "runMode"), false);
+
+  await supervisorMain([
+    ...baseArguments,
+    "--run-mode",
+    "aws-stakeholder-only",
+  ], {
+    async runSupervisor(input) {
+      calls.push(input);
+      return { paymentMoved: false };
+    },
+  });
+  assert.equal(calls[1].runMode, "aws-stakeholder-only");
+
+  await supervisorMain([
+    ...baseArguments,
+    "--run-mode",
+    "local-two-run",
+  ], {
+    async runSupervisor(input) {
+      calls.push(input);
+      return { paymentMoved: false };
+    },
+  });
+  assert.equal(calls[2].runMode, "local-two-run");
+});
+
+test("supervisor CLI rejects unsupported or duplicate run mode before production setup", async () => {
+  for (const arguments_ of [
+    [
+      "--launch-manifest",
+      "/private/launch.json",
+      "--state",
+      "/private/state",
+      "--run-mode",
+      "aws",
+    ],
+    [
+      "--launch-manifest",
+      "/private/launch.json",
+      "--state",
+      "/private/state",
+      "--run-mode",
+      "aws-stakeholder-only",
+      "--run-mode",
+      "aws-stakeholder-only",
+    ],
+  ]) {
+    await assert.rejects(
+      supervisorMain(arguments_, {
+        async createProductionSupervisorDependencies() {
+          assert.fail("invalid run mode reached production setup");
+        },
+        async runSupervisor() {
+          assert.fail("invalid run mode reached supervisor launch");
+        },
+      }),
+      /Supervisor startup failed safely/,
+    );
+  }
 });
 
 test("production supervisor verifies valid enrollment receipts and binds each descriptor to its derived run session", async (t) => {
@@ -314,7 +396,7 @@ test("production supervisor verifies valid enrollment receipts and binds each de
     nowMs: 0,
     operatorKeyId,
     randomBytes: () => Buffer.alloc(32, 7),
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://8.8.8.8:8443",
     releaseId,
     repositorySha,
     role: "payer",
@@ -599,7 +681,7 @@ test("checkpoint scanning accepts one valid Payer intake directory and rejects t
     nowMs: 0,
     operatorKeyId: "operator",
     randomBytes: () => Buffer.alloc(32, 7),
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://8.8.8.8:8443",
     releaseId: "release-intake",
     repositorySha: "a".repeat(40),
     role: "payer",
@@ -675,7 +757,7 @@ test("Requestor production dependencies do not expose Payer intake methods and r
     nowMs: 0,
     operatorKeyId: "operator",
     randomBytes: () => Buffer.alloc(32, 7),
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://8.8.8.8:8443",
     releaseId: "release-payee-intake",
     repositorySha,
     role: "payee",
@@ -757,7 +839,7 @@ test("production dependencies construct the local MCP server only for the Payer 
     nowMs: 0,
     operatorKeyId: "operator",
     randomBytes: () => Buffer.alloc(32, 7),
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://8.8.8.8:8443",
     releaseId: "release-mcp-server",
     repositorySha,
     role: "payer",
@@ -850,7 +932,7 @@ test("production dependencies construct the local MCP server only for the Payer 
     nowMs: 0,
     operatorKeyId: "operator",
     randomBytes: () => Buffer.alloc(32, 8),
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://8.8.8.8:8443",
     releaseId: "release-mcp-server",
     repositorySha,
     role: "payee",
@@ -911,7 +993,7 @@ test("supervisor CLI accepts four Payer MCP path options plus an optional public
     nowMs: 0,
     operatorKeyId: "operator",
     randomBytes: () => Buffer.alloc(32, 9),
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://8.8.8.8:8443",
     releaseId: "release-mcp-cli",
     repositorySha,
     role: "payer",
@@ -978,6 +1060,122 @@ test("supervisor CLI accepts four Payer MCP path options plus an optional public
     },
   });
   assert.equal(externalSeen[0].payerMcpServerOptions.publicUrl, "https://203.0.113.10:19443/mcp");
+  const brokerCapabilityPath = join(root, "bootstrap-broker.capability");
+  await writeFile(brokerCapabilityPath, `${"12".repeat(32)}\n`, { mode: 0o600 });
+  await chmod(brokerCapabilityPath, 0o600);
+  const bootstrapSeen = [];
+  await supervisorMain([
+    "--launch-manifest", payerManifestPath,
+    "--state", root,
+    "--payer-mcp-host", "127.0.0.1",
+    "--payer-mcp-port", "9443",
+    "--payer-mcp-public-url", "https://203.0.113.10:19443/mcp",
+    "--payer-mcp-tls-certificate", certificatePath,
+    "--payer-mcp-tls-private-key", privateKeyPath,
+    "--payer-mcp-bootstrap-broker-url", "http://127.0.0.1:9555",
+    "--payer-mcp-bootstrap-broker-capability-file", brokerCapabilityPath,
+  ], {
+    async createProductionSupervisorDependencies(input) {
+      bootstrapSeen.push(input);
+      return {
+        runSupervisor: async () => ({ paymentMoved: false }),
+      };
+    },
+  });
+  assert.equal(bootstrapSeen[0].payerMcpServerOptions.bootstrapBrokerUrl, "http://127.0.0.1:9555");
+  assert.equal(bootstrapSeen[0].payerMcpServerOptions.bootstrapBrokerCapabilityFile, brokerCapabilityPath);
+  const constructedWithBroker = [];
+  await createProductionSupervisorDependencies({
+    createPayerMcpServer(input) {
+      constructedWithBroker.push(input);
+      return { start: async () => ({ host: input.host, port: input.port, url: `https://${input.host}:${input.port}/mcp` }), stop: async () => undefined };
+    },
+    launchManifestPath: payerManifestPath,
+    payerMcpServerOptions: {
+      bootstrapBrokerCapabilityFile: brokerCapabilityPath,
+      bootstrapBrokerUrl: "http://127.0.0.1:9555",
+      host: "127.0.0.1",
+      port: 9443,
+      tlsCertificatePath: certificatePath,
+      tlsPrivateKeyPath: privateKeyPath,
+    },
+    probe: async () => ({ clean: true, head: repositorySha }),
+    stateRoot: join(root, "broker-runtime"),
+  });
+  assert.equal(typeof constructedWithBroker[0].claimRequestorBootstrap, "function");
+  assert.equal(Object.hasOwn(constructedWithBroker[0], "bootstrapBrokerCapability"), false);
+  assert.equal(Object.hasOwn(constructedWithBroker[0], "bootstrapBrokerCapabilityFile"), false);
+  const publicBrokerClients = [];
+  const loopbackBrokerClients = [];
+  const constructedWithPublicBroker = [];
+  await createProductionSupervisorDependencies({
+    createAwsRequestorBootstrapBrokerClient(input) {
+      publicBrokerClients.push(input);
+      return {
+        claimRequestorBootstrap: async () => ({
+          paymentMoved: false,
+        }),
+      };
+    },
+    createPayerMcpServer(input) {
+      constructedWithPublicBroker.push(input);
+      return {
+        start: async () => ({
+          host: input.host,
+          port: input.port,
+          url: `https://${input.host}:${input.port}/mcp`,
+        }),
+        stop: async () => undefined,
+      };
+    },
+    createRequestorBootstrapBrokerClient(input) {
+      loopbackBrokerClients.push(input);
+      return {
+        claimRequestorBootstrap: async () => ({
+          paymentMoved: false,
+        }),
+      };
+    },
+    launchManifestPath: payerManifestPath,
+    payerMcpServerOptions: {
+      bootstrapBrokerCapabilityFile: brokerCapabilityPath,
+      bootstrapBrokerUrl:
+        "https://bootstrap.example.net/v1/requestor-claims",
+      host: "127.0.0.1",
+      port: 9443,
+      tlsCertificatePath: certificatePath,
+      tlsPrivateKeyPath: privateKeyPath,
+    },
+    probe: async () => ({ clean: true, head: repositorySha }),
+    stateRoot: join(root, "public-broker-runtime"),
+  });
+  assert.equal(publicBrokerClients.length, 1);
+  assert.equal(loopbackBrokerClients.length, 0);
+  assert.equal(
+    publicBrokerClients[0].brokerUrl,
+    "https://bootstrap.example.net/v1/requestor-claims",
+  );
+  assert.equal(
+    typeof constructedWithPublicBroker[0]
+      .claimRequestorBootstrap,
+    "function",
+  );
+  let brokerHalfFactoryCalled = false;
+  await assert.rejects(supervisorMain([
+    "--launch-manifest", payerManifestPath,
+    "--state", root,
+    "--payer-mcp-host", "127.0.0.1",
+    "--payer-mcp-port", "9443",
+    "--payer-mcp-tls-certificate", certificatePath,
+    "--payer-mcp-tls-private-key", privateKeyPath,
+    "--payer-mcp-bootstrap-broker-url", "http://127.0.0.1:9555",
+  ], {
+    async createProductionSupervisorDependencies() {
+      brokerHalfFactoryCalled = true;
+      return {};
+    },
+  }));
+  assert.equal(brokerHalfFactoryCalled, false);
   let publicOnlyFactoryCalled = false;
   await assert.rejects(supervisorMain([
     "--launch-manifest", payerManifestPath,
@@ -1012,7 +1210,7 @@ test("supervisor CLI accepts four Payer MCP path options plus an optional public
     nowMs: 0,
     operatorKeyId: "operator",
     randomBytes: () => Buffer.alloc(32, 10),
-    relayUrl: "https://127.0.0.1:8443",
+    relayUrl: "https://8.8.8.8:8443",
     releaseId: "release-mcp-cli",
     repositorySha,
     role: "payee",
@@ -1088,7 +1286,7 @@ test("production TLS option reader rejects growth and same-size drift before con
       nowMs: 0,
       operatorKeyId: "operator",
       randomBytes: () => Buffer.alloc(32, 11),
-      relayUrl: "https://127.0.0.1:8443",
+      relayUrl: "https://8.8.8.8:8443",
       releaseId: `release-mcp-${candidate}`,
       repositorySha,
       role: "payer",
@@ -1326,7 +1524,11 @@ test("fails closed immediately for invalid funding and at the bounded underfundi
     },
   });
   await assert.rejects(deadlineVerifier(input));
-  assert.deepEqual(sleeps, [300_000, 180_000]);
+  // The run must stop exactly at the bounded deadline: every sleep respects
+  // the poll interval and the cumulative wait equals the deadline.
+  assert.ok(sleeps.length > 1);
+  assert.ok(sleeps.every((milliseconds) => milliseconds <= 300_000));
+  assert.equal(sleeps.reduce((total, milliseconds) => total + milliseconds, 0), SUPERVISOR_FUNDING_DEADLINE_MS);
 });
 
 test("pins Git inspection to a clean frozen repository object despite poisoned environment", async () => {

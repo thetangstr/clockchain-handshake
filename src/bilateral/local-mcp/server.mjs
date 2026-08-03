@@ -1,4 +1,5 @@
 import { createHash, randomBytes as nodeRandomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
+import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 
@@ -7,6 +8,12 @@ import {
   REQUEST_PAYMENT_TOOL_NAME,
   buildPaymentIntakeToolResult,
 } from "./payment-intake.mjs";
+import { canonicalBytes } from "../canonical.mjs";
+import {
+  createResolvedLookup,
+  resolvePublicEndpoint as resolveNetworkEndpoint,
+  validatePublicEndpoint as validateNetworkEndpoint,
+} from "../network-endpoint.mjs";
 
 export const PAYER_MCP_PROTOCOL_VERSION = "2025-11-25";
 
@@ -21,7 +28,10 @@ const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 const CAPABILITY_PATTERN = /^[0-9a-f]{64}$/;
 const JSON_CONTENT_TYPE = "application/json";
 const JSON_ACCEPT = "application/json, text/event-stream";
+const BOOTSTRAP_ACCEPT = "application/json";
 const GENERIC_FAILURE = Object.freeze({ error: "PAYER_MCP_PROTOCOL_FAILED", paymentMoved: false });
+const BOOTSTRAP_FAILURE = Object.freeze({ error: "REQUESTOR_BOOTSTRAP_FAILED", paymentMoved: false });
+const BOOTSTRAP_BROKER_RESPONSE_SCHEMA = "clockchain.requestor-bootstrap-broker-response/v1";
 const PARSER_FAILURE_RESPONSE = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
 const SINGLETON_HEADERS = new Set([
   "accept",
@@ -32,6 +42,15 @@ const SINGLETON_HEADERS = new Set([
   "mcp-protocol-version",
   "mcp-session-id",
 ]);
+const BOOTSTRAP_CLAIM_KEYS = Object.freeze(["claimNonce", "paymentMoved", "repositorySha", "requestorPublicKey"]);
+const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const BASE64URL_32_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const BOOTSTRAP_ENVELOPE_ALGORITHM = "X25519-HKDF-SHA256-AES-256-GCM";
+const BOOTSTRAP_ENVELOPE_SCHEMA = "clockchain.requestor-bootstrap-envelope/v1";
+const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const MAX_BOOTSTRAP_CIPHERTEXT_BYTES = 65_536;
 
 function fail() {
   throw new Error("Payer MCP server failed safely.");
@@ -106,7 +125,7 @@ function validatePem(value) {
   return value;
 }
 
-function validatePublicEndpoint(value, certificatePem) {
+function validatePublicEndpoint(value, certificatePem, allowTestAddresses) {
   if (value === undefined) return null;
   if (typeof value !== "string") fail();
   let url;
@@ -115,24 +134,17 @@ function validatePublicEndpoint(value, certificatePem) {
   } catch {
     fail();
   }
-  if (
-    url.protocol !== "https:" ||
-    url.pathname !== "/mcp" ||
-    url.search !== "" ||
-    url.hash !== "" ||
-    url.username !== "" ||
-    url.password !== "" ||
-    url.port === "" ||
-    net.isIP(url.hostname) === 0 ||
-    url.hostname === "0.0.0.0"
-  ) {
+  if (url.port === "") fail();
+  let endpoint;
+  try {
+    endpoint = validateNetworkEndpoint(value, {
+      allowedPaths: ["/mcp"],
+      allowTestAddresses,
+      defaultPort: Number(url.port),
+      protocols: ["https:"],
+    });
+  } catch {
     fail();
-  }
-  const port = Number(url.port);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535 || String(port) !== url.port) fail();
-  if (net.isIP(url.hostname) === 4) {
-    const octets = url.hostname.split(".");
-    if (octets.length !== 4 || octets.some((octet) => String(Number(octet)) !== octet || Number(octet) > 255)) fail();
   }
   let certificate;
   try {
@@ -140,10 +152,14 @@ function validatePublicEndpoint(value, certificatePem) {
   } catch {
     fail();
   }
-  if (certificate.checkIP(url.hostname) !== url.hostname) fail();
+  const certificateIdentity =
+    net.isIP(endpoint.hostname) === 0
+      ? certificate.checkHost(endpoint.hostname)
+      : certificate.checkIP(endpoint.hostname);
+  if (certificateIdentity !== endpoint.hostname) fail();
   return Object.freeze({
-    authority: hostAuthority(url.hostname, port),
-    url: url.href,
+    authority: hostAuthority(endpoint.hostname, endpoint.port),
+    url: endpoint.url,
   });
 }
 
@@ -167,6 +183,10 @@ function emptyResponse(res, statusCode) {
 
 function protocolFailure(res, statusCode = 400) {
   response(res, statusCode, GENERIC_FAILURE);
+}
+
+function bootstrapFailure(res, statusCode = 400) {
+  response(res, statusCode, BOOTSTRAP_FAILURE);
 }
 
 function exactObject(value, keys) {
@@ -235,6 +255,17 @@ async function readBody(req) {
 }
 
 function parseJsonRpc(text) {
+  rejectDuplicateJsonKeys(text);
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    fail();
+  }
+  return value;
+}
+
+function parseJson(text) {
   rejectDuplicateJsonKeys(text);
   let value;
   try {
@@ -399,6 +430,368 @@ function validateProtocolHeader(req) {
   if (req.headers["mcp-protocol-version"] !== PAYER_MCP_PROTOCOL_VERSION) fail();
 }
 
+function validateBootstrapClaim(value, repositorySha) {
+  exactObject(value, BOOTSTRAP_CLAIM_KEYS);
+  if (
+    !UUID_V4_PATTERN.test(value.claimNonce) ||
+    value.paymentMoved !== false ||
+    value.repositorySha !== repositorySha ||
+    typeof value.requestorPublicKey !== "string" ||
+    !BASE64URL_32_PATTERN.test(value.requestorPublicKey)
+  ) {
+    fail();
+  }
+  const keyBytes = Buffer.from(value.requestorPublicKey, "base64url");
+  if (keyBytes.length !== 32 || keyBytes.toString("base64url") !== value.requestorPublicKey) fail();
+  return Object.freeze({
+    claimNonce: value.claimNonce,
+    paymentMoved: false,
+    repositorySha: value.repositorySha,
+    requestorPublicKey: value.requestorPublicKey,
+  });
+}
+
+function requestorBootstrapClaimFingerprint(claim) {
+  return createHash("sha256").update(canonicalBytes(claim)).digest("hex");
+}
+
+function exactBase64url(value, decodedLength = null, maxDecodedLength = null) {
+  if (typeof value !== "string" || value.length === 0 || value.includes("=") || !BASE64URL_PATTERN.test(value)) fail();
+  const decoded = Buffer.from(value, "base64url");
+  if (
+    decoded.length === 0 ||
+    (decodedLength !== null && decoded.length !== decodedLength) ||
+    (maxDecodedLength !== null && decoded.length > maxDecodedLength) ||
+    decoded.toString("base64url") !== value
+  ) {
+    fail();
+  }
+  return decoded;
+}
+
+function exactBase64(value, decodedLength) {
+  if (typeof value !== "string" || !BASE64_PATTERN.test(value)) fail();
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.length !== decodedLength || decoded.toString("base64") !== value) fail();
+}
+
+function validateBootstrapHeaders(req, expectedHost) {
+  if (req.rawHeaders.length / 2 > MAX_HEADERS) return 431;
+  const seenHeaders = new Map();
+  for (let index = 0; index < req.rawHeaders.length; index += 2) {
+    const name = req.rawHeaders[index];
+    if (typeof name !== "string") return 400;
+    const key = name.toLowerCase();
+    seenHeaders.set(key, (seenHeaders.get(key) ?? 0) + 1);
+  }
+  for (const key of SINGLETON_HEADERS) {
+    if ((seenHeaders.get(key) ?? 0) > 1 || (req.headersDistinct?.[key]?.length ?? 0) > 1) return 400;
+  }
+  if (req.url !== "/bootstrap") return 404;
+  if (req.method !== "POST") return 405;
+  if (req.headers.host !== expectedHost) return 400;
+  if (Object.hasOwn(req.headers, "authorization")) return 400;
+  if (Object.hasOwn(req.headers, "origin")) return 400;
+  if (Object.hasOwn(req.headers, "mcp-protocol-version") || Object.hasOwn(req.headers, "mcp-session-id")) return 400;
+  if (req.headers.accept !== BOOTSTRAP_ACCEPT) return 400;
+  if (req.headers["content-type"] !== JSON_CONTENT_TYPE) return 415;
+  const contentLength = req.headers["content-length"];
+  if (contentLength !== undefined && (!/^(?:0|[1-9][0-9]*)$/.test(contentLength) || Number(contentLength) > MAX_BODY_BYTES)) return 413;
+  return 0;
+}
+
+function validateBootstrapBrokerResponse(value, { claim, repositorySha }) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) fail();
+  const keys = Reflect.ownKeys(value);
+  if (value.status === "PENDING_APPROVAL") {
+    exactObject(value, ["claimFingerprint", "paymentMoved", "repositorySha", "schema", "status"]);
+  } else if (value.status === "SEALED") {
+    exactObject(value, ["claimFingerprint", "context", "envelope", "paymentMoved", "repositorySha", "schema", "signature", "status"]);
+    exactObject(value.context, ["claimNonce", "paymentMoved", "releaseId", "repositorySha", "sessionId"]);
+    exactObject(value.envelope, ["algorithm", "ciphertextBase64url", "ephemeralPublicKey", "ivBase64url", "paymentMoved", "schema", "tagBase64url"]);
+    exactObject(value.signature, ["algorithm", "keyId", "value"]);
+    if (
+      value.context.claimNonce !== claim.claimNonce ||
+      value.context.paymentMoved !== false ||
+      value.context.repositorySha !== repositorySha ||
+      typeof value.context.releaseId !== "string" ||
+      !UUID_V4_PATTERN.test(value.context.sessionId) ||
+      value.envelope.algorithm !== BOOTSTRAP_ENVELOPE_ALGORITHM ||
+      value.envelope.paymentMoved !== false ||
+      value.envelope.schema !== BOOTSTRAP_ENVELOPE_SCHEMA ||
+      value.signature.algorithm !== "ed25519" ||
+      typeof value.signature.keyId !== "string" ||
+      !KEY_ID_PATTERN.test(value.signature.keyId) ||
+      typeof value.signature.value !== "string"
+    ) {
+      fail();
+    }
+    exactBase64url(value.envelope.ciphertextBase64url, null, MAX_BOOTSTRAP_CIPHERTEXT_BYTES);
+    exactBase64url(value.envelope.ephemeralPublicKey, 32);
+    exactBase64url(value.envelope.ivBase64url, 12);
+    exactBase64url(value.envelope.tagBase64url, 16);
+    exactBase64(value.signature.value, 64);
+  } else {
+    fail();
+  }
+  if (
+    keys.length === 0 ||
+    value.claimFingerprint !== requestorBootstrapClaimFingerprint(claim) ||
+    value.paymentMoved !== false ||
+    value.repositorySha !== repositorySha ||
+    value.schema !== BOOTSTRAP_BROKER_RESPONSE_SCHEMA
+  ) {
+    fail();
+  }
+  return Object.freeze(value);
+}
+
+function validateBrokerUrl(value) {
+  if (typeof value !== "string") fail();
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    fail();
+  }
+  if (
+    url.protocol !== "http:" ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.port === "" ||
+    !["127.0.0.1", "[::1]"].includes(url.hostname)
+  ) {
+    fail();
+  }
+  return url;
+}
+
+function brokerHostname(url) {
+  return url.hostname === "[::1]" ? "::1" : url.hostname;
+}
+
+function validateBrokerCapability(value) {
+  if (typeof value !== "string" || !CAPABILITY_PATTERN.test(value)) fail();
+  return value;
+}
+
+function validateClaimRequestorBootstrap(value) {
+  if (value === undefined) return null;
+  if (typeof value !== "function") fail();
+  return value;
+}
+
+export function createRequestorBootstrapBrokerClient({ brokerCapability, brokerUrl, requestHttp } = {}) {
+  const url = validateBrokerUrl(brokerUrl);
+  const capability = validateBrokerCapability(brokerCapability);
+  const request = requestHttp ?? (({ body, headers }) => new Promise((resolvePromise, rejectPromise) => {
+    const payload = Buffer.from(JSON.stringify(body), "utf8");
+    const req = http.request({
+      agent: false,
+      headers: {
+        ...headers,
+        "Content-Length": String(payload.length),
+      },
+      host: brokerHostname(url),
+      method: "POST",
+      path: "/claim",
+      port: Number(url.port),
+      timeout: REQUEST_TIMEOUT_MS,
+    }, (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on("data", (chunk) => {
+        size += chunk.length;
+        if (size > MAX_BODY_BYTES) res.destroy(new Error("response too large"));
+        else chunks.push(chunk);
+      });
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolvePromise({
+          body: text === "" ? null : parseJson(text),
+          headers: res.headers,
+          statusCode: res.statusCode,
+          text,
+        });
+      });
+    });
+    req.once("timeout", () => req.destroy(new Error("request timeout")));
+    req.once("error", rejectPromise);
+    req.end(payload);
+  }));
+  if (typeof request !== "function") fail();
+  return Object.freeze({
+    async claimRequestorBootstrap(claim) {
+      const result = await request({
+        body: claim,
+        headers: {
+          Accept: BOOTSTRAP_ACCEPT,
+          Authorization: `Bearer ${capability}`,
+          "Content-Type": JSON_CONTENT_TYPE,
+          Host: hostAuthority(brokerHostname(url), Number(url.port)),
+        },
+        method: "POST",
+        url,
+      });
+      if (!((result.statusCode === 202 && result.body?.status === "PENDING_APPROVAL") || (result.statusCode === 200 && result.body?.status === "SEALED"))) fail();
+      return result.body;
+    },
+  });
+}
+
+export function createAwsRequestorBootstrapBrokerClient({
+  allowTestAddresses = false,
+  brokerCapability,
+  brokerUrl,
+  lookup,
+  requestHttps,
+} = {}) {
+  if (typeof allowTestAddresses !== "boolean") fail();
+  const capability = validateBrokerCapability(
+    brokerCapability,
+  );
+  let endpoint;
+  try {
+    endpoint = validateNetworkEndpoint(brokerUrl, {
+      allowedPaths: ["/v1/requestor-claims"],
+      allowTestAddresses,
+      defaultPort: 443,
+      protocols: ["https:"],
+    });
+  } catch {
+    fail();
+  }
+  if (
+    lookup !== undefined &&
+    typeof lookup !== "function"
+  ) {
+    fail();
+  }
+  const request = requestHttps ?? (({
+    body,
+    headers,
+    method,
+    resolved,
+  }) => new Promise(
+    (resolvePromise, rejectPromise) => {
+      const payload = Buffer.from(
+        JSON.stringify(body),
+        "utf8",
+      );
+      const request_ = https.request({
+        agent: false,
+        headers: {
+          ...headers,
+          "Content-Length": String(payload.length),
+        },
+        host: resolved.hostname,
+        lookup: createResolvedLookup(resolved, {
+          allowTestAddresses,
+        }),
+        method,
+        path: resolved.path,
+        port: resolved.port,
+        rejectUnauthorized: true,
+        servername: resolved.hostname,
+        timeout: REQUEST_TIMEOUT_MS,
+      }, (response_) => {
+        const chunks = [];
+        let size = 0;
+        response_.on("data", (chunk) => {
+          size += chunk.length;
+          if (size > MAX_BODY_BYTES) {
+            response_.destroy(
+              new Error("response too large"),
+            );
+          } else {
+            chunks.push(chunk);
+          }
+        });
+        response_.on("end", () => {
+          const text = Buffer.concat(chunks)
+            .toString("utf8");
+          resolvePromise({
+            body:
+              text === "" ? null : parseJson(text),
+            headers: response_.headers,
+            statusCode: response_.statusCode,
+            text,
+          });
+        });
+      });
+      request_.once(
+        "timeout",
+        () => request_.destroy(
+          new Error("request timeout"),
+        ),
+      );
+      request_.once("error", rejectPromise);
+      request_.end(payload);
+    },
+  ));
+  if (typeof request !== "function") fail();
+  return Object.freeze({
+    async claimRequestorBootstrap(claim) {
+      let resolved;
+      try {
+        resolved = await resolveNetworkEndpoint(
+          endpoint,
+          {
+            allowTestAddresses,
+            ...(lookup === undefined ? {} : { lookup }),
+          },
+        );
+      } catch {
+        fail();
+      }
+      const url = new URL(endpoint.url);
+      const result = await request({
+        body: claim,
+        headers: {
+          Accept: BOOTSTRAP_ACCEPT,
+          Authorization: `Bearer ${capability}`,
+          "Content-Type": JSON_CONTENT_TYPE,
+          Host: url.host,
+        },
+        method: "POST",
+        resolved,
+        url,
+      });
+      const contentType = String(
+        result?.headers?.["content-type"] ?? "",
+      ).split(";")[0].trim().toLowerCase();
+      if (
+        result?.headers?.location !== undefined ||
+        contentType !== JSON_CONTENT_TYPE ||
+        !(
+          (
+            result.statusCode === 202 &&
+            result.body?.status ===
+              "PENDING_APPROVAL"
+          ) ||
+          (
+            result.statusCode === 200 &&
+            result.body?.status === "SEALED"
+          )
+        )
+      ) {
+        fail();
+      }
+      return validateBootstrapBrokerResponse(
+        result.body,
+        {
+          claim,
+          repositorySha:
+            claim?.repositorySha,
+        },
+      );
+    },
+  });
+}
+
 function assertSessionRequest(session) {
   session.requests += 1;
   if (session.requests > SESSION_REQUEST_LIMIT) {
@@ -409,7 +802,9 @@ function assertSessionRequest(session) {
 }
 
 export function createPayerMcpServer({
+  allowTestAddresses = false,
   capabilityDigest: expectedCapabilityDigest,
+  claimRequestorBootstrap,
   createHttpsServer = https.createServer,
   host,
   intakeStore,
@@ -421,6 +816,7 @@ export function createPayerMcpServer({
   tlsCertificatePem,
   tlsPrivateKeyPem,
 } = {}) {
+  if (typeof allowTestAddresses !== "boolean") fail();
   const bindHost = validateHost(host);
   const bindPort = validatePort(port);
   const digest = validateDigest(expectedCapabilityDigest);
@@ -428,7 +824,12 @@ export function createPayerMcpServer({
   const store = validateIntakeStore(intakeStore);
   const certificate = validatePem(tlsCertificatePem);
   const privateKey = validatePem(tlsPrivateKeyPem);
-  const publicEndpoint = validatePublicEndpoint(publicUrl, certificate);
+  const publicEndpoint = validatePublicEndpoint(
+    publicUrl,
+    certificate,
+    allowTestAddresses,
+  );
+  const bootstrapBroker = validateClaimRequestorBootstrap(claimRequestorBootstrap);
   if (typeof createHttpsServer !== "function" || typeof nowMs !== "function" || typeof randomBytes !== "function") fail();
 
   const sessions = new Map();
@@ -522,9 +923,28 @@ export function createPayerMcpServer({
     fail();
   }
 
+  async function handleBootstrap(req, res) {
+    if (bootstrapBroker === null) {
+      bootstrapFailure(res, 404);
+      return;
+    }
+    const headerStatus = validateBootstrapHeaders(req, advertisedAuthority());
+    if (headerStatus) {
+      bootstrapFailure(res, headerStatus);
+      return;
+    }
+    const claim = validateBootstrapClaim(parseJson(await readBody(req)), sha);
+    const brokerResponse = validateBootstrapBrokerResponse(await bootstrapBroker(claim), { claim, repositorySha: sha });
+    response(res, brokerResponse.status === "PENDING_APPROVAL" ? 202 : 200, brokerResponse, { "Cache-Control": "no-store" });
+  }
+
   async function handleRequest(req, res) {
     try {
       req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy());
+      if (req.url === "/bootstrap") {
+        await handleBootstrap(req, res);
+        return;
+      }
       const headerStatus = validateCommonHeaders(req, advertisedAuthority());
       if (headerStatus) {
         if (headerStatus === 405 && req.method === "GET" && req.url === "/mcp") {
@@ -555,7 +975,8 @@ export function createPayerMcpServer({
       }
       await handlePost(req, res);
     } catch {
-      if (!res.headersSent) protocolFailure(res);
+      if (!res.headersSent && req.url === "/bootstrap") bootstrapFailure(res);
+      else if (!res.headersSent) protocolFailure(res);
       else res.destroy();
     }
   }

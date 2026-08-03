@@ -12,7 +12,11 @@ import { validateActiveLaunchState } from "./manifest.mjs";
 import { readLaunchManifest } from "./manifest.mjs";
 import { PAYER_MCP_INTAKE_DIRECTORY_NAME, createPayerMcpIntakeStore, scanPayerMcpIntakeDirectory } from "../local-mcp/intake-store.mjs";
 import { readRequestorMcpIntake as readDefaultRequestorMcpIntake } from "../local-mcp/client.mjs";
-import { createPayerMcpServer as createDefaultPayerMcpServer } from "../local-mcp/server.mjs";
+import {
+  createAwsRequestorBootstrapBrokerClient as createDefaultAwsRequestorBootstrapBrokerClient,
+  createPayerMcpServer as createDefaultPayerMcpServer,
+  createRequestorBootstrapBrokerClient as createDefaultRequestorBootstrapBrokerClient,
+} from "../local-mcp/server.mjs";
 import { createLocalPreflightEnrollment, readAndSignTokenCommitment } from "./preflight.mjs";
 import { validateRelayArtifact, validateRelayArtifactWithFacts } from "./artifact.mjs";
 import { verifyDescriptorEnvelope } from "../descriptor.mjs";
@@ -181,6 +185,10 @@ async function readPinnedPrivateText(path, maximum = MAX_STATE_BYTES, afterFirst
   } finally {
     if (handle) await handle.close();
   }
+}
+function exactPrivateLine(value) {
+  if (typeof value !== "string" || !value.endsWith("\n") || value.trimEnd() !== value.slice(0, -1)) fail();
+  return value.slice(0, -1);
 }
 async function readPrivateJson(root, path) {
   const bytes = await readPrivateBytes(root, path); const text = bytes.toString("utf8");
@@ -369,7 +377,9 @@ function rpcQuantity(value) {
   return BigInt(value);
 }
 
-export const SUPERVISOR_FUNDING_DEADLINE_MS = 8 * 60_000;
+// Stakeholder demos start the operator and the remote participant minutes apart;
+// align every wait window with the 30-minute signed-discovery expiry.
+export const SUPERVISOR_FUNDING_DEADLINE_MS = 30 * 60_000;
 export const SUPERVISOR_FUNDING_INTERVAL_MS = 5_000;
 
 export function createProductionSepoliaRpc({ createClient = createPublicClient, rpcUrl = RPC_URL } = {}) {
@@ -432,6 +442,19 @@ export function createSupervisorStatusLine(value) {
     return `${canonicalJson({ code: "COORDINATION_SUPERVISOR_FAILED", paymentMoved: false })}\n`;
   }
   const status = ownSelectorValue(value, "status");
+  if (status === "PARTY_PROGRESS") {
+    const progressStatus =
+      exactPartyCompleteStatus(value);
+    if (
+      progressStatus.paymentMoved !== false ||
+      progressStatus.role !== "payer" ||
+      progressStatus.state !== "PROPOSED" ||
+      progressStatus.status !== "PARTY_PROGRESS"
+    ) {
+      fail();
+    }
+    return `${canonicalJson({ paymentMoved: false, role: "payer", state: "PROPOSED", status: "PARTY_PROGRESS" })}\n`;
+  }
   if (status === "PARTY_COMPLETE") {
     const terminalStatus = exactPartyCompleteStatus(value);
     if (terminalStatus.paymentMoved !== false || !["payer", "payee"].includes(terminalStatus.role) || terminalStatus.status !== "PARTY_COMPLETE") fail();
@@ -551,9 +574,15 @@ export async function createCoordinationIdentity({ role, stateRoot }) {
   } finally { await root.handle.close(); }
 }
 
-export function createTransport(manifestOrActive) {
+export function createTransport(
+  manifestOrActive,
+  dependencies,
+) {
   if (!manifestOrActive || typeof manifestOrActive.relayUrl !== 'string' || typeof manifestOrActive.tlsCertificatePem !== 'string') fail();
-  return createPinnedHttpsTransport({ expectedFingerprint: manifestOrActive.expectedTlsFingerprint, relayUrl: manifestOrActive.relayUrl, tlsCertificatePem: manifestOrActive.tlsCertificatePem });
+  return createPinnedHttpsTransport(
+    { expectedFingerprint: manifestOrActive.expectedTlsFingerprint, relayUrl: manifestOrActive.relayUrl, tlsCertificatePem: manifestOrActive.tlsCertificatePem },
+    dependencies,
+  );
 }
 export async function verifyRepositoryState({ repositorySha, probe }) {
   if (!/^[0-9a-f]{40}$/.test(repositorySha) || typeof probe !== 'function') fail();
@@ -632,14 +661,36 @@ export async function ensureInvitations({ capabilityDigest, releaseId, repositor
   if (proofs[0].address === proofs[1].address || proofs[0].secretPath === proofs[1].secretPath || proofs[0].signature === proofs[1].signature) fail();
   return Object.freeze(proofs);
 }
-export async function createProductionSupervisorDependencies({ createPayerMcpServer = createDefaultPayerMcpServer, launchManifestPath, now = Date.now, payerMcpServerOptions, sleeper = (milliseconds) => new Promise((resolve_) => setTimeout(resolve_, milliseconds)), stateRoot, probe, repositoryRoot = SUPERVISOR_REPOSITORY_ROOT, sepoliaRpc, createSepoliaClient } = {}) {
+export async function createProductionSupervisorDependencies({
+  allowTestAddresses = false,
+  createAwsRequestorBootstrapBrokerClient =
+    createDefaultAwsRequestorBootstrapBrokerClient,
+  createPayerMcpServer = createDefaultPayerMcpServer,
+  createRequestorBootstrapBrokerClient =
+    createDefaultRequestorBootstrapBrokerClient,
+  launchManifestPath,
+  now = Date.now,
+  payerMcpServerOptions,
+  sleeper = (milliseconds) =>
+    new Promise((resolve_) =>
+      setTimeout(resolve_, milliseconds)),
+  stateRoot,
+  probe,
+  repositoryRoot = SUPERVISOR_REPOSITORY_ROOT,
+  sepoliaRpc,
+  createSepoliaClient,
+} = {}) {
+  if (typeof allowTestAddresses !== "boolean") fail();
+  const networkOptions = Object.freeze({
+    allowTestAddresses,
+  });
   const store = await createPrivateSupervisorStateStore({ stateRoot });
   await createFixedRunDirectories(stateRoot);
   const repositoryInspector = createGitInspector(repositoryRoot);
   const checkpoint = await store.readState();
   const resumed = checkpoint !== null && checkpoint?.phase !== "LOCAL_SECRETS_READY";
-  const manifest = resumed ? null : await readLaunchManifest(launchManifestPath);
-  const active = resumed ? await validateActiveLaunchState(checkpoint.activeLaunchState) : null;
+  const manifest = resumed ? null : await readLaunchManifest(launchManifestPath, undefined, networkOptions);
+  const active = resumed ? await validateActiveLaunchState(checkpoint.activeLaunchState, networkOptions) : null;
   const scope = Object.freeze(resumed
     ? { capabilityDigest: active.capabilityDigest, ...(active.role === "payer" ? { payerMcpIntakeCapabilityDigest: active.payerMcpIntakeCapabilityDigest } : {}), releaseId: active.releaseId, repositorySha: active.repositorySha, role: active.role, sessionId: active.sessionId }
     : { capabilityDigest: createHash('sha256').update(Buffer.from(manifest.bootstrapCapability, 'hex')).digest('hex'), ...(manifest.role === "payer" ? { payerMcpIntakeCapabilityDigest: manifest.payerMcpIntakeCapabilityDigest } : {}), releaseId: manifest.releaseId, repositorySha: manifest.repositorySha, role: manifest.role, sessionId: manifest.sessionId });
@@ -648,10 +699,42 @@ export async function createProductionSupervisorDependencies({ createPayerMcpSer
     : null;
   if (payerMcpServerOptions !== undefined && scope.role !== "payer") fail();
   if (payerMcpServerOptions !== undefined && typeof createPayerMcpServer !== "function") fail();
+  const hasBootstrapBrokerUrl = payerMcpServerOptions !== undefined && Object.hasOwn(payerMcpServerOptions, "bootstrapBrokerUrl");
+  const hasBootstrapBrokerCapabilityFile = payerMcpServerOptions !== undefined && Object.hasOwn(payerMcpServerOptions, "bootstrapBrokerCapabilityFile");
+  if (hasBootstrapBrokerUrl !== hasBootstrapBrokerCapabilityFile) fail();
+  const bootstrapBrokerCapability = hasBootstrapBrokerCapabilityFile
+    ? await readPinnedPrivateText(payerMcpServerOptions.bootstrapBrokerCapabilityFile, 1_024, payerMcpServerOptions.afterPinnedTextFirstRead)
+    : null;
+  let bootstrapBrokerClient = null;
+  if (hasBootstrapBrokerUrl) {
+    let protocol;
+    try {
+      protocol = new URL(
+        payerMcpServerOptions.bootstrapBrokerUrl,
+      ).protocol;
+    } catch {
+      fail();
+    }
+    const createBootstrapBrokerClient =
+      protocol === "http:"
+        ? createRequestorBootstrapBrokerClient
+        : protocol === "https:"
+          ? createAwsRequestorBootstrapBrokerClient
+          : fail();
+    bootstrapBrokerClient =
+      createBootstrapBrokerClient({
+        brokerCapability: exactPrivateLine(
+          bootstrapBrokerCapability,
+        ),
+        brokerUrl:
+          payerMcpServerOptions.bootstrapBrokerUrl,
+      });
+  }
   const normalizedPayerMcpServerOptions = payerMcpServerOptions === undefined ? null : Object.freeze({
     host: payerMcpServerOptions.host,
     port: payerMcpServerOptions.port,
     ...(payerMcpServerOptions.publicUrl === undefined ? {} : { publicUrl: payerMcpServerOptions.publicUrl }),
+    ...(bootstrapBrokerClient === null ? {} : { claimRequestorBootstrap: bootstrapBrokerClient.claimRequestorBootstrap }),
     tlsCertificatePem: payerMcpServerOptions.tlsCertificatePem ?? await readPinnedPrivateText(payerMcpServerOptions.tlsCertificatePath, MAX_STATE_BYTES, payerMcpServerOptions.afterPinnedTextFirstRead),
     tlsPrivateKeyPem: payerMcpServerOptions.tlsPrivateKeyPem ?? await readPinnedPrivateText(payerMcpServerOptions.tlsPrivateKeyPath, MAX_STATE_BYTES, payerMcpServerOptions.afterPinnedTextFirstRead),
   });
@@ -767,10 +850,24 @@ export async function createProductionSupervisorDependencies({ createPayerMcpSer
       if (!enrollment || checked.facts.identity.address !== enrollment.invitations[context.subjectRun]?.address || checked.facts.identity.repositorySha !== context.repositorySha) fail();
       return checked;
     },
-    createTransport,
-    createCoordinationClient,
-    createResumedCoordinationClient,
-    validateActiveLaunchState,
+    createTransport: (value) =>
+      createTransport(value, networkOptions),
+    createCoordinationClient: (value) =>
+      createCoordinationClient(
+        value,
+        networkOptions,
+      ),
+    createResumedCoordinationClient:
+      (value) =>
+        createResumedCoordinationClient(
+          value,
+          networkOptions,
+        ),
+    validateActiveLaunchState: (value) =>
+      validateActiveLaunchState(
+        value,
+        networkOptions,
+      ),
     async resolveOperatorPublicKey(active) {
       if (!active || active.repositorySha !== scope.repositorySha || typeof active.operatorKeyId !== 'string') fail();
       return repositoryInspector.operatorKey(scope.repositorySha, active.operatorKeyId);

@@ -58,6 +58,11 @@ export const COORDINATION_EVENT_KINDS = Object.freeze(
   Object.keys(COORDINATION_EVENT_AUTHORITIES),
 );
 
+export const RUN_MODES = Object.freeze([
+  "local-two-run",
+  "aws-stakeholder-only",
+]);
+
 const INITIAL_KEYS = Object.freeze([
   "releaseId",
   "repositorySha",
@@ -129,8 +134,17 @@ const RECOVERY_RUN_KEYS = Object.freeze([
 const REDUCTION_OPTIONS_KEYS = Object.freeze([
   "expectedPublicKey",
 ]);
+const REDUCTION_OPTIONS_WITH_MODE_KEYS = Object.freeze([
+  "expectedPublicKey",
+  "runMode",
+]);
 const VERIFICATION_OPTIONS_KEYS = Object.freeze([
   "expectedPublicKey",
+  "verifierPublicationVerified",
+]);
+const VERIFICATION_OPTIONS_WITH_MODE_KEYS = Object.freeze([
+  "expectedPublicKey",
+  "runMode",
   "verifierPublicationVerified",
 ]);
 const ROLES = Object.freeze(["payee", "payer"]);
@@ -515,6 +529,30 @@ function deriveState(facts) {
     return "PREFLIGHT_READY";
   }
   if (
+    facts.registered.stakeholder &&
+    !facts.registered.rehearsal
+  ) {
+    if (!both(facts.identityPackageReady.stakeholder)) {
+      return "PREFLIGHT_PASSED";
+    }
+    if (!facts.runDescriptorReady.stakeholder) {
+      return "STAKEHOLDER_IDENTITIES_READY";
+    }
+    if (!facts.runStarted.stakeholder) {
+      return "STAKEHOLDER_DESCRIPTOR_READY";
+    }
+    if (
+      !facts.verificationPassed.stakeholder ||
+      !facts.verifierPublicationVerified.stakeholder
+    ) {
+      return "STAKEHOLDER_RUNNING";
+    }
+    if (!facts.releaseCompleted) {
+      return "STAKEHOLDER_VERIFIED";
+    }
+    return "COMPLETE";
+  }
+  if (
     !facts.registered.rehearsal ||
     !both(facts.identityPackageReady.rehearsal)
   ) {
@@ -687,11 +725,47 @@ function recoveryDigestExists(facts, digest) {
   return false;
 }
 
+function optionKeysFor(options, kind) {
+  if (!isPlainObject(options)) {
+    invalid();
+  }
+  const hasRunMode = Object.hasOwn(options, "runMode");
+  if (kind === "VERIFICATION_PASSED") {
+    return hasRunMode
+      ? VERIFICATION_OPTIONS_WITH_MODE_KEYS
+      : VERIFICATION_OPTIONS_KEYS;
+  }
+  return hasRunMode
+    ? REDUCTION_OPTIONS_WITH_MODE_KEYS
+    : REDUCTION_OPTIONS_KEYS;
+}
+
+function normalizeRunMode(value) {
+  if (value === undefined) {
+    return "local-two-run";
+  }
+  if (!RUN_MODES.includes(value)) {
+    invalid();
+  }
+  return value;
+}
+
+function stakeholderOnlyStarted(facts) {
+  return facts.registered.stakeholder === true &&
+    facts.registered.rehearsal !== true;
+}
+
+function assertRunModeContinuity(view, runMode) {
+  if (
+    stakeholderOnlyStarted(view.facts) &&
+    runMode !== "aws-stakeholder-only"
+  ) {
+    invalid();
+  }
+}
+
 function readReductionOptions(options, kind) {
-  const keys =
-    kind === "VERIFICATION_PASSED"
-      ? VERIFICATION_OPTIONS_KEYS
-      : REDUCTION_OPTIONS_KEYS;
+  const keys = optionKeysFor(options, kind);
   const data = readExactData(options, keys);
   if (
     typeof data.get("expectedPublicKey") !== "string" ||
@@ -700,7 +774,19 @@ function readReductionOptions(options, kind) {
   ) {
     invalid();
   }
-  return data.get("expectedPublicKey");
+  return Object.freeze({
+    expectedPublicKey: data.get("expectedPublicKey"),
+    runMode: normalizeRunMode(data.get("runMode")),
+  });
+}
+
+function assertRunModeAllowsEvent(event, runMode) {
+  if (
+    runMode === "aws-stakeholder-only" &&
+    event.subjectRun === "rehearsal"
+  ) {
+    invalid();
+  }
 }
 
 export function initialReleaseView(input) {
@@ -731,17 +817,19 @@ export function reduceReleaseEvent(
     unverifiedEvent,
     ENVELOPE_KEYS,
   );
-  const expectedPublicKey = readReductionOptions(
+  const reductionOptions = readReductionOptions(
     options,
     eventData.get("kind"),
   );
+  assertRunModeContinuity(view, reductionOptions.runMode);
   const event = readVerifiedEvent(
     unverifiedEvent,
     view,
-    expectedPublicKey,
+    reductionOptions.expectedPublicKey,
   );
   assertAuthority(event);
   assertRunScope(event);
+  assertRunModeAllowsEvent(event, reductionOptions.runMode);
 
   if (
     event.kind === "TERMINAL_FAILURE" ||
@@ -818,7 +906,12 @@ export function reduceReleaseEvent(
       break;
     }
     case "REGISTER_STAKEHOLDER": {
-      requireState(view, "REHEARSAL_VERIFIED");
+      requireState(
+        view,
+        reductionOptions.runMode === "aws-stakeholder-only"
+          ? "PREFLIGHT_PASSED"
+          : "REHEARSAL_VERIFIED",
+      );
       assertUnused(facts.registered.stakeholder);
       facts.registered.stakeholder = true;
       break;
@@ -831,7 +924,9 @@ export function reduceReleaseEvent(
         view,
         run === "rehearsal"
           ? "PREFLIGHT_PASSED"
-          : "REHEARSAL_VERIFIED",
+          : reductionOptions.runMode === "aws-stakeholder-only"
+            ? "PREFLIGHT_PASSED"
+            : "REHEARSAL_VERIFIED",
       );
       assertUnused(facts.identityPackageReady[run][role]);
       facts.identityPackageReady[run][role] = true;
