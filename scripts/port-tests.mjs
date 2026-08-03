@@ -38,6 +38,7 @@ const SRC_TABLE = {
   "src/registration.mjs": "src/core/registration.mjs",
   "src/registration-internal.mjs": "src/core/registration.mjs",
   "scripts/create-session.mjs": "scripts/create-session.mjs",
+  "scripts/verify-bilateral-results.mjs": "scripts/verify-bilateral-results.mjs",
   "test/helpers/fake-bilateral-clockchain.mjs": "test/helpers/fake-bilateral-clockchain.mjs",
 };
 
@@ -60,6 +61,13 @@ const TESTS = {
 };
 
 /** Byte-copied support files (no specifier rewrites needed or allowed). */
+const ADAPTED_TESTS = {
+  "test/bilateral-verdict.test.mjs": "test/core-verdict.test.mjs",
+  "test/bilateral-evidence.test.mjs": "test/core-evidence.test.mjs",
+  "test/bilateral-funding-keystore.test.mjs": "test/core-funding-wallet.test.mjs",
+  "test/registration.test.mjs": "test/core-registration.test.mjs",
+};
+
 const SUPPORT = [
   "test/fixtures/mcp-sse.txt",
   "test/fixtures/registered-receipt.json",
@@ -68,6 +76,7 @@ const SUPPORT = [
 /** Support modules needing specifier rewrites (donor rel == target rel). */
 const REWRITE_SUPPORT = [
   "test/helpers/fake-bilateral-clockchain.mjs",
+  "scripts/verify-bilateral-results.mjs",
 ];
 
 const IMPORT_LINE = /\bfrom\s*["']|\bimport\s*\(\s*["']|^\s*import\s+["']|^\s*export\s/;
@@ -139,6 +148,25 @@ for (const rel of SUPPORT) {
     mkdirSync(dirname(targetAbs), { recursive: true });
     copyFileSync(donorAbs, targetAbs);
     console.log(`copy ${rel} (byte copy)`);
+  }
+}
+
+for (const [donorRel, targetRel] of Object.entries(ADAPTED_TESTS)) {
+  CURRENT_TARGET_REL = targetRel;
+  const donorAbs = resolve(DONOR, donorRel);
+  const targetAbs = resolve(TARGET, targetRel);
+  const { out, rewrites } = rewriteSpecifiers(donorAbs, readFileSync(donorAbs, "utf8"));
+  if (checkOnly) {
+    if (!existsSync(targetAbs) || readFileSync(targetAbs, "utf8") !== out) {
+      console.error(`STALE ${targetRel}`);
+      failures += 1;
+    } else {
+      console.log(`ok   ${targetRel} (${rewrites} specifier line(s) rewritten)`);
+    }
+  } else {
+    mkdirSync(dirname(targetAbs), { recursive: true });
+    writeFileSync(targetAbs, out);
+    console.log(`port ${targetRel} (${rewrites} specifier line(s) rewritten)`);
   }
 }
 
