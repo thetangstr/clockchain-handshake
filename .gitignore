@@ -2,6 +2,8 @@ node_modules/
 state/
 *.log
 .DS_Store
+# Generated release pin — produced by scripts/release-pin.mjs at session start
+release.json
 # Private material — never commit keys, tokens, journals, keystores, or run state
 **/private/
 **/*.key
