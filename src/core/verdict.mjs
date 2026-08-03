@@ -818,7 +818,7 @@ function liveProposalDigest(searchResult) {
     fail();
   }
   if (searchResult.length === 0) {
-    fail("EXPIRED");
+    fail("MISSING");
   }
   if (searchResult.length !== 1) {
     fail("DUPLICATE");

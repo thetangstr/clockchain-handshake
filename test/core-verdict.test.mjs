@@ -1545,7 +1545,7 @@ test("maps rate-limited and absent proposal discovery to fixed terminal outcomes
         },
       }),
     },
-    "EXPIRED",
+    "MISSING",
   );
 });
 
