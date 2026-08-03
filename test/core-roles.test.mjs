@@ -239,6 +239,7 @@ test("payer publishes USD 100, verifies payee acceptance, acknowledges, signs, a
     descriptorEnvelope: envelope,
     jitter: () => 0,
     monotonicNow: () => monotonicMs,
+    now: () => 1784923200000,
     outputDirectory: directory,
     ownerOf,
     publishEvidence: async (options) => {
@@ -304,6 +305,47 @@ test("payer publishes USD 100, verifies payee acceptance, acknowledges, signs, a
   assert.equal(
     published[0].result.signature.algorithm,
     "eip191",
+  );
+});
+
+test("payer acceptance watch closes named EXPIRED when the remaining window cannot fund the acknowledgment write", async (t) => {
+  const directory = await outputDirectory(t);
+  const {
+    descriptor: sessionDescriptor,
+    envelope,
+    repositoryPublicKey,
+  } = signedDescriptor();
+  const fake = configuredFake();
+  let monotonicMs = 0;
+
+  await assert.rejects(
+    runPayerRole({
+      client: fake,
+      descriptorEnvelope: envelope,
+      jitter: () => 0,
+      monotonicNow: () => monotonicMs,
+      now: () => 1784923200000 + 590000,
+      outputDirectory: directory,
+      ownerOf,
+      repositoryPublicKey,
+      signMessage: (bytes) =>
+        PAYER_ACCOUNT.signMessage({
+          message: { raw: bytes },
+        }),
+      sleeper: async (delayMs) => {
+        monotonicMs += delayMs;
+      },
+    }),
+    (error) =>
+      error instanceof ProtocolFailureError &&
+      error.terminalCode === "EXPIRED",
+  );
+  assert.equal(fake.calls.logAction.length, 1);
+  assert.deepEqual(
+    fake.calls.logAction.map(
+      ({ asset_reference_id }) => asset_reference_id,
+    ),
+    [sessionKey(dSession(sessionDescriptor), "proposal")],
   );
 });
 
@@ -427,6 +469,7 @@ test("one pinned output identity spans every role write and evidence publication
       },
       jitter: () => 0,
       monotonicNow: () => monotonicMs,
+      now: () => 1784923200000,
       outputDirectory: directory,
       ownerOf,
       publishEvidence: async () => {
@@ -607,4 +650,3 @@ test("role repository root is fixed from the role module location", () => {
     new URL("../", import.meta.url).pathname.replace(/\/$/, ""),
   );
 });
-

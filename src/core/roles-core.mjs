@@ -9,6 +9,9 @@ import {
   verifyDescriptorEnvelope,
 } from "./descriptor.mjs";
 import {
+  assertInWindowPollBound,
+} from "./deadline.mjs";
+import {
   PARTY_RESULT_SCHEMA,
   partySignatureBytes,
 } from "./evidence.mjs";
@@ -501,6 +504,10 @@ export async function runPayerRole(input) {
     const accepted = await pollForTransition({
       client: snapshot.client,
       message: acceptance,
+      pollDurationMs: assertInWindowPollBound({
+        nowMs: monotonic(snapshot.now ?? Date.now),
+        proposalDeadlineMs: Number(proposed.deadlineMs),
+      }),
       proposalDeadlineMs: proposed.deadlineMs,
       stateMachine,
       ...runnerOptions(snapshot),
@@ -845,4 +852,3 @@ export async function runPayeeRole(input) {
     }
   }
 }
-
