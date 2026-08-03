@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
 import {
@@ -137,6 +137,30 @@ export function validateReleasePin(pin) {
   checked(pin.chainId, DECIMAL_PATTERN, "RELEASE_INPUT");
   checked(pin.generatedAtMs, DECIMAL_PATTERN, "RELEASE_INPUT");
   return pin;
+}
+
+// The single reader counterpart: delivery-shell code must not name the
+// pin file directly, so the operator loads the pin through here.
+export async function readReleasePin({ cwd }) {
+  if (typeof cwd !== "string" || cwd.length === 0) {
+    throw new ReleasePinError("RELEASE_INPUT");
+  }
+  let raw;
+  try {
+    raw = await readFile(`${cwd}/release.json`, "utf8");
+  } catch {
+    throw new ReleasePinError("RELEASE_UNAVAILABLE");
+  }
+  if (Buffer.byteLength(raw, "utf8") > 65536) {
+    throw new ReleasePinError("RELEASE_INPUT");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new ReleasePinError("RELEASE_INPUT");
+  }
+  return validateReleasePin(parsed);
 }
 
 export async function buildReleasePin({

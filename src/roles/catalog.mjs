@@ -146,7 +146,13 @@ export function createMessenger({
     async send(kind, body) {
       const seq = nextSeq;
       const sig = await sign(
-        canonicalBytes({ body, kind, role, seq, sessionId }),
+        canonicalBytes({
+          body,
+          kind,
+          role,
+          seq: String(seq),
+          sessionId,
+        }),
       );
       if (typeof sig !== "string" || sig.length > 256) {
         invalid("MESSENGER_SIG");

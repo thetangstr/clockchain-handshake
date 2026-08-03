@@ -111,6 +111,7 @@ WAIT_ALLOWLIST=(
   "src/roles/common.mjs:relay long-poll cadence, status heartbeat interval, and heartbeat timer — reviewed human-paced wait plumbing"
   "src/roles/requestor.mjs:on-chain funding balance poll cadence — reviewed human-paced wait plumbing"
   "scripts/preflight.mjs:median/p95 latency gate bounds — reviewed healthy-regime admission thresholds"
+  "src/roles/operator.mjs:four-hour signed-session window and evidence availability poll cadence — reviewed human-paced wait plumbing"
 )
 wait_allowlisted_file() {
   local file="$1" entry
