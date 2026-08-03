@@ -443,6 +443,34 @@ async function fundBatch({
     if (persisted.completed === true) {
       return;
     }
+    // Resume path: the funding record is a byte-pinned declaration of
+    // fresh, unused participants. Regenerating it after a partial batch
+    // would record the observed post-funding balances and the funding
+    // script would correctly reject it. Keep the original declaration
+    // and let the journal drive idempotent completion.
+    emitStatus(stdout, "OPERATOR_FUNDING_BATCH", {
+      batch: batchName,
+    });
+    const resumeRecordPath = join(
+      stateDir,
+      "funding",
+      `${batchName}.json`,
+    );
+    const resumeJournalDirectory = join(
+      stateDir,
+      "funding",
+      `journal-${batchName}`,
+    );
+    await deps.fundBatch({
+      config,
+      journalDirectory: resumeJournalDirectory,
+      recordPath: resumeRecordPath,
+      spawnProcess: deps.spawnProcess,
+    });
+    sessionState.funding[batchName].completed = true;
+    await saveSessionState(stateDir, sessionState);
+    emitStatus(stdout, "OPERATOR_FUNDED", { batch: batchName });
+    return;
   }
   emitStatus(stdout, "OPERATOR_FUNDING_BATCH", {
     batch: batchName,
