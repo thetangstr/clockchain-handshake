@@ -664,3 +664,86 @@ test(
     assert.equal(verifierSpawns.length, 2);
   },
 );
+
+test(
+  "a sub-run with a published verdict is adopted, not re-entered",
+  async (t) => {
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const operatorPrivateKeyPem = privateKey.export({
+      format: "pem",
+      type: "pkcs8",
+    });
+    await withRelay(t, async ({ relayUrl }) => {
+      const stateDir = await mkdtemp(
+        join(tmpdir(), "operator-adopt-"),
+      );
+      t.after(() =>
+        rm(stateDir, { recursive: true, force: true }),
+      );
+      const rehearsalSessionId = crypto.randomUUID();
+      const stakeholderSessionId = crypto.randomUUID();
+      const sessionState = {
+        funding: { "batch-a": null, "batch-b": null },
+        operatorKeyId: KEY_ID,
+        relayUrl,
+        schema: OPERATOR_SESSION_SCHEMA,
+        subRuns: {
+          rehearsal: {
+            discovery: null,
+            payerAgentId: null,
+            sessionId: rehearsalSessionId,
+          },
+          stakeholder: {
+            discovery: null,
+            payerAgentId: null,
+            sessionId: stakeholderSessionId,
+          },
+        },
+      };
+      await writeFile(
+        join(stateDir, "operator-session.json"),
+        JSON.stringify(sessionState),
+        { encoding: "utf8", mode: 0o600 },
+      );
+      const relay = createRelayClient({ relayUrl });
+      await relay.createSession({
+        senderKey: "seed",
+        sessionId: rehearsalSessionId,
+        sig: "aa",
+        subjectRun: "rehearsal",
+      });
+      await relay.createSession({
+        senderKey: "seed",
+        sessionId: stakeholderSessionId,
+        sig: "aa",
+        subjectRun: "stakeholder",
+      });
+      await relay.putVerdict(rehearsalSessionId, {
+        outcome: "REHEARSAL_PASSED",
+      });
+
+      const stdout = captureStdout();
+      const { deps } = fakeDeps({
+        operatorPrivateKeyPem,
+        stdout,
+      });
+      const operatorPromise = runOperator({
+        config: configFor(relayUrl),
+        deps,
+        stateDir,
+      });
+      await driveSession(relayUrl, stakeholderSessionId, {
+        live: true,
+      });
+      await operatorPromise;
+
+      const text = stdout.text();
+      assert.match(text, /OPERATOR_SUBRUN_ADOPTED/);
+      assert.match(text, /OPERATOR_RUN_COMPLETE/);
+      assert.equal(
+        text.split("OPERATOR_SUBRUN_STARTED").length - 1,
+        1,
+      );
+    });
+  },
+);

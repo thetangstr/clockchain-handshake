@@ -1188,8 +1188,24 @@ export async function runOperator({
   }
 
   for (const subRun of SUB_RUNS) {
-    emitStatus(stdout, "OPERATOR_SUBRUN_STARTED", { subRun });
     const relay = relayFactory({ relayUrl: config.relayUrl });
+    // A published verdict is the sub-run completion marker. After a
+    // crash, roles that are asked to re-enter an out-of-window session
+    // correctly fail closed on the deadline; the operator must instead
+    // adopt the finished sub-run and move on.
+    const snapshot = await relay
+      .getSnapshot(sessionState.subRuns[subRun].sessionId)
+      .catch(() => null);
+    if (
+      snapshot !== null &&
+      typeof snapshot === "object" &&
+      snapshot.verdict !== null &&
+      snapshot.verdict !== undefined
+    ) {
+      emitStatus(stdout, "OPERATOR_SUBRUN_ADOPTED", { subRun });
+      continue;
+    }
+    emitStatus(stdout, "OPERATOR_SUBRUN_STARTED", { subRun });
     await runSubRun({
       config,
       deps: activeDeps,
