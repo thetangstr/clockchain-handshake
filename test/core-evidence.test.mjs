@@ -28,6 +28,7 @@ import {
   BilateralEvidenceConfigurationError,
   BilateralEvidenceAmbiguousPublicationError,
   BilateralEvidenceRedactionError,
+  BilateralEvidencePublicationTransportError,
   BilateralPartyResultValidationError,
   LOCAL_VERDICTS,
   PARTY_RESULT_KEYS,
@@ -1402,6 +1403,152 @@ test("writes and cross-checks deterministic JSON and Markdown artifacts", async 
       "party-result.json",
     ],
   );
+});
+
+test("delivers the published triple to an injected transport after local publication", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const result = buildFixture();
+  const deliveries = [];
+  const paths = await writePartyResult({
+    canaries: [],
+    directory,
+    publish: async (triple) => {
+      deliveries.push(triple);
+    },
+    result,
+  });
+
+  assert.equal(deliveries.length, 1);
+  const [triple] = deliveries;
+  assert.deepEqual(Object.keys(triple).sort(), [
+    "json",
+    "markdown",
+    "marker",
+  ]);
+  assert.equal(
+    triple.json,
+    await readFile(paths.jsonPath, "utf8"),
+  );
+  assert.equal(
+    triple.markdown,
+    await readFile(paths.markdownPath, "utf8"),
+  );
+  assert.equal(
+    triple.marker,
+    await readFile(paths.markerPath, "utf8"),
+  );
+});
+
+test("surfaces a transport failure without disturbing the local publication", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const cause = new Error("relay offline");
+  await assert.rejects(
+    writePartyResult({
+      canaries: [],
+      directory,
+      publish: async () => {
+        throw cause;
+      },
+      result: buildFixture(),
+    }),
+    (error) => {
+      assert.ok(
+        error instanceof
+          BilateralEvidencePublicationTransportError,
+      );
+      assert.equal(error.name, "BilateralEvidencePublicationTransportError");
+      assert.equal(error.category, "publication");
+      assert.equal(
+        error.code,
+        "BILATERAL_EVIDENCE_PUBLICATION_TRANSPORT",
+      );
+      assert.equal(error.cause, cause);
+      assert.deepEqual(error.paths, {
+        jsonPath: join(directory, "party-result.json"),
+        markdownPath: join(directory, "PARTY-RESULT.md"),
+        markerPath: join(
+          directory,
+          ".party-result.complete.json",
+        ),
+      });
+      assert.ok(Object.isFrozen(error.paths));
+      return true;
+    },
+  );
+
+  // The local publication is intact, so the caller can retry
+  // only the transport from the carried paths.
+  assert.deepEqual(
+    JSON.parse(
+      await readFile(
+        join(directory, "party-result.json"),
+        "utf8",
+      ),
+    ),
+    buildFixture(),
+  );
+  assert.deepEqual(
+    (await readdir(directory)).sort(),
+    [
+      ".party-result.complete.json",
+      "PARTY-RESULT.md",
+      "party-result.json",
+    ],
+  );
+});
+
+test("rejects a non-function publish transport without writing anything", async (t) => {
+  for (const publish of [
+    "relay",
+    new Proxy(async () => {}, {}),
+  ]) {
+    const directory = await temporaryDirectory(t);
+    await assert.rejects(
+      writePartyResult({
+        canaries: [],
+        directory,
+        publish,
+        result: buildFixture(),
+      }),
+      (error) => {
+        assert.ok(
+          error instanceof BilateralEvidenceConfigurationError,
+        );
+        assert.equal(
+          error.code,
+          "BILATERAL_EVIDENCE_CONFIGURATION",
+        );
+        return true;
+      },
+    );
+    assert.deepEqual(await readdir(directory), []);
+  }
+});
+
+test("keeps the AUTHORIZING_WORD_PATTERN ban ahead of the transport", async (t) => {
+  const directory = await temporaryDirectory(t);
+  let called = false;
+  const result = buildFixture();
+  result.localVerdict = "AUTHORIZED";
+  await assert.rejects(
+    writePartyResult({
+      canaries: [],
+      directory,
+      publish: async () => {
+        called = true;
+      },
+      result,
+    }),
+    (error) => {
+      assert.ok(
+        error instanceof BilateralPartyResultValidationError,
+      );
+      assert.equal(error.code, "BILATERAL_PARTY_RESULT_INVALID");
+      return true;
+    },
+  );
+  assert.equal(called, false);
+  assert.deepEqual(await readdir(directory), []);
 });
 
 test("accepts the bounded role-canary ceiling without persisting canaries", async (t) => {

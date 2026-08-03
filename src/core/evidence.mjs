@@ -155,6 +155,7 @@ const WRITE_OPTION_KEYS = new Set([
   "directory",
   "directoryPin",
   "fileSystem",
+  "publish",
   "result",
 ]);
 const DEFAULT_FILE_SYSTEM = Object.freeze({
@@ -229,6 +230,21 @@ export class BilateralEvidenceAmbiguousPublicationError
     this.category = "publication";
     this.code =
       "BILATERAL_EVIDENCE_PUBLICATION_AMBIGUOUS";
+  }
+}
+
+export class BilateralEvidencePublicationTransportError
+  extends Error {
+  constructor(paths, cause) {
+    super(
+      "Bilateral evidence was published locally, but the evidence transport failed.",
+    );
+    this.name = new.target.name;
+    this.category = "publication";
+    this.code =
+      "BILATERAL_EVIDENCE_PUBLICATION_TRANSPORT";
+    this.paths = Object.freeze({ ...paths });
+    this.cause = cause;
   }
 }
 
@@ -1028,11 +1044,23 @@ function validateWriteOptions(options) {
     undefined,
   );
   const fileSystem = readDataOption(options, "fileSystem", {});
+  const publish = readDataOption(
+    options,
+    "publish",
+    undefined,
+  );
   if (
     typeof directory !== "string" ||
     directory.length === 0 ||
     directory.length > MAX_DIRECTORY_LENGTH ||
     directory.includes("\0")
+  ) {
+    throw new BilateralEvidenceConfigurationError();
+  }
+  if (
+    publish !== undefined &&
+    (typeof publish !== "function" ||
+      types.isProxy(publish))
   ) {
     throw new BilateralEvidenceConfigurationError();
   }
@@ -1056,6 +1084,7 @@ function validateWriteOptions(options) {
     canaries: validateCanaries(canaries),
     directory,
     directoryPin,
+    publish,
     result,
   };
 }
@@ -1220,6 +1249,7 @@ export async function writePartyResult(options) {
     canaries,
     directory,
     directoryPin,
+    publish,
     result,
   } = validateWriteOptions(options);
 
@@ -1268,6 +1298,8 @@ export async function writePartyResult(options) {
     temporaryMarkdownPath,
   ];
   let finalPublicationAttempted = false;
+  let publishedMarker;
+  let publishedPaths;
 
   try {
     if (directoryPin === undefined) {
@@ -1363,7 +1395,7 @@ export async function writePartyResult(options) {
       await directoryPin.sync();
     }
 
-    const marker = completionMarkerBytes(
+    publishedMarker = completionMarkerBytes(
       finalJson,
       finalMarkdown,
     );
@@ -1380,16 +1412,20 @@ export async function writePartyResult(options) {
     await pinnedOperation(
       directoryPin,
       () =>
-        activeFileSystem.writeFile(markerPath, marker, {
-          encoding: "utf8",
-          flag: "wx",
-          mode: 0o600,
-        }),
+        activeFileSystem.writeFile(
+          markerPath,
+          publishedMarker,
+          {
+            encoding: "utf8",
+            flag: "wx",
+            mode: 0o600,
+          },
+        ),
     );
     if (directoryPin !== undefined) {
       await directoryPin.sync();
     }
-    return { jsonPath, markdownPath, markerPath };
+    publishedPaths = { jsonPath, markdownPath, markerPath };
   } catch (error) {
     await cleanupTemporaryFiles(
       activeFileSystem,
@@ -1408,4 +1444,19 @@ export async function writePartyResult(options) {
     }
     throw new BilateralEvidenceConfigurationError();
   }
+  if (publish !== undefined) {
+    try {
+      await publish({
+        json,
+        markdown,
+        marker: publishedMarker,
+      });
+    } catch (cause) {
+      throw new BilateralEvidencePublicationTransportError(
+        publishedPaths,
+        cause,
+      );
+    }
+  }
+  return publishedPaths;
 }
