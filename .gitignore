@@ -1,0 +1,12 @@
+node_modules/
+state/
+*.log
+.DS_Store
+# Private material — never commit keys, tokens, journals, keystores, or run state
+**/private/
+**/*.key
+**/*.pem
+**/keystore*.json
+**/funding-journal/
+**/.env
+**/run-state/
