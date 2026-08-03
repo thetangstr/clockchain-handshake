@@ -493,6 +493,56 @@ test("accepts only a complete lifecycle reconstructed from signed raw relay enve
   assert.equal(result.state, "COMPLETE");
 });
 
+test("persists COMPLETE after appending the release-completion event from stakeholder-verified state", async () => {
+  const fixture = signedReplayFixture();
+  const set = await enrollmentSetBytes({
+    payee: await enrollment("payee", 1, fixture.keys.payee),
+    payer: await enrollment("payer", 3, fixture.keys.payer),
+  });
+  const append = (role, kind, artifactDigest = null, subjectRun = "release") =>
+    fixture.append({ artifactDigest, kind, role, subjectRun });
+  append("payer", "ENROLLMENT_CONFIRMED"); append("payee", "ENROLLMENT_CONFIRMED");
+  append("operator", "ENROLLMENT_RECEIPT"); append("operator", "WAIT_FOR_FUNDING");
+  append("payer", "FUNDING_INPUTS_READY"); append("payee", "FUNDING_INPUTS_READY");
+  append("payer", "TOKEN_READY", "a".repeat(64)); append("payee", "TOKEN_READY", "b".repeat(64));
+  append("operator", "PREFLIGHT_PLAN_READY", "1".repeat(64));
+  append("payer", "PREFLIGHT_PARTICIPANT_READY", "2".repeat(64)); append("payee", "PREFLIGHT_PARTICIPANT_READY", "3".repeat(64));
+  const checkpoints = [];
+  for (const subjectRun of ["rehearsal", "stakeholder"]) {
+    const descriptor = subjectRun === "rehearsal" ? "4".repeat(64) : "a".repeat(64);
+    append("operator", subjectRun === "rehearsal" ? "REGISTER_REHEARSAL" : "REGISTER_STAKEHOLDER", subjectRun === "rehearsal" ? "1".repeat(64) : null, subjectRun);
+    append("payer", "IDENTITY_PACKAGE_READY", subjectRun === "rehearsal" ? "5".repeat(64) : "b".repeat(64), subjectRun);
+    append("payee", "IDENTITY_PACKAGE_READY", subjectRun === "rehearsal" ? "6".repeat(64) : "c".repeat(64), subjectRun);
+    append("operator", subjectRun === "rehearsal" ? "REHEARSAL_DESCRIPTOR_READY" : "STAKEHOLDER_DESCRIPTOR_READY", descriptor, subjectRun);
+    append("payee", "DESCRIPTOR_ACCEPTED", descriptor, subjectRun); append("payer", "DESCRIPTOR_ACCEPTED", descriptor, subjectRun);
+    append("operator", subjectRun === "rehearsal" ? "START_REHEARSAL" : "START_STAKEHOLDER", null, subjectRun);
+    append("payee", "ROLE_STARTED", null, subjectRun); append("payer", "ROLE_STARTED", null, subjectRun);
+    append("payee", "ROLE_PACKAGE_READY", subjectRun === "rehearsal" ? "7".repeat(64) : "d".repeat(64), subjectRun);
+    append("payer", "ROLE_PACKAGE_READY", subjectRun === "rehearsal" ? "8".repeat(64) : "e".repeat(64), subjectRun);
+    const verdict = append("operator", "VERIFICATION_PASSED", subjectRun === "rehearsal" ? "9".repeat(64) : "f".repeat(64), subjectRun);
+    checkpoints.push({ action: subjectRun === "rehearsal" ? "REHEARSAL_VERDICT" : "STAKEHOLDER_VERDICT", artifactDigest: verdict.artifactDigest, eventDigest: verdict.eventDigest, role: "operator", status: "EVENT_APPENDED", subjectRun });
+  }
+  const release = { capabilityDigests: ["a".repeat(64), "b".repeat(64)], paymentMoved: false, releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, schema: COORDINATOR_STATE_SCHEMA, sessionId: SESSION_ID };
+  const publications = new Map([["rehearsal", "9".repeat(64)], ["stakeholder", "f".repeat(64)]]);
+  const dependencies = rawReplayDependencies({ fixture, set });
+  dependencies.appendOperatorEvent = async ({ artifactDigest, kind, subjectRun }) => append("operator", kind, artifactDigest, subjectRun);
+  let persistedState = { ...release, checkpoints, state: "STAKEHOLDER_VERIFIED" };
+  dependencies.readState = async () => persistedState;
+  dependencies.readVerifierPublication = async ({ subjectRun }) => ({ paymentMoved: false, publicationDigest: publications.get(subjectRun), releaseId: RELEASE_ID, repositorySha: REPOSITORY_SHA, schema: "clockchain.bilateral-verifier-publication/v1", sessionId: SESSION_ID, status: "VERIFICATION_PASSED", subjectRun });
+  const writes = [];
+  dependencies.writeState = async ({ state }) => { writes.push(state); persistedState = state; };
+  // The production runtime re-invokes the core until it reaches a terminal
+  // state, so mirror that loop here.
+  let result;
+  for (let attempt = 0; attempt < 4 && (result?.state !== "COMPLETE" || persistedState.state !== "COMPLETE"); attempt += 1) {
+    result = await runCoordinatorCore({ dependencies, release, releaseRoot: "/private/release" });
+  }
+  assert.equal(result.state, "COMPLETE");
+  assert.equal(writes.at(-1).state, "COMPLETE");
+  assert.equal(persistedState.state, "COMPLETE");
+  assert.equal(persistedState.checkpoints.filter((entry) => entry.action === "COMPLETE_RELEASE" && entry.status === "EVENT_APPENDED").length, 1);
+});
+
 test("accepts only a fresh successful verifier publication without child output", () => {
   const publicationDigest = "a".repeat(64);
   assert.equal(

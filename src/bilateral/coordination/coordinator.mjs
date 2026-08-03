@@ -1525,7 +1525,12 @@ async function completeRelease({ dependencies, persisted, release, releaseRoot }
     const events = checkedAuthenticatedEvents(await dependencies.readVerifiedRawEvents({ sessionId: release.sessionId }), release);
     const matching = events.filter((event) => event.kind === "COMPLETE_RELEASE" && event.role === "operator" && event.subjectRun === "release" && event.eventDigest === existing.eventDigest && event.artifactDigest === null);
     if (matching.length !== 1) invalid();
-    return descriptorState({ checkpoints: persisted.checkpoints, release, state: "COMPLETE" });
+    // The verified completion event is relay authority, but the operator's
+    // terminal gate reads only the durable state file.  Persist COMPLETE so a
+    // process exit or restart cannot strand the release at STAKEHOLDER_VERIFIED.
+    const state = descriptorState({ checkpoints: persisted.checkpoints, release, state: "COMPLETE" });
+    await dependencies.writeState({ releaseRoot, state });
+    return state;
   }
   if (existing !== undefined) invalid();
   const returned = await adoptOrAppendOperatorEvent({ dependencies, input: { artifactDigest: null, kind: "COMPLETE_RELEASE", releaseId: release.releaseId, repositorySha: release.repositorySha, sessionId: release.sessionId, subjectRun: "release" }, release });
