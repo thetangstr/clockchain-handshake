@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { readCoordinatorState } from "../coordination/coordinator-runtime.mjs";
 import { approveBootstrapClaim } from "../local-mcp/bootstrap-broker.mjs";
+import { SERVICE_NAMES } from "./operator-runtime.mjs";
 import {
   HybridPublicEdgeError,
   buildPublicEdgeArguments,
@@ -166,7 +167,7 @@ function waitForLineFromStream(stream, predicate, deadlineMs = DEFAULT_WAIT_MS) 
   });
 }
 
-function createSpawnedService({ args, command }) {
+export function createSpawnedService({ args, command }) {
   if (typeof command !== "string" || !Array.isArray(args)) fail();
   const child = spawn(command, args, {
     cwd: ROOT,
@@ -174,12 +175,17 @@ function createSpawnedService({ args, command }) {
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stderrBytes = 0;
+  let stderrTail = "";
   child.stderr.on("data", (chunk) => {
     stderrBytes += chunk.length;
+    stderrTail = (stderrTail + chunk.toString("utf8")).slice(-4096);
     if (stderrBytes > MAX_LINE_BYTES * 8) child.kill("SIGTERM");
   });
   child.once("error", () => {});
   return Object.freeze({
+    readStderrTail() {
+      return stderrTail;
+    },
     async stop() {
       if (child.exitCode !== null || child.signalCode !== null) return;
       child.kill("SIGTERM");
@@ -211,6 +217,29 @@ async function writePrivateFile(path, bytes) {
   } finally {
     await handle.close();
   }
+}
+
+async function writeServiceFailureRecord(value) {
+  if (!plain(value)) fail();
+  const keys = ["exitCode", "service", "stateRoot", "stderrTail"];
+  const own = Reflect.ownKeys(value);
+  if (own.length !== keys.length || keys.some((key) => !own.includes(key))) fail();
+  if (
+    !(Number.isInteger(value.exitCode) && value.exitCode >= 0 && value.exitCode <= 255) &&
+    value.exitCode !== "signal"
+  ) {
+    fail();
+  }
+  if (!SERVICE_NAMES.has(value.service)) fail();
+  safeAbsolute(value.stateRoot);
+  if (typeof value.stderrTail !== "string" || value.stderrTail.length > 4096) fail();
+  const bytes = Buffer.from(JSON.stringify({
+    exitCode: value.exitCode,
+    schema: "clockchain.hybrid-local-operator-service-failure/v1",
+    service: value.service,
+    stderrTail: value.stderrTail,
+  }) + "\n", "utf8");
+  await writePrivateFile(join(value.stateRoot, "operator-service-failure.json"), bytes);
 }
 
 async function createStateRoot({ config, stateRoot }) {
@@ -749,6 +778,9 @@ export function createProductionHybridOperatorDependencies(overrides = {}) {
     waitForPayerMcpReady,
     waitForPublicEdge(input) {
       return waitForPublicEdge(input, deps);
+    },
+    writeFailureRecord(input) {
+      return writeServiceFailureRecord(input);
     },
     writeStatus(value) {
       return writeStatus(value, deps);

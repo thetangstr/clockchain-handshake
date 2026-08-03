@@ -64,11 +64,15 @@ function config() {
 
 function fixture({ failAt = null } = {}) {
   const events = [];
+  const failureRecords = [];
   const statuses = [];
   const resource = (name, extra = {}) => Object.freeze({
     ...extra,
     async stop() {
       events.push(`stop:${name}`);
+    },
+    waitForExit() {
+      return new Promise(() => {});
     },
   });
   const step = async (name, result) => {
@@ -160,11 +164,14 @@ function fixture({ failAt = null } = {}) {
         status: "FUNDING_CONFIRMED",
       }));
     },
+    writeFailureRecord(record) {
+      failureRecords.push(record);
+    },
     writeStatus(status) {
       statuses.push(status);
     },
   });
-  return { dependencies, events, statuses };
+  return { dependencies, events, failureRecords, statuses };
 }
 
 function stages(statuses) {
@@ -325,4 +332,118 @@ test("rejects dependency drift and non-false terminal results before reporting s
     HybridOperatorRuntimeError,
   );
   assert.equal(wrong.statuses.some(({ stage }) => stage === "VERIFICATION_PASSED"), false);
+});
+
+test("fails fast with the service name when a supervised service exits unexpectedly mid-run", async () => {
+  const base = fixture();
+  let exitPayer;
+  const payerExit = new Promise((resolve) => {
+    exitPayer = resolve;
+  });
+  const dependencies = Object.freeze({
+    ...base.dependencies,
+    async startBootstrapBroker() {
+      base.events.push("start-broker");
+      return Object.freeze({
+        async approveRequestor() {
+          base.events.push("approve-requestor");
+          setImmediate(() => exitPayer(1));
+          return new Promise(() => {});
+        },
+        capabilityFile: "/private/state/broker.capability",
+        async stop() {
+          base.events.push("stop:broker");
+        },
+        url: "http://127.0.0.1:9555",
+        waitForExit() {
+          return new Promise(() => {});
+        },
+      });
+    },
+    async startPayer() {
+      base.events.push("start-payer");
+      return Object.freeze({
+        readStderrTail() {
+          return "payer crashed: relay connection refused";
+        },
+        async stop() {
+          base.events.push("stop:payer");
+        },
+        waitForExit() {
+          return payerExit;
+        },
+      });
+    },
+  });
+  await assert.rejects(
+    runHybridLocalOperator({ config: config(), stateRoot: "/private/state" }, dependencies),
+    HybridOperatorRuntimeError,
+  );
+  const serviceFailed = base.statuses.filter(({ stage }) => stage === "SERVICE_FAILED");
+  assert.equal(serviceFailed.length, 1);
+  assert.equal(serviceFailed[0].service, "payer-supervisor");
+  assert.equal(serviceFailed[0].paymentMoved, false);
+  assert.equal(serviceFailed[0].schema, HYBRID_OPERATOR_STATUS_SCHEMA);
+  assert.deepEqual(base.failureRecords, [
+    {
+      exitCode: 1,
+      service: "payer-supervisor",
+      stateRoot: "/private/state",
+      stderrTail: "payer crashed: relay connection refused",
+    },
+  ]);
+  assert.equal(
+    base.statuses.filter(({ stage }) => stage === "RUN_STOPPED_SAFELY").length,
+    1,
+  );
+  assert.equal(
+    base.statuses.some(({ stage }) => stage === "VERIFICATION_PASSED"),
+    false,
+  );
+  base.statuses.forEach(assertPublicStatus);
+  const stops = base.events.filter((event) => event.startsWith("stop:"));
+  assert.deepEqual(stops, [
+    "stop:payer",
+    "stop:broker",
+    "stop:console",
+    "stop:coordinator",
+    "stop:edge",
+    "stop:relay",
+  ]);
+});
+
+test("never raises the service-failure path for a clean exit before shutdown", async () => {
+  const base = fixture();
+  let exitPayer;
+  const payerExit = new Promise((resolve) => {
+    exitPayer = resolve;
+  });
+  const dependencies = Object.freeze({
+    ...base.dependencies,
+    async startPayer() {
+      base.events.push("start-payer");
+      setImmediate(() => exitPayer(0));
+      return Object.freeze({
+        readStderrTail() {
+          return "";
+        },
+        async stop() {
+          base.events.push("stop:payer");
+        },
+        waitForExit() {
+          return payerExit;
+        },
+      });
+    },
+  });
+  const result = await runHybridLocalOperator(
+    { config: config(), stateRoot: "/private/state" },
+    dependencies,
+  );
+  assert.deepEqual(result, { paymentMoved: false, status: "VERIFICATION_PASSED" });
+  assert.equal(
+    base.statuses.some(({ stage }) => stage === "SERVICE_FAILED"),
+    false,
+  );
+  assert.deepEqual(base.failureRecords, []);
 });

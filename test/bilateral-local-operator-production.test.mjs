@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   BOOTSTRAP_CLAIM_WAIT_MS,
   createProductionHybridOperatorDependencies,
+  createSpawnedService,
   FUNDING_RECORD_WAIT_MS,
   waitForPendingBootstrapClaim,
   waitForStableFile,
@@ -459,4 +460,55 @@ test("production funding wait polls for the full window before failing closed", 
   const paths = await dependencies.createStateRoot({ config: activeConfig, stateRoot });
   await assert.rejects(dependencies.runFunding({ config: activeConfig, paths }));
   assert.equal(clock.length, 0);
+});
+
+test("spawned services expose a bounded stderr tail after an abnormal exit", async () => {
+  const service = await createSpawnedService({
+    args: ["-e", "process.stderr.write(\"boom-tail\");process.exit(3);"],
+    command: process.execPath,
+  });
+  assert.equal(await service.waitForExit(), 3);
+  assert.match(service.readStderrTail(), /boom-tail/);
+});
+
+test("writeFailureRecord stores one private service-failure record in the state root", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "hybrid-failure-record-"));
+  t.after(() => rm(root, { force: true, recursive: true }));
+  const dependencies = createProductionHybridOperatorDependencies();
+  await dependencies.writeFailureRecord(Object.freeze({
+    exitCode: 1,
+    service: "payer-supervisor",
+    stateRoot: root,
+    stderrTail: "relay connection refused",
+  }));
+  const recordPath = join(root, "operator-service-failure.json");
+  assert.deepEqual(JSON.parse(await readFile(recordPath, "utf8")), {
+    exitCode: 1,
+    schema: "clockchain.hybrid-local-operator-service-failure/v1",
+    service: "payer-supervisor",
+    stderrTail: "relay connection refused",
+  });
+  assert.equal((await stat(recordPath)).mode & 0o777, 0o600);
+});
+
+test("writeFailureRecord rejects unknown services and private path drift", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "hybrid-failure-record-"));
+  t.after(() => rm(root, { force: true, recursive: true }));
+  const dependencies = createProductionHybridOperatorDependencies();
+  await assert.rejects(
+    dependencies.writeFailureRecord(Object.freeze({
+      exitCode: 1,
+      service: "mystery",
+      stateRoot: root,
+      stderrTail: "",
+    })),
+  );
+  await assert.rejects(
+    dependencies.writeFailureRecord(Object.freeze({
+      exitCode: 1,
+      service: "relay",
+      stateRoot: "relative/state",
+      stderrTail: "",
+    })),
+  );
 });

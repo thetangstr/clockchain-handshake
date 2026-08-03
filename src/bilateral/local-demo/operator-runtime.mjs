@@ -14,6 +14,7 @@ const DEPENDENCY_KEYS = Object.freeze([
   "startRelay",
   "waitForPayerMcpReady",
   "waitForPublicEdge",
+  "writeFailureRecord",
   "writeStatus",
 ]);
 const PATH_KEYS = Object.freeze([
@@ -57,11 +58,22 @@ const MESSAGES = Object.freeze({
     "The Payer is ready. The stakeholder may now use the single Requestor prompt.",
   RUN_STOPPED_SAFELY:
     "The run stopped safely before authorization. Review the local operator log.",
+  SERVICE_FAILED:
+    "A required local service stopped unexpectedly. The run failed closed and left a private failure record.",
   STATE_ROOT_CREATED:
     "Fresh isolated operator and Payer state is ready.",
   VERIFICATION_PASSED:
     "Fresh independent verification passed. Open the public receipts for the result.",
 });
+
+export const SERVICE_NAMES = new Set([
+  "bootstrap-broker",
+  "console",
+  "coordinator",
+  "payer-supervisor",
+  "public-edge",
+  "relay",
+]);
 
 export class HybridOperatorRuntimeError extends Error {
   constructor() {
@@ -225,11 +237,58 @@ export async function runHybridLocalOperator(
     validateStatus(status, canaries);
     await activeDependencies.writeStatus(status);
   };
+  let activeStateRoot = null;
+  let stopping = false;
+  let rejectDeath = null;
+  const death = new Promise((_, reject) => {
+    rejectDeath = reject;
+  });
+  // The death watch never rejects unhandled when the sequence settles first.
+  death.catch(() => {});
+  const watchService = (name, service) => {
+    if (!SERVICE_NAMES.has(name) || typeof service.waitForExit !== "function") {
+      fail();
+    }
+    Promise.resolve(service.waitForExit()).then(async (code) => {
+      // Clean exits stay with the protocol gates; supervision only converts
+      // abnormal mid-run exits into an immediate, named, fail-closed stop.
+      if (stopping || code === 0) return;
+      stopping = true;
+      let stderrTail = "";
+      if (typeof service.readStderrTail === "function") {
+        try {
+          const tail = service.readStderrTail();
+          if (typeof tail === "string") stderrTail = tail.slice(-4096);
+        } catch {
+          stderrTail = "";
+        }
+      }
+      try {
+        await activeDependencies.writeFailureRecord(Object.freeze({
+          exitCode: code === null ? "signal" : code,
+          service: name,
+          stateRoot: activeStateRoot,
+          stderrTail,
+        }));
+      } catch {
+        // The failure record is diagnostic only; the public stop proceeds.
+      }
+      try {
+        await emit("SERVICE_FAILED", { service: name });
+      } catch {
+        // The terminal safe failure remains the fixed public outcome.
+      }
+      rejectDeath(new HybridOperatorRuntimeError());
+    });
+  };
+  const track = (name, service) => {
+    resources.push(service);
+    watchService(name, service);
+    return service;
+  };
 
-  try {
-    activeDependencies = dependencies(dependencyInput);
-    const activeConfig = configInput(config, stateRoot);
-    canaries = privateCanaries(activeConfig, stateRoot);
+  const sequence = async (activeConfig, activeStateRoot) => {
+    canaries = privateCanaries(activeConfig, activeStateRoot);
 
     const paths = checkedPaths(
       await activeDependencies.createStateRoot({
@@ -242,13 +301,13 @@ export async function runHybridLocalOperator(
     const relay = resource(
       await activeDependencies.startRelay({ config: activeConfig, paths }),
     );
-    resources.push(relay);
+    track("relay", relay);
     await emit("RELAY_LISTENING");
 
     const edge = resource(
       await activeDependencies.startPublicEdge({ config: activeConfig, paths }),
     );
-    resources.push(edge);
+    track("public-edge", edge);
     await emit("PUBLIC_EDGE_STARTED");
 
     const coordinationReady = await activeDependencies.probeCoordinationEdge({
@@ -264,7 +323,7 @@ export async function runHybridLocalOperator(
     );
     if (typeof coordinator.waitForTerminal !== "function") fail();
     const activeRelease = release(coordinator.release, activeConfig.repositorySha);
-    resources.push(coordinator);
+    track("coordinator", coordinator);
     await emit("COORDINATOR_RELEASE_CREATED");
 
     const consoleServer = resource(
@@ -274,7 +333,7 @@ export async function runHybridLocalOperator(
         release: activeRelease,
       }),
     );
-    resources.push(consoleServer);
+    track("console", consoleServer);
     await emit("CONSOLE_LISTENING");
 
     const broker = resource(
@@ -292,7 +351,7 @@ export async function runHybridLocalOperator(
     ) {
       fail();
     }
-    resources.push(broker);
+    track("bootstrap-broker", broker);
     await emit("BOOTSTRAP_BROKER_LISTENING");
 
     const payer = resource(
@@ -303,7 +362,7 @@ export async function runHybridLocalOperator(
         release: activeRelease,
       }),
     );
-    resources.push(payer);
+    track("payer-supervisor", payer);
     await emit("PAYER_SUPERVISOR_STARTED");
 
     const payerReady = await activeDependencies.waitForPayerMcpReady({
@@ -377,6 +436,7 @@ export async function runHybridLocalOperator(
     ) {
       fail();
     }
+    stopping = true;
     await stopResources(resources);
     resources.length = 0;
     await emit("VERIFICATION_PASSED");
@@ -384,7 +444,15 @@ export async function runHybridLocalOperator(
       paymentMoved: false,
       status: "VERIFICATION_PASSED",
     });
+  };
+
+  try {
+    activeDependencies = dependencies(dependencyInput);
+    const activeConfig = configInput(config, stateRoot);
+    activeStateRoot = stateRoot;
+    return await Promise.race([sequence(activeConfig, stateRoot), death]);
   } catch {
+    stopping = true;
     try {
       await stopResources(resources);
     } catch {

@@ -218,6 +218,9 @@ function service(name, calls, extra = {}) {
     async stop() {
       calls.push(`stop:${name}`);
     },
+    waitForExit() {
+      return new Promise(() => {});
+    },
   });
 }
 
@@ -360,6 +363,9 @@ function createHarness(fx, options = {}) {
       });
       fundingBatches.push(batch);
       return Object.freeze({ paymentMoved: false, status: "FUNDING_CONFIRMED" });
+    },
+    writeFailureRecord(record) {
+      calls.push(`writeFailureRecord:${record.service}`);
     },
     writeStatus(value) {
       statuses.push(value);
