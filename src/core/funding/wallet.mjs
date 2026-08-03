@@ -3,7 +3,6 @@ import {
   createHash,
   scrypt as scryptCallback,
 } from "node:crypto";
-import { execFile as execFileCallback } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -11,14 +10,10 @@ import { promisify } from "node:util";
 import { keccak256 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
-const execFileAsync = promisify(execFileCallback);
 const scryptAsync = promisify(scryptCallback);
 
 export const FUNDING_PASSWORD_FILE_ENV =
   "CLOCKCHAIN_FUNDING_PASSWORD_FILE";
-export const FUNDING_KEYCHAIN_SERVICE =
-  "com.clockchain.handshake.sepolia-funding";
-export const FUNDING_KEYCHAIN_ACCOUNT = "riyadh-v3";
 
 const SEPOLIA_CHAIN_ID = 11155111;
 const MAX_KEYSTORE_BYTES = 65_536;
@@ -51,15 +46,13 @@ const OPTION_KEYS = Object.freeze([
   "dependencies",
 ]);
 const DEPENDENCY_KEYS = Object.freeze([
-  "readKeychainPassword",
-  "execFile",
+  "readPassword",
   "fs",
   "scrypt",
   "stdout",
   "stderr",
 ]);
 const FILE_SYSTEM_KEYS = Object.freeze(["lstat", "open"]);
-const EXEC_FILE_RESULT_KEYS = Object.freeze(["stdout", "stderr"]);
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/u;
 const ADDRESS_NO_PREFIX_PATTERN = /^[0-9a-f]{40}$/u;
 const HEX_32_PATTERN = /^[0-9a-f]{64}$/u;
@@ -235,10 +228,8 @@ function snapshotOptions(options) {
 function snapshotDependencyBag(dependencies) {
   const snapshot = snapshotAllowedObject(dependencies, DEPENDENCY_KEYS);
   if (
-    (Object.hasOwn(snapshot, "readKeychainPassword") &&
-      typeof snapshot.readKeychainPassword !== "function") ||
-    (Object.hasOwn(snapshot, "execFile") &&
-      typeof snapshot.execFile !== "function") ||
+    (Object.hasOwn(snapshot, "readPassword") &&
+      typeof snapshot.readPassword !== "function") ||
     (Object.hasOwn(snapshot, "scrypt") &&
       typeof snapshot.scrypt !== "function")
   ) {
@@ -260,20 +251,6 @@ function snapshotFileSystem(fileSystem) {
     fail();
   }
   return snapshot;
-}
-
-function snapshotExecFileResult(value) {
-  const snapshot = snapshotAllowedObject(value, EXEC_FILE_RESULT_KEYS);
-  if (
-    (Object.hasOwn(snapshot, "stdout") && typeof snapshot.stdout !== "string") ||
-    (Object.hasOwn(snapshot, "stderr") && typeof snapshot.stderr !== "string")
-  ) {
-    fail();
-  }
-  return Object.freeze({
-    stdout: snapshot.stdout ?? "",
-    stderr: snapshot.stderr ?? "",
-  });
 }
 
 function isHex(value, bytes) {
@@ -354,43 +331,26 @@ function validateKeystore(value) {
   });
 }
 
-async function defaultReadKeychainPassword(service, account, dependencies) {
-  const execFile = dependencies.execFile ?? execFileAsync;
-  const result = await sanitizeAsync(() =>
-    execFile(
-      "/usr/bin/security",
-      ["find-generic-password", "-s", service, "-a", account, "-w"],
-      { encoding: "utf8", maxBuffer: 4096 },
-    ),
+async function readPassword(dependencies) {
+  // Portable secret path: tests inject a reader; every other caller names a
+  // private password file through CLOCKCHAIN_FUNDING_PASSWORD_FILE. There is
+  // no OS-specific secret-store fallback; missing configuration fails closed.
+  if (typeof dependencies.readPassword === "function") {
+    const injected = await sanitizeAsync(() => dependencies.readPassword());
+    return validatePassword(injected);
+  }
+  const passwordFile = process.env[FUNDING_PASSWORD_FILE_ENV];
+  if (typeof passwordFile !== "string" || passwordFile.length === 0) fail();
+  const fileSystem = Object.hasOwn(dependencies, "fs")
+    ? snapshotFileSystem(dependencies.fs)
+    : Object.freeze({ lstat, open });
+  const bytes = await sanitizeAsync(() =>
+    readPinnedFile(passwordFile, 4097, fileSystem),
   );
-  return snapshotExecFileResult(result).stdout;
+  return validatePassword(bytes.toString("utf8"));
 }
 
-async function readPassword(dependencies) {
-  // Portable secret path: when CLOCKCHAIN_FUNDING_PASSWORD_FILE names a
-  // private password file, read it instead of the macOS keychain so the
-  // funding flow runs on any operating system. Explicit configuration fails
-  // closed; there is no silent fallback to the keychain.
-  const passwordFile = process.env[FUNDING_PASSWORD_FILE_ENV];
-  if (passwordFile !== undefined) {
-    if (typeof passwordFile !== "string" || passwordFile.length === 0) fail();
-    const fileSystem = Object.hasOwn(dependencies, "fs")
-      ? snapshotFileSystem(dependencies.fs)
-      : Object.freeze({ lstat, open });
-    const bytes = await sanitizeAsync(() =>
-      readPinnedFile(passwordFile, 4097, fileSystem),
-    );
-    const password = bytes.toString("utf8").replace(/\r?\n$/u, "");
-    if (password.trim().length === 0) fail();
-    return password;
-  }
-  const reader =
-    dependencies.readKeychainPassword ??
-    ((service, account) =>
-      defaultReadKeychainPassword(service, account, dependencies));
-  const password = await sanitizeAsync(() =>
-    reader(FUNDING_KEYCHAIN_SERVICE, FUNDING_KEYCHAIN_ACCOUNT),
-  );
+function validatePassword(password) {
   if (
     typeof password !== "string" ||
     password.trim().length === 0 ||
