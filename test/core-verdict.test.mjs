@@ -991,6 +991,21 @@ test("reports shape-broken party packages as MALFORMED", async (t) => {
   );
 });
 
+test("reports an anchored proposal digest that matches no signed amount option as AMOUNT_UNRESOLVED", async (t) => {
+  const fixture = await completeFixture(t);
+  await assertVerdictFailure(
+    {
+      ...fixture.input,
+      clockchain: clockchainWith(fixture.input.clockchain, {
+        async searchActions() {
+          return [{ assetHash: "0".repeat(64) }];
+        },
+      }),
+    },
+    "AMOUNT_UNRESOLVED",
+  );
+});
+
 test("keeps the fail() default as FAILED and every tagged site within the frozen public reason set", async () => {
   const source = await readFile(
     new URL("../src/core/verdict.mjs", import.meta.url),

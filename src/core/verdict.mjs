@@ -898,17 +898,28 @@ async function verifyLiveTransitions(clockchain, descriptor) {
   }
 
   let proposal;
-  let verifiedProposal;
-  let acceptance;
-  let verifiedAcceptance;
-  let acknowledgment;
-  let verifiedAcknowledgment;
   try {
     proposal = recoverAnchoredProposal({
       anchoredHash: proposalDigest,
       descriptor,
       sessionDigest,
     });
+  } catch (error) {
+    if (
+      error instanceof ProtocolFailureError &&
+      error.terminalCode === "AMOUNT_UNRESOLVED"
+    ) {
+      fail("AMOUNT_UNRESOLVED");
+    }
+    fail("MALFORMED");
+  }
+
+  let verifiedProposal;
+  let acceptance;
+  let verifiedAcceptance;
+  let acknowledgment;
+  let verifiedAcknowledgment;
+  try {
     verifiedProposal = await verifyTransition({
       client: clockchain,
       message: proposal,
