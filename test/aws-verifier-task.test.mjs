@@ -216,15 +216,33 @@ test("keeps the authorization literal out of every production surface except the
   const files = stdout.trim().split("\n");
   const authorizingString =
     /["']AUTHORIZED(?:\\n)?["']/;
+  // The hybrid local operator carries one fail-closed guard that rejects any
+  // status payload containing the literal; it never emits the value. Strip
+  // exactly that guard expression before scanning this file so a future
+  // emission site is still caught.
+  const guardOnlyFiles = new Map([
+    [
+      "src/bilateral/local-demo/operator-runtime.mjs",
+      'serialized.includes("AUTHORIZED")',
+    ],
+  ]);
   const matched = [];
   for (const file of files) {
+    const guard = guardOnlyFiles.get(file);
+    const body = await readFile(file, "utf8");
+    const scanned =
+      guard === undefined ? body : body.replaceAll(guard, "");
     if (
-      authorizingString.test(
-        await readFile(file, "utf8"),
-      )
+      authorizingString.test(scanned)
     ) {
       matched.push(file);
     }
+  }
+  for (const [file, guard] of guardOnlyFiles) {
+    assert.ok(
+      (await readFile(file, "utf8")).includes(guard),
+      `${file} must retain its fail-closed authorization-literal guard`,
+    );
   }
   assert.deepEqual(
     matched.sort(),

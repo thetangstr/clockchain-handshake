@@ -1648,15 +1648,21 @@ test("stakeholder watcher progress is staged publicly before raw watcher output 
       anchors: [
         {
           block: "101",
+          cardinality: "1",
           explorerUrl: "https://sepolia.etherscan.io/block/101",
           kind: "PROPOSED",
+          ledgerId: "00000000-0000-4000-8000-000000000001",
           signerRole: "Payer",
+          verified: true,
         },
         {
           block: "102",
+          cardinality: "1",
           explorerUrl: "https://sepolia.etherscan.io/block/102",
           kind: "ACCEPTED",
+          ledgerId: "00000000-0000-4000-8000-000000000002",
           signerRole: "Requestor",
+          verified: true,
         },
       ],
       currentStep:
@@ -1670,7 +1676,7 @@ test("stakeholder watcher progress is staged publicly before raw watcher output 
       requestor: { status: "READY" },
       runId: "run-0123456789abcdef",
       runStatus: "RUNNING",
-      schema: "clockchain.bilateral-public-monitor/v2",
+      schema: "clockchain.bilateral-public-monitor/v3",
       staleAfterMs: 60_000,
       verifier: { status: "NOT_STARTED" },
     },
