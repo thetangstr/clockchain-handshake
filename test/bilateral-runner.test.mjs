@@ -872,7 +872,7 @@ test("mismatches and duplicates fail closed before any runner write", async (t) 
   assert.equal(duplicate.calls.logAction.length, 2);
 });
 
-test("transport and unknown write outcomes are permanently discovery-only", async (t) => {
+test("transport and unknown write outcomes retry after confirmed-absent discovery, then stay discovery-only", async (t) => {
   const directory = await temporaryDirectory(t);
   const message = proposal();
   const markerPath = join(directory, "ambiguous.intent.json");
@@ -890,13 +890,14 @@ test("transport and unknown write outcomes are permanently discovery-only", asyn
       client,
       markerPath,
       message,
+      sleeper: async () => {},
     }),
     (error) =>
       error instanceof ProtocolFailureError &&
       error.terminalCode === "AMBIGUOUS_WRITE" &&
       !error.message.includes("hostile secret"),
   );
-  assert.equal(attempts, 1);
+  assert.equal(attempts, 3);
   assert.deepEqual(
     JSON.parse(await readFile(markerPath, "utf8")),
     markerFor(message),
@@ -907,7 +908,7 @@ test("transport and unknown write outcomes are permanently discovery-only", asyn
     markerPath,
     message,
   });
-  assert.equal(attempts, 1);
+  assert.equal(attempts, 3);
   assert.equal(resumed.source, "pending");
 
   const malformedPath = join(
@@ -954,12 +955,14 @@ test("transport and unknown write outcomes are permanently discovery-only", asyn
         client: throwingClient,
         markerPath: throwPath,
         message,
+        sleeper: async () => {},
       }),
       (error) =>
         error instanceof ProtocolFailureError &&
         error.terminalCode === "AMBIGUOUS_WRITE" &&
         !error.message.includes(thrown.message),
     );
+    assert.equal(throwAttempts, 3);
     assert.deepEqual(
       JSON.parse(await readFile(throwPath, "utf8")),
       markerFor(message),
@@ -970,8 +973,106 @@ test("transport and unknown write outcomes are permanently discovery-only", asyn
       message,
     });
     assert.equal(discoveryOnly.source, "pending");
-    assert.equal(throwAttempts, 1);
+    assert.equal(throwAttempts, 3);
   }
+});
+
+test("retries an ambiguous dispatch after confirmed-absent discovery and writes", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const message = proposal();
+  const markerPath = join(directory, "retry.intent.json");
+  const fake = configuredFake();
+  let attempts = 0;
+  const client = clientFrom(fake, {
+    async logAction(args) {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new McpNetworkError("transient blip");
+      }
+      return fake.logAction(args);
+    },
+  });
+
+  const outcome = await writeOrAdoptTransition({
+    client,
+    markerPath,
+    message,
+    sleeper: async () => {},
+  });
+
+  assert.equal(attempts, 2);
+  assert.equal(outcome.source, "written");
+  assert.equal(outcome.markerCreated, true);
+  assert.equal(outcome.state, "PROPOSED");
+  assert.equal(outcome.transition.digest, transitionDigest(message));
+  assert.deepEqual(fake.calls.logAction, [
+    exactWriteArgs(message),
+  ]);
+});
+
+test("adopts the record when a failed dispatch actually landed", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const message = proposal();
+  const markerPath = join(directory, "landed.intent.json");
+  const fake = configuredFake();
+  let attempts = 0;
+  const client = clientFrom(fake, {
+    async logAction(args) {
+      attempts += 1;
+      await fake.logAction(args);
+      throw new McpNetworkError("response lost after anchor");
+    },
+  });
+
+  const outcome = await writeOrAdoptTransition({
+    client,
+    markerPath,
+    message,
+    sleeper: async () => {},
+  });
+
+  assert.equal(attempts, 1);
+  assert.equal(outcome.source, "adopted");
+  assert.equal(outcome.state, "PROPOSED");
+  assert.equal(outcome.transition.digest, transitionDigest(message));
+  assert.deepEqual(fake.calls.logAction, [
+    exactWriteArgs(message),
+  ]);
+});
+
+test("fails closed without re-dispatch when reconciliation discovery errors", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const message = proposal();
+  const markerPath = join(directory, "blind.intent.json");
+  const fake = configuredFake();
+  let attempts = 0;
+  let searchCalls = 0;
+  const client = clientFrom(fake, {
+    async logAction() {
+      attempts += 1;
+      throw new McpNetworkError("transient blip");
+    },
+    async searchActions(args) {
+      searchCalls += 1;
+      if (searchCalls === 1) {
+        return fake.searchActions(args);
+      }
+      throw new McpRateLimitedError("slow down");
+    },
+  });
+
+  await assert.rejects(
+    writeOrAdoptTransition({
+      client,
+      markerPath,
+      message,
+      sleeper: async () => {},
+    }),
+    (error) =>
+      error instanceof ProtocolFailureError &&
+      error.terminalCode === "AMBIGUOUS_WRITE",
+  );
+  assert.equal(attempts, 1);
 });
 
 test("rate bodies, malformed searches, and symlink markers never become absence", async (t) => {

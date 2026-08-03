@@ -90,7 +90,7 @@ const ADVERSARIAL_CITATIONS = Object.freeze([
   ["repository change after preflight", "test/bilateral-roles.test.mjs", "test", "default builder fails provenance closed before secrets, clients, or tokens"],
   ["prompt change after preflight", "test/bilateral-roles.test.mjs", "test", "default builder fails provenance closed before secrets, clients, or tokens"],
   ["ambiguous registration write", "test/bilateral-machine-prep.test.mjs", "test", "registration resumes marker publication from matching durable identity bytes without registration rebroadcast"],
-  ["ambiguous Clockchain write", "test/bilateral-operational-e2e.test.mjs", "test", "writer crash recovery is discovery-only after one ambiguous dispatch"],
+  ["ambiguous Clockchain write", "test/bilateral-operational-e2e.test.mjs", "test", "writer crash recovery adopts the landed anchor after one ambiguous dispatch"],
   ["missing protocol anchor", "test/bilateral-operational-e2e.test.mjs", "scenario", "missing proposal anchor"],
   ["duplicate protocol anchor", "test/bilateral-operational-e2e.test.mjs", "scenario", "duplicate proposal anchor"],
   ["reordered protocol anchor", "test/bilateral-operational-e2e.test.mjs", "scenario", "reordered package transitions"],
