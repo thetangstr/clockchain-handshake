@@ -26,20 +26,9 @@ for arg in "$@"; do
   esac
 done
 
-# Once delivery-shell code starts landing, strictness is the default and
-# --allow-pending must be a deliberate choice.
-SHELL_CODE_PRESENT=0
-for dir in src/relay src/roles src/verifier; do
-  if [ -n "$(find "$dir" -name '*.mjs' -print -quit 2>/dev/null)" ]; then
-    SHELL_CODE_PRESENT=1
-  fi
-done
-if [ "$ALLOW_PENDING" -eq 0 ] && [ "$SHELL_CODE_PRESENT" -eq 1 ]; then
-  echo "FAIL: delivery-shell code exists; the pending-site allowance" \
-    "is G0-only. Re-run with --allow-pending only while that" \
-    "milestone is open." >&2
-  exit 1
-fi
+# Strictness is the default. --allow-pending exists only for local
+# iteration while a declared reason-code site has not landed yet;
+# npm run verify never passes it.
 
 FAILURES=0
 fail() { echo "FAIL: $1" >&2; FAILURES=$((FAILURES + 1)); }
@@ -165,7 +154,7 @@ for entry in "${REASON_SITES[@]}"; do
   code="${entry%%:*}"
   file="${entry#*:}"
   if [ ! -f "$file" ]; then
-    if [ "$ALLOW_PENDING" -eq 1 ] || [ "$SHELL_CODE_PRESENT" -eq 0 ]; then
+    if [ "$ALLOW_PENDING" -eq 1 ]; then
       note "PENDING $code — declared site $file not yet landed"
     else
       fail "$code has no emission site ($file missing)"
