@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -389,6 +390,15 @@ test("operator config validation", () => {
   rejects({ treasuryAddress: "0x1234" });
   rejects({ treasuryKeystoreFile: "relative/path" });
   rejects({ extra: "field" });
+  // externalPayer is optional and true-only.
+  assert.equal(validateOperatorConfig(valid).externalPayer, false);
+  assert.equal(
+    validateOperatorConfig({ ...valid, externalPayer: true })
+      .externalPayer,
+    true,
+  );
+  rejects({ externalPayer: false });
+  rejects({ externalPayer: "true" });
 });
 
 test(
@@ -503,6 +513,81 @@ test(
           ),
         );
       }
+    });
+  },
+);
+
+test(
+  "external payer handoff skips the payer child and ships a 0600 bundle",
+  async (t) => {
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const operatorPrivateKeyPem = privateKey.export({
+      format: "pem",
+      type: "pkcs8",
+    });
+    await withRelay(t, async ({ relayUrl }) => {
+      const stateDir = await mkdtemp(
+        join(tmpdir(), "operator-external-payer-"),
+      );
+      t.after(() =>
+        rm(stateDir, { recursive: true, force: true }),
+      );
+      const stdout = captureStdout();
+      const { calls, deps } = fakeDeps({
+        operatorPrivateKeyPem,
+        stdout,
+      });
+      const config = {
+        ...configFor(relayUrl),
+        externalPayer: true,
+      };
+      const operatorPromise = runOperator({
+        config,
+        deps,
+        stateDir,
+      });
+      const state = await awaitSessionStateFile(stateDir);
+      await driveSession(
+        relayUrl,
+        state.subRuns.rehearsal.sessionId,
+        { live: false },
+      );
+      await driveSession(
+        relayUrl,
+        state.subRuns.stakeholder.sessionId,
+        { live: true },
+      );
+      await operatorPromise;
+
+      assert.match(stdout.text(), /PAYER_HANDOFF/);
+      assert.match(stdout.text(), /OPERATOR_RUN_COMPLETE/);
+
+      // The payer child spawns only for the rehearsal; the
+      // stakeholder payer is external.
+      const payerSpawns = calls.spawn.filter((call) =>
+        call.script.endsWith("payer.mjs")
+      );
+      assert.equal(payerSpawns.length, 1);
+
+      // The handoff bundle holds the manifest plus a 0600 key
+      // copy the manifest points at.
+      const handoffDirectory = join(stateDir, "payer-handoff");
+      const handoffKey = join(
+        handoffDirectory,
+        "stakeholder-payer.key",
+      );
+      const handoffManifest = JSON.parse(
+        await readFile(
+          join(handoffDirectory, "stakeholder-payer.json"),
+          "utf8",
+        ),
+      );
+      assert.equal(handoffManifest.payer.keyFile, handoffKey);
+      assert.equal(handoffManifest.subjectRun, "stakeholder");
+      const keyStat = await stat(handoffKey);
+      assert.equal(keyStat.mode & 0o777, 0o600);
+      const keyHex = await readFile(handoffKey, "utf8");
+      assert.match(keyHex.trim(), /^0x[0-9a-f]{64}$/);
     });
   },
 );

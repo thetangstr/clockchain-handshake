@@ -188,10 +188,16 @@ export function validateOperatorConfig(value) {
     "treasuryKeystoreFile",
     "treasuryPasswordFile",
   ];
+  const optional = ["externalPayer"];
   const keys = Object.keys(value);
   if (
-    keys.length !== expected.length ||
-    expected.some((key) => !keys.includes(key))
+    keys.length < expected.length ||
+    keys.length > expected.length + optional.length ||
+    expected.some((key) => !keys.includes(key)) ||
+    keys.some(
+      (key) => !expected.includes(key) && !optional.includes(key)
+    ) ||
+    (keys.includes("externalPayer") && value.externalPayer !== true)
   ) {
     operatorFailure("CONFIG_SHAPE");
   }
@@ -221,6 +227,7 @@ export function validateOperatorConfig(value) {
     operatorFailure("CONFIG_SHAPE");
   }
   return Object.freeze({
+    externalPayer: value.externalPayer === true,
     operatorKeyId: value.operatorKeyId,
     relayUrl: value.relayUrl.replace(/\/+$/, ""),
     rpcUrlFile: value.rpcUrlFile,
@@ -626,13 +633,16 @@ async function writePayerManifest({
   address,
   agentId,
   config,
+  directory,
   keyFile,
   pin,
   sessionId,
   stateDir,
   subRun,
 }) {
-  const manifestDirectory = join(stateDir, "manifests");
+  const manifestDirectory = join(
+    directory === undefined ? join(stateDir, "manifests") : directory,
+  );
   await mkdir(manifestDirectory, {
     recursive: true,
     mode: 0o700,
@@ -656,6 +666,48 @@ async function writePayerManifest({
     mode: 0o600,
   });
   return path;
+}
+
+// External-payer handoff: the payer manifest plus a 0600 copy of the
+// payer identity key in one operator-owned directory. The stakeholder
+// payer agent reads the bundle on this machine; the key never travels
+// through a prompt, log, or relay message.
+async function writePayerHandoff({
+  address,
+  agentId,
+  config,
+  keyFile,
+  pin,
+  sessionId,
+  stateDir,
+  subRun,
+}) {
+  const handoffDirectory = join(stateDir, "payer-handoff");
+  await mkdir(handoffDirectory, {
+    recursive: true,
+    mode: 0o700,
+  });
+  const handoffKeyFile = join(
+    handoffDirectory,
+    `${subRun}-payer.key`,
+  );
+  const keyHex = await readFile(keyFile, "utf8");
+  await writeFile(handoffKeyFile, keyHex, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  const manifestPath = await writePayerManifest({
+    address,
+    agentId,
+    config,
+    directory: handoffDirectory,
+    keyFile: handoffKeyFile,
+    pin,
+    sessionId,
+    stateDir,
+    subRun,
+  });
+  return { handoffDirectory, manifestPath };
 }
 
 async function ensureDiscovery({
@@ -873,30 +925,52 @@ async function runSubRun({
     agentId: runState.payerAgentId,
     displayName: "Payer",
   };
-  const manifestPath = await writePayerManifest({
-    address: payerKey.address,
-    agentId: runState.payerAgentId,
-    config,
-    keyFile: payerKey.keyFile,
-    pin,
-    sessionId,
-    stateDir,
-    subRun,
-  });
+  const externalPayer =
+    subRun === "stakeholder" && config.externalPayer === true;
+  let manifestPath;
+  if (externalPayer) {
+    const handoff = await writePayerHandoff({
+      address: payerKey.address,
+      agentId: runState.payerAgentId,
+      config,
+      keyFile: payerKey.keyFile,
+      pin,
+      sessionId,
+      stateDir,
+      subRun,
+    });
+    manifestPath = handoff.manifestPath;
+    emitStatus(stdout, "PAYER_HANDOFF", {
+      handoffDir: handoff.handoffDirectory,
+    });
+  } else {
+    manifestPath = await writePayerManifest({
+      address: payerKey.address,
+      agentId: runState.payerAgentId,
+      config,
+      keyFile: payerKey.keyFile,
+      pin,
+      sessionId,
+      stateDir,
+      subRun,
+    });
+  }
 
   const children = [];
   try {
-    children.push(
-      deps.spawnProcess({
-        args: [
-          "--manifest",
-          manifestPath,
-          "--state",
-          join(stateDir, "states", `${subRun}-payer`),
-        ],
-        script: PAYER_SCRIPT,
-      }),
-    );
+    if (!externalPayer) {
+      children.push(
+        deps.spawnProcess({
+          args: [
+            "--manifest",
+            manifestPath,
+            "--state",
+            join(stateDir, "states", `${subRun}-payer`),
+          ],
+          script: PAYER_SCRIPT,
+        }),
+      );
+    }
     if (subRun === "rehearsal") {
       children.push(
         deps.spawnProcess({
