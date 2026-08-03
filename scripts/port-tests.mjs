@@ -68,6 +68,29 @@ const ADAPTED_TESTS = {
   "test/registration.test.mjs": "test/core-registration.test.mjs",
 };
 
+/**
+ * Reviewed donor-test renames inside adapted files, donor title ->
+ * replacement title. Each entry licenses exactly one absent donor title
+ * and requires the replacement to be present, so adapted coverage can
+ * evolve only by an explicit, auditable registration.
+ *
+ * core-funding-wallet: the macOS Keychain path was deleted per the v2
+ * spec (file/env password sources only); the two Keychain-coupled donor
+ * tests were renamed to their file-source equivalents.
+ */
+const RENAMED_DONOR_TESTS = {
+  "test/core-funding-wallet.test.mjs": new Map([
+    [
+      "openFundingWallet rejects digest mismatch, empty Keychain password, and decrypted-address mismatch",
+      "openFundingWallet rejects digest mismatch, empty password, and decrypted-address mismatch",
+    ],
+    [
+      "openFundingWallet uses bounded nofollow reads and the production security command without leaking canaries",
+      "openFundingWallet reads the password from the private env-named file with bounded nofollow reads and without leaking canaries",
+    ],
+  ]),
+};
+
 const SUPPORT = [
   "test/fixtures/mcp-sse.txt",
   "test/fixtures/registered-receipt.json",
@@ -80,6 +103,16 @@ const REWRITE_SUPPORT = [
 ];
 
 const IMPORT_LINE = /\bfrom\s*["']|\bimport\s*\(\s*["']|^\s*import\s+["']|^\s*export\s/;
+
+function testTitles(source) {
+  const titles = new Set();
+  for (const match of source.matchAll(
+    /^\s*(?:t\.)?test\(\s*"([^"]+)"/gm,
+  )) {
+    titles.add(match[1]);
+  }
+  return titles;
+}
 
 function rewriteSpecifiers(donorFileAbs, source) {
   let rewrites = 0;
@@ -157,16 +190,56 @@ for (const [donorRel, targetRel] of Object.entries(ADAPTED_TESTS)) {
   const targetAbs = resolve(TARGET, targetRel);
   const { out, rewrites } = rewriteSpecifiers(donorAbs, readFileSync(donorAbs, "utf8"));
   if (checkOnly) {
-    if (!existsSync(targetAbs) || readFileSync(targetAbs, "utf8") !== out) {
+    // Adapted files are seeded from the donor and then owned by humans
+    // under the explicit edit budget: donor tests must all survive (by
+    // title), local additions and reviewed edits are expected.
+    if (!existsSync(targetAbs)) {
       console.error(`STALE ${targetRel}`);
       failures += 1;
     } else {
-      console.log(`ok   ${targetRel} (${rewrites} specifier line(s) rewritten)`);
+      const donorTitles = testTitles(out);
+      const targetTitles = testTitles(readFileSync(targetAbs, "utf8"));
+      const renames =
+        RENAMED_DONOR_TESTS[targetRel] ?? new Map();
+      const missing = [];
+      for (const title of donorTitles) {
+        if (targetTitles.has(title)) continue;
+        const replacement = renames.get(title);
+        if (
+          replacement !== undefined &&
+          targetTitles.has(replacement)
+        ) {
+          continue;
+        }
+        missing.push(title);
+      }
+      const unusedRenames = [...renames.keys()].filter(
+        (title) => donorTitles.has(title) === false,
+      );
+      if (missing.length > 0) {
+        console.error(
+          `STALE ${targetRel} (dropped donor test(s): ${missing.join("; ")})`,
+        );
+        failures += 1;
+      } else if (unusedRenames.length > 0) {
+        console.error(
+          `STALE ${targetRel} (rename registration no longer matches the donor: ${unusedRenames.join("; ")})`,
+        );
+        failures += 1;
+      } else {
+        console.log(
+          `ok   ${targetRel} (adapted; ${donorTitles.size} donor test(s) preserved incl. ${renames.size} renamed, ${targetTitles.size - donorTitles.size} local)`,
+        );
+      }
     }
   } else {
+    if (existsSync(targetAbs)) {
+      console.log(`keep ${targetRel} (adapted; human-owned)`);
+      continue;
+    }
     mkdirSync(dirname(targetAbs), { recursive: true });
     writeFileSync(targetAbs, out);
-    console.log(`port ${targetRel} (${rewrites} specifier line(s) rewritten)`);
+    console.log(`seed ${targetRel} (${rewrites} specifier line(s) rewritten)`);
   }
 }
 
