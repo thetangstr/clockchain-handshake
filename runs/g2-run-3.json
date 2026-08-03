@@ -1,0 +1,36 @@
+{
+  "schema": "handshake-run-record/v1",
+  "runId": "g2-run-3",
+  "date": "2026-08-03",
+  "repositorySha": "50c28687bcbdeba1231d2e99a08edfb4cc8189dc",
+  "branch": "handshake-codex",
+  "requestor": {
+    "kind": "fresh-agent-clean-room",
+    "harness": "hermes",
+    "profile": "handshake_requester",
+    "model": "k3",
+    "durationSeconds": 375,
+    "toolCalls": 41,
+    "exitCode": 0,
+    "agentId": "9356"
+  },
+  "rehearsalSessionId": "95442b9f-ac4b-401d-b70f-9a866529fe41",
+  "stakeholderSessionId": "37d072a8-548f-4d09-a015-f66e7dd4802f",
+  "verdict": {
+    "outcome": "AUTHORIZED",
+    "paymentMoved": false,
+    "verifierKeyId": "g1a-live-1",
+    "transitions": [
+      { "kind": "proposal", "blockHeight": "2706962" },
+      { "kind": "acceptance", "blockHeight": "2706983" },
+      { "kind": "acknowledgment", "blockHeight": "2706985" }
+    ]
+  },
+  "funding": {
+    "treasury": "0x157a377e4181f3f87c7f6efed5ddc340ccc00dce",
+    "batchANonces": [115, 116, 117, 118],
+    "batchBNonces": [119, 120, 121, 122],
+    "amountPerAddressWei": "10000000000000000"
+  },
+  "agentIds": { "rehearsalPayer": "9353", "stakeholderPayer": "9354", "requestor": "9356" }
+}
