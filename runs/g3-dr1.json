@@ -1,0 +1,44 @@
+{
+  "schema": "handshake-run-record/v1",
+  "runId": "g3-dr1",
+  "date": "2026-08-03",
+  "repositorySha": "18c4e8950f769a34a2fccf762a902c45cffb1378",
+  "branch": "handshake-codex",
+  "payer": {
+    "kind": "fresh-agent-clean-room",
+    "harness": "hermes",
+    "profile": "handshake_payer",
+    "durationSeconds": 298,
+    "toolCalls": 21,
+    "exitCode": 0,
+    "handoff": "payer-handoff directory (manifest + 0600 key)"
+  },
+  "requestor": {
+    "kind": "fresh-agent-clean-room",
+    "harness": "hermes",
+    "profile": "handshake_requester",
+    "durationSeconds": 273,
+    "toolCalls": 23,
+    "exitCode": 0,
+    "agentId": "9376"
+  },
+  "rehearsalSessionId": "6908bca9-c042-4f7a-a36e-873df4c05ab3",
+  "stakeholderSessionId": "9893090e-6759-437c-be55-757808f48fb4",
+  "verdict": {
+    "outcome": "AUTHORIZED",
+    "paymentMoved": false,
+    "verifierKeyId": "g1a-live-1",
+    "transitions": [
+      { "kind": "proposal", "blockHeight": "2710483" },
+      { "kind": "acceptance", "blockHeight": "2710504" },
+      { "kind": "acknowledgment", "blockHeight": "2710526" }
+    ]
+  },
+  "funding": {
+    "treasury": "0x157a377e4181f3f87c7f6efed5ddc340ccc00dce",
+    "batchANonces": [149, 150, 151, 152],
+    "batchBNonces": [153, 154, 155, 156],
+    "amountPerAddressWei": "10000000000000000"
+  },
+  "note": "First full two-stakeholder run: fresh Hermes agents on BOTH roles, each from one pasted prompt, zero coaching. G3 dress rehearsal."
+}
