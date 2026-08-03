@@ -70,6 +70,7 @@ export const SERVICE_NAMES = new Set([
   "bootstrap-broker",
   "console",
   "coordinator",
+  "funding",
   "payer-supervisor",
   "public-edge",
   "relay",

@@ -512,3 +512,37 @@ test("writeFailureRecord rejects unknown services and private path drift", async
     })),
   );
 });
+
+test("runFunding leaves a private failure record with the funding stderr tail", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "hybrid-funding-failure-"));
+  t.after(() => rm(root, { force: true, recursive: true }));
+  const activeConfig = config(root);
+  const dependencies = createProductionHybridOperatorDependencies({
+    async spawnService() {
+      return Object.freeze({
+        readStderrTail() {
+          return "keychain locked";
+        },
+        async stop() {},
+        waitForExit() {
+          return Promise.resolve(7);
+        },
+        waitForLine() {
+          return Promise.reject(new Error("unused"));
+        },
+      });
+    },
+  });
+  const stateRoot = join(root, "state");
+  const paths = await dependencies.createStateRoot({ config: activeConfig, stateRoot });
+  await assert.rejects(dependencies.runFunding({ config: activeConfig, paths }));
+  assert.deepEqual(
+    JSON.parse(await readFile(join(stateRoot, "operator-service-failure.json"), "utf8")),
+    {
+      exitCode: 7,
+      schema: "clockchain.hybrid-local-operator-service-failure/v1",
+      service: "funding",
+      stderrTail: "keychain locked",
+    },
+  );
+});

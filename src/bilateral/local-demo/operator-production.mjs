@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { X509Certificate, randomBytes, createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { readCoordinatorState } from "../coordination/coordinator-runtime.mjs";
@@ -709,7 +709,31 @@ async function runFunding(
     command: process.execPath,
   });
   const code = await service.waitForExit();
-  if (code !== 0) fail();
+  if (code !== 0) {
+    // Funding is an awaited one-shot child, not a supervised service, so the
+    // runtime watcher never sees its failure.  Leave the same private record
+    // the watcher writes, with the bounded stderr tail, before failing closed.
+    let stderrTail = "";
+    if (typeof service.readStderrTail === "function") {
+      try {
+        const tail = service.readStderrTail();
+        if (typeof tail === "string") stderrTail = tail.slice(-4096);
+      } catch {
+        stderrTail = "";
+      }
+    }
+    try {
+      await writeServiceFailureRecord(Object.freeze({
+        exitCode: code,
+        service: "funding",
+        stateRoot: dirname(paths.releaseRoot),
+        stderrTail,
+      }));
+    } catch {
+      // The failure record is diagnostic only; the run still fails closed.
+    }
+    fail();
+  }
   return Object.freeze({
     paymentMoved: false,
     status: "FUNDING_CONFIRMED",
