@@ -53,7 +53,9 @@ export const MIN_POLL_INTERVAL_MS = 20_000;
 // a persistent one still fails closed well inside the 10-minute expiry.
 export const MAX_WRITE_DISPATCH_ATTEMPTS = 3;
 export const WRITE_RETRY_BACKOFF_MS = Object.freeze([2_000, 5_000]);
-export const MAX_POLL_DURATION_MS = 8 * 60_000;
+// Role agents poll while the counterparty is still starting; align with the
+// 30-minute signed-discovery expiry for staggered human-driven demos.
+export const MAX_POLL_DURATION_MS = 30 * 60_000;
 
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const UUID_PATTERN =
