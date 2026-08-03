@@ -47,7 +47,9 @@ export const COORDINATOR_CLI_FLAGS = Object.freeze([
   "--tls-certificate", "--tls-fingerprint",
 ]);
 export const COORDINATOR_FUNDING_INTERVAL_MS = 20_000;
-export const COORDINATOR_FUNDING_DEADLINE_MS = 8 * 60_000;
+// Stakeholder demos start the operator and the remote participant minutes apart;
+// align every wait window with the 30-minute signed-discovery expiry.
+export const COORDINATOR_FUNDING_DEADLINE_MS = 30 * 60_000;
 const ROOT = resolve(fileURLToPath(new URL("../../../", import.meta.url)));
 const MAX_PRIVATE_BYTES = 64 * 1024;
 const MAX_CERTIFICATE_BYTES = 1024 * 1024;

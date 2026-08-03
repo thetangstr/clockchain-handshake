@@ -17,7 +17,7 @@ digest, release, session, and expiry. Requestor verifies all of those fields
 before sending a claim or payment request.
 
 Preserve the assigned private state root unchanged. Underfunding is pending
-until the bounded eight-minute funding deadline. Do not retry consumed bootstrap
+until the bounded thirty-minute funding deadline. Do not retry consumed bootstrap
 material. `paymentMoved:false` applies throughout.
 
 A2A is intentionally absent. Payer MCP is the payment-intake/guidance surface.

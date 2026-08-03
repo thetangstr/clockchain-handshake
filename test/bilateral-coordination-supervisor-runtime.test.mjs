@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createFundingInputVerifier, createGitInspector, createPrivateRoot, createPrivateSupervisorStateStore, createProductionSupervisorDependencies, createSupervisorLauncher, createSupervisorStatusLine, createVerifierPublicationVerifier, scanSupervisorCheckpointDirectories } from "../src/bilateral/coordination/supervisor-runtime.mjs";
+import { SUPERVISOR_FUNDING_DEADLINE_MS, createFundingInputVerifier, createGitInspector, createPrivateRoot, createPrivateSupervisorStateStore, createProductionSupervisorDependencies, createSupervisorLauncher, createSupervisorStatusLine, createVerifierPublicationVerifier, scanSupervisorCheckpointDirectories } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { verifyRepositoryState } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { ensureToken } from "../src/bilateral/coordination/supervisor-runtime.mjs";
 import { ensureInvitations } from "../src/bilateral/coordination/supervisor-runtime.mjs";
@@ -1524,7 +1524,11 @@ test("fails closed immediately for invalid funding and at the bounded underfundi
     },
   });
   await assert.rejects(deadlineVerifier(input));
-  assert.deepEqual(sleeps, [300_000, 180_000]);
+  // The run must stop exactly at the bounded deadline: every sleep respects
+  // the poll interval and the cumulative wait equals the deadline.
+  assert.ok(sleeps.length > 1);
+  assert.ok(sleeps.every((milliseconds) => milliseconds <= 300_000));
+  assert.equal(sleeps.reduce((total, milliseconds) => total + milliseconds, 0), SUPERVISOR_FUNDING_DEADLINE_MS);
 });
 
 test("pins Git inspection to a clean frozen repository object despite poisoned environment", async () => {

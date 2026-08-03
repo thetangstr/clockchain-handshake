@@ -377,7 +377,9 @@ function rpcQuantity(value) {
   return BigInt(value);
 }
 
-export const SUPERVISOR_FUNDING_DEADLINE_MS = 8 * 60_000;
+// Stakeholder demos start the operator and the remote participant minutes apart;
+// align every wait window with the 30-minute signed-discovery expiry.
+export const SUPERVISOR_FUNDING_DEADLINE_MS = 30 * 60_000;
 export const SUPERVISOR_FUNDING_INTERVAL_MS = 5_000;
 
 export function createProductionSepoliaRpc({ createClient = createPublicClient, rpcUrl = RPC_URL } = {}) {

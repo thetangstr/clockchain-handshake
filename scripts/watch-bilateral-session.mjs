@@ -38,7 +38,9 @@ export const WATCHER_REPORT_SCHEMA =
 export const AWS_WATCHER_PROJECTION_SCHEMA =
   "clockchain.aws-watcher-projection/v1";
 export const WATCHER_INTERVAL_MS = 20_000;
-export const WATCHER_WINDOW_MS = 480_000;
+// Matches the 30-minute coordination deadline: staggered stakeholder
+// demos may legitimately watch a session for the full join window.
+export const WATCHER_WINDOW_MS = 1_800_000;
 
 const SLOTS = Object.freeze([
   "proposal",
