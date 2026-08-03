@@ -569,6 +569,25 @@ async function registerPayer({
   } catch {
     checkpoint = null;
   }
+  // Terminal-checkpoint adoption: a checkpoint that already carries a
+  // registered agentId for this exact payer address is a completed
+  // registration, not an in-flight intent. Adopting it lets the
+  // operator restart after a post-registration verification failure;
+  // without this the wallet nonce guard would permanently brick the
+  // funded payer identity key. Mirrors the requestor's own adoption.
+  if (
+    checkpoint !== null &&
+    typeof checkpoint.agentId === "string" &&
+    checkpoint.agentId.length > 0
+  ) {
+    runState.payerAgentId = checkpoint.agentId;
+    await saveSessionState(stateDir, sessionState);
+    emitStatus(stdout, "OPERATOR_PAYER_REGISTERED", {
+      agentId: checkpoint.agentId,
+      subRun,
+    });
+    return checkpoint.agentId;
+  }
   const registration = await deps.registerIdentity({
     privateKey: key.privateKeyHex,
     expectedAddress: address,
