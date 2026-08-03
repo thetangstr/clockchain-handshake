@@ -14,6 +14,8 @@ import { privateKeyToAccount } from "viem/accounts";
 const execFileAsync = promisify(execFileCallback);
 const scryptAsync = promisify(scryptCallback);
 
+export const FUNDING_PASSWORD_FILE_ENV =
+  "CLOCKCHAIN_FUNDING_PASSWORD_FILE";
 export const FUNDING_KEYCHAIN_SERVICE =
   "com.clockchain.handshake.sepolia-funding";
 export const FUNDING_KEYCHAIN_ACCOUNT = "riyadh-v3";
@@ -365,6 +367,23 @@ async function defaultReadKeychainPassword(service, account, dependencies) {
 }
 
 async function readPassword(dependencies) {
+  // Portable secret path: when CLOCKCHAIN_FUNDING_PASSWORD_FILE names a
+  // private password file, read it instead of the macOS keychain so the
+  // funding flow runs on any operating system. Explicit configuration fails
+  // closed; there is no silent fallback to the keychain.
+  const passwordFile = process.env[FUNDING_PASSWORD_FILE_ENV];
+  if (passwordFile !== undefined) {
+    if (typeof passwordFile !== "string" || passwordFile.length === 0) fail();
+    const fileSystem = Object.hasOwn(dependencies, "fs")
+      ? snapshotFileSystem(dependencies.fs)
+      : Object.freeze({ lstat, open });
+    const bytes = await sanitizeAsync(() =>
+      readPinnedFile(passwordFile, 4097, fileSystem),
+    );
+    const password = bytes.toString("utf8").replace(/\r?\n$/u, "");
+    if (password.trim().length === 0) fail();
+    return password;
+  }
   const reader =
     dependencies.readKeychainPassword ??
     ((service, account) =>
